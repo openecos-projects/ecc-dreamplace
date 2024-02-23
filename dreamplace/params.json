@@ -37,7 +37,19 @@
     },
     "global_place_stages": {
         "description": "global placement configurations of each stage, a dictionary of {\"num_bins_x\", \"num_bins_y\", \"iteration\", \"learning_rate\", \"learning_rate_decay\", \"wirelength\", \"optimizer\", \"Llambda_density_weight_iteration\", \"Lsub_iteration\"}",
-        "default": "",
+        "default": [
+            {
+                "num_bins_x": 512,
+                "num_bins_y": 512,
+                "iteration": 3000,
+                "learning_rate": 0.01,
+                "wirelength": "weighted_average",
+                "optimizer": "Nesterov",
+                "Llambda_density_weight_iteration": 1,
+                "Lsub_iteration": 1,
+                "learning_rate_decay": 1.0
+            }
+        ],
         "required": "required"
     },
     "target_density": {
@@ -50,7 +62,7 @@
     },
     "random_seed": {
         "description": "random seed",
-        "default": 1000
+        "default": 5000
     },
     "result_dir": {
         "description": "result directory for output",
@@ -245,11 +257,11 @@
     },
     "macro_halo_x": {
         "description": "horizontal halo around movable macros",
-        "default": 0
+        "default": 1000
     },
     "macro_halo_y": {
         "description": "vertical halo around movable macros",
-        "default": 0
+        "default": 1000
     },
     "macro_overlap_flag": {
         "description": "whether enable MFP macro overlap",

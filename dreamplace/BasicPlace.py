@@ -723,12 +723,12 @@ class BasicPlace(nn.Module):
         # wirelength cost
         POWVFILE = os.path.abspath(
             os.path.join(
-                os.path.dirname(__file__), "../thirdparty/NCTUgr.ICCAD2012/POWV9.dat"
+                os.path.dirname(__file__), "../POWV9.dat"
             )
         )
         POSTFILE = os.path.abspath(
             os.path.join(
-                os.path.dirname(__file__), "../thirdparty/NCTUgr.ICCAD2012/POST9.dat"
+                os.path.dirname(__file__), "../POST9.dat"
             )
         )
         logging.info("POWVFILE = %s" % (POWVFILE))

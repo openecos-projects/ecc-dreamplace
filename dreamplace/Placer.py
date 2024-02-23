@@ -21,7 +21,7 @@
 
 import matplotlib
 from matplotlib import pyplot as plt
-
+import json
 matplotlib.use("Agg")
 import os
 import sys
@@ -35,10 +35,17 @@ import logging
 root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if root_dir not in sys.path:
     sys.path.append(root_dir)
-
+    
+top_root_dir = os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))))
+if top_root_dir not in sys.path:
+    sys.path.append(top_root_dir)
 import dreamplace.configure as configure
 import dreamplace.Params as Params
-import dreamplace.PlaceDB as PlaceDB
+from aimp.macroPlaceDB import MacroPlaceDB as PlaceDB
+from eda_engine.engine.iEDA.module.ieda_engine_dm import EngineDataManager
+from eda_engine.engine.iEDA.ieda_engine import EngineIEDA
+from eda_engine.ai_infra.data_manager.data_manager import DataManager
 import dreamplace.NonLinearPlace as NonLinearPlace
 
 
@@ -48,8 +55,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="[%(levelname)-7s] %(name)s - %(message)s",
     handlers=[
-        logging.FileHandler("DREAMPlace.log", mode="w"),
-        # logging.StreamHandler(sys.stdout),
+        # logging.FileHandler("DREAMPlace.log", mode="w"),
+        logging.StreamHandler(sys.stdout),
     ],
 )
 
@@ -116,19 +123,45 @@ class PlacementEngine:
         # read cpp database
         tt = time.time()
         if self.placedb is None:
-            self.placedb = PlaceDB.PlaceDB()
-            self.placedb.read(self.params)
+            # workspace_dir = '/home/zhaoxueyan/code/ai-eda/workspace_aimp/workspace_ariane133_t28'
+            # design_name = 'ariane'
+            
+            workspace_dir = '/home/zhaoxueyan/code/ai-mp/workspace_aimp/workspace_xs_top'
+            design_name = 'XS_TOP'
+            self.data_manager = DataManager(workspace_dir)
+            self.engine_ieda = EngineIEDA(
+                design_name=design_name,
+                path_manager=self.data_manager.get_path_manager())
+            # workspace_path = '/home/zhaoxueyan/code/ai-eda/workspace_aimp/'
+            # path_manager = PathManager()
+            self.engine_data_ieda = EngineDataManager(
+                design_name, self.data_manager.get_path_manager())
+            # engine_data_ieda.read_verilog(
+            #     '/home/zhaoxueyan/code/ai-eda/workspace_aimp/ariane133/ariane133/netlist/ariane.v', top_module='ariane')
+            self.engine_data_ieda.read_def(
+                self.data_manager.get_config_manager().get_config_path().def_input_path)
+            self.placedb = PlaceDB(self.engine_ieda)
+            self.placedb.setup_rawdb(self.params)
+            
+            # self.placedb.write(self.params, "debug.pl")
+            # exit(0)
+            
+            # self.placedb.initialize()
+            # self.placedb.read(self.params)
         logging.info("setting up raw database takes %.2f seconds" % (time.time() - tt))
 
     def setup_placedb(self):
         # setup python placement database
         tt = time.time()
-        self.setup_rawdb()
-        self.placedb.initialize_from_rawdb(self.params)
-        self.placedb.initialize(self.params)
+        self.placedb.init_db(self.params)
         logging.info(
             "setting up placement database takes %.2f seconds" % (time.time() - tt)
         )
+
+    def write_back(self, def_file="output.def"):
+        # self.placedb.write_placement_back(self.params)
+        # self.engine_data_ieda.gds_save(def_file+".gds")
+        self.engine_data_ieda.def_save(def_file)
 
     def update_params(self, new_params):
         self.params.update(new_params)
@@ -137,6 +170,7 @@ class PlacementEngine:
     def place(self):
         # solve placement
         tt = time.time()
+        self.params.plot_flag = True
         self.placer = NonLinearPlace.NonLinearPlace(self.params, self.placedb)
         logging.info(
             "non-linear placement initialization takes %.2f seconds"
@@ -257,13 +291,24 @@ class PlacementEngine:
             os.system("mkdir -p %s" % (self.path))
         self.gp_out_file = os.path.join(
             self.path,
-            "%s.gp.%s"
-            % (self.params.design_name(), self.params.solution_file_suffix()),
+            "%s.gp.def"
+            % (self.params.design_name()),
         )
-        self.placedb.write(self.params, self.gp_out_file)
+        self.write_back(self.gp_out_file)
+        tcl_file = os.path.join(
+            self.path,
+            "%s.tcl"
+            % (self.params.design_name()),
+        )
+        self.engine_data_ieda.tcl_save(tcl_file)
+        # self.placedb.write(self.params, self.gp_out_file)
 
     def run(self):
         # run entire placement flow
+        print('read verilog done')
+        # self.placedb = PlaceDB(engine_data_ieda)
+        # self.placedb.init_db(params)
+        print('init db done')
         tt = time.time()
         self.setup_placedb()
         self.place()
@@ -327,12 +372,28 @@ if __name__ == "__main__":
     """
     @brief main function to invoke the entire placement flow.
     """
+    logging.root.name = 'DREAMPlace'
+    logging.basicConfig(level=logging.INFO,
+                        format='[%(levelname)-7s] %(name)s - %(message)s',
+                        stream=sys.stdout)
+    # if len(sys.argv) == 1 or "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
+        # params.printWelcome()
+        # params.printHelp()
+        # exit()
 
-    if len(sys.argv) == 1 or "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
-        params = Params.Params()
-        params.printWelcome()
-        params.printHelp()
-        exit()
-
-    engine = PlacementEngine(sys.argv[1:])
+    params = Params.Params()
+    # json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/dreamplace/params.json'
+   
+    # # json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/test/XS_TOP_TSMC28_0208/mobohb_log/XS_TOP/run-1_0_0/parameters.json'
+    # with open(json_file, 'r') as f:
+    #     params.fromJson(json.load(f))
+    engine = PlacementEngine(params)
+    engine.setup_rawdb()
     ppa = engine.run()
+
+    ''' 
+    path = '/home/zhaoxueyan/code/ai-eda/'
+    json_file = path + 'app/AutoDMP/test/ariane133_nangate45_51/mobohb_log/NV_ariane133_partition_c/run-0_0_0/parameters.json'
+
+
+    '''

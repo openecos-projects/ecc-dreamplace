@@ -48,6 +48,7 @@ class Params:
             else:
                 self.__dict__[key] = None
         self.__dict__["params_dict"] = params_dict
+        self.base_design_name = "default"
 
     def printWelcome(self):
         """
@@ -185,20 +186,8 @@ class Params:
     def design_name(self):
         """
         @brief speculate the design name for dumping out intermediate solutions
-        """
-        if self.aux_input:
-            design_name = (
-                os.path.basename(self.aux_input).replace(".aux", "").replace(".AUX", "")
-            )
-        elif self.verilog_input:
-            design_name = (
-                os.path.basename(self.verilog_input).replace(".v", "").replace(".V", "")
-            )
-        elif self.def_input:
-            design_name = (
-                os.path.basename(self.def_input).replace(".def", "").replace(".DEF", "")
-            )
-        return design_name
+        """    
+        return self.base_design_name
 
     def solution_file_suffix(self):
         """

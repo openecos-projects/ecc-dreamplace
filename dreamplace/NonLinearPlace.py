@@ -69,7 +69,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         all_metrics = []
         lrs = []
         scheduler = None
-        plot_frequency = 100
+        plot_frequency = 10
 
         # global placement
         if params.global_place_flag:
@@ -173,6 +173,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             model.data_collections.pos[0], params.gp_noise_ratio
                         )
                     initialize_learning_rate(model.data_collections.pos[0])
+                    logging.info(" learning rate = %g" % (optimizer.param_groups[0]["lr"]))
                     if (
                         optimizer_name.lower()
                         in [
@@ -887,59 +888,11 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
         if params.plot_flag:
             self.plot(params, placedb, 9999, self.pos[0].data.clone().cpu().numpy())
-
-        # recover node sizes, pins shifts, and positions of macros
-        if params.macro_halo_x >= 0 and params.macro_halo_y >= 0:
-            with torch.no_grad():
-                # node sizes
-                self.data_collections.node_size_x[placedb.movable_macro_idx] -= (
-                    2 * params.macro_halo_x
-                )
-                self.data_collections.node_size_y[placedb.movable_macro_idx] -= (
-                    2 * params.macro_halo_y
-                )
-                # self.data_collections.node_size_x[placedb.fixed_macro_idx] -= (
-                #     2 * params.macro_halo_x
-                # )
-                # self.data_collections.node_size_y[placedb.fixed_macro_idx] -= (
-                #     2 * params.macro_halo_y
-                # )
-
-                # pin offsets
-                self.data_collections.pin_offset_x[
-                    placedb.movable_macro_pins
-                ] -= params.macro_halo_x
-                self.data_collections.pin_offset_y[
-                    placedb.movable_macro_pins
-                ] -= params.macro_halo_y
-                # self.data_collections.pin_offset_x[
-                #     placedb.fixed_macro_pins
-                # ] -= params.macro_halo_x
-                # self.data_collections.pin_offset_y[
-                #     placedb.fixed_macro_pins
-                # ] -= params.macro_halo_y
-
-                # macro locations
-                self.pos[0][placedb.movable_slice][
-                    placedb.movable_macro_mask
-                ] += params.macro_halo_x
-                self.pos[0][
-                    placedb.num_nodes : placedb.num_nodes + placedb.num_movable_nodes
-                ][placedb.movable_macro_mask] += params.macro_halo_y
-                self.pos[0][placedb.fixed_slice][
-                    placedb.fixed_macro_mask
-                ] += params.macro_halo_x
-                self.pos[0][
-                    placedb.num_nodes
-                    + placedb.num_movable_nodes : placedb.num_nodes
-                    + placedb.num_movable_nodes
-                    + placedb.num_terminals
-                ][placedb.fixed_macro_mask] += params.macro_halo_y
-
+            
         # rescale everything
         cur_scale_factor = self.data_collections.fp_info.scale_factor
         gcd_site_scale_factor = 1 / math.gcd(
-            placedb.pydb.site_width, placedb.pydb.row_height
+            placedb.origin_site_width, placedb.origin_row_height
         )
         if cur_scale_factor != gcd_site_scale_factor:
             logging.warn(
@@ -957,6 +910,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 # self.data_collections.node_areas.mul_(rescale_factor * rescale_factor)
                 self.data_collections.fp_info.scale(rescale_factor)
                 self.data_collections.fp_info.scale_factor = gcd_site_scale_factor
+                params.macro_halo_x *= rescale_factor
+                params.macro_halo_y *= rescale_factor
+                
                 # TODO: rescale fence regions
 
         # dump global placement solution for legalization
@@ -1063,6 +1019,54 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             logging.info(cur_metric)
             iteration += 1
 
+        # recover node sizes, pins shifts, and positions of macros
+        if params.macro_halo_x >= 0 and params.macro_halo_y >= 0:
+            with torch.no_grad():
+                # node sizes
+                self.data_collections.node_size_x[placedb.movable_macro_idx] -= (
+                    2 * params.macro_halo_x
+                )
+                self.data_collections.node_size_y[placedb.movable_macro_idx] -= (
+                    2 * params.macro_halo_y
+                )
+                # self.data_collections.node_size_x[placedb.fixed_macro_idx] -= (
+                #     2 * params.macro_halo_x
+                # )
+                # self.data_collections.node_size_y[placedb.fixed_macro_idx] -= (
+                #     2 * params.macro_halo_y
+                # )
+
+                # pin offsets
+                self.data_collections.pin_offset_x[
+                    placedb.movable_macro_pins
+                ] -= params.macro_halo_x
+                self.data_collections.pin_offset_y[
+                    placedb.movable_macro_pins
+                ] -= params.macro_halo_y
+                # self.data_collections.pin_offset_x[
+                #     placedb.fixed_macro_pins
+                # ] -= params.macro_halo_x
+                # self.data_collections.pin_offset_y[
+                #     placedb.fixed_macro_pins
+                # ] -= params.macro_halo_y
+
+                # macro locations
+                self.pos[0][placedb.movable_slice][
+                    placedb.movable_macro_mask
+                ] += params.macro_halo_x
+                self.pos[0][
+                    placedb.num_nodes : placedb.num_nodes + placedb.num_movable_nodes
+                ][placedb.movable_macro_mask] += params.macro_halo_y
+                self.pos[0][placedb.fixed_slice][
+                    placedb.fixed_macro_mask
+                ] += params.macro_halo_x
+                self.pos[0][
+                    placedb.num_nodes
+                    + placedb.num_movable_nodes : placedb.num_nodes
+                    + placedb.num_movable_nodes
+                    + placedb.num_terminals
+                ][placedb.fixed_macro_mask] += params.macro_halo_y
+
         # plot placement
         if params.plot_flag:
             self.plot(
@@ -1082,7 +1086,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         if params.detailed_place_flag:
             tt = time.time()
             self.pos[0].data.copy_(self.op_collections.detailed_place_op(self.pos[0]))
-            macro_orients = self.op_collections.macro_refinement_op(self.pos[0])
+            # macro_orients = self.op_collections.macro_refinement_op(self.pos[0])
             logging.info("detailed placement takes %.3f seconds" % (time.time() - tt))
             cur_metric = EvalMetrics.EvalMetrics(iteration)
             all_metrics.append(cur_metric)
@@ -1102,7 +1106,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         )
 
         # apply macro orientations solution
-        if params.detailed_place_flag:
+        if False:
             orients_map = {
                 "N": 0,
                 "S": 1,
@@ -1152,6 +1156,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         # run RSMT
         with torch.no_grad():
             tt = time.time()
+            # FIXME:
             rsmt_wl = self.op_collections.rsmt_wl_op(self.pos[0])
             logging.info("rsmt computation takes %.3f seconds" % (time.time() - tt))
             logging.info("flute rsmt %.6E" % rsmt_wl)

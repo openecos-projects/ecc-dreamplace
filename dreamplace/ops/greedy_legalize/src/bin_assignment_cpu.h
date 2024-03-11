@@ -54,14 +54,14 @@ void distributeFixedCells2BinsCPU(const LegalizationDB<T>& db, const T* x,
       int bin_id_xl = std::max((int)floorDiv(x[node_id] - xl, bin_size_x, (T)0), 0);
       int bin_id_xh = std::min(
           (int)ceilDiv((x[node_id] + node_size_x[node_id] - xl), bin_size_x, (T)0),
-          num_bins_x);
+          num_bins_x - 1);
       int bin_id_yl = std::max((int)floorDiv(y[node_id] - yl, bin_size_y, (T)0), 0);
       int bin_id_yh = std::min(
           (int)ceilDiv((y[node_id] + node_size_y[node_id] - yl), bin_size_y, (T)0),
-          num_bins_y);
+          num_bins_y - 1);
 
-      for (int bin_id_x = bin_id_xl; bin_id_x < bin_id_xh; ++bin_id_x) {
-        for (int bin_id_y = bin_id_yl; bin_id_y < bin_id_yh; ++bin_id_y) {
+      for (int bin_id_x = bin_id_xl; bin_id_x <= bin_id_xh; ++bin_id_x) {
+        for (int bin_id_y = bin_id_yl; bin_id_y <= bin_id_yh; ++bin_id_y) {
           int bin_id = bin_id_x * num_bins_y + bin_id_y;
 
           bin_cells[bin_id].push_back(node_id);
@@ -118,7 +118,7 @@ void distributeBlanks2BinsCPU(
           T node_yh = node_yl + node_size_y[node_id];
 
           if (node_yh > blank.yl && node_yl < blank.yh && node_xh > blank.xl &&
-              node_xl < blank.xh)  // overlap
+              node_xl < blank.xh)  // overlap FIXME:
           {
             if (node_xl <= blank.xl && node_xh >= blank.xh)  // erase
             {
@@ -139,7 +139,7 @@ void distributeBlanks2BinsCPU(
               Blank<T> new_blank = blank;
               blank.xh = floorDiv((node_xl - xl), site_width) * site_width +
                          xl;  // align blanks to sites
-              new_blank.xl = floorDiv((node_xh - xl), site_width) * site_width +
+              new_blank.xl = ceilDiv((node_xh - xl), site_width) * site_width +
                              xl;  // align blanks to sites
               bin_blanks.at(blank_bin_id)
                   .insert(bin_blanks.at(blank_bin_id).begin() + bi + 1,

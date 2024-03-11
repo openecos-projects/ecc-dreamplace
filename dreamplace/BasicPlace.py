@@ -807,7 +807,7 @@ class BasicPlace(nn.Module):
             flat_region_boxes_start=data_collections.flat_region_boxes_start,
             node2fence_region_map=data_collections.node2fence_region_map,
             fp_info=data_collections.fp_info,
-            num_bins_x=1,
+            num_bins_x=1, # whole row
             num_bins_y=64,
             # num_bins_x=64, num_bins_y=64,
             num_movable_nodes=placedb.num_movable_nodes,

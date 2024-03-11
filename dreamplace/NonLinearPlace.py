@@ -912,7 +912,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 self.data_collections.fp_info.scale_factor = gcd_site_scale_factor
                 params.macro_halo_x *= rescale_factor
                 params.macro_halo_y *= rescale_factor
-                
+                params.macro_pin_halo_x*=rescale_factor
+                params.macro_pin_halo_y*=rescale_factor
                 # TODO: rescale fence regions
 
         # dump global placement solution for legalization
@@ -1020,7 +1021,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             iteration += 1
 
         # recover node sizes, pins shifts, and positions of macros
-        if params.macro_halo_x >= 0 and params.macro_halo_y >= 0:
+        if params.macro_halo_x >= 0 and params.macro_halo_y >= 0 and params.macro_pin_halo_x >= 0:
             with torch.no_grad():
                 # node sizes
                 self.data_collections.node_size_x[placedb.movable_macro_idx] -= (
@@ -1029,6 +1030,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 self.data_collections.node_size_y[placedb.movable_macro_idx] -= (
                     2 * params.macro_halo_y
                 )
+                self.data_collections.node_size_x[placedb.movable_macro_idx] -= torch.tensor(placedb.is_pin_lower_x * params.macro_pin_halo_x + placedb.is_pin_upper_x * params.macro_pin_halo_x, device=self.pos[0].device)
+                self.data_collections.node_size_y[placedb.movable_macro_idx] -= torch.tensor(placedb.is_pin_lower_y * params.macro_pin_halo_y + placedb.is_pin_upper_y * params.macro_pin_halo_y, device=self.pos[0].device)
                 # self.data_collections.node_size_x[placedb.fixed_macro_idx] -= (
                 #     2 * params.macro_halo_x
                 # )
@@ -1050,6 +1053,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 #     placedb.fixed_macro_pins
                 # ] -= params.macro_halo_y
 
+                self.data_collections.pin_offset_x[placedb.movable_macro_pins] -= torch.tensor(placedb.is_pin_lower_x[placedb.pin2node_map[placedb.movable_macro_pins]] * params.macro_pin_halo_x, device=self.pos[0].device) 
+                self.data_collections.pin_offset_y[placedb.movable_macro_pins] -= torch.tensor(placedb.is_pin_lower_y[placedb.pin2node_map[placedb.movable_macro_pins]] * params.macro_pin_halo_y, device=self.pos[0].device)
                 # macro locations
                 self.pos[0][placedb.movable_slice][
                     placedb.movable_macro_mask
@@ -1057,6 +1062,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 self.pos[0][
                     placedb.num_nodes : placedb.num_nodes + placedb.num_movable_nodes
                 ][placedb.movable_macro_mask] += params.macro_halo_y
+                
                 self.pos[0][placedb.fixed_slice][
                     placedb.fixed_macro_mask
                 ] += params.macro_halo_x
@@ -1067,6 +1073,26 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     + placedb.num_terminals
                 ][placedb.fixed_macro_mask] += params.macro_halo_y
 
+              
+                self.pos[0][placedb.movable_slice][
+                    placedb.movable_macro_mask
+                ] += torch.tensor(placedb.is_pin_lower_x * params.macro_pin_halo_x, device=self.pos[0].device)
+                
+                self.pos[0][
+                    placedb.num_nodes : placedb.num_nodes + placedb.num_movable_nodes
+                ][placedb.movable_macro_mask] += torch.tensor(placedb.is_pin_lower_y * params.macro_pin_halo_y, device=self.pos[0].device)
+                
+                # TODO:
+                # self.pos[0][placedb.fixed_slice][
+                #     placedb.fixed_macro_mask
+                # ] += placedb.is_pin_lower_x * params.macro_pin_halo
+                # self.pos[0][
+                #     placedb.num_nodes
+                #     + placedb.num_movable_nodes : placedb.num_nodes
+                #     + placedb.num_movable_nodes
+                #     + placedb.num_terminals
+                # ][placedb.fixed_macro_mask] += params.macro_halo_y
+            
         # plot placement
         if params.plot_flag:
             self.plot(

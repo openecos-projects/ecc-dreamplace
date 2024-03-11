@@ -94,6 +94,7 @@ class PlacementEngine:
             self.params.routability_opt_flag = 0
             self.params.macro_halo_x = 0
             self.params.macro_halo_y = 0
+            self.params.macro_pin_halo = 0
             self.params.plot_flag = 1
             self.params.gp_noise_ratio = 0.0
             self.params.pin_density = -1
@@ -123,7 +124,7 @@ class PlacementEngine:
         # read cpp database
         tt = time.time()
         if self.placedb is None:
-            # workspace_dir = '/home/zhaoxueyan/code/ai-eda/workspace_aimp/workspace_ariane133_t28'
+            # workspace_dir = '/home/zhaoxueyan/code/ai-mp/workspace_aimp/workspace_ariane133_t28'
             # design_name = 'ariane'
             
             workspace_dir = '/home/zhaoxueyan/code/ai-mp/workspace_aimp/workspace_xs_top'

@@ -306,5 +306,13 @@
     "risa_weights": {
         "description": "whether use weighted smooth HPWL with RISA net weights",
         "default": 0
+    },
+    "macro_pin_halo_x": {
+        "description": "whether use weighted smooth HPWL with RISA net weights",
+        "default": 1000
+    },
+    "macro_pin_halo_y": {
+        "description": "whether use weighted smooth HPWL with RISA net weights",
+        "default": 1000
     }
 }

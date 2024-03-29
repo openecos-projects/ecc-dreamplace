@@ -42,7 +42,7 @@ if top_root_dir not in sys.path:
     sys.path.append(top_root_dir)
 import dreamplace.configure as configure
 import dreamplace.Params as Params
-from aimp.macroPlaceDB import MacroPlaceDB as PlaceDB
+from macro_placer.database.macroPlaceDB import MacroPlaceDB as PlaceDB
 from eda_engine.engine.iEDA.module.ieda_engine_dm import EngineDataManager
 from eda_engine.engine.iEDA.ieda_engine import EngineIEDA
 from eda_engine.ai_infra.data_manager.data_manager import DataManager

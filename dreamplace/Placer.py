@@ -85,7 +85,8 @@ class PlacementEngine:
         self.params = Params.Params()
         self.update_params(params)
         self.params.printWelcome()
-
+        self.data_manager = None
+        self.eda_engine = None
         if self.params.evaluate_pl == 1:
             self.params.global_place_flag = 1
             self.params.global_place_stages[0]["iteration"] = 0
@@ -145,7 +146,9 @@ class PlacementEngine:
             # self.engine_data_ieda.read_def(
             #     self.data_manager.get_config_manager().get_config_path().def_input_path)
             self.placedb = PlaceDB(self.eda_engine)
-            self.placedb.setup_rawdb(self.params)
+            if self.params.with_sta:
+                self.eda_engine.get_engine_dm().init_sta()
+            self.placedb.setup_rawdb(self.params, self.params.with_sta)
             
             # self.placedb.write(self.params, "debug.pl")
             # exit(0)

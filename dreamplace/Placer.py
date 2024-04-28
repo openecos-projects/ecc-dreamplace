@@ -43,12 +43,10 @@ if top_root_dir not in sys.path:
 import dreamplace.configure as configure
 import dreamplace.Params as Params
 from macro_placer.database.macroPlaceDB import MacroPlaceDB as PlaceDB
-from eda_engine.engine.iEDA.module.ieda_engine_dm import EngineDataManager
-from eda_engine.engine.iEDA.ieda_engine import EngineIEDA
-# from eda_engine.ai_infra.data_manager.data_manager import DataManager
 import dreamplace.NonLinearPlace as NonLinearPlace
 from data_manager.aimp_dm import AimpDataManager
-from eda_engine.engine.iEDA.ieda_engine import EngineIEDA
+from third_party.aieda.tools.iEDA.module.sta import IEDASta
+from third_party.aieda.tools.iEDA.module.io import IEDAIO
 
 
 # set up logging
@@ -85,8 +83,6 @@ class PlacementEngine:
         self.params = Params.Params()
         self.update_params(params)
         self.params.printWelcome()
-        self.data_manager = None
-        self.eda_engine = None
         if self.params.evaluate_pl == 1:
             self.params.global_place_flag = 1
             self.params.global_place_stages[0]["iteration"] = 0
@@ -123,14 +119,13 @@ class PlacementEngine:
         self.density = float("inf")
         self.metrics = None
 
-    def setup_rawdb(self, data_manager : AimpDataManager, eda_engine : EngineIEDA):
+    def setup_rawdb(self, data_manager : AimpDataManager):
         # read cpp database
         tt = time.time()
         if self.placedb is None:
             # workspace_dir = '/home/zhaoxueyan/code/ai-mp/workspace_aimp/workspace_ariane133_t28'
             # design_name = 'ariane'
             self.data_manager = data_manager
-            self.eda_engine = eda_engine
             # workspace_dir = '/data/project_share/benchmark/aimp/autoDMP/workspace_xs_top'
             # design_name = 'XS_TOP'
             # self.data_manager = DataManager(workspace_dir)
@@ -145,10 +140,11 @@ class PlacementEngine:
             #     '/home/zhaoxueyan/code/ai-eda/workspace_aimp/ariane133/ariane133/netlist/ariane.v', top_module='ariane')
             # self.engine_data_ieda.read_def(
             #     self.data_manager.get_config_manager().get_config_path().def_input_path)
-            self.placedb = PlaceDB(self.eda_engine)
+            self.placedb = PlaceDB(data_manager)
             if self.params.with_sta:
-                self.eda_engine.get_engine_dm().init_sta()
-            self.placedb.setup_rawdb(self.params, self.params.with_sta)
+                ieda_sta = IEDASta(self.data_manager.dir_workspace)
+                ieda_sta.init_sta()
+            self.placedb.setup_rawdb(self.params)
             
             # self.placedb.write(self.params, "debug.pl")
             # exit(0)
@@ -168,7 +164,8 @@ class PlacementEngine:
     def write_back(self, def_file="output.def"):
         # self.placedb.write_placement_back(self.params)
         # self.engine_data_ieda.gds_save(def_file+".gds")
-        self.eda_engine.get_engine_dm().def_save(def_file)
+        ieda_io = IEDAIO(self.data_manager.dir_workspace)
+        ieda_io.def_save(def_file)
 
     def update_params(self, new_params):
         self.params.update(new_params)
@@ -307,7 +304,8 @@ class PlacementEngine:
             "%s.tcl"
             % (self.params.design_name()),
         )
-        self.eda_engine.get_engine_dm().tcl_save(tcl_file)
+        ieda_io = IEDAIO(self.data_manager.dir_workspace)
+        ieda_io.tcl_save(tcl_file)
         # self.placedb.write(self.params, self.gp_out_file)
 
     def run(self):

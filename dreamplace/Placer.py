@@ -148,7 +148,7 @@ class PlacementEngine:
             self.placedb = PlaceDB(self.eda_engine)
             if self.params.with_sta:
                 self.eda_engine.get_engine_dm().init_sta()
-            self.placedb.setup_rawdb(self.params, self.params.with_sta)
+            self.placedb.setup_rawdb(self.params)
             
             # self.placedb.write(self.params, "debug.pl")
             # exit(0)
@@ -387,15 +387,25 @@ if __name__ == "__main__":
         # params.printWelcome()
         # params.printHelp()
         # exit()
-
+    ## init workspace
+    workspace_path = "/home/zhaoxueyan/code/ai-mp/workspace_aimp/ariane133"
+    #init aimp
+    data_manager = AimpDataManager(workspace_path)
     params = Params.Params()
+    engine_ieda = EngineIEDA(
+            design_name=data_manager.get_engine_dm().get_config_manager().get_config_workspace().design,
+            path_manager=data_manager.get_engine_dm().get_path_manager())
+
+    engine_ieda.get_engine_dm().read_def() 
+    
+    ## init PlacementEngine
     # json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/dreamplace/params.json'
-   
-    # # json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/test/XS_TOP_TSMC28_0208/mobohb_log/XS_TOP/run-1_0_0/parameters.json'
-    # with open(json_file, 'r') as f:
-    #     params.fromJson(json.load(f))
+    json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/test/XS_TOP_TSMC28_0208/mobohb_log/XS_TOP/run-1_0_0/parameters.json'
+    with open(json_file, 'r') as f:
+        params.fromJson(json.load(f))
     engine = PlacementEngine(params)
-    engine.setup_rawdb()
+    
+    engine.setup_rawdb(data_manager=data_manager, eda_engine=engine_ieda)    
     ppa = engine.run()
 
     ''' 

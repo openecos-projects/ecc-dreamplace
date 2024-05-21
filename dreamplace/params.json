@@ -314,5 +314,9 @@
     "macro_pin_halo_y": {
         "description": "whether use weighted smooth HPWL with RISA net weights",
         "default": 1000
+    },
+    "with_sta": {
+        "description": "Open STA for Place",
+        "default": 1
     }
 }

@@ -388,7 +388,7 @@ if __name__ == "__main__":
         # params.printHelp()
         # exit()
     ## init workspace
-    workspace_path = "/home/zhaoxueyan/code/ai-mp/workspace_aimp/workspace_yanqihu"
+    workspace_path = "/data/project_share/benchmark/aimp/autoDMP/openC910/openC910_3500x3500_1000M_0614"
     #init aimp
     data_manager = AimpDataManager(workspace_path)
     params = Params.Params()
@@ -400,9 +400,9 @@ if __name__ == "__main__":
     params.with_sta = False
     ## init PlacementEngine
     # json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/dreamplace/params.json'
-    json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/test/XS_TOP_TSMC28_0208/mobohb_log/XS_TOP/run-1_0_0/parameters.json'
-    with open(json_file, 'r') as f:
-        params.fromJson(json.load(f))
+    # json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/test/XS_TOP_TSMC28_0208/mobohb_log/XS_TOP/run-1_0_0/parameters.json'
+    # with open(json_file, 'r') as f:
+    #     params.fromJson(json.load(f))
     engine = PlacementEngine(params)
     
     engine.setup_rawdb(data_manager=data_manager)    

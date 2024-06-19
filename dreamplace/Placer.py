@@ -31,6 +31,7 @@ import random
 import numpy as np
 import logging
 
+os.environ['eda_tool'] = "iEDA"
 # for consistency between python2 and python3
 root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if root_dir not in sys.path:
@@ -40,6 +41,7 @@ top_root_dir = os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))))
 if top_root_dir not in sys.path:
     sys.path.append(top_root_dir)
+    sys.path.append(top_root_dir + "/third_party/aieda")
 import dreamplace.configure as configure
 import dreamplace.Params as Params
 from macro_placer.database.macroPlaceDB import MacroPlaceDB as PlaceDB
@@ -385,15 +387,25 @@ if __name__ == "__main__":
         # params.printWelcome()
         # params.printHelp()
         # exit()
-
+    ## init workspace
+    workspace_path = "/data/project_share/benchmark/aimp/autoDMP/openC910/openC910_3500x3500_1000M_0614"
+    #init aimp
+    data_manager = AimpDataManager(workspace_path)
     params = Params.Params()
+    workspace = data_manager.workspace
+    ieda_io = IEDAIO(dir_workspace = workspace.workspace,
+                              input_def = workspace.json_path.def_input_path)
+    data_manager.set_ieda_io(ieda_io)
+    ieda_io.read_def() 
+    params.with_sta = False
+    ## init PlacementEngine
     # json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/dreamplace/params.json'
-   
-    # # json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/test/XS_TOP_TSMC28_0208/mobohb_log/XS_TOP/run-1_0_0/parameters.json'
+    # json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/test/XS_TOP_TSMC28_0208/mobohb_log/XS_TOP/run-1_0_0/parameters.json'
     # with open(json_file, 'r') as f:
     #     params.fromJson(json.load(f))
     engine = PlacementEngine(params)
-    engine.setup_rawdb()
+    
+    engine.setup_rawdb(data_manager=data_manager)    
     ppa = engine.run()
 
     ''' 

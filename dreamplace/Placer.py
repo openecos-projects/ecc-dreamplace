@@ -45,8 +45,8 @@ import dreamplace.Params as Params
 from macro_placer.database.macroPlaceDB import MacroPlaceDB as PlaceDB
 import dreamplace.NonLinearPlace as NonLinearPlace
 from data_manager.aimp_dm import AimpDataManager
-from third_party.aieda.tools.iEDA.module.sta import IEDASta
-from third_party.aieda.tools.iEDA.module.io import IEDAIO
+from tools.iEDA.module.sta import IEDASta
+from tools.iEDA.module.io import IEDAIO
 
 
 # set up logging

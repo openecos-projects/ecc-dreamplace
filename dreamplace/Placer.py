@@ -31,6 +31,7 @@ import random
 import numpy as np
 import logging
 
+os.environ['eda_tool'] = "iEDA"
 # for consistency between python2 and python3
 root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if root_dir not in sys.path:
@@ -40,6 +41,7 @@ top_root_dir = os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))))
 if top_root_dir not in sys.path:
     sys.path.append(top_root_dir)
+    sys.path.append(top_root_dir + "/third_party/aieda")
 import dreamplace.configure as configure
 import dreamplace.Params as Params
 from macro_placer.database.macroPlaceDB import MacroPlaceDB as PlaceDB
@@ -386,24 +388,25 @@ if __name__ == "__main__":
         # params.printHelp()
         # exit()
     ## init workspace
-    workspace_path = "/home/zhaoxueyan/code/ai-mp/workspace_aimp/ariane133"
+    workspace_path = "/home/zhaoxueyan/code/ai-mp/workspace_aimp/workspace_NutShell"
     #init aimp
     data_manager = AimpDataManager(workspace_path)
     params = Params.Params()
-    engine_ieda = EngineIEDA(
-            design_name=data_manager.get_engine_dm().get_config_manager().get_config_workspace().design,
-            path_manager=data_manager.get_engine_dm().get_path_manager())
-
-    engine_ieda.get_engine_dm().read_def() 
-    
+    workspace = data_manager.workspace
+    ieda_io = IEDAIO(dir_workspace = workspace.workspace,
+                              input_def = workspace.json_path.def_input_path)
+    data_manager.set_ieda_io(ieda_io)
+    ieda_io.read_def() 
+    params.with_sta = False
     ## init PlacementEngine
     # json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/dreamplace/params.json'
-    json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/test/XS_TOP_TSMC28_0208/mobohb_log/XS_TOP/run-1_0_0/parameters.json'
+    # json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/test/XS_TOP_TSMC28_0208/mobohb_log/XS_TOP/run-1_0_0/parameters.json'
+    json_file = '/home/zhaoxueyan/code/ai-mp/AutoDMP/dreamplace/params2.json'
     with open(json_file, 'r') as f:
         params.fromJson(json.load(f))
     engine = PlacementEngine(params)
     
-    engine.setup_rawdb(data_manager=data_manager, eda_engine=engine_ieda)    
+    engine.setup_rawdb(data_manager=data_manager)    
     ppa = engine.run()
 
     ''' 

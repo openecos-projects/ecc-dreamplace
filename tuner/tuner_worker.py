@@ -34,6 +34,8 @@ from tuner.tuner_configs import (
     AUTODMP_BEST_CFG,
 )
 
+from data_manager.aimp_dm import AimpDataManager
+
 opj = os.path.join
 
 # Wrap AutoDMP config in dataclass
@@ -57,6 +59,8 @@ AutoDMPConfig = make_dataclass(
 class AutoDMPWorker(Worker):
     def __init__(
         self,
+        nameserver_port,
+        data_manager : AimpDataManager,
         log_dir,
         *args,
         default_config,
@@ -65,13 +69,15 @@ class AutoDMPWorker(Worker):
         multiobj=False,
         **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+        super().__init__(nameserver_port=nameserver_port, *args, **kwargs)
         self.log_dir = log_dir
         self.congestion_ratio = congestion_ratio
         self.density_ratio = density_ratio
         self.multiobj = multiobj
+        self.data_manager = data_manager
 
         # update default with best parameters
+        print(default_config)
         path_reuse = Path(default_config["reuse_params"])
         if path_reuse.suffix == ".json" and path_reuse.is_file():
             with path_reuse.open() as f:
@@ -104,7 +110,7 @@ class AutoDMPWorker(Worker):
     def _setup_placer(self):
         params = self._create_params({})
         self.placer = PlacementEngine(params)
-        self.placer.setup_rawdb()
+        self.placer.setup_rawdb(data_manager=self.data_manager)
 
     def _update_logger(self, working_directory, suffix=""):
         # change logger
@@ -119,7 +125,7 @@ class AutoDMPWorker(Worker):
             if isinstance(hdlr, logging.FileHandler):
                 log.removeHandler(hdlr)
         log.addHandler(filehandler)
-        log.setLevel(logging.DEBUG)
+        log.setLevel(logging.INFO)
 
     def compute(self, config_id, config, budget, working_directory, **kwargs):
         config_identifier = "run-" + "_".join([str(x) for x in config_id])

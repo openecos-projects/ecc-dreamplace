@@ -23,7 +23,7 @@
     "target_density": 0.7,
     "density_weight": 8e-05,
     "random_seed": 1000,
-    "result_dir": "",
+    "result_dir": "./",
     "scale_factor": 1.0,
     "ignore_net_weight": 10,
     "shift_factor": [0, 0],

@@ -153,7 +153,7 @@ class PlaceDrawer {
   /// \param height of screen
   void paintCairo(cairo_surface_t* cs, double width, double height) const {
 #if DRAWPLACE == 1
-    double expand = 1.05;
+    double expand = 1.3;
     double ratio[2] = {width / (expand * (m_xh - m_xl)),
                        height / (expand * (m_yh - m_yl))};
     char buf[16];
@@ -205,6 +205,8 @@ class PlaceDrawer {
       for (int i = m_num_movable_nodes; i < m_num_nodes - m_num_filler_nodes;
            ++i) {
         // for IO terminals - upsize for visibility
+        // printf("cell id %d, coordinate (%f, %f, %f, %f)\n", i, m_x[i], m_y[i],
+        //        m_node_size_x[i], m_node_size_y[i]);
         if (m_node_size_x[i] == 0 && m_node_size_y[i] == 0) {
           coordinate_type x = m_x[i];
           coordinate_type y = m_y[i];

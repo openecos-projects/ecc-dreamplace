@@ -5,12 +5,12 @@
     "verilog_input": "",
     "gpu": 1,
     "gpu_id": 1,
-    "num_bins_x": 512,
-    "num_bins_y": 512,
+    "num_bins_x": 256,
+    "num_bins_y": 256,
     "global_place_stages": [
         {
-            "num_bins_x": 512,
-            "num_bins_y": 512,
+            "num_bins_x": 256,
+            "num_bins_y": 256,
             "iteration": 3000,
             "learning_rate": 0.01,
             "wirelength": "weighted_average",

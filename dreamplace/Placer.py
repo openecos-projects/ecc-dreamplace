@@ -146,6 +146,7 @@ class PlacementEngine:
             if self.params.with_sta:
                 ieda_sta = IEDASta(self.data_manager.dir_workspace)
                 ieda_sta.init_sta()
+                # ieda_sta.create_data_flow()
             self.placedb.setup_rawdb(self.params)
             
             # self.placedb.write(self.params, "debug.pl")
@@ -388,7 +389,8 @@ if __name__ == "__main__":
         # params.printHelp()
         # exit()
     ## init workspace
-    workspace_path = "/home/zhaoxueyan/code/ai-mp/workspace_aimp/workspace_NutShell"
+    # workspace_path = "/home/zhaoxueyan/code/ai-mp/workspace_aimp/workspace_NutShell"
+    workspace_path = "/home/zhaoxueyan/code/ai-mp/workspace_aimp/ariane133"
     #init aimp
     data_manager = AimpDataManager(workspace_path)
     params = Params.Params()
@@ -399,6 +401,7 @@ if __name__ == "__main__":
     ieda_io.read_def() 
     params.with_sta = False
     ## init PlacementEngine
+    json_file = '/home/zhaoxueyan/code/ai-mp/workspace_aimp/workspace_NutShell/aimp/log/run-0_0_3/parameters.json'
     # json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/dreamplace/params.json'
     # json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/test/XS_TOP_TSMC28_0208/mobohb_log/XS_TOP/run-1_0_0/parameters.json'
     json_file = '/home/zhaoxueyan/code/ai-mp/AutoDMP/dreamplace/params2.json'

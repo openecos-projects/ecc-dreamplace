@@ -290,12 +290,12 @@ class PlaceDrawer {
         } else {
           cairo_rectangle(c, m_x[i], m_y[i], m_node_size_x[i],
                           m_node_size_y[i]);
-          cairo_set_source_rgb(c, 140 / 255.0, 140 / 255.0, 140 / 255.0);
+          cairo_set_source_rgb(c, 50 / 255.0, 50 / 255.0, 220 / 255.0);
           cairo_fill(c);
           cairo_rectangle(c, m_x[i], m_y[i], m_node_size_x[i],
                           m_node_size_y[i]);
           cairo_set_line_width(c, m_site_width);
-          cairo_set_source_rgb(c, 140 / 255.0, 140 / 255.0, 140 / 255.0);
+          cairo_set_source_rgb(c, 20 / 255.0, 20 / 255.0, 255 / 255.0);
           cairo_stroke(c);
         }
         if (m_content & NODETEXT) {

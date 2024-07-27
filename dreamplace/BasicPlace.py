@@ -115,7 +115,8 @@ class PlaceDataCollection(object):
                 self.original_pin_offset_x = self.pin_offset_x.clone()
                 self.original_pin_offset_y = self.pin_offset_y.clone()
 
-            self.target_density = torch.empty(1, dtype=self.pos[0].dtype, device=device)
+            self.target_density = torch.empty(
+                1, dtype=self.pos[0].dtype, device=device)
             self.target_density.data.fill_(params.target_density)
 
             self.node_areas = self.node_size_x * self.node_size_y
@@ -126,7 +127,8 @@ class PlaceDataCollection(object):
                 device
             )
 
-            self.pin2node_map = torch.from_numpy(placedb.pin2node_map).to(device)
+            self.pin2node_map = torch.from_numpy(
+                placedb.pin2node_map).to(device)
             self.flat_node2pin_map = torch.from_numpy(placedb.flat_node2pin_map).to(
                 device
             )
@@ -135,7 +137,8 @@ class PlaceDataCollection(object):
             ).to(device)
             # number of pins for each cell
             self.pin_weights = (
-                self.flat_node2pin_start_map[1:] - self.flat_node2pin_start_map[:-1]
+                self.flat_node2pin_start_map[1:] -
+                self.flat_node2pin_start_map[:-1]
             ).to(self.node_size_x.dtype)
 
             self.unit_pin_capacity = torch.empty(
@@ -152,7 +155,8 @@ class PlaceDataCollection(object):
                 self.unit_pin_capacity = avg_pin_capacity.clamp_(
                     max=params.unit_pin_capacity
                 )
-                logging.info("unit_pin_capacity = %g" % (self.unit_pin_capacity))
+                logging.info("unit_pin_capacity = %g" %
+                             (self.unit_pin_capacity))
 
             # routing information
             # project initial routing utilization map to one layer
@@ -185,7 +189,8 @@ class PlaceDataCollection(object):
             if np.amin(placedb.net_weights) != np.amax(
                 placedb.net_weights
             ):  # weights are meaningful
-                self.net_weights = torch.from_numpy(placedb.net_weights).to(device)
+                self.net_weights = torch.from_numpy(
+                    placedb.net_weights).to(device)
             else:  # an empty tensor
                 logging.warning("net weights are all the same, ignored")
                 self.net_weights = torch.Tensor().to(device)
@@ -207,15 +212,15 @@ class PlaceDataCollection(object):
                     torch.from_numpy(region).to(device)
                     for region in placedb.virtual_macro_fence_region
                 ]
-                ## this is for overflow op
+                # this is for overflow op
                 self.total_movable_node_area_fence_region = torch.from_numpy(
                     placedb.total_movable_node_area_fence_region
                 ).to(device)
-                ## this is for gamma update
+                # this is for gamma update
                 self.num_movable_nodes_fence_region = torch.from_numpy(
                     placedb.num_movable_nodes_fence_region
                 ).to(device)
-                ## this is not used yet
+                # this is not used yet
                 self.num_filler_nodes_fence_region = torch.from_numpy(
                     placedb.num_filler_nodes_fence_region
                 ).to(device)
@@ -382,52 +387,55 @@ class BasicPlace(nn.Module):
         ):
             init_loc_perc_x = 0.5
             init_loc_perc_y = 0.5
-            logging.warn("incorrect initial location provided, choose center of layout")
+            logging.warn(
+                "incorrect initial location provided, choose center of layout")
 
         init_loc_x = (
-            placedb.xl * 1.0 + (placedb.xh * 1.0 - placedb.xl * 1.0) * init_loc_perc_x
+            placedb.xl * 1.0 + (placedb.xh * 1.0 -
+                                placedb.xl * 1.0) * init_loc_perc_x
         )
         init_loc_y = (
-            placedb.yl * 1.0 + (placedb.yh * 1.0 - placedb.yl * 1.0) * init_loc_perc_y
+            placedb.yl * 1.0 + (placedb.yh * 1.0 -
+                                placedb.yl * 1.0) * init_loc_perc_y
         )
 
         # x position
-        self.init_pos[0 : placedb.num_physical_nodes] = placedb.node_x
+        self.init_pos[0: placedb.num_physical_nodes] = placedb.node_x
         if params.global_place_flag and params.random_center_init_flag:
             logging.info(
                 f"move cells to location {init_loc_x, init_loc_y} with random noise"
             )
-            self.init_pos[0 : placedb.num_movable_nodes] = (
+            self.init_pos[0: placedb.num_movable_nodes] = (
                 np.random.normal(
                     loc=init_loc_x,
                     scale=(placedb.xh - placedb.xl) * 0.001,
                     size=placedb.num_movable_nodes,
                 )
-                - placedb.node_size_x[0 : placedb.num_movable_nodes] / 2
+                - placedb.node_size_x[0: placedb.num_movable_nodes] / 2
             )
 
         # y position
         self.init_pos[
-            placedb.num_nodes : placedb.num_nodes + placedb.num_physical_nodes
+            placedb.num_nodes: placedb.num_nodes + placedb.num_physical_nodes
         ] = placedb.node_y
         if params.global_place_flag and params.random_center_init_flag:
             self.init_pos[
-                placedb.num_nodes : placedb.num_nodes + placedb.num_movable_nodes
+                placedb.num_nodes: placedb.num_nodes + placedb.num_movable_nodes
             ] = (
                 np.random.normal(
                     loc=init_loc_y,
                     scale=(placedb.yh - placedb.yl) * 0.001,
                     size=placedb.num_movable_nodes,
                 )
-                - placedb.node_size_y[0 : placedb.num_movable_nodes] / 2
+                - placedb.node_size_y[0: placedb.num_movable_nodes] / 2
             )
 
         if placedb.num_filler_nodes:  # uniformly distribute filler cells in the layout
             if len(placedb.regions) > 0:
-                ### uniformly spread fillers in fence region
-                ### for cells in the fence region
+                # uniformly spread fillers in fence region
+                # for cells in the fence region
                 for i, region in enumerate(placedb.regions):
-                    filler_beg, filler_end = placedb.filler_start_map[i : i + 2]
+                    filler_beg, filler_end = placedb.filler_start_map[i: i + 2]
                     subregion_areas = (region[:, 2] - region[:, 0]) * (
                         region[:, 3] - region[:, 1]
                     )
@@ -444,38 +452,40 @@ class BasicPlace(nn.Module):
                     ).astype(np.int32)
                     for j, subregion in enumerate(region):
                         sub_filler_beg, sub_filler_end = subregion_num_filler_start_map[
-                            j : j + 2
+                            j: j + 2
                         ]
                         self.init_pos[
                             placedb.num_physical_nodes
                             + filler_beg
-                            + sub_filler_beg : placedb.num_physical_nodes
+                            + sub_filler_beg: placedb.num_physical_nodes
                             + filler_beg
                             + sub_filler_end
                         ] = np.random.uniform(
                             low=subregion[0],
-                            high=subregion[2] - placedb.filler_size_x_fence_region[i],
+                            high=subregion[2] -
+                            placedb.filler_size_x_fence_region[i],
                             size=sub_filler_end - sub_filler_beg,
                         )
                         self.init_pos[
                             placedb.num_nodes
                             + placedb.num_physical_nodes
                             + filler_beg
-                            + sub_filler_beg : placedb.num_nodes
+                            + sub_filler_beg: placedb.num_nodes
                             + placedb.num_physical_nodes
                             + filler_beg
                             + sub_filler_end
                         ] = np.random.uniform(
                             low=subregion[1],
-                            high=subregion[3] - placedb.filler_size_y_fence_region[i],
+                            high=subregion[3] -
+                            placedb.filler_size_y_fence_region[i],
                             size=sub_filler_end - sub_filler_beg,
                         )
 
-                ### for cells outside fence region
+                # for cells outside fence region
                 filler_beg, filler_end = placedb.filler_start_map[-2:]
                 self.init_pos[
                     placedb.num_physical_nodes
-                    + filler_beg : placedb.num_physical_nodes
+                    + filler_beg: placedb.num_physical_nodes
                     + filler_end
                 ] = np.random.uniform(
                     low=placedb.xl,
@@ -485,7 +495,7 @@ class BasicPlace(nn.Module):
                 self.init_pos[
                     placedb.num_nodes
                     + placedb.num_physical_nodes
-                    + filler_beg : placedb.num_nodes
+                    + filler_beg: placedb.num_nodes
                     + placedb.num_physical_nodes
                     + filler_end
                 ] = np.random.uniform(
@@ -496,22 +506,25 @@ class BasicPlace(nn.Module):
 
             else:
                 self.init_pos[
-                    placedb.num_physical_nodes : placedb.num_nodes
+                    placedb.num_physical_nodes: placedb.num_nodes
                 ] = np.random.uniform(
                     low=placedb.xl,
-                    high=placedb.xh - placedb.node_size_x[-placedb.num_filler_nodes],
+                    high=placedb.xh -
+                    placedb.node_size_x[-placedb.num_filler_nodes],
                     size=placedb.num_filler_nodes,
                 )
                 self.init_pos[
                     placedb.num_nodes
-                    + placedb.num_physical_nodes : placedb.num_nodes * 2
+                    + placedb.num_physical_nodes: placedb.num_nodes * 2
                 ] = np.random.uniform(
                     low=placedb.yl,
-                    high=placedb.yh - placedb.node_size_y[-placedb.num_filler_nodes],
+                    high=placedb.yh -
+                    placedb.node_size_y[-placedb.num_filler_nodes],
                     size=placedb.num_filler_nodes,
                 )
 
-        logging.debug("prepare init_pos takes %.2f seconds" % (time.time() - tt))
+        logging.debug("prepare init_pos takes %.2f seconds" %
+                      (time.time() - tt))
 
         # setting device
         if params.gpu and torch.cuda.is_available():
@@ -539,12 +552,14 @@ class BasicPlace(nn.Module):
         self.data_collections = PlaceDataCollection(
             self.pos, params, placedb, self.device
         )
-        logging.debug("build data_collections takes %.2f seconds" % (time.time() - tt))
+        logging.debug("build data_collections takes %.2f seconds" %
+                      (time.time() - tt))
 
         # similarly I wrap all ops
         tt = time.time()
         self.op_collections = PlaceOpCollection()
-        logging.debug("build op_collections takes %.2f seconds" % (time.time() - tt))
+        logging.debug("build op_collections takes %.2f seconds" %
+                      (time.time() - tt))
 
         tt = time.time()
         # position to pin position
@@ -609,7 +624,8 @@ class BasicPlace(nn.Module):
         # can only read once
         self.read_lut_flag = True
 
-        logging.debug("build BasicPlace ops takes %.2f seconds" % (time.time() - tt))
+        logging.debug("build BasicPlace ops takes %.2f seconds" %
+                      (time.time() - tt))
 
     def __call__(self, params, placedb):
         """
@@ -670,7 +686,7 @@ class BasicPlace(nn.Module):
             pin2net_map=data_collections.pin2net_map,
             net_weights=data_collections.net_weights,
             net_mask=data_collections.net_mask_ignore_large_degrees,  # net_mask_all
-            algorithm="net-by-net", # "atomic"
+            algorithm="net-by-net",  # "atomic"
         )
 
         # wirelength for position
@@ -699,7 +715,7 @@ class BasicPlace(nn.Module):
             pin2net_map=data_collections.pin2net_map,
             net_weights=data_collections.net_weights,
             net_mask=data_collections.net_mask_ignore_large_weights,
-            algorithm="net-by-net", # "atomic"
+            algorithm="net-by-net",  # "atomic"
         )
 
         # wirelength for position
@@ -735,7 +751,8 @@ class BasicPlace(nn.Module):
         logging.info("POSTFILE = %s" % (POSTFILE))
         wirelength_for_pin_op = rmst_wl.RmstWL(
             flat_netpin=torch.from_numpy(placedb.flat_net2pin_map).to(device),
-            netpin_start=torch.from_numpy(placedb.flat_net2pin_start_map).to(device),
+            netpin_start=torch.from_numpy(
+                placedb.flat_net2pin_start_map).to(device),
             ignore_net_degree=params.ignore_net_degree,
             POWVFILE=POWVFILE,
             POSTFILE=POSTFILE,
@@ -744,7 +761,8 @@ class BasicPlace(nn.Module):
         # wirelength for position
         def build_wirelength_op(pos, reduction=True):
             pin_pos = pin_pos_op(pos)
-            wls = wirelength_for_pin_op(pin_pos.clone().cpu(), self.read_lut_flag)
+            wls = wirelength_for_pin_op(
+                pin_pos.clone().cpu(), self.read_lut_flag)
             self.read_lut_flag = False
             if reduction:
                 return wls.sum() / data_collections.fp_info.scale_factor
@@ -807,7 +825,7 @@ class BasicPlace(nn.Module):
             flat_region_boxes_start=data_collections.flat_region_boxes_start,
             node2fence_region_map=data_collections.node2fence_region_map,
             fp_info=data_collections.fp_info,
-            num_bins_x=1, # whole row
+            num_bins_x=1,  # whole row
             num_bins_y=64,
             # num_bins_x=64, num_bins_y=64,
             num_movable_nodes=placedb.num_movable_nodes,
@@ -866,7 +884,7 @@ class BasicPlace(nn.Module):
                 logging.error("legality check failed in greedy legalization")
                 return pos
             else:
-                ### start abacus legalizer
+                # start abacus legalizer
                 for i in range(len(placedb.regions) + 1):
                     pos = legal_ops[i][1](pos, pos_ml_list[i], pos_gl_list[i])
             return pos
@@ -880,8 +898,8 @@ class BasicPlace(nn.Module):
     def build_fence_region_legalization(
         self, region_id, params, placedb, data_collections, device
     ):
-        ### reconstruct node size
-        ### extract necessary nodes in the electric field and insert virtual macros to replace fence region
+        # reconstruct node size
+        # extract necessary nodes in the electric field and insert virtual macros to replace fence region
         num_nodes = placedb.num_nodes
         num_movable_nodes = placedb.num_movable_nodes
         num_filler_nodes = placedb.num_filler_nodes
@@ -897,8 +915,10 @@ class BasicPlace(nn.Module):
             ] >= len(placedb.regions)
 
         virtual_macros = data_collections.virtual_macro_fence_region[region_id]
-        virtual_macros_center_x = (virtual_macros[:, 2] + virtual_macros[:, 0]) / 2
-        virtual_macros_center_y = (virtual_macros[:, 3] + virtual_macros[:, 1]) / 2
+        virtual_macros_center_x = (
+            virtual_macros[:, 2] + virtual_macros[:, 0]) / 2
+        virtual_macros_center_y = (
+            virtual_macros[:, 3] + virtual_macros[:, 1]) / 2
         virtual_macros_size_x = (virtual_macros[:, 2] - virtual_macros[:, 0]).clamp(
             min=30
         )
@@ -906,97 +926,101 @@ class BasicPlace(nn.Module):
         virtual_macros_size_y = (virtual_macros[:, 3] - virtual_macros[:, 1]).clamp(
             min=30
         )
-        virtual_macros[:, 0] = virtual_macros_center_x - virtual_macros_size_x / 2
-        virtual_macros[:, 1] = virtual_macros_center_y - virtual_macros_size_y / 2
+        virtual_macros[:, 0] = virtual_macros_center_x - \
+            virtual_macros_size_x / 2
+        virtual_macros[:, 1] = virtual_macros_center_y - \
+            virtual_macros_size_y / 2
         virtual_macros_pos = virtual_macros[:, 0:2].t().contiguous()
 
-        ### node size
+        # node size
         node_size_x, node_size_y = (
             data_collections.node_size_x,
             data_collections.node_size_y,
         )
-        filler_beg, filler_end = placedb.filler_start_map[region_id : region_id + 2]
+        filler_beg, filler_end = placedb.filler_start_map[region_id: region_id + 2]
         node_size_x = torch.cat(
             [
-                node_size_x[:num_movable_nodes][fence_region_mask],  ## movable
+                node_size_x[:num_movable_nodes][fence_region_mask],  # movable
                 node_size_x[
-                    num_movable_nodes : num_movable_nodes + num_terminals
-                ],  ## terminals
-                virtual_macros_size_x,  ## virtual macros
+                    num_movable_nodes: num_movable_nodes + num_terminals
+                ],  # terminals
+                virtual_macros_size_x,  # virtual macros
                 node_size_x[
                     num_movable_nodes
-                    + num_terminals : num_movable_nodes
+                    + num_terminals: num_movable_nodes
                     + num_terminals
                     + num_terminal_NIs
-                ],  ## terminal NIs
+                ],  # terminal NIs
                 node_size_x[
                     num_nodes
                     - num_filler_nodes
-                    + filler_beg : num_nodes
+                    + filler_beg: num_nodes
                     - num_filler_nodes
                     + filler_end
-                ],  ## fillers
+                ],  # fillers
             ],
             0,
         )
         node_size_y = torch.cat(
             [
-                node_size_y[:num_movable_nodes][fence_region_mask],  ## movable
+                node_size_y[:num_movable_nodes][fence_region_mask],  # movable
                 node_size_y[
-                    num_movable_nodes : num_movable_nodes + num_terminals
-                ],  ## terminals
-                virtual_macros_size_y,  ## virtual macros
+                    num_movable_nodes: num_movable_nodes + num_terminals
+                ],  # terminals
+                virtual_macros_size_y,  # virtual macros
                 node_size_y[
                     num_movable_nodes
-                    + num_terminals : num_movable_nodes
+                    + num_terminals: num_movable_nodes
                     + num_terminals
                     + num_terminal_NIs
-                ],  ## terminal NIs
+                ],  # terminal NIs
                 node_size_y[
                     num_nodes
                     - num_filler_nodes
-                    + filler_beg : num_nodes
+                    + filler_beg: num_nodes
                     - num_filler_nodes
                     + filler_end
-                ],  ## fillers
+                ],  # fillers
             ],
             0,
         )
 
-        ### num pins in nodes
-        ### 0 for virtual macros and fillers
+        # num pins in nodes
+        # 0 for virtual macros and fillers
         num_pins_in_nodes = data_collections.num_pins_in_nodes
         num_pins_in_nodes = torch.cat(
             [
-                num_pins_in_nodes[:num_movable_nodes][fence_region_mask],  ## movable
+                # movable
+                num_pins_in_nodes[:num_movable_nodes][fence_region_mask],
                 num_pins_in_nodes[
-                    num_movable_nodes : num_movable_nodes + num_terminals
-                ],  ## terminals
+                    num_movable_nodes: num_movable_nodes + num_terminals
+                ],  # terminals
                 torch.zeros(
                     virtual_macros_size_x.size(0),
                     dtype=num_pins_in_nodes.dtype,
                     device=device,
-                ),  ## virtual macros
+                ),  # virtual macros
                 num_pins_in_nodes[
                     num_movable_nodes
-                    + num_terminals : num_movable_nodes
+                    + num_terminals: num_movable_nodes
                     + num_terminals
                     + num_terminal_NIs
-                ],  ## terminal NIs
+                ],  # terminal NIs
                 num_pins_in_nodes[
                     num_nodes
                     - num_filler_nodes
-                    + filler_beg : num_nodes
+                    + filler_beg: num_nodes
                     - num_filler_nodes
                     + filler_end
-                ],  ## fillers
+                ],  # fillers
             ],
             0,
         )
-        ## num movable nodes and num filler nodes
+        # num movable nodes and num filler nodes
         num_movable_nodes_fence_region = fence_region_mask.long().sum().item()
         num_filler_nodes_fence_region = filler_end - filler_beg
-        num_terminals_fence_region = num_terminals + virtual_macros_size_x.size(0)
+        num_terminals_fence_region = num_terminals + \
+            virtual_macros_size_x.size(0)
         assert (
             node_size_x.size(0)
             == node_size_y.size(0)
@@ -1006,19 +1030,19 @@ class BasicPlace(nn.Module):
             + num_filler_nodes_fence_region
         )
 
-        ### flat region boxes
+        # flat region boxes
         flat_region_boxes = torch.tensor(
             [],
             device=node_size_x.device,
             dtype=data_collections.flat_region_boxes.dtype,
         )
-        ### flat region boxes start
+        # flat region boxes start
         flat_region_boxes_start = torch.tensor(
             [0],
             device=node_size_x.device,
             dtype=data_collections.flat_region_boxes_start.dtype,
         )
-        ### node2fence region map: movable + terminal
+        # node2fence region map: movable + terminal
         node2fence_region_map = torch.zeros(
             num_movable_nodes_fence_region + num_terminals_fence_region,
             dtype=data_collections.node2fence_region_map.dtype,
@@ -1072,32 +1096,33 @@ class BasicPlace(nn.Module):
         )
 
         def build_greedy_legalization_op(pos):
-            ### reconstruct pos for fence region
+            # reconstruct pos for fence region
             pos_total = pos.data.clone()
             pos = pos.view(2, -1)
             pos = (
                 torch.cat(
                     [
-                        pos[:, :num_movable_nodes][:, fence_region_mask],  ## movable
+                        pos[:, :num_movable_nodes][:,
+                                                   fence_region_mask],  # movable
                         pos[
-                            :, num_movable_nodes : num_movable_nodes + num_terminals
-                        ],  ## terminals
-                        virtual_macros_pos,  ## virtual macros
+                            :, num_movable_nodes: num_movable_nodes + num_terminals
+                        ],  # terminals
+                        virtual_macros_pos,  # virtual macros
                         pos[
                             :,
                             num_movable_nodes
-                            + num_terminals : num_movable_nodes
+                            + num_terminals: num_movable_nodes
                             + num_terminals
                             + num_terminal_NIs,
-                        ],  ## terminal NIs
+                        ],  # terminal NIs
                         pos[
                             :,
                             num_nodes
                             - num_filler_nodes
-                            + filler_beg : num_nodes
+                            + filler_beg: num_nodes
                             - num_filler_nodes
                             + filler_end,
-                        ],  ## fillers
+                        ],  # fillers
                     ],
                     1,
                 )
@@ -1109,7 +1134,7 @@ class BasicPlace(nn.Module):
             logging.info("Start legalization")
             pos1 = ml(pos, pos)
             result = gl(pos1, pos1)
-            ## commit legal solution for movable cells in fence region
+            # commit legal solution for movable cells in fence region
             pos_total = pos_total.view(2, -1)
             result = result.view(2, -1)
             pos_total[0, :num_movable_nodes].masked_scatter_(
@@ -1124,7 +1149,7 @@ class BasicPlace(nn.Module):
 
         def build_abacus_legalization_op(pos_total, pos_ref, pos):
             result = al(pos_ref, pos)
-            ### commit abacus results to pos_total
+            # commit abacus results to pos_total
             pos_total = pos_total.view(2, -1)
             result = result.view(2, -1)
             pos_total[0, :num_movable_nodes].masked_scatter_(
@@ -1271,7 +1296,8 @@ class BasicPlace(nn.Module):
                     return pos1
                 pos1 = ism(pos1, scale_factor)
                 legal = self.op_collections.legality_check_op(pos1)
-                logging.info("Independent set matching legal flag = %d" % (legal))
+                logging.info(
+                    "Independent set matching legal flag = %d" % (legal))
                 if not legal:
                     return pos1
                 pos1 = gs(pos1, scale_factor)
@@ -1335,7 +1361,8 @@ class BasicPlace(nn.Module):
         if isinstance(pos, np.ndarray):
             pos = torch.from_numpy(pos)
         self.op_collections.draw_place_op(pos, figname)
-        logging.info("plotting to %s takes %.3f seconds" % (figname, time.time() - tt))
+        logging.info("plotting to %s takes %.3f seconds" %
+                     (figname, time.time() - tt))
 
     def dump(self, params, placedb, pos, filename):
         """
@@ -1387,20 +1414,28 @@ class BasicPlace(nn.Module):
         """
         with gzip.open(filename, "rb") as f:
             data = pickle.load(f)
-            self.data_collections.node_size_x.data = data[0].data.to(self.device)
-            self.data_collections.node_size_y.data = data[1].data.to(self.device)
-            self.data_collections.flat_net2pin_map.data = data[2].data.to(self.device)
+            self.data_collections.node_size_x.data = data[0].data.to(
+                self.device)
+            self.data_collections.node_size_y.data = data[1].data.to(
+                self.device)
+            self.data_collections.flat_net2pin_map.data = data[2].data.to(
+                self.device)
             self.data_collections.flat_net2pin_start_map.data = data[3].data.to(
                 self.device
             )
-            self.data_collections.pin2net_map.data = data[4].data.to(self.device)
-            self.data_collections.flat_node2pin_map.data = data[5].data.to(self.device)
+            self.data_collections.pin2net_map.data = data[4].data.to(
+                self.device)
+            self.data_collections.flat_node2pin_map.data = data[5].data.to(
+                self.device)
             self.data_collections.flat_node2pin_start_map.data = data[6].data.to(
                 self.device
             )
-            self.data_collections.pin2node_map.data = data[7].data.to(self.device)
-            self.data_collections.pin_offset_x.data = data[8].data.to(self.device)
-            self.data_collections.pin_offset_y.data = data[9].data.to(self.device)
+            self.data_collections.pin2node_map.data = data[7].data.to(
+                self.device)
+            self.data_collections.pin_offset_x.data = data[8].data.to(
+                self.device)
+            self.data_collections.pin_offset_y.data = data[9].data.to(
+                self.device)
             self.data_collections.net_mask_ignore_large_degrees.data = data[10].data.to(
                 self.device
             )

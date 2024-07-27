@@ -168,12 +168,14 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
                 if iteration == 0:
                     if params.gp_noise_ratio > 0.0 and params.random_center_init_flag:
-                        logging.info("add %g%% noise" % (params.gp_noise_ratio * 100))
+                        logging.info("add %g%% noise" %
+                                     (params.gp_noise_ratio * 100))
                         model.op_collections.noise_op(
                             model.data_collections.pos[0], params.gp_noise_ratio
                         )
                     initialize_learning_rate(model.data_collections.pos[0])
-                    logging.info(" learning rate = %g" % (optimizer.param_groups[0]["lr"]))
+                    logging.info(" learning rate = %g" %
+                                 (optimizer.param_groups[0]["lr"]))
                     if (
                         optimizer_name.lower()
                         in [
@@ -215,12 +217,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         if len(metrics) > 1:
                             cur_metric = metrics[-1][-1][-1]
                             prev_metric = metrics[-2][-1][-1]
-                            ### update stop mask for each fence region
+                            # update stop mask for each fence region
                             # if(stop_mask is not None):
                             #     stop_mask.copy_(cur_metric.overflow < params.stop_overflow)
 
                             if Lgamma_step > 100 and (
-                                ### for fence region, the outer cell overflow decides the stopping of GP
+                                # for fence region, the outer cell overflow decides the stopping of GP
                                 (
                                     cur_metric.overflow[-1] < params.stop_overflow
                                     and cur_metric.hpwl > prev_metric.hpwl
@@ -274,7 +276,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         if len(metrics) > 1:
                             cur_metric = metrics[-1][-1]
                             prev_metric = metrics[-2][-1]
-                            ### for fence regions, the outer cell overflow and max_density decides whether to stop
+                            # for fence regions, the outer cell overflow and max_density decides whether to stop
                             if (
                                 cur_metric.overflow[-1] < params.stop_overflow
                                 and cur_metric.hpwl > prev_metric.hpwl
@@ -333,7 +335,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
                     # metric for this iteration
                     cur_metric = EvalMetrics.EvalMetrics(
-                        iteration, (Lgamma_step, Llambda_density_weight_step, Lsub_step)
+                        iteration, (Lgamma_step,
+                                    Llambda_density_weight_step, Lsub_step)
                     )
                     cur_metric.gamma = model.gamma.data
                     cur_metric.density_weight = model.density_weight.data
@@ -352,7 +355,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         model.initialize_density_weight(params, placedb)
                         if model.density_weight.size(0) == 1:
                             logging.info(
-                                "density_weight = %.6E" % (model.density_weight.data)
+                                "density_weight = %.6E" % (
+                                    model.density_weight.data)
                             )
                         else:
                             logging.info(
@@ -380,7 +384,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     optimizer.zero_grad()
 
                     # t1 = time.time()
-                    cur_metric.evaluate(placedb, eval_ops, pos, model.data_collections)
+                    cur_metric.evaluate(placedb, eval_ops,
+                                        pos, model.data_collections)
                     model.overflow = cur_metric.overflow.data.clone()
                     # logging.debug("evaluation %.3f ms" % ((time.time()-t1)*1000))
                     # t2 = time.time()
@@ -402,7 +407,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         cur_pos = self.pos[0].data.clone().cpu().numpy()
                         self.plot(params, placedb, iteration, cur_pos)
 
-                    #### stop updating fence regions that are marked stop, exclude the outer cell !
+                    # stop updating fence regions that are marked stop, exclude the outer cell !
                     t3 = time.time()
                     if model.update_mask is not None:
                         pos_bk = pos.data.clone()
@@ -412,7 +417,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             model.update_mask
                         ):
                             if fence_region_update_flag == 0:
-                                ### don't update cell location in that region
+                                # don't update cell location in that region
                                 mask = self.op_collections.fence_region_density_ops[
                                     region_id
                                 ].pos_mask
@@ -420,7 +425,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     else:
                         optimizer.step()
 
-                    logging.info("optimizer step %.3f ms" % ((time.time() - t3) * 1000))
+                    logging.info("optimizer step %.3f ms" %
+                                 ((time.time() - t3) * 1000))
 
                     # nesterov has already computed the objective of the next step
                     if optimizer_name.lower() == "nesterov":
@@ -441,7 +447,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         else:
                             best_pos[0].data.copy_(self.pos[0].data)
 
-                    logging.info("full step %.3f ms" % ((time.time() - t0) * 1000))
+                    logging.info("full step %.3f ms" %
+                                 ((time.time() - t0) * 1000))
 
                 def check_plateau(x, window=10, threshold=0.001):
                     if len(x) < window:
@@ -457,14 +464,16 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     overflow_diff = np.maximum(0, np.sign(x[1:, 1] - x[:-1, 1])).astype(
                         np.float32
                     )
-                    overflow_diff = np.sum(overflow_diff) / overflow_diff.shape[0]
+                    overflow_diff = np.sum(
+                        overflow_diff) / overflow_diff.shape[0]
                     overflow_range = np.max(x[:, 1]) - np.min(x[:, 1])
                     wl_mean = np.mean(x[:, 0])
                     wl_ratio, overflow_ratio = (
                         wl_mean - best_metric[0].hpwl.item()
                     ) / best_metric[0].hpwl.item(), (
                         overflow_mean
-                        - max(params.stop_overflow, best_metric[0].overflow.item())
+                        - max(params.stop_overflow,
+                              best_metric[0].overflow.item())
                     ) / best_metric[
                         0
                     ].overflow.item()
@@ -501,7 +510,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         # print(pos[: placedb.num_movable_nodes].mean())
                         xc = pos[: placedb.num_movable_nodes].data.mean()
                         yc = pos.data[
-                            placedb.num_nodes : placedb.num_nodes
+                            placedb.num_nodes: placedb.num_nodes
                             + placedb.num_movable_nodes
                         ].mean()
                         num_movable_nodes = placedb.num_movable_nodes
@@ -512,11 +521,11 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         )
 
                         fixed_pos_x = pos.data[
-                            num_movable_nodes : num_movable_nodes + num_fixed_nodes
+                            num_movable_nodes: num_movable_nodes + num_fixed_nodes
                         ].clone()
                         fixed_pos_y = pos.data[
                             num_nodes
-                            + num_movable_nodes : num_nodes
+                            + num_movable_nodes: num_nodes
                             + num_movable_nodes
                             + num_fixed_nodes
                         ].clone()
@@ -535,11 +544,11 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             )
 
                         pos.data[
-                            num_movable_nodes : num_movable_nodes + num_fixed_nodes
+                            num_movable_nodes: num_movable_nodes + num_fixed_nodes
                         ] = fixed_pos_x
                         pos.data[
                             num_nodes
-                            + num_movable_nodes : num_nodes
+                            + num_movable_nodes: num_nodes
                             + num_movable_nodes
                             + num_fixed_nodes
                         ] = fixed_pos_y
@@ -559,7 +568,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
                 Llambda_flat_iteration = 0
 
-                ### preparation for self-adaptive divergence check
+                # preparation for self-adaptive divergence check
                 overflow_list = [1]
                 divergence_list = []
                 min_perturb_interval = 50
@@ -582,8 +591,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         Llambda_metrics.append([])
                         Lsub_metrics = Llambda_metrics[-1]
                         for Lsub_step in range(model.Lsub_iteration):
-                            ## divergence threshold should decrease as overflow decreases
-                            ## only detect divergence when overflow is relatively low but not too low
+                            # divergence threshold should decrease as overflow decreases
+                            # only detect divergence when overflow is relatively low but not too low
                             """
                             # this heuristics makes placement unstable
                             if (
@@ -620,7 +629,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     ]
                                 )
 
-                            ## quadratic penalty and entropy injection
+                            # quadratic penalty and entropy injection
                             """
                             # This heuristics makes placement unstable
                             if (
@@ -740,7 +749,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     )
                             if adjust_pin_area_flag:
                                 pin_utilization_map = (
-                                    model.op_collections.pin_utilization_map_op(pos)
+                                    model.op_collections.pin_utilization_map_op(
+                                        pos)
                                 )
                                 if params.plot_flag:
                                     path = "%s/%s" % (
@@ -778,8 +788,10 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 model.op_collections.density_op.reset()
                                 model.op_collections.density_overflow_op.reset()
                                 model.op_collections.pin_utilization_map_op.reset()
-                                model.initialize_density_weight(params, placedb)
-                                model.density_weight.mul_(0.1 / params.density_weight)
+                                model.initialize_density_weight(
+                                    params, placedb)
+                                model.density_weight.mul_(
+                                    0.1 / params.density_weight)
                                 logging.info(
                                     "density_weight = %.6E"
                                     % (model.density_weight.data)
@@ -855,7 +867,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         / 2
                     )
                     self.pos[0][
-                        placedb.num_nodes : placedb.num_nodes
+                        placedb.num_nodes: placedb.num_nodes
                         + placedb.num_movable_nodes
                     ].add_(
                         self.data_collections.node_size_y[: placedb.num_movable_nodes]
@@ -873,7 +885,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         / 2
                     )
                     self.pos[0][
-                        placedb.num_nodes : placedb.num_nodes
+                        placedb.num_nodes: placedb.num_nodes
                         + placedb.num_movable_nodes
                     ].sub_(
                         self.data_collections.node_size_y[: placedb.num_movable_nodes]
@@ -887,8 +899,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     )
 
         if params.plot_flag:
-            self.plot(params, placedb, 9999, self.pos[0].data.clone().cpu().numpy())
-            
+            self.plot(params, placedb, 9999,
+                      self.pos[0].data.clone().cpu().numpy())
+
         # rescale everything
         cur_scale_factor = self.data_collections.fp_info.scale_factor
         gcd_site_scale_factor = 1 / math.gcd(
@@ -904,7 +917,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 self.pos[0].mul_(rescale_factor).round_()
                 self.data_collections.node_size_x.mul_(rescale_factor).round_()
                 self.data_collections.node_size_y.mul_(rescale_factor).round_()
-                self.data_collections.flat_region_boxes.mul_(rescale_factor).round_()
+                self.data_collections.flat_region_boxes.mul_(
+                    rescale_factor).round_()
                 self.data_collections.pin_offset_x.mul_(rescale_factor)
                 self.data_collections.pin_offset_y.mul_(rescale_factor)
                 # self.data_collections.node_areas.mul_(rescale_factor * rescale_factor)
@@ -912,8 +926,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 self.data_collections.fp_info.scale_factor = gcd_site_scale_factor
                 params.macro_halo_x *= rescale_factor
                 params.macro_halo_y *= rescale_factor
-                params.macro_pin_halo_x*=rescale_factor
-                params.macro_pin_halo_y*=rescale_factor
+                params.macro_pin_halo_x *= rescale_factor
+                params.macro_pin_halo_y *= rescale_factor
                 # TODO: rescale fence regions
 
         # dump global placement solution for legalization
@@ -926,7 +940,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             )
 
         # process metrics
-        flatten = lambda l: sum(map(flatten, l), []) if isinstance(l, list) else [l]
+        def flatten(l): return sum(map(flatten, l), []
+                                   ) if isinstance(l, list) else [l]
         metrics = flatten(all_metrics)
         objectives = [metric.objective.data.item() for metric in metrics]
         hpwls = [metric.hpwl.data.item() for metric in metrics]
@@ -942,7 +957,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         # plot losses
         if params.plot_flag:
             self.plot(
-                params, placedb, iteration, self.pos[0].data.clone().cpu().numpy()
+                params, placedb, iteration, self.pos[0].data.clone(
+                ).cpu().numpy()
             )
             epochs = np.arange(len(objectives))
             num_subplots = 4
@@ -954,7 +970,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     metric.macro_overlap.data.item() for metric in metrics
                 ]
                 num_subplots += 1
-            fig, axis = plt.subplots(1, num_subplots, figsize=(5 * num_subplots, 5))
+            fig, axis = plt.subplots(
+                1, num_subplots, figsize=(5 * num_subplots, 5))
             axis[0].plot(epochs, np.log10(objectives), color="red")
             axis[0].set_title("Obj")
             axis[1].plot(epochs, np.log10(hpwls), color="blue")
@@ -966,7 +983,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             plotted = 4
             if len(lrs) >= len(epochs):
                 axis[plotted].plot(
-                    epochs, np.log10(lrs[0 : len(epochs)]), color="black"
+                    epochs, np.log10(lrs[0: len(epochs)]), color="black"
                 )
                 axis[plotted].set_title("Lr")
                 plotted += 1
@@ -1004,14 +1021,17 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 "overflow is significant %.3f or hpwl is infinity or nan, skip legalization and detail placement steps"
                 % (last_metric.overflow[-1])
             )
-            self.plot(params, placedb, 9999, self.pos[0].data.clone().cpu().numpy())
+            self.plot(params, placedb, 9999,
+                      self.pos[0].data.clone().cpu().numpy())
             return float("inf"), float("inf"), processed_metrics
 
         # legalization
         if params.legalize_flag:
             tt = time.time()
-            self.pos[0].data.copy_(self.op_collections.legalize_op(self.pos[0]))
-            logging.info("legalization takes %.3f seconds" % (time.time() - tt))
+            self.pos[0].data.copy_(
+                self.op_collections.legalize_op(self.pos[0]))
+            logging.info("legalization takes %.3f seconds" %
+                         (time.time() - tt))
             cur_metric = EvalMetrics.EvalMetrics(iteration)
             all_metrics.append(cur_metric)
             cur_metric.evaluate(
@@ -1030,8 +1050,10 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 self.data_collections.node_size_y[placedb.movable_macro_idx] -= (
                     2 * params.macro_halo_y
                 )
-                self.data_collections.node_size_x[placedb.movable_macro_idx] -= torch.tensor(placedb.is_pin_lower_x * params.macro_pin_halo_x + placedb.is_pin_upper_x * params.macro_pin_halo_x, device=self.pos[0].device)
-                self.data_collections.node_size_y[placedb.movable_macro_idx] -= torch.tensor(placedb.is_pin_lower_y * params.macro_pin_halo_y + placedb.is_pin_upper_y * params.macro_pin_halo_y, device=self.pos[0].device)
+                self.data_collections.node_size_x[placedb.movable_macro_idx] -= torch.tensor(
+                    placedb.is_pin_lower_x * params.macro_pin_halo_x + placedb.is_pin_upper_x * params.macro_pin_halo_x, device=self.pos[0].device)
+                self.data_collections.node_size_y[placedb.movable_macro_idx] -= torch.tensor(
+                    placedb.is_pin_lower_y * params.macro_pin_halo_y + placedb.is_pin_upper_y * params.macro_pin_halo_y, device=self.pos[0].device)
                 # self.data_collections.node_size_x[placedb.fixed_macro_idx] -= (
                 #     2 * params.macro_halo_x
                 # )
@@ -1053,35 +1075,36 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 #     placedb.fixed_macro_pins
                 # ] -= params.macro_halo_y
 
-                self.data_collections.pin_offset_x[placedb.movable_macro_pins] -= torch.tensor(placedb.is_pin_lower_x[placedb.pin2node_map[placedb.movable_macro_pins]] * params.macro_pin_halo_x, device=self.pos[0].device) 
-                self.data_collections.pin_offset_y[placedb.movable_macro_pins] -= torch.tensor(placedb.is_pin_lower_y[placedb.pin2node_map[placedb.movable_macro_pins]] * params.macro_pin_halo_y, device=self.pos[0].device)
+                self.data_collections.pin_offset_x[placedb.movable_macro_pins] -= torch.tensor(
+                    placedb.is_pin_lower_x[placedb.pin2node_map[placedb.movable_macro_pins]] * params.macro_pin_halo_x, device=self.pos[0].device)
+                self.data_collections.pin_offset_y[placedb.movable_macro_pins] -= torch.tensor(
+                    placedb.is_pin_lower_y[placedb.pin2node_map[placedb.movable_macro_pins]] * params.macro_pin_halo_y, device=self.pos[0].device)
                 # macro locations
                 self.pos[0][placedb.movable_slice][
                     placedb.movable_macro_mask
                 ] += params.macro_halo_x
                 self.pos[0][
-                    placedb.num_nodes : placedb.num_nodes + placedb.num_movable_nodes
+                    placedb.num_nodes: placedb.num_nodes + placedb.num_movable_nodes
                 ][placedb.movable_macro_mask] += params.macro_halo_y
-                
+
                 self.pos[0][placedb.fixed_slice][
                     placedb.fixed_macro_mask
                 ] += params.macro_halo_x
                 self.pos[0][
                     placedb.num_nodes
-                    + placedb.num_movable_nodes : placedb.num_nodes
+                    + placedb.num_movable_nodes: placedb.num_nodes
                     + placedb.num_movable_nodes
                     + placedb.num_terminals
                 ][placedb.fixed_macro_mask] += params.macro_halo_y
 
-              
                 self.pos[0][placedb.movable_slice][
                     placedb.movable_macro_mask
                 ] += torch.tensor(placedb.is_pin_lower_x * params.macro_pin_halo_x, device=self.pos[0].device)
-                
+
                 self.pos[0][
-                    placedb.num_nodes : placedb.num_nodes + placedb.num_movable_nodes
+                    placedb.num_nodes: placedb.num_nodes + placedb.num_movable_nodes
                 ][placedb.movable_macro_mask] += torch.tensor(placedb.is_pin_lower_y * params.macro_pin_halo_y, device=self.pos[0].device)
-                
+
                 # TODO:
                 # self.pos[0][placedb.fixed_slice][
                 #     placedb.fixed_macro_mask
@@ -1092,11 +1115,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 #     + placedb.num_movable_nodes
                 #     + placedb.num_terminals
                 # ][placedb.fixed_macro_mask] += params.macro_halo_y
-            
+
         # plot placement
         if params.plot_flag:
             self.plot(
-                params, placedb, iteration, self.pos[0].data.clone().cpu().numpy()
+                params, placedb, iteration, self.pos[0].data.clone(
+                ).cpu().numpy()
             )
 
         # dump legalization solution for detailed placement
@@ -1111,9 +1135,11 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         # detailed placement
         if params.detailed_place_flag:
             tt = time.time()
-            self.pos[0].data.copy_(self.op_collections.detailed_place_op(self.pos[0]))
+            self.pos[0].data.copy_(
+                self.op_collections.detailed_place_op(self.pos[0]))
             # macro_orients = self.op_collections.macro_refinement_op(self.pos[0])
-            logging.info("detailed placement takes %.3f seconds" % (time.time() - tt))
+            logging.info("detailed placement takes %.3f seconds" %
+                         (time.time() - tt))
             cur_metric = EvalMetrics.EvalMetrics(iteration)
             all_metrics.append(cur_metric)
             cur_metric.evaluate(
@@ -1127,8 +1153,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         # apply position solution/ will also update movable node orientations based on row
         placedb.apply(
             params,
-            cur_pos[0 : placedb.num_movable_nodes],
-            cur_pos[placedb.num_nodes : placedb.num_nodes + placedb.num_movable_nodes],
+            cur_pos[0: placedb.num_movable_nodes],
+            cur_pos[placedb.num_nodes: placedb.num_nodes +
+                    placedb.num_movable_nodes],
         )
 
         # apply macro orientations solution
@@ -1146,7 +1173,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             }
             for macro, orient in macro_orients:
                 placedb.rawdb.setNodeOrient(
-                    int(macro), place_io_cpp.OrientEnum.OrientType(orients_map[orient])
+                    int(macro), place_io_cpp.OrientEnum.OrientType(
+                        orients_map[orient])
                 )
 
         # update pin offsets of std cells
@@ -1184,7 +1212,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             tt = time.time()
             # FIXME:
             rsmt_wl = self.op_collections.rsmt_wl_op(self.pos[0])
-            logging.info("rsmt computation takes %.3f seconds" % (time.time() - tt))
+            logging.info("rsmt computation takes %.3f seconds" %
+                         (time.time() - tt))
             logging.info("flute rsmt %.6E" % rsmt_wl)
 
         # get HPWL

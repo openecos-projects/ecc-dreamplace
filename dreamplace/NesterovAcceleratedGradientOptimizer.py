@@ -71,7 +71,8 @@ class NesterovAcceleratedGradientOptimizer(Optimizer):
             v_kp1=[None],
             obj_eval_count=0,
         )
-        super(NesterovAcceleratedGradientOptimizer, self).__init__(params, defaults)
+        super(NesterovAcceleratedGradientOptimizer,
+              self).__init__(params, defaults)
         self.obj_and_grad_fn = obj_and_grad_fn
         self.constraint_fn = constraint_fn
 
@@ -118,7 +119,8 @@ class NesterovAcceleratedGradientOptimizer(Optimizer):
                             torch.zeros_like(v_k), requires_grad=True
                         )
                     )
-                    group["v_k_1"][i].data.copy_(group["v_k"][i] - group["lr"] * g_k)
+                    group["v_k_1"][i].data.copy_(
+                        group["v_k"][i] - group["lr"] * g_k)
                     obj, grad = obj_and_grad_fn(group["v_k_1"][i])
                     group["g_k_1"].append(grad.data)
                     group["obj_k_1"].append(obj.data.clone())

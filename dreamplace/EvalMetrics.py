@@ -114,7 +114,8 @@ class EvalMetrics(object):
         if self.macro_overlap is not None:
             content += ", MacroOverlap %.3E" % (self.macro_overlap)
         if self.macro_overlap_weight is not None:
-            content += ", MacroOverlapWeight %.6E" % (self.macro_overlap_weight)
+            content += ", MacroOverlapWeight %.6E" % (
+                self.macro_overlap_weight)
         if self.gamma is not None:
             content += ", gamma %.6E" % (self.gamma)
         if self.eval_time is not None:

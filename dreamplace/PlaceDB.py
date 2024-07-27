@@ -51,7 +51,8 @@ class PlaceDB(object):
         self.pydb = None  # raw placement database, a Python object
 
         self.place_info = {}  # placement information
-        self.num_physical_nodes = 0  # number of real nodes, including movable nodes, terminals, and terminal_NIs
+        # number of real nodes, including movable nodes, terminals, and terminal_NIs
+        self.num_physical_nodes = 0
         self.num_terminals = 0  # number of terminals, essentially fixed macros
         self.num_terminal_NIs = (
             0  # number of terminal_NIs that can be overlapped, essentially IO pins
@@ -64,7 +65,8 @@ class PlaceDB(object):
         self.node_size_x = None  # 1D array, cell width
         self.node_size_y = None  # 1D array, cell height
 
-        self.node2orig_node_map = None  # some fixed cells may have non-rectangular shapes; we flatten them and create new nodes
+        # some fixed cells may have non-rectangular shapes; we flatten them and create new nodes
+        self.node2orig_node_map = None
         # this map maps the current multiple node ids into the original one
 
         self.pin_direct = None  # 1D array, pin direction IO
@@ -138,8 +140,10 @@ class PlaceDB(object):
         self.unit_vertical_capacity = None  # per unit distance, projected to one layer
         self.unit_horizontal_capacities = None  # per unit distance, layer by layer
         self.unit_vertical_capacities = None  # per unit distance, layer by layer
-        self.initial_horizontal_demand_map = None  # routing demand map from fixed cells, indexed by (grid x, grid y), projected to one layer
-        self.initial_vertical_demand_map = None  # routing demand map from fixed cells, indexed by (grid x, grid y), projected to one layer
+        # routing demand map from fixed cells, indexed by (grid x, grid y), projected to one layer
+        self.initial_horizontal_demand_map = None
+        # routing demand map from fixed cells, indexed by (grid x, grid y), projected to one layer
+        self.initial_vertical_demand_map = None
 
         self.dtype = None
 
@@ -243,7 +247,7 @@ class PlaceDB(object):
         for new_net_id in range(len(net_order)):
             for pin_id in self.net2pin_map[new_net_id]:
                 self.pin2net_map[pin_id] = new_net_id
-        ## check
+        # check
         # for net_id in range(len(self.net2pin_map)):
         #    for j in range(len(self.net2pin_map[net_id])):
         #        assert self.pin2net_map[self.net2pin_map[net_id][j]] == net_id
@@ -266,7 +270,7 @@ class PlaceDB(object):
         for i in range(len(self.node2pin_map)):
             for j in range(len(self.node2pin_map[i])):
                 self.node2pin_map[i][j] = old2new_pin_id_map[self.node2pin_map[i][j]]
-        ## check
+        # check
         # for net_id in range(len(self.net2pin_map)):
         #    for j in range(len(self.net2pin_map[net_id])):
         #        assert self.pin2net_map[self.net2pin_map[net_id][j]] == net_id
@@ -431,12 +435,14 @@ class PlaceDB(object):
         @param y vertical cell locations
         @return density map
         """
-        bin_index_xl = np.maximum(np.floor(x / self.bin_size_x).astype(np.int32), 0)
+        bin_index_xl = np.maximum(
+            np.floor(x / self.bin_size_x).astype(np.int32), 0)
         bin_index_xh = np.minimum(
             np.ceil((x + self.node_size_x) / self.bin_size_x).astype(np.int32),
             self.num_bins_x - 1,
         )
-        bin_index_yl = np.maximum(np.floor(y / self.bin_size_y).astype(np.int32), 0)
+        bin_index_yl = np.maximum(
+            np.floor(y / self.bin_size_y).astype(np.int32), 0)
         bin_index_yh = np.minimum(
             np.ceil((y + self.node_size_y) / self.bin_size_y).astype(np.int32),
             self.num_bins_y - 1,
@@ -583,11 +589,15 @@ class PlaceDB(object):
                             if token.endswith(".pl"):
                                 filename = token
                                 break
-            filename = os.path.join(os.path.dirname(params.aux_input), filename)
+            filename = os.path.join(
+                os.path.dirname(params.aux_input), filename)
             if filename is not None and os.path.exists(filename):
-                self.node_x = np.zeros(self.num_physical_nodes, dtype=self.dtype)
-                self.node_y = np.zeros(self.num_physical_nodes, dtype=self.dtype)
-                self.node_orient = np.zeros(self.num_physical_nodes, dtype=np.string_)
+                self.node_x = np.zeros(
+                    self.num_physical_nodes, dtype=self.dtype)
+                self.node_y = np.zeros(
+                    self.num_physical_nodes, dtype=self.dtype)
+                self.node_orient = np.zeros(
+                    self.num_physical_nodes, dtype=np.string_)
                 self.read_pl(params, filename)
                 use_read_pl_flag = True
         if not use_read_pl_flag:
@@ -596,7 +606,8 @@ class PlaceDB(object):
             self.node_orient = np.array(pydb.node_orient, dtype=np.string_)
         self.node_size_x = np.array(pydb.node_size_x, dtype=self.dtype)
         self.node_size_y = np.array(pydb.node_size_y, dtype=self.dtype)
-        self.node2orig_node_map = np.array(pydb.node2orig_node_map, dtype=np.int32)
+        self.node2orig_node_map = np.array(
+            pydb.node2orig_node_map, dtype=np.int32)
         self.pin_direct = np.array(pydb.pin_direct, dtype=np.string_)
         self.pin_offset_x = np.array(pydb.pin_offset_x, dtype=self.dtype)
         self.pin_offset_y = np.array(pydb.pin_offset_y, dtype=self.dtype)
@@ -609,7 +620,8 @@ class PlaceDB(object):
         )
         self.net_weights = np.array(pydb.net_weights, dtype=self.dtype)
         self.node2pin_map = pydb.node2pin_map
-        self.flat_node2pin_map = np.array(pydb.flat_node2pin_map, dtype=np.int32)
+        self.flat_node2pin_map = np.array(
+            pydb.flat_node2pin_map, dtype=np.int32)
         self.flat_node2pin_start_map = np.array(
             pydb.flat_node2pin_start_map, dtype=np.int32
         )
@@ -619,7 +631,8 @@ class PlaceDB(object):
         self.regions = pydb.regions
         for i in range(len(self.regions)):
             self.regions[i] = np.array(self.regions[i], dtype=self.dtype)
-        self.flat_region_boxes = np.array(pydb.flat_region_boxes, dtype=self.dtype)
+        self.flat_region_boxes = np.array(
+            pydb.flat_region_boxes, dtype=self.dtype)
         self.flat_region_boxes_start = np.array(
             pydb.flat_region_boxes_start, dtype=np.int32
         )
@@ -628,7 +641,7 @@ class PlaceDB(object):
         )
         # print(self.flat_region_boxes, self.flat_region_boxes_start, self.node2fence_region_map)
         # print(self.flat_region_boxes.shape, self.flat_region_boxes_start.shape, self.node2fence_region_map.shape)
-        #### nonfence region is set to INT_MAX, we set it to #regions??? not compatible with other APIs
+        # nonfence region is set to INT_MAX, we set it to #regions??? not compatible with other APIs
         # self.node2fence_region_map = np.minimum(self.node2fence_region_map, len(self.regions))
         self.xl = float(pydb.xl)
         self.yl = float(pydb.yl)
@@ -678,7 +691,8 @@ class PlaceDB(object):
 
         # convert node2pin_map to array of array
         for i in range(len(self.node2pin_map)):
-            self.node2pin_map[i] = np.array(self.node2pin_map[i], dtype=np.int32)
+            self.node2pin_map[i] = np.array(
+                self.node2pin_map[i], dtype=np.int32)
         self.node2pin_map = np.array(self.node2pin_map, dtype=object)
 
         # convert net2pin_map to array of array
@@ -715,7 +729,8 @@ class PlaceDB(object):
 
         num_movable_nodes = self.num_movable_nodes
 
-        movable_node_size_x = self.node_size_x[:num_movable_nodes][fence_region_mask]
+        movable_node_size_x = self.node_size_x[:
+                                               num_movable_nodes][fence_region_mask]
         # movable_node_size_y = self.node_size_y[:num_movable_nodes][fence_region_mask]
 
         lower_bound = np.percentile(movable_node_size_x, 5)
@@ -736,27 +751,28 @@ class PlaceDB(object):
         )
 
         if region_id < num_regions:
-            ## placeable area is not just fention region area. Macros can have overlap with fence region. But we approximate by this method temporarily
+            # placeable area is not just fention region area. Macros can have overlap with fence region. But we approximate by this method temporarily
             region = self.regions[region_id]
             placeable_area = np.sum(
                 (region[:, 2] - region[:, 0]) * (region[:, 3] - region[:, 1])
             )
         else:
-            ### invalid area outside the region, excluding macros? ignore overlap between fence region and macro
+            # invalid area outside the region, excluding macros? ignore overlap between fence region and macro
             fence_regions = np.concatenate(self.regions, 0).astype(np.float32)
             fence_regions_size_x = fence_regions[:, 2] - fence_regions[:, 0]
             fence_regions_size_y = fence_regions[:, 3] - fence_regions[:, 1]
-            fence_region_area = np.sum(fence_regions_size_x * fence_regions_size_y)
+            fence_region_area = np.sum(
+                fence_regions_size_x * fence_regions_size_y)
 
             placeable_area = (
                 max(self.total_space_area, self.area - self.total_fixed_node_area)
                 - fence_region_area
             )
 
-        ### recompute target density based on the region utilization
+        # recompute target density based on the region utilization
         utilization = min(total_movable_node_area / placeable_area, 1.0)
         if target_density < utilization:
-            ### add a few fillers to avoid divergence
+            # add a few fillers to avoid divergence
             target_density_fence_region = min(1, utilization + 0.01)
         else:
             target_density_fence_region = target_density
@@ -805,7 +821,8 @@ class PlaceDB(object):
         # set large cells as macros
         node_areas = self.node_size_x * self.node_size_y
         mean_area = node_areas[self.movable_slice].mean() * area_threshold
-        row_height = self.node_size_y[self.movable_slice].min() * height_threshold
+        row_height = self.node_size_y[self.movable_slice].min(
+        ) * height_threshold
 
         # movable macros
         self.movable_macro_mask = (node_areas[self.movable_slice] > mean_area) & (
@@ -853,7 +870,8 @@ class PlaceDB(object):
             # self.node_y[self.fixed_macro_idx] -= params.macro_halo_y
 
             # shift macro pins
-            self.movable_macro_pins = np.isin(self.pin2node_map, self.movable_macro_idx)
+            self.movable_macro_pins = np.isin(
+                self.pin2node_map, self.movable_macro_idx)
             self.pin_offset_x[self.movable_macro_pins] += params.macro_halo_x
             self.pin_offset_y[self.movable_macro_pins] += params.macro_halo_y
             # self.fixed_macro_pins = np.isin(self.pin2node_map, self.fixed_macro_idx)
@@ -919,7 +937,8 @@ class PlaceDB(object):
     def pin_density_inflation(self, pin_density, pin_accessibility=2.0):
         # pin_accessibility: virtually increases # pins due to cell blockages/pin shapes
         if 0 < pin_density < 1:
-            num_tracks_height = 5  # assume 6.5-track high-density library ~ 5 M1/M2 tracks for signal routing
+            # assume 6.5-track high-density library ~ 5 M1/M2 tracks for signal routing
+            num_tracks_height = 5
             num_pins_in_cell = np.ediff1d(self.flat_node2pin_start_map)
             inflated_widths = self.crop_to_site(
                 np.minimum(
@@ -958,7 +977,8 @@ class PlaceDB(object):
                         self.routing_V = float(line[0])
                         self.routing_H = float(line[1])
                     elif len(line) == 3:
-                        self.macros_routing[line[0]] = [float(line[1]), float(line[2])]
+                        self.macros_routing[line[0]] = [
+                            float(line[1]), float(line[2])]
 
         if self.macros_routing:
             movable_macros_indexes = np.where(self.movable_macro_mask)[0]
@@ -969,7 +989,8 @@ class PlaceDB(object):
                 (movable_macros_indexes, fixed_macro_indexes)
             )
             for name, util in self.macros_routing.items():
-                idx = np.where(macros_indexes == self.node_name2id_map[name])[0]
+                idx = np.where(macros_indexes ==
+                               self.node_name2id_map[name])[0]
                 self.macro_util_V[idx], self.macro_util_H[idx] = util
 
         self.routing_grid_xl = self.xl
@@ -1078,7 +1099,8 @@ row height = %g, site width = %g
                 2,
                 max(
                     np.ceil(
-                        math.log2(math.sqrt(self.num_movable_nodes / aspect_ratio))
+                        math.log2(
+                            math.sqrt(self.num_movable_nodes / aspect_ratio))
                     ),
                     0,
                 ),
@@ -1089,7 +1111,8 @@ row height = %g, site width = %g
                 2,
                 max(
                     np.ceil(
-                        math.log2(math.sqrt(self.num_movable_nodes * aspect_ratio))
+                        math.log2(
+                            math.sqrt(self.num_movable_nodes * aspect_ratio))
                     ),
                     0,
                 ),
@@ -1190,7 +1213,8 @@ row height = %g, site width = %g
                 )
             )
 
-        target_density = min(self.total_movable_node_area / self.total_space_area, 1.0)
+        target_density = min(self.total_movable_node_area /
+                             self.total_space_area, 1.0)
         if target_density > params.target_density:
             logging.warn(
                 "target_density %g is smaller than utilization %g, ignored"
@@ -1224,14 +1248,15 @@ row height = %g, site width = %g
                 .numpy()
                 for region_id, region in enumerate(self.regions)
             ]
-            virtual_macro_for_non_fence_region = np.concatenate(self.regions, 0)
+            virtual_macro_for_non_fence_region = np.concatenate(
+                self.regions, 0)
             self.virtual_macro_fence_region = virtual_macro_for_fence_region + [
                 virtual_macro_for_non_fence_region
             ]
 
         # insert filler nodes
         if len(self.regions) > 0:
-            ### calculate fillers if there is fence region
+            # calculate fillers if there is fence region
             self.filler_size_x_fence_region = []
             self.filler_size_y_fence_region = []
             self.num_filler_nodes = 0
@@ -1277,7 +1302,8 @@ row height = %g, site width = %g
                         dtype=self.node_size_y.dtype,
                     )
                 )
-                filler_node_area_i = num_filler_i * (filler_size_x_i * filler_size_y_i)
+                filler_node_area_i = num_filler_i * \
+                    (filler_size_x_i * filler_size_y_i)
                 self.total_filler_node_area += filler_node_area_i
                 content += (
                     "Region: %2d filler_node_area = %10.2f, #fillers = %8d, filler sizes = %2.4gx%g\n"
@@ -1325,11 +1351,12 @@ row height = %g, site width = %g
                     )
                 )
             else:
-                node_size_order = np.argsort(self.node_size_x[self.movable_slice])
+                node_size_order = np.argsort(
+                    self.node_size_x[self.movable_slice])
                 filler_size_x = np.mean(
                     self.node_size_x[
                         node_size_order[
-                            int(self.num_movable_nodes * 0.05) : int(
+                            int(self.num_movable_nodes * 0.05): int(
                                 self.num_movable_nodes * 0.95
                             )
                         ]
@@ -1348,7 +1375,8 @@ row height = %g, site width = %g
                     0.0,
                 )
                 self.num_filler_nodes = int(
-                    round(self.total_filler_node_area / (filler_size_x * filler_size_y))
+                    round(self.total_filler_node_area /
+                          (filler_size_x * filler_size_y))
                 )
                 self.node_size_x = np.concatenate(
                     [
@@ -1384,7 +1412,8 @@ row height = %g, site width = %g
             self.num_filler_nodes = 0
             filler_size_x, filler_size_y = 0, 0
             if len(self.regions) > 0:
-                self.filler_start_map = np.zeros(len(self.regions) + 2, dtype=np.int32)
+                self.filler_start_map = np.zeros(
+                    len(self.regions) + 2, dtype=np.int32)
                 self.num_filler_nodes_fence_region = np.zeros(
                     len(self.num_filler_nodes_fence_region)
                 )
@@ -1438,7 +1467,8 @@ row height = %g, site width = %g
                 sol_file_format = place_io.SolutionFileFormat.BOOKSHELF
 
         # unscale locations
-        node_x, node_y = self.unscale_pl(params.shift_factor, params.scale_factor)
+        node_x, node_y = self.unscale_pl(
+            params.shift_factor, params.scale_factor)
 
         # Global placement may have floating point positions.
         # Currently only support BOOKSHELF format.
@@ -1454,7 +1484,8 @@ row height = %g, site width = %g
                 self.rawdb, filename, sol_file_format, node_x, node_y
             )
         logging.info(
-            "write %s takes %.3f seconds" % (str(sol_file_format), time.time() - tt)
+            "write %s takes %.3f seconds" % (
+                str(sol_file_format), time.time() - tt)
         )
 
     def read_pl(self, params, pl_file):
@@ -1537,7 +1568,8 @@ row height = %g, site width = %g
 
         for net_id in range(len(self.net2pin_map)):
             pins = self.net2pin_map[net_id]
-            content += "\nNetDegree : %d %s" % (len(pins), self.net_names[net_id])
+            content += "\nNetDegree : %d %s" % (len(pins),
+                                                self.net_names[net_id])
             for pin_id in pins:
                 # (self.pin_offset_x[pin_id] - self.node_x[pin_id]/2) / params.scale_factor
                 content += "\n\t%s %s : %d %d" % (
@@ -1560,7 +1592,8 @@ row height = %g, site width = %g
         self.node_y[self.movable_slice] = node_y[self.movable_slice]
 
         # unscale locations
-        node_x, node_y = self.unscale_pl(params.shift_factor, params.scale_factor)
+        node_x, node_y = self.unscale_pl(
+            params.shift_factor, params.scale_factor)
 
         # update raw database
         place_io.PlaceIOFunction.apply(self.rawdb, node_x, node_y)

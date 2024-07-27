@@ -36,7 +36,7 @@ os.environ['eda_tool'] = "iEDA"
 root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if root_dir not in sys.path:
     sys.path.append(root_dir)
-    
+
 top_root_dir = os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))))
 if top_root_dir not in sys.path:
@@ -121,7 +121,7 @@ class PlacementEngine:
         self.density = float("inf")
         self.metrics = None
 
-    def setup_rawdb(self, data_manager : AimpDataManager):
+    def setup_rawdb(self, data_manager: AimpDataManager):
         # read cpp database
         tt = time.time()
         if self.placedb is None:
@@ -148,20 +148,22 @@ class PlacementEngine:
                 ieda_sta.init_sta()
                 # ieda_sta.create_data_flow()
             self.placedb.setup_rawdb(self.params)
-            
+
             # self.placedb.write(self.params, "debug.pl")
             # exit(0)
-            
+
             # self.placedb.initialize()
             # self.placedb.read(self.params)
-        logging.info("setting up raw database takes %.2f seconds" % (time.time() - tt))
+        logging.info("setting up raw database takes %.2f seconds" %
+                     (time.time() - tt))
 
     def setup_placedb(self):
         # setup python placement database
         tt = time.time()
         self.placedb.init_db(self.params)
         logging.info(
-            "setting up placement database takes %.2f seconds" % (time.time() - tt)
+            "setting up placement database takes %.2f seconds" % (
+                time.time() - tt)
         )
 
     def write_back(self, def_file="output.def"):
@@ -183,8 +185,10 @@ class PlacementEngine:
             "non-linear placement initialization takes %.2f seconds"
             % (time.time() - tt)
         )
-        self.rsmt, self.hpwl, self.metrics = self.placer(self.params, self.placedb)
-        logging.info("non-linear placement takes %.2f seconds" % (time.time() - tt))
+        self.rsmt, self.hpwl, self.metrics = self.placer(
+            self.params, self.placedb)
+        logging.info("non-linear placement takes %.2f seconds" %
+                     (time.time() - tt))
 
     def external_detailed_placer(self):
         # call external detailed placement
@@ -219,7 +223,8 @@ class PlacementEngine:
             tt = time.time()
             os.system(cmd)
             logging.info(
-                "External detailed placement takes %.2f seconds" % (time.time() - tt)
+                "External detailed placement takes %.2f seconds" % (
+                    time.time() - tt)
             )
 
             if self.params.plot_flag:
@@ -227,9 +232,9 @@ class PlacementEngine:
                 self.placedb.read_pl(self.params, dp_out_file + ".ntup.pl")
                 iteration = len(self.metrics)
                 pos = self.placer.init_pos
-                pos[0 : self.placedb.num_physical_nodes] = self.placedb.node_x
+                pos[0: self.placedb.num_physical_nodes] = self.placedb.node_x
                 pos[
-                    self.placedb.num_nodes : self.placedb.num_nodes
+                    self.placedb.num_nodes: self.placedb.num_nodes
                     + self.placedb.num_physical_nodes
                 ] = self.placedb.node_y
                 hpwl, density_overflow, max_density = self.placer.validate(
@@ -259,13 +264,16 @@ class PlacementEngine:
             )
             cmd += " -noglobal %s ; " % (self.params.detailed_place_command)
             # cmd += " %s ; " % (self.params.detailed_place_command) ## test whole flow
-            cmd += "mv ntuplace_4dr_out.fence.plt %s.fence.plt ; " % (dp_out_file)
-            cmd += "mv ntuplace_4dr_out.init.plt %s.init.plt ; " % (dp_out_file)
+            cmd += "mv ntuplace_4dr_out.fence.plt %s.fence.plt ; " % (
+                dp_out_file)
+            cmd += "mv ntuplace_4dr_out.init.plt %s.init.plt ; " % (
+                dp_out_file)
             cmd += "mv ntuplace_4dr_out %s.ntup.def ; " % (dp_out_file)
             cmd += "mv ntuplace_4dr_out.ntup.overflow.plt %s.ntup.overflow.plt ; " % (
                 dp_out_file
             )
-            cmd += "mv ntuplace_4dr_out.ntup.plt %s.ntup.plt ; " % (dp_out_file)
+            cmd += "mv ntuplace_4dr_out.ntup.plt %s.ntup.plt ; " % (
+                dp_out_file)
             if os.path.exists("%s/dat" % (os.path.dirname(dp_out_file))):
                 cmd += "rm -r %s/dat ; " % (os.path.dirname(dp_out_file))
             cmd += "mv dat %s/ ; " % (os.path.dirname(dp_out_file))
@@ -273,7 +281,8 @@ class PlacementEngine:
             tt = time.time()
             os.system(cmd)
             logging.info(
-                "External detailed placement takes %.2f seconds" % (time.time() - tt)
+                "External detailed placement takes %.2f seconds" % (
+                    time.time() - tt)
             )
         else:
             logging.warning(
@@ -293,7 +302,8 @@ class PlacementEngine:
 
     def save_placement(self):
         # write placement solution
-        self.path = "%s/%s" % (self.params.result_dir, self.params.design_name())
+        self.path = "%s/%s" % (self.params.result_dir,
+                               self.params.design_name())
         if not os.path.exists(self.path):
             os.system("mkdir -p %s" % (self.path))
         self.gp_out_file = os.path.join(
@@ -350,7 +360,8 @@ class PlacementEngine:
                 tt2 = time.time()
                 self.get_congestion()
                 logging.info(
-                    "congestion extraction takes %.3f seconds" % (time.time() - tt2)
+                    "congestion extraction takes %.3f seconds" % (
+                        time.time() - tt2)
                 )
 
             logging.info("placement takes %.3f seconds" % (time.time() - tt))
@@ -385,22 +396,22 @@ if __name__ == "__main__":
                         format='[%(levelname)-7s] %(name)s - %(message)s',
                         stream=sys.stdout)
     # if len(sys.argv) == 1 or "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
-        # params.printWelcome()
-        # params.printHelp()
-        # exit()
-    ## init workspace
+    # params.printWelcome()
+    # params.printHelp()
+    # exit()
+    # init workspace
     # workspace_path = "/home/zhaoxueyan/code/ai-mp/workspace_aimp/workspace_NutShell"
     workspace_path = "/home/zhaoxueyan/code/ai-mp/workspace_aimp/ariane133"
-    #init aimp
+    # init aimp
     data_manager = AimpDataManager(workspace_path)
     params = Params.Params()
     workspace = data_manager.workspace
-    ieda_io = IEDAIO(dir_workspace = workspace.workspace,
-                              input_def = workspace.json_path.def_input_path)
+    ieda_io = IEDAIO(dir_workspace=workspace.workspace,
+                     input_def=workspace.json_path.def_input_path)
     data_manager.set_ieda_io(ieda_io)
-    ieda_io.read_def() 
+    ieda_io.read_def()
     params.with_sta = False
-    ## init PlacementEngine
+    # init PlacementEngine
     json_file = '/home/zhaoxueyan/code/ai-mp/workspace_aimp/workspace_NutShell/aimp/log/run-0_0_3/parameters.json'
     # json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/dreamplace/params.json'
     # json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/test/XS_TOP_TSMC28_0208/mobohb_log/XS_TOP/run-1_0_0/parameters.json'
@@ -408,8 +419,8 @@ if __name__ == "__main__":
     with open(json_file, 'r') as f:
         params.fromJson(json.load(f))
     engine = PlacementEngine(params)
-    
-    engine.setup_rawdb(data_manager=data_manager)    
+
+    engine.setup_rawdb(data_manager=data_manager)
     ppa = engine.run()
 
     ''' 

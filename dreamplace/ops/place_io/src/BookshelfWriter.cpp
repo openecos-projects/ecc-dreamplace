@@ -1,19 +1,3 @@
-/*
-* Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-* http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*/
-
 /*************************************************************************
     > File Name: BookshelfWriter.cpp
     > Author: Yibo Lin
@@ -190,8 +174,7 @@ bool BookShelfWriter::writeScl(std::string const& outFileNoSuffix) const
         fprintf(out, "\tHeight : %ld\n", it->height());
         fprintf(out, "\tSitewidth : %d\n", it->step(kX));
         fprintf(out, "\tSitespacing : %d\n", it->step(kX)); // I do not know what is this for, simply set the same as Sitewidth
-        // AA: I think OrientEnum::N should be 1 and OrientEnum::FS should be 0 here
-        fprintf(out, "\tSiteorient : %d\n", ((it->orient() == OrientEnum::N)? 1 : 0));
+        fprintf(out, "\tSiteorient : %d\n", ((it->orient() == OrientEnum::N)? 0 : 1));
         fprintf(out, "\tSitesymmetry : %d\n", 1); 
         fprintf(out, "\tSubrowOrigin : %d NumSites : %d\n", it->xl(), it->numSites(kX));
         fprintf(out, "End\n");

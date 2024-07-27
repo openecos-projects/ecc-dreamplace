@@ -1,19 +1,3 @@
-/*
-* Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-* http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*/
-
 /*************************************************************************
     > File Name: Msg.cpp
     > Author: Yibo Lin
@@ -28,14 +12,7 @@
 
 DREAMPLACE_BEGIN_NAMESPACE
 
-const bool DREAMPLACE_DISABLE_PRINT =
-    std::getenv("DREAMPLACE_DISABLE_PRINT")
-        ? atoi(std::getenv("DREAMPLACE_DISABLE_PRINT"))
-        : 0;
-
 int dreamplacePrint(MessageType m, const char* format, ...) {
-  if (DREAMPLACE_DISABLE_PRINT) return 0;
-
   va_list args;
   va_start(args, format);
   int ret = dreamplaceVPrintStream(m, stdout, format, args);

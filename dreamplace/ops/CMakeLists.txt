@@ -9,15 +9,13 @@ add_subdirectory(density_overflow)
 add_subdirectory(density_potential)
 add_subdirectory(electric_potential)
 add_subdirectory(hpwl)
-add_subdirectory(rmst_wl)
+# add_subdirectory(rmst_wl)
 add_subdirectory(weighted_average_wirelength)
 add_subdirectory(logsumexp_wirelength)
 add_subdirectory(fence_region)
 # legalization operators
 add_subdirectory(legality_check)
 add_subdirectory(macro_legalize)
-add_subdirectory(macro_overlap)
-add_subdirectory(macro_refinement)
 add_subdirectory(greedy_legalize)
 add_subdirectory(abacus_legalize)
 # detailed placement operators
@@ -27,8 +25,12 @@ add_subdirectory(k_reorder)
 # routing congestion operator
 add_subdirectory(pin_utilization)
 add_subdirectory(rudy)
+add_subdirectory(pinrudy)
 add_subdirectory(nctugr_binary)
 add_subdirectory(adjust_node_area)
+# timing operator
+add_subdirectory(pin_weight_sum)
+add_subdirectory(timing)
 
 file(GLOB INSTALL_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/*.py")
 install(

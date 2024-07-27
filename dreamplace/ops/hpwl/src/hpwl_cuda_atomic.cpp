@@ -1,19 +1,3 @@
-/*
-* Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-* http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*/
-
 /**
  * @file   hpwl_cuda_atomic.cpp
  * @author Yibo Lin
@@ -55,7 +39,7 @@ at::Tensor hpwl_atomic_forward(at::Tensor pos, at::Tensor pin2net_map,
 
   int num_nets = net_mask.numel();
   // x then y
-  at::Tensor scaled_pos = at::_cast_Int(pos.mul(1000), false);
+  at::Tensor scaled_pos = pos.mul(1000).to(torch::kInt);
   at::Tensor partial_hpwl_max = at::zeros({2, num_nets}, scaled_pos.options());
   at::Tensor partial_hpwl_min = at::zeros({2, num_nets}, scaled_pos.options());
   partial_hpwl_max[0].fill_(std::numeric_limits<T>::min());
@@ -74,17 +58,17 @@ at::Tensor hpwl_atomic_forward(at::Tensor pos, at::Tensor pin2net_map,
   // std::cout << "partial_hpwl_max = " << partial_hpwl_max << "\n";
   // std::cout << "partial_hpwl_min = " << partial_hpwl_min << "\n";
   // std::cout << "partial_hpwl = \n" <<
-  // (partial_hpwl_max-partial_hpwl_min)._cast_double().mul(1.0/1000) << "\n";
+  // (partial_hpwl_max-partial_hpwl_min).to(torch::kDouble).mul(1.0/1000) << "\n";
 
   auto delta = partial_hpwl_max - partial_hpwl_min;
 
   at::Tensor hpwl;
   switch (pos.scalar_type()) {
     case at::ScalarType::Double:
-      hpwl = at::_cast_Double(delta, false);
+      hpwl = delta.to(torch::kDouble);
       break;
     case at::ScalarType::Float:
-      hpwl = at::_cast_Float(delta, false);
+      hpwl = delta.to(torch::kFloat);
       break;
     default:
       AT_ERROR("hpwl_atomic_forward", " not implemented for '",
@@ -94,7 +78,7 @@ at::Tensor hpwl_atomic_forward(at::Tensor pos, at::Tensor pin2net_map,
   if (net_weights.numel()) {
     hpwl.mul_(net_weights.view({1, num_nets}));
   }
-  return hpwl.sum(0).mul_(1.0 / 1000);
+  return hpwl.sum().mul_(1.0 / 1000);
 }
 
 DREAMPLACE_END_NAMESPACE

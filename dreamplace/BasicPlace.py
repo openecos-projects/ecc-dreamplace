@@ -46,6 +46,8 @@ import dreamplace.ops.pin_pos.pin_pos as pin_pos
 import dreamplace.ops.global_swap.global_swap as global_swap
 import dreamplace.ops.k_reorder.k_reorder as k_reorder
 import dreamplace.ops.independent_set_matching.independent_set_matching as independent_set_matching
+import dreamplace.ops.pin_weight_sum.pin_weight_sum as pws
+import dreamplace.ops.timing.timing as timingimport 
 import pdb
 
 
@@ -91,6 +93,7 @@ class PlaceDataCollection(object):
         @param device cpu or cuda
         """
         self.device = device
+        torch.set_num_threads(params.num_threads)
         # position should be parameter
         self.pos = pos
 
@@ -123,6 +126,8 @@ class PlaceDataCollection(object):
             self.movable_macro_mask = torch.from_numpy(placedb.movable_macro_mask).to(
                 device
             )
+            self.movable_macro_pins = torch.tensor(
+                    placedb.movable_macro_pins, dtype=int, device=device)
             self.fixed_macro_mask = torch.from_numpy(placedb.fixed_macro_mask).to(
                 device
             )
@@ -186,14 +191,7 @@ class PlaceDataCollection(object):
             self.flat_net2pin_start_map = torch.from_numpy(
                 placedb.flat_net2pin_start_map
             ).to(device)
-            if np.amin(placedb.net_weights) != np.amax(
-                placedb.net_weights
-            ):  # weights are meaningful
-                self.net_weights = torch.from_numpy(
-                    placedb.net_weights).to(device)
-            else:  # an empty tensor
-                logging.warning("net weights are all the same, ignored")
-                self.net_weights = torch.Tensor().to(device)
+            self.net_weights = torch.from_numpy(placedb.net_weights).to(device)
 
             # regions
             self.flat_region_boxes = torch.from_numpy(placedb.flat_region_boxes).to(
@@ -359,7 +357,7 @@ class PlaceOpCollection(object):
         self.macro_overlap_op = None
         self.update_macro_overlap_weight_op = None
         self.macro_refinement_op = None
-
+        self.pws_op = None
 
 class BasicPlace(nn.Module):
     """
@@ -367,7 +365,7 @@ class BasicPlace(nn.Module):
     All placement engines should be derived from this class.
     """
 
-    def __init__(self, params, placedb):
+    def __init__(self, params, placedb, timer):
         """
         @brief initialization
         @param params parameter
@@ -578,6 +576,14 @@ class BasicPlace(nn.Module):
             self.op_collections.pin_pos_op,
             self.device,
         )
+        self.op_collections.pws_op = self.build_pws(
+            placedb, self.data_collections)
+        # rectilinear minimum steiner tree wirelength from flute
+        # can only be called once
+        if params.timing_opt_flag:
+            self.op_collections.timing_op = self.build_timing_op(
+                params, placedb, timer)
+
         # hpwl for nets with smaller weight than ignore_net_weight
         self.op_collections.weight_hpwl_op = self.build_weight_hpwl(
             params,
@@ -611,6 +617,9 @@ class BasicPlace(nn.Module):
             self.op_collections.legalize_op = self.build_legalization(
                 params, placedb, self.data_collections, self.device
             )
+        if params.macro_place_flag:
+            self.op_collections.macro_legalize_op = self.build_macro_legalization(
+                params, placedb, self.data_collections, self.device)
         # detailed placement
         self.op_collections.detailed_place_op = self.build_detailed_placement(
             params, placedb, self.data_collections, self.device
@@ -699,6 +708,22 @@ class BasicPlace(nn.Module):
 
         return build_wirelength_op
 
+    def build_pws(self, placedb, data_collections):
+        """
+        @brief accumulate pin weights of a node
+        @param placedb placement database
+        @param data_collections a collection of all data and variables required for constructing the ops
+        """
+        # CPU version by default...
+        pws_op = pws.PinWeightSum(
+            flat_nodepin=data_collections.flat_node2pin_map,
+            nodepin_start=data_collections.flat_node2pin_start_map,
+            pin2net_map=data_collections.pin2net_map,
+            num_nodes=placedb.num_nodes,
+            algorithm='node-by-node')
+
+        return pws_op
+
     def build_weight_hpwl(self, params, placedb, data_collections, pin_pos_op, device):
         """
         @brief compute half-perimeter wirelength for weights less than ignore_net_weight
@@ -771,6 +796,36 @@ class BasicPlace(nn.Module):
 
         return build_wirelength_op
 
+    def build_timing_op(self, params, placedb, timer=None):
+        """
+        @brief build the operator for timing analysis and feedbacks.
+        @param placedb the placement database
+        @param timer the timer object used in timing-driven mode
+        """
+        return timing.TimingOpt(
+            timer,  # The timer should be at the same level as placedb.
+            placedb.net_names,  # The net names are required by OpenTimer.
+            placedb.pin_names,  # The pin names are required by OpenTimer.
+            placedb.flat_net2pin_map,
+            placedb.flat_net2pin_start_map,
+            placedb.net_name2id_map,
+            placedb.pin_name2id_map,
+            placedb.pin2node_map,
+            placedb.pin_offset_x,
+            placedb.pin_offset_y,
+            placedb.net_criticality,
+            placedb.net_criticality_deltas,
+            placedb.net_weights,
+            placedb.net_weight_deltas,
+            wire_resistance_per_micron=params.wire_resistance_per_micron,
+            wire_capacitance_per_micron=params.wire_capacitance_per_micron,
+            net_weighting_scheme=params.net_weighting_scheme,
+            momentum_decay_factor=params.momentum_decay_factor,
+            scale_factor=params.scale_factor,
+            lef_unit=placedb.rawdb.lefUnit(),
+            def_unit=placedb.rawdb.defUnit(),
+            ignore_net_degree=params.ignore_net_degree)
+
     def build_legality_check(self, params, placedb, data_collections, device):
         """
         @brief legality check
@@ -790,6 +845,39 @@ class BasicPlace(nn.Module):
             num_movable_nodes=placedb.num_movable_nodes,
         )
 
+    def build_macro_legalization(self, params, placedb, data_collections, device):
+        """
+        @brief legalization
+        @param params parameters
+        @param placedb placement database
+        @param data_collections a collection of all data and variables required for constructing the ops
+        @param device cpu or cuda
+        """
+        # for movable macro legalization
+        # the number of bins control the search granularity
+        ml = macro_legalize.MacroLegalize(
+            node_size_x=data_collections.node_size_x,
+            node_size_y=data_collections.node_size_y,
+            node_weights=data_collections.num_pins_in_nodes,
+            flat_region_boxes=data_collections.flat_region_boxes,
+            flat_region_boxes_start=data_collections.flat_region_boxes_start,
+            node2fence_region_map=data_collections.node2fence_region_map,
+            xl=placedb.xl,
+            yl=placedb.yl,
+            xh=placedb.xh,
+            yh=placedb.yh,
+            site_width=placedb.site_width,
+            row_height=placedb.row_height,
+            num_bins_x=placedb.num_bins_x,
+            num_bins_y=placedb.num_bins_y,
+            num_movable_nodes=placedb.num_movable_nodes,
+            num_terminal_NIs=placedb.num_terminal_NIs,
+            num_filler_nodes=placedb.num_filler_nodes)
+        def build_macro_legalization_op(pos):
+            logging.info("Start macro legalization")
+            return ml(pos.clone(), pos)
+        return build_macro_legalization_op
+        
     def build_legalization(self, params, placedb, data_collections, device):
         """
         @brief legalization
@@ -807,13 +895,17 @@ class BasicPlace(nn.Module):
             flat_region_boxes=data_collections.flat_region_boxes,
             flat_region_boxes_start=data_collections.flat_region_boxes_start,
             node2fence_region_map=data_collections.node2fence_region_map,
-            fp_info=data_collections.fp_info,
+            xl=placedb.xl,
+            yl=placedb.yl,
+            xh=placedb.xh,
+            yh=placedb.yh,
+            site_width=placedb.site_width,
+            row_height=placedb.row_height,
             num_bins_x=placedb.num_bins_x,
             num_bins_y=placedb.num_bins_y,
             num_movable_nodes=placedb.num_movable_nodes,
             num_terminal_NIs=placedb.num_terminal_NIs,
-            num_filler_nodes=placedb.num_filler_nodes,
-        )
+            num_filler_nodes=placedb.num_filler_nodes)
         # for standard cell legalization
         # legalize_alg = mg_legalize.MGLegalize
         legalize_alg = greedy_legalize.GreedyLegalize
@@ -824,14 +916,18 @@ class BasicPlace(nn.Module):
             flat_region_boxes=data_collections.flat_region_boxes,
             flat_region_boxes_start=data_collections.flat_region_boxes_start,
             node2fence_region_map=data_collections.node2fence_region_map,
-            fp_info=data_collections.fp_info,
-            num_bins_x=1,  # whole row
+            xl=placedb.xl,
+            yl=placedb.yl,
+            xh=placedb.xh,
+            yh=placedb.yh,
+            site_width=placedb.site_width,
+            row_height=placedb.row_height,
+            num_bins_x=1,
             num_bins_y=64,
             # num_bins_x=64, num_bins_y=64,
             num_movable_nodes=placedb.num_movable_nodes,
             num_terminal_NIs=placedb.num_terminal_NIs,
-            num_filler_nodes=placedb.num_filler_nodes,
-        )
+            num_filler_nodes=placedb.num_filler_nodes)
         # for standard cell legalization
         al = abacus_legalize.AbacusLegalize(
             node_size_x=data_collections.node_size_x,
@@ -840,14 +936,18 @@ class BasicPlace(nn.Module):
             flat_region_boxes=data_collections.flat_region_boxes,
             flat_region_boxes_start=data_collections.flat_region_boxes_start,
             node2fence_region_map=data_collections.node2fence_region_map,
-            fp_info=data_collections.fp_info,
+            xl=placedb.xl,
+            yl=placedb.yl,
+            xh=placedb.xh,
+            yh=placedb.yh,
+            site_width=placedb.site_width,
+            row_height=placedb.row_height,
             num_bins_x=1,
             num_bins_y=64,
             # num_bins_x=64, num_bins_y=64,
             num_movable_nodes=placedb.num_movable_nodes,
             num_terminal_NIs=placedb.num_terminal_NIs,
-            num_filler_nodes=placedb.num_filler_nodes,
-        )
+            num_filler_nodes=placedb.num_filler_nodes)
 
         def build_legalization_op(pos):
             logging.info("Start legalization")
@@ -855,11 +955,19 @@ class BasicPlace(nn.Module):
             pos2 = gl(pos1, pos1)
             legal = self.op_collections.legality_check_op(pos2)
             if not legal:
-                logging.error("legality check failed in greedy legalization")
+                logging.error("legality check failed in greedy legalization, "
+                              "return illegal results after greedy legalization.")
                 return pos2
-            return al(pos1, pos2)
+            pos3 = al(pos1, pos2)
+            legal = self.op_collections.legality_check_op(pos3)
+            if not legal:
+                logging.error("legality check failed in abacus legalization, "
+                              "return legal results after greedy legalization.")
+                return pos2
+            return pos3
 
         return build_legalization_op
+
 
     def build_multi_fence_region_legalization(
         self, params, placedb, data_collections, device
@@ -1056,7 +1164,7 @@ class BasicPlace(nn.Module):
             flat_region_boxes=flat_region_boxes,
             flat_region_boxes_start=flat_region_boxes_start,
             node2fence_region_map=node2fence_region_map,
-            fp_info=data_collections.fp_info,
+            # fp_info=data_collections.fp_info,
             num_bins_x=params.num_bins_x,
             num_bins_y=params.num_bins_y,
             num_movable_nodes=num_movable_nodes_fence_region,
@@ -1071,7 +1179,7 @@ class BasicPlace(nn.Module):
             flat_region_boxes=flat_region_boxes,
             flat_region_boxes_start=flat_region_boxes_start,
             node2fence_region_map=node2fence_region_map,
-            fp_info=data_collections.fp_info,
+            # fp_info=data_collections.fp_info,
             num_bins_x=1,
             num_bins_y=64,
             # num_bins_x=64, num_bins_y=64,
@@ -1087,7 +1195,7 @@ class BasicPlace(nn.Module):
             flat_region_boxes=flat_region_boxes,
             flat_region_boxes_start=flat_region_boxes_start,
             node2fence_region_map=node2fence_region_map,
-            fp_info=data_collections.fp_info,
+            # fp_info=data_collections.fp_info,
             num_bins_x=1,
             num_bins_y=64,
             num_movable_nodes=num_movable_nodes_fence_region,
@@ -1163,7 +1271,8 @@ class BasicPlace(nn.Module):
 
         return build_greedy_legalization_op, build_abacus_legalization_op
 
-    def build_detailed_placement(self, params, placedb, data_collections, device):
+    def build_detailed_placement(self, params, placedb, data_collections,
+                                 device):
         """
         @brief detailed placement consisting of global swap and independent set matching
         @param params parameters
@@ -1186,7 +1295,12 @@ class BasicPlace(nn.Module):
             pin_offset_x=data_collections.pin_offset_x,
             pin_offset_y=data_collections.pin_offset_y,
             net_mask=data_collections.net_mask_ignore_large_degrees,
-            fp_info=data_collections.fp_info,
+            xl=placedb.xl,
+            yl=placedb.yl,
+            xh=placedb.xh,
+            yh=placedb.yh,
+            site_width=placedb.site_width,
+            row_height=placedb.row_height,
             num_bins_x=placedb.num_bins_x // 2,
             num_bins_y=placedb.num_bins_y // 2,
             num_movable_nodes=placedb.num_movable_nodes,
@@ -1194,8 +1308,7 @@ class BasicPlace(nn.Module):
             num_filler_nodes=placedb.num_filler_nodes,
             batch_size=256,
             max_iters=2,
-            algorithm="concurrent",
-        )
+            algorithm='concurrent')
         kr = k_reorder.KReorder(
             node_size_x=data_collections.node_size_x,
             node_size_y=data_collections.node_size_y,
@@ -1211,15 +1324,19 @@ class BasicPlace(nn.Module):
             pin_offset_x=data_collections.pin_offset_x,
             pin_offset_y=data_collections.pin_offset_y,
             net_mask=data_collections.net_mask_ignore_large_degrees,
-            fp_info=data_collections.fp_info,
+            xl=placedb.xl,
+            yl=placedb.yl,
+            xh=placedb.xh,
+            yh=placedb.yh,
+            site_width=placedb.site_width,
+            row_height=placedb.row_height,
             num_bins_x=placedb.num_bins_x,
             num_bins_y=placedb.num_bins_y,
             num_movable_nodes=placedb.num_movable_nodes,
             num_terminal_NIs=placedb.num_terminal_NIs,
             num_filler_nodes=placedb.num_filler_nodes,
             K=4,
-            max_iters=2,
-        )
+            max_iters=2)
         ism = independent_set_matching.IndependentSetMatching(
             node_size_x=data_collections.node_size_x,
             node_size_y=data_collections.node_size_y,
@@ -1235,7 +1352,12 @@ class BasicPlace(nn.Module):
             pin_offset_x=data_collections.pin_offset_x,
             pin_offset_y=data_collections.pin_offset_y,
             net_mask=data_collections.net_mask_ignore_large_degrees,
-            fp_info=data_collections.fp_info,
+            xl=placedb.xl,
+            yl=placedb.yl,
+            xh=placedb.xh,
+            yh=placedb.yh,
+            site_width=placedb.site_width,
+            row_height=placedb.row_height,
             num_bins_x=placedb.num_bins_x,
             num_bins_y=placedb.num_bins_y,
             num_movable_nodes=placedb.num_movable_nodes,
@@ -1244,15 +1366,20 @@ class BasicPlace(nn.Module):
             batch_size=2048,
             set_size=128,
             max_iters=50,
-            algorithm="concurrent",
-        )
+            algorithm='concurrent')
 
         # wirelength for position
         def build_detailed_placement_op(pos):
             logging.info("Start ABCDPlace for refinement")
+
+            if placedb.num_movable_nodes < 2:
+                logging.info("Too few movable cells, skip detailed placement")
+                return pos
+
             pos1 = pos
             legal = self.op_collections.legality_check_op(pos1)
-            logging.info("ABCDPlace input legal flag = %d" % (legal))
+            logging.info("ABCDPlace input legal flag = %d" %
+                         (legal))
             if not legal:
                 return pos1
 
@@ -1279,14 +1406,10 @@ class BasicPlace(nn.Module):
                         target_inv_scale_factor = inv_scale_factor
                         break
                 scale_factor = 1.0 / target_inv_scale_factor
-                logging.info(
-                    "Deriving from system scale factor %g (1/%d)"
-                    % (params.scale_factor, inv_scale_factor)
-                )
-                logging.info(
-                    "Use scale factor %g (1/%d) for detailed placement"
-                    % (scale_factor, target_inv_scale_factor)
-                )
+                logging.info("Deriving from system scale factor %g (1/%d)" %
+                             (params.scale_factor, inv_scale_factor))
+                logging.info("Use scale factor %g (1/%d) for detailed placement" %
+                             (scale_factor, target_inv_scale_factor))
 
             for i in range(1):
                 pos1 = kr(pos1, scale_factor)
@@ -1296,8 +1419,8 @@ class BasicPlace(nn.Module):
                     return pos1
                 pos1 = ism(pos1, scale_factor)
                 legal = self.op_collections.legality_check_op(pos1)
-                logging.info(
-                    "Independent set matching legal flag = %d" % (legal))
+                logging.info("Independent set matching legal flag = %d" %
+                             (legal))
                 if not legal:
                     return pos1
                 pos1 = gs(pos1, scale_factor)

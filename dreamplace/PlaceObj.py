@@ -56,9 +56,10 @@ class PreconditionOp:
     Need to be carefully designed.
     """
 
-    def __init__(self, placedb, data_collections):
+    def __init__(self, placedb, data_collections, op_collections):
         self.placedb = placedb
         self.data_collections = data_collections
+        self.op_collections = op_collections
         self.iteration = 0
         self.alpha = 1.0
         self.best_overflow = None
@@ -85,27 +86,29 @@ class PreconditionOp:
         elif self.best_overflow.mean() > overflow.mean():
             self.best_overflow = overflow
 
-    def __call__(self, grad, density_weight, update_mask=None):
+    def __call__(self, grad, density_weight, update_mask=None, fix_nodes_mask=None):
         """Introduce alpha parameter to avoid divergence.
         It is tricky for this parameter to increase.
         """
         with torch.no_grad():
+            # The preconditioning step in python is time-consuming, as in each gradient
+            # pass, the total net weight should be re-calculated.
+            sum_pin_weights_in_nodes = self.op_collections.pws_op(
+                self.data_collections.net_weights)
             if density_weight.size(0) == 1:
-                precond = (
-                    self.data_collections.num_pins_in_nodes
-                    + self.alpha * density_weight * self.data_collections.node_areas
-                )
+                precond = (sum_pin_weights_in_nodes
+                           + self.alpha * density_weight * self.data_collections.node_areas
+                           )
             else:
                 # only precondition the non fence region
                 node_areas = self.data_collections.node_areas.clone()
 
-                mask = self.data_collections.node2fence_region_map[
-                    : self.placedb.num_movable_nodes
-                ] >= len(self.placedb.regions)
+                mask = self.data_collections.node2fence_region_map[: self.placedb.num_movable_nodes] >= len(
+                    self.placedb.regions
+                )
                 node_areas[: self.placedb.num_movable_nodes].masked_scatter_(
-                    mask,
-                    node_areas[: self.placedb.num_movable_nodes][mask]
-                    * density_weight[-1],
+                    mask, node_areas[: self.placedb.num_movable_nodes][mask] *
+                    density_weight[-1]
                 )
                 filler_beg, filler_end = self.placedb.filler_start_map[-2:]
                 node_areas[
@@ -115,9 +118,7 @@ class PreconditionOp:
                     - self.placedb.num_filler_nodes
                     + filler_end
                 ] *= density_weight[-1]
-                precond = (
-                    self.data_collections.num_pins_in_nodes + self.alpha * node_areas
-                )
+                precond = sum_pin_weights_in_nodes + self.alpha * node_areas
 
             precond.clamp_(min=1.0)
             grad[0: self.placedb.num_nodes].div_(precond)
@@ -134,22 +135,22 @@ class PreconditionOp:
                     movable_mask, 0)
                 grad[1, : self.placedb.num_movable_nodes].masked_fill_(
                     movable_mask, 0)
-                grad[
-                    0, self.placedb.num_nodes - self.placedb.num_filler_nodes:
-                ].masked_fill_(filler_mask, 0)
-                grad[
-                    1, self.placedb.num_nodes - self.placedb.num_filler_nodes:
-                ].masked_fill_(filler_mask, 0)
+                grad[0, self.placedb.num_nodes -
+                     self.placedb.num_filler_nodes:].masked_fill_(filler_mask, 0)
+                grad[1, self.placedb.num_nodes -
+                     self.placedb.num_filler_nodes:].masked_fill_(filler_mask, 0)
+                grad = grad.view(-1)
+            if fix_nodes_mask is not None:
+                grad = grad.view(2, -1)
+                grad[0, :self.placedb.num_movable_nodes].masked_fill_(
+                    fix_nodes_mask[:self.placedb.num_movable_nodes], 0)
+                grad[1, :self.placedb.num_movable_nodes].masked_fill_(
+                    fix_nodes_mask[:self.placedb.num_movable_nodes], 0)
                 grad = grad.view(-1)
             self.iteration += 1
 
             # only work in benchmarks without fence region, assume overflow has been updated
-            if (
-                len(self.placedb.regions) > 0
-                and self.overflows
-                and self.overflows[-1] < 0.3
-                and self.alpha < 1024
-            ):
+            if len(self.placedb.regions) > 0 and self.overflows and self.overflows[-1].max() < 0.3 and self.alpha < 1024:
                 if (self.iteration % 20) == 0:
                     self.alpha *= 2
                     logging.info(
@@ -203,6 +204,7 @@ class PlaceObj(nn.Module):
         # fence region
         # update mask controls whether stop gradient/updating, 1 represents allow grad/update
         self.update_mask = None
+        self.fix_nodes_mask = None
         if len(placedb.regions) > 0:
             # for subregion rough legalization, once stop updating, perform immediate greddy legalization once
             # this is to avoid repeated legalization
@@ -242,6 +244,9 @@ class PlaceObj(nn.Module):
             if global_place_params["num_bins_y"]
             else placedb.num_bins_y
         )
+        name = "Global placement: %dx%d bins by default" % (
+            num_bins_x, num_bins_y)
+        logging.info(name)
         self.num_bins_x = num_bins_x
         self.num_bins_y = num_bins_y
         self.bin_size_x = (placedb.xh - placedb.xl) / num_bins_x
@@ -299,7 +304,7 @@ class PlaceObj(nn.Module):
             params, placedb
         )
         self.op_collections.precondition_op = self.build_precondition(
-            params, placedb, self.data_collections
+            params, placedb, self.data_collections, self.op_collections
         )
         self.op_collections.noise_op = self.build_noise(
             params, placedb, self.data_collections
@@ -533,7 +538,7 @@ class PlaceObj(nn.Module):
         obj.backward()
 
         self.op_collections.precondition_op(
-            pos.grad, self.density_weight, self.update_mask
+            pos.grad, self.density_weight, self.update_mask, self.fix_nodes_mask
         )
 
         return obj, pos.grad
@@ -623,7 +628,8 @@ class PlaceObj(nn.Module):
 
         # wirelength for position
         def build_wirelength_op(pos):
-            return wirelength_for_pin_op(pin_pos_op(pos))
+            pos1 = pin_pos_op(pos)
+            return wirelength_for_pin_op(pos1)
 
         # update gamma
         base_gamma = self.base_gamma(params, placedb)
@@ -1213,6 +1219,13 @@ class PlaceObj(nn.Module):
                 noise = torch.rand_like(pos)
                 noise.sub_(0.5).mul_(node_size).mul_(noise_ratio)
                 # no noise to fixed cells
+                if self.fix_nodes_mask is not None:
+                    noise = noise.view(2, -1)
+                    noise[0, :placedb.num_movable_nodes].masked_fill_(
+                        self.fix_nodes_mask[:placedb.num_movable_nodes], 0)
+                    noise[1, :placedb.num_movable_nodes].masked_fill_(
+                        self.fix_nodes_mask[:placedb.num_movable_nodes], 0)
+                    noise = noise.view(-1)
                 noise[
                     placedb.num_movable_nodes: placedb.num_nodes
                     - placedb.num_filler_nodes
@@ -1226,7 +1239,7 @@ class PlaceObj(nn.Module):
 
         return noise_op
 
-    def build_precondition(self, params, placedb, data_collections):
+    def build_precondition(self, params, placedb, data_collections, op_collections):
         """
         @brief preconditioning to gradient
         @param params parameters
@@ -1234,7 +1247,7 @@ class PlaceObj(nn.Module):
         @param data_collections a collection of data and variables required for constructing ops
         """
 
-        return PreconditionOp(placedb, data_collections)
+        return PreconditionOp(placedb, data_collections, op_collections)
 
     def build_route_utilization_map(self, params, placedb, data_collections):
         """
@@ -1247,37 +1260,39 @@ class PlaceObj(nn.Module):
             netpin_start=data_collections.flat_net2pin_start_map,
             flat_netpin=data_collections.flat_net2pin_map,
             net_weights=data_collections.net_weights,
-            fp_info=data_collections.fp_info,
+            xl=placedb.routing_grid_xl,
+            yl=placedb.routing_grid_yl,
+            xh=placedb.routing_grid_xh,
+            yh=placedb.routing_grid_yh,
             num_bins_x=placedb.num_routing_grids_x,
             num_bins_y=placedb.num_routing_grids_y,
             unit_horizontal_capacity=placedb.unit_horizontal_capacity,
             unit_vertical_capacity=placedb.unit_vertical_capacity,
-            initial_horizontal_utilization_map=data_collections.initial_horizontal_utilization_map,
-            initial_vertical_utilization_map=data_collections.initial_vertical_utilization_map,
-        )
+            initial_horizontal_utilization_map=data_collections.
+            initial_horizontal_utilization_map,
+            initial_vertical_utilization_map=data_collections.
+            initial_vertical_utilization_map,
+            deterministic_flag=params.deterministic_flag)
 
-        congestion_macros_op = rudy_macros.RudyWithMacros(
-            netpin_start=data_collections.flat_net2pin_start_map,
-            flat_netpin=data_collections.flat_net2pin_map,
-            net_weights=data_collections.net_weights,
-            fp_info=data_collections.fp_info,
-            num_bins_x=placedb.num_routing_grids_x,
-            num_bins_y=placedb.num_routing_grids_y,
-            node_size_x=data_collections.node_size_x,
-            node_size_y=data_collections.node_size_y,
-            num_movable_nodes=placedb.num_movable_nodes,
-            movable_macro_mask=data_collections.movable_macro_mask,
-            num_terminals=placedb.num_terminals,
-            fixed_macro_mask=data_collections.fixed_macro_mask,
-            params=params,
-        )
+        # congestion_macros_op = rudy_macros.RudyWithMacros(
+        #     netpin_start=data_collections.flat_net2pin_start_map,
+        #     flat_netpin=data_collections.flat_net2pin_map,
+        #     net_weights=data_collections.net_weights,
+        #     fp_info=data_collections.fp_info,
+        #     num_bins_x=placedb.num_routing_grids_x,
+        #     num_bins_y=placedb.num_routing_grids_y,
+        #     node_size_x=data_collections.node_size_x,
+        #     node_size_y=data_collections.node_size_y,
+        #     num_movable_nodes=placedb.num_movable_nodes,
+        #     movable_macro_mask=data_collections.movable_macro_mask,
+        #     num_terminals=placedb.num_terminals,
+        #     fixed_macro_mask=data_collections.fixed_macro_mask,
+        #     params=params,
+        # )
 
-        def route_utilization_map_op(pos, macro_mode=False):
+        def route_utilization_map_op(pos):
             pin_pos = self.op_collections.pin_pos_op(pos)
-            if macro_mode:
-                return congestion_macros_op(pos, pin_pos)
-            else:
-                return congestion_op(pin_pos)
+            return congestion_op(pin_pos)
 
         return route_utilization_map_op
 
@@ -1293,14 +1308,17 @@ class PlaceObj(nn.Module):
             flat_node2pin_start_map=data_collections.flat_node2pin_start_map,
             node_size_x=data_collections.node_size_x,
             node_size_y=data_collections.node_size_y,
-            fp_info=data_collections.fp_info,
+            xl=placedb.routing_grid_xl,
+            yl=placedb.routing_grid_yl,
+            xh=placedb.routing_grid_xh,
+            yh=placedb.routing_grid_yh,
             num_movable_nodes=placedb.num_movable_nodes,
             num_filler_nodes=placedb.num_filler_nodes,
             num_bins_x=placedb.num_routing_grids_x,
             num_bins_y=placedb.num_routing_grids_y,
             unit_pin_capacity=data_collections.unit_pin_capacity,
             pin_stretch_ratio=params.pin_stretch_ratio,
-        )
+            deterministic_flag=params.deterministic_flag)
 
     def build_nctugr_congestion_map(self, params, placedb, data_collections):
         """
@@ -1330,21 +1348,21 @@ class PlaceObj(nn.Module):
         @brief adjust cell area according to routing congestion and pin utilization map
         """
         total_movable_area = (
-            data_collections.node_size_x[: placedb.num_movable_nodes]
-            * data_collections.node_size_y[: placedb.num_movable_nodes]
-        ).sum()
+            data_collections.node_size_x[:placedb.num_movable_nodes] *
+            data_collections.node_size_y[:placedb.num_movable_nodes]).sum()
         total_filler_area = (
-            data_collections.node_size_x[-placedb.num_filler_nodes:]
-            * data_collections.node_size_y[-placedb.num_filler_nodes:]
-        ).sum()
-        total_place_area = (
-            total_movable_area + total_filler_area
-        ) / data_collections.target_density
+            data_collections.node_size_x[-placedb.num_filler_nodes:] *
+            data_collections.node_size_y[-placedb.num_filler_nodes:]).sum()
+        total_place_area = (total_movable_area + total_filler_area
+                            ) / data_collections.target_density
         adjust_node_area_op = adjust_node_area.AdjustNodeArea(
             flat_node2pin_map=data_collections.flat_node2pin_map,
             flat_node2pin_start_map=data_collections.flat_node2pin_start_map,
             pin_weights=data_collections.pin_weights,
-            fp_info=data_collections.fp_info,
+            xl=placedb.routing_grid_xl,
+            yl=placedb.routing_grid_yl,
+            xh=placedb.routing_grid_xh,
+            yh=placedb.routing_grid_yh,
             num_movable_nodes=placedb.num_movable_nodes,
             num_filler_nodes=placedb.num_filler_nodes,
             route_num_bins_x=placedb.num_routing_grids_x,

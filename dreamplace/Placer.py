@@ -32,6 +32,8 @@ import numpy as np
 import logging
 
 os.environ['eda_tool'] = "iEDA"
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+
 # for consistency between python2 and python3
 root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if root_dir not in sys.path:
@@ -49,7 +51,7 @@ import dreamplace.NonLinearPlace as NonLinearPlace
 from data_manager.aimp_dm import AimpDataManager
 from tools.iEDA.module.sta import IEDASta
 from tools.iEDA.module.io import IEDAIO
-
+import dreamplace.Timer
 
 # set up logging
 logging.root.name = "DREAMPlace"
@@ -180,7 +182,22 @@ class PlacementEngine:
         # solve placement
         tt = time.time()
         self.params.plot_flag = True
-        self.placer = NonLinearPlace.NonLinearPlace(self.params, self.placedb)
+        timer = None
+        if params.timing_opt_flag:
+            tt = time.time()
+            timer = Timer.Timer()
+            timer(params, self.placedb)
+            # This must be done to explicitly execute the parser builders.
+            # The parsers in OpenTimer are all in lazy mode.
+            timer.update_timing()
+            logging.info("reading timer takes %.2f seconds" % (time.time() - tt))
+
+            # Dump example here. Some dump functions are defined.
+            # Check instance methods defined in Timer.py for debugging.
+            # timer.dump_pin_cap("pin_caps.txt")
+            # timer.dump_graph("timing_graph.txt")
+
+        self.placer = NonLinearPlace.NonLinearPlace(self.params, self.placedb, timer)
         logging.info(
             "non-linear placement initialization takes %.2f seconds"
             % (time.time() - tt)
@@ -292,7 +309,7 @@ class PlacementEngine:
     def get_congestion(self):
         pos = self.placer.data_collections.pos[0]
         congestion_map = self.placer.op_collections.get_congestion_map_op(
-            pos, self.params.route_info_input != ""
+            pos
         )
         congestion, _ = torch.topk(
             congestion_map.flatten(), k=int(0.1 * congestion_map.numel())

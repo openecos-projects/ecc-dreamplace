@@ -51,7 +51,7 @@ import dreamplace.NonLinearPlace as NonLinearPlace
 from data_manager.aimp_dm import AimpDataManager
 from tools.iEDA.module.sta import IEDASta
 from tools.iEDA.module.io import IEDAIO
-import dreamplace.Timer
+import dreamplace.Timer as Timer
 
 # set up logging
 logging.root.name = "DREAMPlace"

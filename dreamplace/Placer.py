@@ -32,7 +32,7 @@ import numpy as np
 import logging
 
 os.environ['eda_tool'] = "iEDA"
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
 
 # for consistency between python2 and python3
 root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -183,7 +183,7 @@ class PlacementEngine:
         tt = time.time()
         self.params.plot_flag = True
         timer = None
-        if params.timing_opt_flag:
+        if self.params.timing_opt_flag:
             tt = time.time()
             timer = Timer.Timer()
             timer(params, self.placedb)
@@ -417,8 +417,8 @@ if __name__ == "__main__":
     # params.printHelp()
     # exit()
     # init workspace
-    # workspace_path = "/home/zhaoxueyan/code/ai-mp/workspace_aimp/workspace_NutShell"
-    workspace_path = "/home/zhaoxueyan/code/ai-mp/workspace_aimp/ariane133"
+    workspace_path = "/home/zhaoxueyan/code/ai-mp/workspace_aimp/workspace_NutShell"
+    # workspace_path = "/home/zhaoxueyan/code/ai-mp/workspace_aimp/ariane133"
     # init aimp
     data_manager = AimpDataManager(workspace_path)
     params = Params.Params()
@@ -429,10 +429,10 @@ if __name__ == "__main__":
     ieda_io.read_def()
     params.with_sta = False
     # init PlacementEngine
-    json_file = '/home/zhaoxueyan/code/ai-mp/workspace_aimp/workspace_NutShell/aimp/log/run-0_0_3/parameters.json'
+    json_file = '/home/zhaoxueyan/code/ai-mp/workspace_aimp/workspace_NutShell/aimp/log/run-0_0_0/parameters.json'
     # json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/dreamplace/params.json'
     # json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/test/XS_TOP_TSMC28_0208/mobohb_log/XS_TOP/run-1_0_0/parameters.json'
-    json_file = '/home/zhaoxueyan/code/ai-mp/AutoDMP/dreamplace/params2.json'
+    # json_file = '/home/zhaoxueyan/code/ai-mp/AutoDMP/dreamplace/params2.json'
     with open(json_file, 'r') as f:
         params.fromJson(json.load(f))
     engine = PlacementEngine(params)

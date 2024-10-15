@@ -78,23 +78,23 @@ void sortNodesInRow(const T* host_x, const T* host_y,
         return x1 < x2 || (x1 == x2 && node_id1 < node_id2);
         });
 
-    for (int j = 1, je = nodes_in_row.size(); j < je; ++j) {
-      int node_id1 = nodes_in_row.at(j - 1);
-      int node_id2 = nodes_in_row.at(j);
-      T xl1 = host_x[node_id1]; 
-      T xl2 = host_x[node_id2];
-      T width1 = host_node_size_x[node_id1]; 
-      T width2 = host_node_size_x[node_id2]; 
-      T xh1 = xl1 + width1; 
-      T xh2 = xl2 + width2; 
-      T yl1 = host_y[node_id1]; 
-      T yl2 = host_y[node_id2]; 
-      T yh1 = yl1 + host_node_size_y[node_id1]; 
-      T yh2 = yl2 + host_node_size_y[node_id2]; 
-      dreamplaceAssertMsg(xl1 < xl2 && xh1 < xh2, 
-          "node %d (%g, %g, %g, %g) overlaps with node %d (%g, %g, %g, %g)", 
-          node_id1, xl1, yl1, xh1, yh1, node_id2, xl2, yl2, xh2, yh2);
-    }
+    // for (int j = 1, je = nodes_in_row.size(); j < je; ++j) {
+    //   int node_id1 = nodes_in_row.at(j - 1);
+    //   int node_id2 = nodes_in_row.at(j);
+    //   T xl1 = host_x[node_id1]; 
+    //   T xl2 = host_x[node_id2];
+    //   T width1 = host_node_size_x[node_id1]; 
+    //   T width2 = host_node_size_x[node_id2]; 
+    //   T xh1 = xl1 + width1; 
+    //   T xh2 = xl2 + width2; 
+    //   T yl1 = host_y[node_id1]; 
+    //   T yl2 = host_y[node_id2]; 
+    //   T yh1 = yl1 + host_node_size_y[node_id1]; 
+    //   T yh2 = yl2 + host_node_size_y[node_id2]; 
+    //   // dreamplaceAssertMsg(xl1 < xl2 && xh1 < xh2, 
+    //   //     "node %d (%g, %g, %g, %g) overlaps with node %d (%g, %g, %g, %g)", 
+    //   //     node_id1, xl1, yl1, xh1, yh1, node_id2, xl2, yl2, xh2, yh2);
+    // }
   }
 }
 

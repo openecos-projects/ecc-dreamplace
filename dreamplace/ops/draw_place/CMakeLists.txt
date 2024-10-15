@@ -14,6 +14,7 @@ set(LINK_LIBS utility_cxx
   )
 
 if(CAIRO_FOUND)
+  message(STATUS "CAIRO found")
   set(INCLUDE_DIRS ${INCLUDE_DIRS} ${CAIRO_INCLUDE_DIRS})
   set(LINK_LIBS ${LINK_LIBS} ${CAIRO_LIBRARIES})
   set(DRAWPLACE 1)

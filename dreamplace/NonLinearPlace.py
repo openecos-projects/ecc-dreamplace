@@ -21,12 +21,13 @@ if sys.version_info[0] < 3:
     import cPickle as pickle
 else:
     import _pickle as pickle
-import BasicPlace
-import PlaceObj
-import NesterovAcceleratedGradientOptimizer
-import EvalMetrics
+import dreamplace.BasicPlace as BasicPlace
+import dreamplace.PlaceObj as PlaceObj
+import dreamplace.NesterovAcceleratedGradientOptimizer as NesterovAcceleratedGradientOptimizer
+import dreamplace.EvalMetrics as EvalMetrics
 import pdb
 import dreamplace.ops.fence_region.fence_region as fence_region
+import math
 
 
 class NonLinearPlace(BasicPlace.BasicPlace):
@@ -573,35 +574,36 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 )
 
                             # quadratic penalty and entropy injection
-                            if (
-                                len(placedb.regions) == 0
-                                and iteration - last_perturb_iter > min_perturb_interval
-                                and check_plateau(overflow_list, window=15, threshold=0.001)
-                            ):
-                                if overflow_list[-1] > 0.9:  # stuck at high overflow
-                                    model.quad_penalty = True
-                                    model.density_factor *= 2
-                                    logging.info(
-                                        f"Stuck at early stage. Turn on quadratic penalty with double density factor to accelerate convergence"
-                                    )
-                                    # stuck at very high overflow
-                                    if overflow_list[-1] > 0.95:
-                                        noise_intensity = min(
-                                            max(40 + (120 - 40) *
-                                                (overflow_list[-1] - 0.95) * 10, 40), 90
-                                        )
-                                        entropy_injection(
-                                            self.pos[0],
-                                            placedb,
-                                            shrink_factor=0.996,
-                                            noise_intensity=noise_intensity,
-                                            mode="random",
-                                        )
-                                        logging.info(
-                                            f"Stuck at very early stage. Turn on entropy injection with noise intensity = {noise_intensity} to help convergence"
-                                        )
-                                    last_perturb_iter = iteration
-                                    perturb_counter += 1
+                            # This heuristics makes placement unstable
+                            # if (
+                            #     len(placedb.regions) == 0
+                            #     and iteration - last_perturb_iter > min_perturb_interval
+                            #     and check_plateau(overflow_list, window=15, threshold=0.001)
+                            # ):
+                            #     if overflow_list[-1] > 0.9:  # stuck at high overflow
+                            #         model.quad_penalty = True
+                            #         model.density_factor *= 2
+                            #         logging.info(
+                            #             f"Stuck at early stage. Turn on quadratic penalty with double density factor to accelerate convergence"
+                            #         )
+                            #         # stuck at very high overflow
+                            #         if overflow_list[-1] > 0.95:
+                            #             noise_intensity = min(
+                            #                 max(40 + (120 - 40) *
+                            #                     (overflow_list[-1] - 0.95) * 10, 40), 90
+                            #             )
+                            #             entropy_injection(
+                            #                 self.pos[0],
+                            #                 placedb,
+                            #                 shrink_factor=0.996,
+                            #                 noise_intensity=noise_intensity,
+                            #                 mode="random",
+                            #             )
+                            #             logging.info(
+                            #                 f"Stuck at very early stage. Turn on entropy injection with noise intensity = {noise_intensity} to help convergence"
+                            #             )
+                            #         last_perturb_iter = iteration
+                            #         perturb_counter += 1
 
                             iteration += 1
                             # stopping criteria
@@ -731,7 +733,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 param_group["lr"] *= global_place_params["learning_rate_decay"]
 
                 # in case of divergence, use the best metric
-                # last_metric = all_metrics[-1][-1][-1]
+                last_metric = all_metrics[-1][-1][-1]
                 # if (
                 #     last_metric.overflow[-1] > max(params.stop_overflow, best_metric[0].overflow[-1])
                 #     and last_metric.hpwl > best_metric[0].hpwl
@@ -757,7 +759,14 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             self.pos[0][: placedb.num_movable_nodes][movable_macro_mask] += params.macro_halo_x
                             self.pos[0][placedb.num_nodes: placedb.num_nodes +
                                         placedb.num_movable_nodes][movable_macro_mask] += params.macro_halo_y
-
+                            params.macro_halo_x = 0
+                            params.macro_halo_y = 0
+                    if last_metric and (
+                        last_metric.overflow[-1] > params.stop_overflow
+                        or torch.isinf(last_metric.objective)
+                        or torch.isnan(last_metric.objective)
+                    ):
+                        break
                     if params.plot_flag:
                         self.plot(params, placedb, iteration,
                                   self.pos[0].data.clone().cpu().numpy())
@@ -807,18 +816,142 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             cur_metric.evaluate(
                 placedb, {"hpwl": self.op_collections.hpwl_op}, self.pos[0])
             logging.info(cur_metric)
-
+        if params.plot_flag:
+            self.plot(params, placedb, 9999, self.pos[0].data.clone().cpu().numpy())
+        
         # dump global placement solution for legalization
         if params.dump_global_place_solution_flag:
             self.dump(params, placedb, self.pos[0].cpu(
             ), "%s.lg.pklz" % (params.design_name()))
-
+        
+        # process metrics
+        flatten = lambda l: sum(map(flatten, l), []) if isinstance(l, list) else [l]
+        metrics = flatten(all_metrics)
+        objectives = [metric.objective.data.item() for metric in metrics]
+        hpwls = [metric.hpwl.data.item() for metric in metrics]
+        overflows = [metric.overflow.data.item() for metric in metrics]
+        densities = [metric.max_density.data.item() for metric in metrics]
+        processed_metrics = {
+            "objective": objectives,
+            "hpwl": hpwls,
+            "overflow": overflows,
+            "density": densities,
+        }
+        
         # plot placement
         if params.plot_flag:
             self.plot(params, placedb, iteration,
                       self.pos[0].data.clone().cpu().numpy())
+        
+        last_metric = copy.deepcopy(all_metrics)
+        for idx in [-1, -1, -1]:
+            try:
+                last_metric = last_metric[idx]
+            except IndexError:
+                last_metric = False
+                break
 
+        if not last_metric:
+            cur_metric = EvalMetrics.EvalMetrics(iteration)
+            all_metrics.append(cur_metric)
+            cur_metric.evaluate(
+                placedb, {"hpwl": self.op_collections.hpwl_op}, self.pos[0]
+            )
+            logging.info(cur_metric)
+
+        # in case of significant divergence, no need to run legalizer
+        if last_metric and (
+            last_metric.overflow[-1] > params.stop_overflow
+            or torch.isinf(last_metric.objective)
+            or torch.isnan(last_metric.objective)
+        ):
+            logging.warn(
+                "overflow is significant %.3f or hpwl is infinity or nan, skip legalization and detail placement steps"
+                % (last_metric.overflow[-1])
+            )
+            self.plot(params, placedb, 9999, self.pos[0].data.clone().cpu().numpy())
+            return float("inf"), float("inf"), processed_metrics
+        
         # legalization
+        if params.legalize_flag:
+            if params.macro_place_flag:
+                tt = time.time()
+                self.pos[0].data.copy_(
+                    self.op_collections.macro_legalize_op(self.pos[0]))
+                logging.info("Macro legalization takes %.3f seconds" %
+                            (time.time() - tt))
+                cur_metric = EvalMetrics.EvalMetrics(iteration)
+                all_metrics.append(cur_metric)
+                cur_metric.evaluate(
+                    placedb, {"hpwl": self.op_collections.hpwl_op}, self.pos[0])
+                logging.info(cur_metric)
+                iteration += 1
+
+        # recover node sizes, pins shifts, and positions of macros
+        if params.macro_halo_x >= 0 and params.macro_halo_y >= 0 :
+            with torch.no_grad():
+                # node sizes
+                self.data_collections.node_size_x[placedb.movable_macro_idx] -= (
+                    2 * params.macro_halo_x
+                )
+                self.data_collections.node_size_y[placedb.movable_macro_idx] -= (
+                    2 * params.macro_halo_y
+                )
+                # self.data_collections.node_size_x[placedb.fixed_macro_idx] -= (
+                #     2 * params.macro_halo_x
+                # )
+                # self.data_collections.node_size_y[placedb.fixed_macro_idx] -= (
+                #     2 * params.macro_halo_y
+                # )
+
+                # pin offsets
+                self.data_collections.pin_offset_x[
+                    placedb.movable_macro_pins
+                ] -= params.macro_halo_x
+                self.data_collections.pin_offset_y[
+                    placedb.movable_macro_pins
+                ] -= params.macro_halo_y
+                
+                self.pos[0][placedb.movable_slice][
+                    placedb.movable_macro_mask
+                ] += params.macro_halo_x
+                self.pos[0][
+                    placedb.num_nodes : placedb.num_nodes + placedb.num_movable_nodes
+                ][placedb.movable_macro_mask] += params.macro_halo_y
+                
+                self.pos[0][placedb.fixed_slice][
+                    placedb.fixed_macro_mask
+                ] += params.macro_halo_x
+                self.pos[0][
+                    placedb.num_nodes
+                    + placedb.num_movable_nodes : placedb.num_nodes
+                    + placedb.num_movable_nodes
+                    + placedb.num_terminals
+                ][placedb.fixed_macro_mask] += params.macro_halo_y
+                
+                # self.data_collections.pin_offset_x[
+                #     placedb.fixed_macro_pins
+                # ] -= params.macro_halo_x
+                # self.data_collections.pin_offset_y[
+                #     placedb.fixed_macro_pins
+                # ] -= params.macro_halo_y
+        if params.macro_pin_halo_x >= 0:
+            with torch.no_grad():
+                self.data_collections.node_size_x[placedb.movable_macro_idx] -= torch.tensor(placedb.is_pin_lower_x * params.macro_pin_halo_x + placedb.is_pin_upper_x * params.macro_pin_halo_x, device=self.pos[0].device)
+                self.data_collections.node_size_y[placedb.movable_macro_idx] -= torch.tensor(placedb.is_pin_lower_y * params.macro_pin_halo_y + placedb.is_pin_upper_y * params.macro_pin_halo_y, device=self.pos[0].device)
+
+                self.data_collections.pin_offset_x[placedb.movable_macro_pins] -= torch.tensor(placedb.is_pin_lower_x[placedb.pin2node_map[placedb.movable_macro_pins]] * params.macro_pin_halo_x, device=self.pos[0].device) 
+                self.data_collections.pin_offset_y[placedb.movable_macro_pins] -= torch.tensor(placedb.is_pin_lower_y[placedb.pin2node_map[placedb.movable_macro_pins]] * params.macro_pin_halo_y, device=self.pos[0].device)
+                # macro locations
+              
+                self.pos[0][placedb.movable_slice][
+                    placedb.movable_macro_mask
+                ] += torch.tensor(placedb.is_pin_lower_x * params.macro_pin_halo_x, device=self.pos[0].device)
+                
+                self.pos[0][
+                    placedb.num_nodes : placedb.num_nodes + placedb.num_movable_nodes
+                ][placedb.movable_macro_mask] += torch.tensor(placedb.is_pin_lower_y * params.macro_pin_halo_y, device=self.pos[0].device)
+
         if params.legalize_flag:
             tt = time.time()
             self.pos[0].data.copy_(
@@ -851,6 +984,34 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
             logging.info(cur_metric)
             iteration += 1
+        
+        # rescale everything
+        cur_scale_factor = self.data_collections.fp_info.scale_factor
+        gcd_site_scale_factor = 1 / math.gcd(
+            placedb.origin_site_width, placedb.origin_row_height
+        )
+        if cur_scale_factor != gcd_site_scale_factor:
+            logging.warn(
+                f"Rescaling by GCD(site_width, row_height) = {gcd_site_scale_factor} before legalization and detailed placement"
+            )
+            params.scale_factor = gcd_site_scale_factor
+            rescale_factor = gcd_site_scale_factor / cur_scale_factor
+            with torch.no_grad():
+                self.pos[0].mul_(rescale_factor).round_()
+                self.data_collections.node_size_x.mul_(rescale_factor).round_()
+                self.data_collections.node_size_y.mul_(rescale_factor).round_()
+                self.data_collections.flat_region_boxes.mul_(rescale_factor).round_()
+                self.data_collections.pin_offset_x.mul_(rescale_factor)
+                self.data_collections.pin_offset_y.mul_(rescale_factor)
+                # self.data_collections.node_areas.mul_(rescale_factor * rescale_factor)
+                self.data_collections.fp_info.scale(rescale_factor)
+                self.data_collections.fp_info.scale_factor = gcd_site_scale_factor
+                params.macro_halo_x *= rescale_factor
+                params.macro_halo_y *= rescale_factor
+                params.macro_pin_halo_x*=rescale_factor
+                params.macro_pin_halo_y*=rescale_factor
+                # TODO: rescale fence regions
+
 
         # plot placement
         if params.plot_flag:
@@ -934,4 +1095,85 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         # plot placement
         if params.plot_flag:
             self.plot(params, placedb, iteration, cur_pos)
-        return all_metrics
+        
+        # apply macro orientations solution
+        if False:
+            orients_map = {
+                "N": 0,
+                "S": 1,
+                "W": 2,
+                "E": 3,
+                "FN": 4,
+                "FS": 5,
+                "FW": 6,
+                "FE": 7,
+                "UNKNOWN": 8,
+            }
+            for macro, orient in macro_orients:
+                placedb.rawdb.setNodeOrient(
+                    int(macro), place_io_cpp.OrientEnum.OrientType(orients_map[orient])
+                )
+
+        # update pin offsets of std cells
+        # assume rows are FS = 0, N = 1, FS, ...
+        # cur_orient = torch.from_numpy(
+        #     np.where(placedb.node_orient == b"N", 1, 0)[: placedb.num_movable_nodes]
+        # ).to(self.pos[0].device)
+        # new_orient = (
+        #     torch.div(
+        #         self.pos[0][
+        #             placedb.num_nodes : placedb.num_nodes + placedb.num_movable_nodes
+        #         ],
+        #         self.data_collections.fp_info.row_height,
+        #         rounding_mode="floor",
+        #     )
+        #     % 2
+        # )
+        # flips = (
+        #     (cur_orient != new_orient) & ~self.data_collections.movable_macro_mask
+        # ).nonzero().view(-1)
+        # self.data_collections.pin_offset_y[flips] = (
+        #     self.data_collections.fp_info.row_height
+        #     - self.data_collections.pin_offset_y[flips]
+        # )
+
+        # reset net weights
+        self.data_collections.net_weights.fill_(1.0)
+
+        # run RSMT
+        with torch.no_grad():
+            tt = time.time()
+            # FIXME:
+            rsmt_wl = self.op_collections.rsmt_wl_op(self.pos[0])
+            logging.info("rsmt computation takes %.3f seconds" % (time.time() - tt))
+            logging.info("flute rsmt %.6E" % rsmt_wl)
+
+        # get HPWL
+        with torch.no_grad():
+            hpwl = self.op_collections.hpwl_op(self.pos[0])
+            logging.info("unweighted hpwl %.6E" % hpwl)
+
+        # save nets degree, RSMT, HPWL
+        # with torch.no_grad():
+        #     degrees = torch.from_numpy(np.ediff1d(placedb.flat_net2pin_start_map))
+        #     mask = torch.logical_and(2 <= degrees, degrees < params.ignore_net_degree)
+        #     degrees = degrees[mask].long()
+        #     steiners = self.op_collections.rsmt_wl_op(self.pos[0], False)[mask]
+        #     wirelengths = (
+        #         self.op_collections.hpwl_op(self.pos[0], False)
+        #         .cpu()
+        #         .detach()[mask]
+        #     )
+        #     weights = steiners / wirelengths
+        #     # get new RISA weights
+        #     degrees, indices = torch.sort(degrees)
+        #     weights = weights[indices]
+        #     c = torch.stack((degrees, weights))
+        #     idxs, vals = torch.unique(c[0, :], return_counts=True)
+        #     vs = torch.split_with_sizes(c[1, :], tuple(vals))
+        #     weights_dict = {int(k.item()): float(v.mean()) for k, v in zip(idxs, vs)}
+        #     path = "%s/%s" % (params.result_dir, params.design_name())
+        #     with open("%s/risa_weights.pkl" % path, "wb") as f:
+        #         pickle.dump(weights_dict, f)
+
+        return float(rsmt_wl), float(hpwl), processed_metrics

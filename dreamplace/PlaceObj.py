@@ -124,7 +124,10 @@ class PreconditionOp:
             grad[0: self.placedb.num_nodes].div_(precond)
             grad[self.placedb.num_nodes: self.placedb.num_nodes *
                  2].div_(precond)
-
+            grad = grad.view(2, -1)
+            grad[0, self.placedb.num_movable_nodes:self.placedb.num_nodes] = 0
+            grad[1, self.placedb.num_movable_nodes:self.placedb.num_nodes] = 0
+            grad = grad.view(-1)
             # stop gradients for terminated electric field
             if update_mask is not None:
                 grad = grad.view(2, -1)

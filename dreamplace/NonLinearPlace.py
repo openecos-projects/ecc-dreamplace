@@ -64,26 +64,27 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             # macro place use external 1 stage to place macros
             if params.macro_place_flag:
                 first_place_params = global_place_stages[0]
-                global_place_stages.insert(0, first_place_params)
+                if params.two_stage_flag:
+                    global_place_stages.insert(0, first_place_params)
                 macro_placed = False
 
                 # add macro halo
-                if params.macro_halo_x > 0 or params.macro_halo_y > 0:
-                    with torch.no_grad():
-                        movable_macro_mask = self.data_collections.movable_macro_mask
-                        movable_macro_pins = self.data_collections.movable_macro_pins
-                        # node sizes
-                        self.data_collections.node_size_x[: placedb.num_movable_nodes][movable_macro_mask] += (
-                            2 * params.macro_halo_x)
-                        self.data_collections.node_size_y[: placedb.num_movable_nodes][movable_macro_mask] += (
-                            2 * params.macro_halo_y)
-                        # pin offsets
-                        self.data_collections.pin_offset_x[movable_macro_pins] += params.macro_halo_x
-                        self.data_collections.pin_offset_y[movable_macro_pins] += params.macro_halo_y
-                        # macro locations
-                        self.pos[0][: placedb.num_movable_nodes][movable_macro_mask] -= params.macro_halo_x
-                        self.pos[0][placedb.num_nodes: placedb.num_nodes +
-                                    placedb.num_movable_nodes][movable_macro_mask] -= params.macro_halo_y
+                # if params.macro_halo_x > 0 or params.macro_halo_y > 0:
+                #     with torch.no_grad():
+                #         movable_macro_mask = self.data_collections.movable_macro_mask
+                #         movable_macro_pins = self.data_collections.movable_macro_pins
+                #         # node sizes
+                #         self.data_collections.node_size_x[: placedb.num_movable_nodes][movable_macro_mask] += (
+                #             2 * params.macro_halo_x)
+                #         self.data_collections.node_size_y[: placedb.num_movable_nodes][movable_macro_mask] += (
+                #             2 * params.macro_halo_y)
+                #         # pin offsets
+                #         self.data_collections.pin_offset_x[movable_macro_pins] += params.macro_halo_x
+                #         self.data_collections.pin_offset_y[movable_macro_pins] += params.macro_halo_y
+                #         # macro locations
+                #         self.pos[0][: placedb.num_movable_nodes][movable_macro_mask] -= params.macro_halo_x
+                #         self.pos[0][placedb.num_nodes: placedb.num_nodes +
+                #                     placedb.num_movable_nodes][movable_macro_mask] -= params.macro_halo_y
 
             # global placement may run in multiple stages according to user specification
             for cur_stage, global_place_params in enumerate(global_place_stages):
@@ -761,12 +762,32 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                         placedb.num_movable_nodes][movable_macro_mask] += params.macro_halo_y
                             params.macro_halo_x = 0
                             params.macro_halo_y = 0
+                    if params.macro_pin_halo_x >= 0:
+                        with torch.no_grad():
+                            self.data_collections.node_size_x[placedb.movable_macro_idx] -= torch.tensor(placedb.is_pin_lower_x * params.macro_pin_halo_x + placedb.is_pin_upper_x * params.macro_pin_halo_x, device=self.pos[0].device)
+                            self.data_collections.node_size_y[placedb.movable_macro_idx] -= torch.tensor(placedb.is_pin_lower_y * params.macro_pin_halo_y + placedb.is_pin_upper_y * params.macro_pin_halo_y, device=self.pos[0].device)
+
+                            self.data_collections.pin_offset_x[placedb.movable_macro_pins] -= torch.tensor(placedb.is_pin_lower_x[placedb.pin2node_map[placedb.movable_macro_pins]] * params.macro_pin_halo_x, device=self.pos[0].device) 
+                            self.data_collections.pin_offset_y[placedb.movable_macro_pins] -= torch.tensor(placedb.is_pin_lower_y[placedb.pin2node_map[placedb.movable_macro_pins]] * params.macro_pin_halo_y, device=self.pos[0].device)
+                            # macro locations
+                        
+                            self.pos[0][placedb.movable_slice][
+                                placedb.movable_macro_mask
+                            ] += torch.tensor(placedb.is_pin_lower_x * params.macro_pin_halo_x, device=self.pos[0].device)
+                            
+                            self.pos[0][
+                                placedb.num_nodes : placedb.num_nodes + placedb.num_movable_nodes
+                            ][placedb.movable_macro_mask] += torch.tensor(placedb.is_pin_lower_y * params.macro_pin_halo_y, device=self.pos[0].device)
+                            params.macro_pin_halo_x = 0
+                            params.macro_pin_halo_y = 0
+
                     if last_metric and (
                         last_metric.overflow[-1] > params.stop_overflow
                         or torch.isinf(last_metric.objective)
                         or torch.isnan(last_metric.objective)
                     ):
                         break
+                    
                     if params.plot_flag:
                         self.plot(params, placedb, iteration,
                                   self.pos[0].data.clone().cpu().numpy())
@@ -872,21 +893,6 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             self.plot(params, placedb, 9999, self.pos[0].data.clone().cpu().numpy())
             return float("inf"), float("inf"), processed_metrics
         
-        # legalization
-        if params.legalize_flag:
-            if params.macro_place_flag:
-                tt = time.time()
-                self.pos[0].data.copy_(
-                    self.op_collections.macro_legalize_op(self.pos[0]))
-                logging.info("Macro legalization takes %.3f seconds" %
-                            (time.time() - tt))
-                cur_metric = EvalMetrics.EvalMetrics(iteration)
-                all_metrics.append(cur_metric)
-                cur_metric.evaluate(
-                    placedb, {"hpwl": self.op_collections.hpwl_op}, self.pos[0])
-                logging.info(cur_metric)
-                iteration += 1
-
         # recover node sizes, pins shifts, and positions of macros
         if params.macro_halo_x >= 0 and params.macro_halo_y >= 0 :
             with torch.no_grad():
@@ -951,6 +957,22 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 self.pos[0][
                     placedb.num_nodes : placedb.num_nodes + placedb.num_movable_nodes
                 ][placedb.movable_macro_mask] += torch.tensor(placedb.is_pin_lower_y * params.macro_pin_halo_y, device=self.pos[0].device)
+                params.macro_pin_halo_x = 0
+                params.macro_pin_halo_y = 0
+                # legalization
+        if params.legalize_flag:
+            if params.macro_place_flag:
+                tt = time.time()
+                self.pos[0].data.copy_(
+                    self.op_collections.macro_legalize_op(self.pos[0]))
+                logging.info("Macro legalization takes %.3f seconds" %
+                            (time.time() - tt))
+                cur_metric = EvalMetrics.EvalMetrics(iteration)
+                all_metrics.append(cur_metric)
+                cur_metric.evaluate(
+                    placedb, {"hpwl": self.op_collections.hpwl_op}, self.pos[0])
+                logging.info(cur_metric)
+                iteration += 1
 
         if params.legalize_flag:
             tt = time.time()

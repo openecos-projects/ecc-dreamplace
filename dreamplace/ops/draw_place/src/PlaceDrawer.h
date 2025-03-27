@@ -1,18 +1,18 @@
 /*
-* Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-* http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*/
+ * Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 /**
  * @file   PlaceDrawer.h
@@ -47,17 +47,16 @@ typedef struct _cairo_surface cairo_surface_t;
 DREAMPLACE_BEGIN_NAMESPACE
 
 /// PlaceDrawer write files in various formats
-template <typename T, typename I>
-class PlaceDrawer {
- public:
+template <typename T, typename I> class PlaceDrawer {
+public:
   typedef T coordinate_type;
   typedef I index_type;
 
   enum FileFormat {
-    EPS = 0,  // handle by cairo
-    PDF = 1,  // handle by cairo
-    SVG = 2,  // handle by cairo
-    PNG = 3,  // handle by cairo
+    EPS = 0, // handle by cairo
+    PDF = 1, // handle by cairo
+    SVG = 2, // handle by cairo
+    PNG = 3, // handle by cairo
     GDSII = 4
   };
   enum DrawContent {
@@ -71,10 +70,10 @@ class PlaceDrawer {
   };
   /// constructor
   PlaceDrawer(
-      const coordinate_type* x, const coordinate_type* y,
-      const coordinate_type* node_size_x, const coordinate_type* node_size_y,
-      const coordinate_type* pin_offset_x, const coordinate_type* pin_offset_y,
-      const index_type* pin2node_map, const index_type num_nodes,
+      const coordinate_type *x, const coordinate_type *y,
+      const coordinate_type *node_size_x, const coordinate_type *node_size_y,
+      const coordinate_type *pin_offset_x, const coordinate_type *pin_offset_y,
+      const index_type *pin2node_map, const index_type num_nodes,
       const index_type num_movable_nodes, const index_type num_filler_nodes,
       const index_type num_pins, const coordinate_type xl,
       const coordinate_type yl, const coordinate_type xh,
@@ -82,29 +81,17 @@ class PlaceDrawer {
       const coordinate_type row_height, const coordinate_type bin_size_x,
       const coordinate_type bin_size_y, bool show_fillers = true,
       int content = ALL_PHYS)
-      : m_x(x),
-        m_y(y),
-        m_node_size_x(node_size_x),
-        m_node_size_y(node_size_y),
-        m_pin_offset_x(pin_offset_x),
-        m_pin_offset_y(pin_offset_y),
-        m_pin2node_map(pin2node_map),
-        m_num_nodes(num_nodes),
+      : m_x(x), m_y(y), m_node_size_x(node_size_x), m_node_size_y(node_size_y),
+        m_pin_offset_x(pin_offset_x), m_pin_offset_y(pin_offset_y),
+        m_pin2node_map(pin2node_map), m_num_nodes(num_nodes),
         m_num_movable_nodes(num_movable_nodes),
-        m_num_filler_nodes(num_filler_nodes),
-        m_num_pins(num_pins),
-        m_xl(xl),
-        m_yl(yl),
-        m_xh(xh),
-        m_yh(yh),
-        m_site_width(site_width),
-        m_row_height(row_height),
-        m_bin_size_x(bin_size_x),
-        m_bin_size_y(bin_size_y),
-        m_show_fillers(show_fillers),
+        m_num_filler_nodes(num_filler_nodes), m_num_pins(num_pins), m_xl(xl),
+        m_yl(yl), m_xh(xh), m_yh(yh), m_site_width(site_width),
+        m_row_height(row_height), m_bin_size_x(bin_size_x),
+        m_bin_size_y(bin_size_y), m_show_fillers(show_fillers),
         m_content(content) {}
 
-  bool run(std::string const& filename, FileFormat ff) const {
+  bool run(std::string const &filename, FileFormat ff) const {
     dreamplacePrint(kINFO, "writing placement to %s\n", filename.c_str());
     bool flag = false;
 
@@ -119,19 +106,18 @@ class PlaceDrawer {
     }
 
     switch (ff) {
-      case EPS:
-      case PDF:
-      case SVG:
-      case PNG:
-        flag = writeFig(filename.c_str(), width, height, ff);
-        break;
-      case GDSII:
-        flag = writeGdsii(filename);
-        break;
-      default:
-        dreamplacePrint(kERROR, "unknown writing format at line %u\n",
-                        __LINE__);
-        break;
+    case EPS:
+    case PDF:
+    case SVG:
+    case PNG:
+      flag = writeFig(filename.c_str(), width, height, ff);
+      break;
+    case GDSII:
+      flag = writeGdsii(filename);
+      break;
+    default:
+      dreamplacePrint(kERROR, "unknown writing format at line %u\n", __LINE__);
+      break;
     }
 
     return flag;
@@ -139,7 +125,7 @@ class PlaceDrawer {
 
   /// \param first and last mark nodes whose nets will be drawn
   template <typename Iterator>
-  bool run(std::string const& filename, FileFormat ff, Iterator first,
+  bool run(std::string const &filename, FileFormat ff, Iterator first,
            Iterator last) {
     m_sMarkNode.insert(first, last);
     bool flag = run(filename, ff);
@@ -147,25 +133,25 @@ class PlaceDrawer {
     return flag;
   }
 
- protected:
+protected:
   /// write formats supported by cairo
   /// \param width of screen
   /// \param height of screen
-  void paintCairo(cairo_surface_t* cs, double width, double height) const {
+  void paintCairo(cairo_surface_t *cs, double width, double height) const {
 #if DRAWPLACE == 1
     double expand = 1.3;
     double ratio[2] = {width / (expand * (m_xh - m_xl)),
                        height / (expand * (m_yh - m_yl))};
     char buf[16];
-    cairo_t* c;
+    cairo_t *c;
     cairo_text_extents_t extents;
 
     c = cairo_create(cs);
-    cairo_save(c);  // save status
-    cairo_translate(
-        c, (m_xl + (expand - 1) / 2 * (m_xh - m_xl)) * ratio[0],
-        height - (m_yl + (expand - 1) / 2 * (m_yh - m_yl)) * ratio[1]);
-    cairo_scale(c, ratio[0], -ratio[1]);  // scale is additive
+    cairo_save(c); // save status
+    cairo_translate(c, (m_xl + (expand - 1) / 2 * (m_xh - m_xl)) * ratio[0],
+                    height -
+                        (m_yl + (expand - 1) / 2 * (m_yh - m_yl)) * ratio[1]);
+    cairo_scale(c, ratio[0], -ratio[1]); // scale is additive
 
     // exterior
     cairo_rectangle(c, -(expand - 1) / 2 * (m_xh - m_xl),
@@ -175,11 +161,11 @@ class PlaceDrawer {
     cairo_fill(c);
     // background
     cairo_rectangle(c, m_xl, m_yl, (m_xh - m_xl), (m_yh - m_yl));
-    cairo_set_source_rgb(c, 75 / 255.0, 75 / 255.0, 75 / 255.0);
+    cairo_set_source_rgb(c, 1, 1, 1);
     cairo_fill(c);
     cairo_rectangle(c, m_xl, m_yl, (m_xh - m_xl), (m_yh - m_yl));
     cairo_set_line_width(c, 2 * m_row_height);
-    cairo_set_source_rgb(c, 120 / 255.0, 120 / 255.0, 120 / 255.0);
+    cairo_set_source_rgb(c, 1, 1, 1);
     cairo_stroke(c);
 
     // bins
@@ -205,7 +191,8 @@ class PlaceDrawer {
       for (int i = m_num_movable_nodes; i < m_num_nodes - m_num_filler_nodes;
            ++i) {
         // for IO terminals - upsize for visibility
-        // printf("cell id %d, coordinate (%f, %f, %f, %f)\n", i, m_x[i], m_y[i],
+        // printf("cell id %d, coordinate (%f, %f, %f, %f)\n", i, m_x[i],
+        // m_y[i],
         //        m_node_size_x[i], m_node_size_y[i]);
         if (m_node_size_x[i] == 0 && m_node_size_y[i] == 0) {
           coordinate_type x = m_x[i];
@@ -253,14 +240,16 @@ class PlaceDrawer {
       }
       // filler
       if (m_show_fillers) {
+        printf("Show filler run !!!!! m_num_filler_nodes %d\n",
+               m_num_filler_nodes);
         for (int i = m_num_nodes - m_num_filler_nodes; i < m_num_nodes; ++i) {
           cairo_rectangle(c, m_x[i], m_y[i], m_node_size_x[i],
                           m_node_size_y[i]);
-          cairo_set_source_rgba(c, 115 / 255.0, 115 / 255.0, 125 / 255.0, 0.5);
+          cairo_set_source_rgba(c, 180 / 255.0, 115 / 255.0, 125 / 255.0, 0.5);
           cairo_fill(c);
           cairo_rectangle(c, m_x[i], m_y[i], m_node_size_x[i],
                           m_node_size_y[i]);
-          cairo_set_source_rgba(c, 100 / 255.0, 100 / 255.0, 100 / 255.0, 0.8);
+          cairo_set_source_rgba(c, 180 / 255.0, 100 / 255.0, 100 / 255.0, 0.8);
           cairo_stroke(c);
           if (m_content & NODETEXT) {
             sprintf(buf, "%u", i);
@@ -323,34 +312,35 @@ class PlaceDrawer {
                     cs, width, height);
 #endif
   }
-  bool writeFig(const char* fname, double width, double height,
+  bool writeFig(const char *fname, double width, double height,
                 FileFormat ff) const {
 #if DRAWPLACE == 1
-    cairo_surface_t* cs;
+    cairo_surface_t *cs;
 
     switch (ff) {
-      case PNG:
-        cs = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
-        break;
-      case PDF:
-        cs = cairo_pdf_surface_create(fname, width, height);
-        break;
-      case EPS:
-        cs = cairo_ps_surface_create(fname, width, height);
-        break;
-      case SVG:
-        cs = cairo_svg_surface_create(fname, width, height);
-        break;
-      default:
-        dreamplacePrint(kERROR, "unknown file format in %s\n", __func__);
-        return false;
+    case PNG:
+      cs = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+      break;
+    case PDF:
+      cs = cairo_pdf_surface_create(fname, width, height);
+      break;
+    case EPS:
+      cs = cairo_ps_surface_create(fname, width, height);
+      break;
+    case SVG:
+      cs = cairo_svg_surface_create(fname, width, height);
+      break;
+    default:
+      dreamplacePrint(kERROR, "unknown file format in %s\n", __func__);
+      return false;
     }
 
     paintCairo(cs, width, height);
 
     cairo_surface_flush(cs);
     // need additional writing call for PNG
-    if (ff == PNG) cairo_surface_write_to_png(cs, fname);
+    if (ff == PNG)
+      cairo_surface_write_to_png(cs, fname);
     cairo_surface_destroy(cs);
     return true;
 #else
@@ -369,7 +359,7 @@ class PlaceDrawer {
   }
 
   /// write gdsii format
-  virtual bool writeGdsii(std::string const& filename) const {
+  virtual bool writeGdsii(std::string const &filename) const {
     double scale_rato = 1000;
     GdsParser::GdsWriter gw(filename.c_str());
     gw.create_lib("TOP", 0.001, 1e-6 / scale_rato);
@@ -385,7 +375,7 @@ class PlaceDrawer {
     return true;
   }
   /// write contents to GDSII
-  virtual void writeGdsiiContent(GdsParser::GdsWriter& gw,
+  virtual void writeGdsiiContent(GdsParser::GdsWriter &gw,
                                  double scale_rato) const {
     // layer specification
     // it is better to use even layers, because text appears on odd layers
@@ -402,7 +392,7 @@ class PlaceDrawer {
     const unsigned pinLayer = getLayer(false);
     const unsigned multiRowCellBboxLayer = getLayer(false);
     const unsigned movePathLayer = getLayer(false);
-    const unsigned markedNodeLayer = getLayer(false);  // together with netLayer
+    const unsigned markedNodeLayer = getLayer(false); // together with netLayer
     const unsigned netLayer = getLayer(false);
 
     dreamplacePrint(
@@ -445,19 +435,19 @@ class PlaceDrawer {
       coordinate_type node_xh = node_xl + m_node_size_x[i];
       coordinate_type node_yh = node_yl + m_node_size_y[i];
       unsigned layer;
-      if (i < m_num_movable_nodes)  // movable cell
+      if (i < m_num_movable_nodes) // movable cell
       {
         layer = movableCellBboxLayer;
-      } else if (i >= m_num_nodes - m_num_filler_nodes)  // filler cell
+      } else if (i >= m_num_nodes - m_num_filler_nodes) // filler cell
       {
         layer = fillerCellBboxLayer;
-      } else  // fixed cells
+      } else // fixed cells
       {
         layer = fixedCellBboxLayer;
       }
 
       if (layer == fixedCellBboxLayer ||
-          m_sMarkNode.empty())  // do not write cells if there are marked cells
+          m_sMarkNode.empty()) // do not write cells if there are marked cells
       {
         gw.write_box(layer, 0, node_xl * scale_rato, node_yl * scale_rato,
                      node_xh * scale_rato, node_yh * scale_rato);
@@ -466,7 +456,7 @@ class PlaceDrawer {
                            (node_yl + node_yh) / 2 * scale_rato, layer + 1, 5);
 
         if (i < m_num_movable_nodes &&
-            m_node_size_y[i] > m_row_height)  // multi-row cell
+            m_node_size_y[i] > m_row_height) // multi-row cell
         {
           gw.write_box(multiRowCellBboxLayer, 0, node_xl * scale_rato,
                        node_yl * scale_rato, node_xh * scale_rato,
@@ -476,7 +466,7 @@ class PlaceDrawer {
                              multiRowCellBboxLayer + 1, 5);
         }
       }
-      if (m_sMarkNode.count(i))  // highlight marked nodes
+      if (m_sMarkNode.count(i)) // highlight marked nodes
       {
         gw.write_box(markedNodeLayer, 0, node_xl * scale_rato,
                      node_yl * scale_rato, node_xh * scale_rato,
@@ -506,7 +496,8 @@ class PlaceDrawer {
   /// \param reset controls whehter restart from 1
   unsigned getLayer(bool reset = false) const {
     static unsigned count = 0;
-    if (reset) count = 0;
+    if (reset)
+      count = 0;
     return (++count) << 1;
   }
   /// \param i node id
@@ -517,9 +508,9 @@ class PlaceDrawer {
   std::string getTextOnPin(index_type i) const { return "NA"; }
   /// \brief set pin bounding box
   /// \param i pin id
-  void getPinBbox(index_type i, double scale_rato, coordinate_type& xl,
-                  coordinate_type& yl, coordinate_type& xh,
-                  coordinate_type& yh) const {
+  void getPinBbox(index_type i, double scale_rato, coordinate_type &xl,
+                  coordinate_type &yl, coordinate_type &xh,
+                  coordinate_type &yh) const {
     index_type node_id = m_pin2node_map[i];
     coordinate_type x = m_x[node_id];
     coordinate_type y = m_y[node_id];
@@ -534,13 +525,13 @@ class PlaceDrawer {
     yh = y + offset_y + pin_size;
   }
 
-  const coordinate_type* m_x;
-  const coordinate_type* m_y;
-  const coordinate_type* m_node_size_x;
-  const coordinate_type* m_node_size_y;
-  const coordinate_type* m_pin_offset_x;
-  const coordinate_type* m_pin_offset_y;
-  const index_type* m_pin2node_map;
+  const coordinate_type *m_x;
+  const coordinate_type *m_y;
+  const coordinate_type *m_node_size_x;
+  const coordinate_type *m_node_size_y;
+  const coordinate_type *m_pin_offset_x;
+  const coordinate_type *m_pin_offset_y;
+  const index_type *m_pin2node_map;
   index_type m_num_nodes;
   index_type m_num_movable_nodes;
   index_type m_num_filler_nodes;
@@ -554,8 +545,8 @@ class PlaceDrawer {
   coordinate_type m_bin_size_x;
   coordinate_type m_bin_size_y;
   bool m_show_fillers;
-  std::set<index_type> m_sMarkNode;  ///< marked nodes whose net will be drawn
-  int m_content;                     ///< content for DrawContent
+  std::set<index_type> m_sMarkNode; ///< marked nodes whose net will be drawn
+  int m_content;                    ///< content for DrawContent
 };
 
 DREAMPLACE_END_NAMESPACE

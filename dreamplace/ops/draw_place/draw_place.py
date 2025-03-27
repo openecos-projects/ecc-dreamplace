@@ -48,7 +48,7 @@ class DrawPlaceFunction(Function):
         num_movable_nodes,
         num_filler_nodes,
         filename,
-        show_fillers=False,
+        show_fillers=True,
     ):
         ret = draw_place_cpp.forward(
             pos,

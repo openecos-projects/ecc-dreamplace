@@ -12,4 +12,4 @@
 	url = https://github.com/pybind/pybind11.git
 [submodule "thirdparty/OpenTimer"]
 	path = thirdparty/OpenTimer
-	url = https://github.com/enzoleo/OpenTimer.git
+	url = git@github.com:enzoleo/OpenTimer.git

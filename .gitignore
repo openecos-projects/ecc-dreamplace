@@ -11,7 +11,7 @@ dist
 dreamplace.egg-info
 install
 *.so
-thirdparty/flute
+# thirdparty/flute
 .DS_Store
 .vscode/*
 bin

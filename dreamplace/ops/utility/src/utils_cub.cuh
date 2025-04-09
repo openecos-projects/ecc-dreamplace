@@ -12,12 +12,12 @@
 #include "utility/src/namespace.h"
 
 // include cub in a safe manner
-#define CUB_NS_PREFIX namespace DREAMPLACE_NAMESPACE {
-#define CUB_NS_POSTFIX }
-#define CUB_NS_QUALIFIER DREAMPLACE_NAMESPACE::cub
+// #define CUB_NS_PREFIX namespace DREAMPLACE_NAMESPACE {
+// #define CUB_NS_POSTFIX }
+// #define CUB_NS_QUALIFIER DREAMPLACE_NAMESPACE::cub
 #include "cub/cub.cuh"
-#undef CUB_NS_QUALIFIER
-#undef CUB_NS_POSTFIX
-#undef CUB_NS_PREFIX
+// #undef CUB_NS_QUALIFIER
+// #undef CUB_NS_POSTFIX
+// #undef CUB_NS_PREFIX
 
 #endif

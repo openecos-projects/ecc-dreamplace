@@ -5,7 +5,7 @@
 # Activate new FindPython mode, specified in pybind11Config.cmake.in...
 # This one is recommended from CMake 3.12+.
 # It should try to find the Python associated with the environment variable.
-find_package(Python COMPONENTS Interpreter Development)
+# find_package(Python COMPONENTS Interpreter Development)
 add_subdirectory(thirdparty/pybind11)
 
 execute_process(COMMAND ${PYTHON_EXECUTABLE} -c 

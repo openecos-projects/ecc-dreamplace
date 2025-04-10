@@ -30,7 +30,7 @@
         0,
         0
     ],
-    "ignore_net_degree": 100,
+    "ignore_net_degree": 40,
     "gp_noise_ratio": 0.025,
     "enable_fillers": 1,
     "global_place_flag": 1,
@@ -93,5 +93,5 @@
     "macro_pin_halo_x": 20000,
     "macro_pin_halo_y": 20000,
     "with_sta": 0,
-    "base_design_name": "default"
+    "base_design_name": "tt_um_kianV_rv32ima_uLinux_SoC"
 }

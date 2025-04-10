@@ -576,35 +576,35 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
                             # quadratic penalty and entropy injection
                             # This heuristics makes placement unstable
-                            # if (
-                            #     len(placedb.regions) == 0
-                            #     and iteration - last_perturb_iter > min_perturb_interval
-                            #     and check_plateau(overflow_list, window=15, threshold=0.001)
-                            # ):
-                            #     if overflow_list[-1] > 0.9:  # stuck at high overflow
-                            #         model.quad_penalty = True
-                            #         model.density_factor *= 2
-                            #         logging.info(
-                            #             f"Stuck at early stage. Turn on quadratic penalty with double density factor to accelerate convergence"
-                            #         )
-                            #         # stuck at very high overflow
-                            #         if overflow_list[-1] > 0.95:
-                            #             noise_intensity = min(
-                            #                 max(40 + (120 - 40) *
-                            #                     (overflow_list[-1] - 0.95) * 10, 40), 90
-                            #             )
-                            #             entropy_injection(
-                            #                 self.pos[0],
-                            #                 placedb,
-                            #                 shrink_factor=0.996,
-                            #                 noise_intensity=noise_intensity,
-                            #                 mode="random",
-                            #             )
-                            #             logging.info(
-                            #                 f"Stuck at very early stage. Turn on entropy injection with noise intensity = {noise_intensity} to help convergence"
-                            #             )
-                            #         last_perturb_iter = iteration
-                            #         perturb_counter += 1
+                            if (
+                                len(placedb.regions) == 0
+                                and iteration - last_perturb_iter > min_perturb_interval
+                                and check_plateau(overflow_list, window=15, threshold=0.001)
+                            ):
+                                if overflow_list[-1] > 0.9:  # stuck at high overflow
+                                    model.quad_penalty = True
+                                    model.density_factor *= 2
+                                    logging.info(
+                                        f"Stuck at early stage. Turn on quadratic penalty with double density factor to accelerate convergence"
+                                    )
+                                    # stuck at very high overflow
+                                    if overflow_list[-1] > 0.95:
+                                        noise_intensity = min(
+                                            max(40 + (120 - 40) *
+                                                (overflow_list[-1] - 0.95) * 10, 40), 90
+                                        )
+                                        entropy_injection(
+                                            self.pos[0],
+                                            placedb,
+                                            shrink_factor=0.996,
+                                            noise_intensity=noise_intensity,
+                                            mode="random",
+                                        )
+                                        logging.info(
+                                            f"Stuck at very early stage. Turn on entropy injection with noise intensity = {noise_intensity} to help convergence"
+                                        )
+                                    last_perturb_iter = iteration
+                                    perturb_counter += 1
 
                             iteration += 1
                             # stopping criteria
@@ -1166,7 +1166,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         with torch.no_grad():
             tt = time.time()
             # FIXME:
-            rsmt_wl = self.op_collections.rsmt_wl_op(self.pos[0])
+            rsmt_wl = 0
             logging.info("rsmt computation takes %.3f seconds" % (time.time() - tt))
             logging.info("flute rsmt %.6E" % rsmt_wl)
 

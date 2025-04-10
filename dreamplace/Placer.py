@@ -46,7 +46,7 @@ if top_root_dir not in sys.path:
     sys.path.append(top_root_dir + "/third_party/aieda")
 import dreamplace.configure as configure
 import dreamplace.Params as Params
-from macro_placer.database.macroPlaceDB import MacroPlaceDB as PlaceDB
+from dreamplace.macroPlaceDB import MacroPlaceDB as PlaceDB
 import dreamplace.NonLinearPlace as NonLinearPlace
 from data_manager.aimp_dm import AimpDataManager
 from tools.iEDA.module.sta import IEDASta
@@ -417,7 +417,8 @@ if __name__ == "__main__":
     # exit()
     # init workspace
     # workspace_path = "/data/project_share/aimp_test/XSTop/workspace_XSTop"
-    workspace_path = "/home/zhaoxueyan/code/ai-mp/workspace_aimp/ariane133"
+    workspace_path = "/home/zhaoxueyan/code/benchmark/workspace_case/KIANV/workspace"
+    # workspace_path = "/home/zhaoxueyan/code/benchmark/workspace_case/retrosoc_asic_flatten/workspace"
     # init aimp
     data_manager = AimpDataManager(workspace_path)
     params = Params.Params()
@@ -429,11 +430,12 @@ if __name__ == "__main__":
     params.with_sta = False
     # init PlacementEngine
     # json_file = '/home/zhaoxueyan/code/ai-mp/workspace_aimp/workspace_NutShell/aimp/log/run-0_0_0/parameters.json'
-    json_file = '/home/zhaoxueyan/code/ai-mp/AutoDMP/dreamplace/parameters-85.json'
+    json_file = '/home/zhaoxueyan/code/ai-mp/AutoDMP/dreamplace/params2.json'
     # json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/test/XS_TOP_TSMC28_0208/mobohb_log/XS_TOP/run-1_0_0/parameters.json'
     # json_file = '/home/zhaoxueyan/code/ai-mp/workspace_aimp/workspace_NutShell/aimp/log/run-0_0_8/parameters.json'
     with open(json_file, 'r') as f:
         params.fromJson(json.load(f))
+    # params.base_design_name = data_manager.
     engine = PlacementEngine(params)
 
     engine.setup_rawdb(data_manager=data_manager)

@@ -49,6 +49,7 @@ import dreamplace.ops.nctugr_binary.nctugr_binary as nctugr_binary
 import dreamplace.ops.adjust_node_area.adjust_node_area as adjust_node_area
 import dreamplace.ops.macro_overlap.macro_overlap as macro_overlap
 import dreamplace.ops.macro_refinement.macro_refinement as macro_refinement
+from dreamplace.ops.timing_propagation.timing_propagation import TimingPropagation
 
 
 class PreconditionOp:
@@ -296,6 +297,10 @@ class PlaceObj(nn.Module):
             self.num_bins_y,
             name=name,
         )
+
+        self.op_collections.timing_propagation_op = self.build_timing_propagation_op()
+        self.op_collections.elmore_delay_op = self.build_elmore_delay_op()
+
         # build multiple density op for multi-electric field
         if len(self.placedb.regions) > 0:
             (
@@ -418,8 +423,52 @@ class PlaceObj(nn.Module):
             result = torch.add(
                 result, self.macro_overlap, alpha=self.macro_overlap_weight.item()
             )
-
+        if self.with_sta:
+            slack = self.timing_obj(pos)
+            result = torch.add(result, slack)
+            
         return result
+
+    def timing_obj(self, pos):
+        """
+        @brief Compute objective.
+            wirelength + density_weight * density penalty + macro_overlap_weight * macro overlap penalty
+        @param pos locations of cells
+        @return objective value
+        """
+
+        steiner_topo_res = self.op_collections.steiner_topo_op(
+            self.op_collections.pin_pos_op(pos))
+        # Index 0: Steiner X coords (1D Int32 Tensor)
+        newx = steiner_topo_res[0]
+        # Index 1: Steiner Y coords (1D Int32 Tensor)
+        newy = steiner_topo_res[1]
+        # Index 2: Pin mapping X (1D Int32 Tensor)
+        pin_relate_x = steiner_topo_res[2]
+        # Index 3: Pin mapping Y (1D Int32 Tensor)
+        pin_relate_y = steiner_topo_res[3]
+        # Index 4: Branch start nodes (1D Int32 Tensor)
+        branch_u = steiner_topo_res[4]
+        # Index 5: Branch end nodes (1D Int32 Tensor)
+        branch_v = steiner_topo_res[5]
+        # Index 6: Net branch starts (1D Int32 Tensor)
+        net_branch_start = steiner_topo_res[6]
+
+        # ELMORE DELAY
+        pin_net_delay, pin_net_impulse, pin_net_cap = self.op_collections.elmore_delay_op(
+            newx, newy, pin_relate_x, pin_relate_y,
+            branch_u,
+            branch_v,
+            net_branch_start
+        )
+        ##
+        wns, tns = self.op_collections.timing_propagation_op(
+            pin_net_delay, pin_net_impulse, pin_net_cap)
+
+        # Index 0: WNS (1D Float Tensor)
+
+        alpha = 0.2
+        return tns + alpha * wns
 
     def obj_and_grad_fn_old(self, pos_w, pos_g=None, admm_multiplier=None):
         """
@@ -675,6 +724,31 @@ class PlaceObj(nn.Module):
             # logging.debug("update gamma to %g" % (wirelength_for_pin_op.gamma.data))
 
         return build_wirelength_op, build_update_gamma_op
+
+    def build_elmore_delay_op(
+            self, params, placedb, data_collections):
+
+        return
+
+    def build_timing_propagation_op(
+            self, params, placedb, data_collections):
+
+        return TimingPropagation(
+            data_collections.inrdelays,
+            data_collections.infdelays,
+            data_collections.inrtrans,
+            data_collections.inftrans,
+            data_collections.outcaps,
+            data_collections.pin_net,
+            data_collections.cells_by_level,
+            data_collections.start_points,
+            data_collections.end_points,
+            data_collections.net_flat_arcs_start,
+            data_collections.net_flat_arcs,
+            data_collections.arcs_info,
+            data_collections.cell_flat_arcs_start,
+            data_collections.cell_flat_arcs,
+            data_collections.cells_by_reverse_level)
 
     def build_density_overflow(
         self, params, placedb, data_collections, num_bins_x, num_bins_y

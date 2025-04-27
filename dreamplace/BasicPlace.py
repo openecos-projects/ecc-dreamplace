@@ -47,7 +47,8 @@ import dreamplace.ops.global_swap.global_swap as global_swap
 import dreamplace.ops.k_reorder.k_reorder as k_reorder
 import dreamplace.ops.independent_set_matching.independent_set_matching as independent_set_matching
 import dreamplace.ops.pin_weight_sum.pin_weight_sum as pws
-import dreamplace.ops.timing.timing as timingimport 
+import dreamplace.ops.timing.timing as timingimport
+import dreamplace.ops.steiner_topo.steiner_topo as steiner_topo
 import pdb
 
 
@@ -127,7 +128,7 @@ class PlaceDataCollection(object):
                 device
             )
             self.movable_macro_pins = torch.tensor(
-                    placedb.movable_macro_pins, dtype=int, device=device)
+                placedb.movable_macro_pins, dtype=int, device=device)
             self.fixed_macro_mask = torch.from_numpy(placedb.fixed_macro_mask).to(
                 device
             )
@@ -278,6 +279,34 @@ class PlaceDataCollection(object):
                 placedb.bndry_padding_y,
             )
 
+            # diff timing opt
+            self.inrdelays = torch.from_numpy(
+                placedb.inrdelays
+            ).to(device)
+            self.infdelays = torch.from_numpy(placedb.infdelays).to(device)
+            self.inrtrans = torch.from_numpy(placedb.inrtrans).to(device)
+            self.inftrans = torch.from_numpy(placedb.inftrans).to(device)
+            self.outcaps = torch.from_numpy(placedb.outcaps).to(device)
+            self.pin_net = torch.from_numpy(placedb.pin_net).to(device)
+            
+            self.cells_by_level = torch.from_numpy(
+                placedb.cells_by_level).to(device)
+            self.start_points = torch.from_numpy(
+                placedb.start_points).to(device)
+            self.end_points = torch.from_numpy(placedb.end_points).to(device)
+            self.net_flat_arcs_start = torch.from_numpy(
+                placedb.net_flat_arcs_start).to(device)
+            self.net_flat_arcs = torch.from_numpy(
+                placedb.net_flat_arcs).to(device)
+            self.cell_flat_arcs_start = torch.from_numpy(
+                placedb.cell_flat_arcs_start).to(device)
+            self.cell_flat_arcs = torch.from_numpy(
+                placedb.cell_flat_arcs).to(device)
+            self.cells_by_reverse_level = torch.from_numpy(
+                placedb.cells_by_reverse_level).to(device)
+            
+            self.arcs_info = torch.from_numpy(placedb.arcs_info).to(device)
+
     def bin_center_x_padded(self, placedb, padding, num_bins_x):
         """
         @brief compute array of bin center horizontal coordinates with padding
@@ -358,6 +387,12 @@ class PlaceOpCollection(object):
         self.update_macro_overlap_weight_op = None
         self.macro_refinement_op = None
         self.pws_op = None
+
+        # diff timing obj
+        self.steiner_topo_op = None
+        self.elmore_delay_op = None
+        self.timing_propagation_op = None
+
 
 class BasicPlace(nn.Module):
     """
@@ -564,6 +599,10 @@ class BasicPlace(nn.Module):
         self.op_collections.pin_pos_op = self.build_pin_pos(
             params, placedb, self.data_collections, self.device
         )
+
+        self.op_collections.steiner_topo_op = self.build_steiner_topo(
+            params, placedb, self.data_collections, self.device)
+
         # bound nodes to layout region
         self.op_collections.move_boundary_op = self.build_move_boundary(
             params, placedb, self.data_collections, self.device
@@ -662,6 +701,20 @@ class BasicPlace(nn.Module):
             num_physical_nodes=placedb.num_physical_nodes,
             algorithm="node-by-node",
         )
+
+    def build_steiner_topo(self, params, placedb, data_collections, device):
+        """
+        @brief build the operator for Steiner tree topology construction
+        """
+        steiner_topo_for_pin_op = steiner_topo.SteinerTopo(
+            flat_net2pin_map=data_collections.flat_net2pin_map.to(
+                device).cpu(),
+            flat_net2pin_start_map=data_collections.flat_net2pin_start_map.to(
+                device).cpu(),
+            # pin2node_map=data_collections.pin2node_map,
+            ignore_net_degree=params.ignore_net_degree)
+
+        return steiner_topo_for_pin_op
 
     def build_move_boundary(self, params, placedb, data_collections, device):
         """
@@ -873,11 +926,12 @@ class BasicPlace(nn.Module):
             num_movable_nodes=placedb.num_movable_nodes,
             num_terminal_NIs=placedb.num_terminal_NIs,
             num_filler_nodes=placedb.num_filler_nodes)
+
         def build_macro_legalization_op(pos):
             logging.info("Start macro legalization")
             return ml(pos.clone(), pos)
         return build_macro_legalization_op
-        
+
     def build_legalization(self, params, placedb, data_collections, device):
         """
         @brief legalization
@@ -967,7 +1021,6 @@ class BasicPlace(nn.Module):
             return pos3
 
         return build_legalization_op
-
 
     def build_multi_fence_region_legalization(
         self, params, placedb, data_collections, device

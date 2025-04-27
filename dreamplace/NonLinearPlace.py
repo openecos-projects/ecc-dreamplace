@@ -354,6 +354,16 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     elif optimizer_name.lower() != "nesterov":
                         assert 0, "unsupported optimizer %s" % (optimizer_name)
 
+                    # diff tdp 
+                    if params.with_sta and (iteration % 10 == 0 and iteration >= 20):
+                        t_steiner = time.time()
+                        with torch.no_grad():
+                            self.op_collections.steiner_topo_op.update_topo(self.op_collections.pin_pos_op(pos))
+                            
+                        logging.info("Update steiner topo %.3f ms" %
+                                 ((time.time() - t_steiner) * 1000))
+                        
+                        
                     # plot placement
                     if params.plot_flag and (iteration % 100 == 0 or iteration == 999):
                         cur_pos = self.pos[0].data.clone().cpu().numpy()

@@ -76,6 +76,9 @@ class SteinerTopo(nn.Module):
         # 算法参数（保留接口兼容性）
         self.algorithm = algorithm
 
+    def update_topo(self):
+        pass
+
     def forward(self, pos, read_lut_flag=False):
         """
         @brief 前向传播主函数

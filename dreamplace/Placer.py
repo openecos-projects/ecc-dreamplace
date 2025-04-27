@@ -127,34 +127,13 @@ class PlacementEngine:
         # read cpp database
         tt = time.time()
         if self.placedb is None:
-            # workspace_dir = '/home/zhaoxueyan/code/ai-mp/workspace_aimp/workspace_ariane133_t28'
-            # design_name = 'ariane'
             self.data_manager = data_manager
-            # workspace_dir = '/data/project_share/benchmark/aimp/autoDMP/workspace_xs_top'
-            # design_name = 'XS_TOP'
-            # self.data_manager = DataManager(workspace_dir)
-            # self.engine_ieda = EngineIEDA(
-            #     design_name=design_name,
-            #     path_manager=self.data_manager.get_path_manager())
-            # workspace_path = '/home/zhaoxueyan/code/ai-eda/workspace_aimp/'
-            # path_manager = PathManager()
-            # self.engine_data_ieda = EngineDataManager(
-            #     design_name, self.data_manager.get_path_manager())
-            # engine_data_ieda.read_verilog(
-            #     '/home/zhaoxueyan/code/ai-eda/workspace_aimp/ariane133/ariane133/netlist/ariane.v', top_module='ariane')
-            # self.engine_data_ieda.read_def(
-            #     self.data_manager.get_config_manager().get_config_path().def_input_path)
             self.placedb = PlaceDB(data_manager)
             if self.params.with_sta:
                 ieda_sta = IEDASta(self.data_manager.dir_workspace)
                 ieda_sta.init_sta()
             self.placedb.setup_rawdb(self.params)
 
-            # self.placedb.write(self.params, "debug.pl")
-            # exit(0)
-
-            # self.placedb.initialize()
-            # self.placedb.read(self.params)
         logging.info("setting up raw database takes %.2f seconds" %
                      (time.time() - tt))
 

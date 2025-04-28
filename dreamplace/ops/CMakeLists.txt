@@ -32,6 +32,11 @@ add_subdirectory(adjust_node_area)
 add_subdirectory(pin_weight_sum)
 add_subdirectory(timing)
 
+#diff tdp 
+add_subdirectory(timing_propagation)
+add_subdirectory(rc_timing)
+add_subdirectory(steiner_topo)
+
 file(GLOB INSTALL_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/*.py")
 install(
     FILES ${INSTALL_SRCS} DESTINATION dreamplace/ops

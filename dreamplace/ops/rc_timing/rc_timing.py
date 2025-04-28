@@ -10,8 +10,7 @@ from torch.autograd import Function
 
 import dreamplace.ops.rc_timing.rc_timing_cpp as rc_timing_cpp
 import dreamplace.configure as configure
-if configure.compile_configurations["CUDA_FOUND"] == "TRUE":
-    import dreamplace.ops.rc_timing.rc_timing_cuda as rc_timing_cuda
+
 
 class RCTimingFunction(Function):
         

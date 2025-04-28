@@ -50,6 +50,7 @@ import dreamplace.ops.adjust_node_area.adjust_node_area as adjust_node_area
 import dreamplace.ops.macro_overlap.macro_overlap as macro_overlap
 import dreamplace.ops.macro_refinement.macro_refinement as macro_refinement
 from dreamplace.ops.timing_propagation.timing_propagation import TimingPropagation
+from dreamplace.ops.rc_timing.rc_timing import RCTiming
 
 
 class PreconditionOp:
@@ -426,7 +427,7 @@ class PlaceObj(nn.Module):
         if self.with_sta:
             slack = self.timing_obj(pos)
             result = torch.add(result, slack)
-            
+
         return result
 
     def timing_obj(self, pos):
@@ -727,8 +728,14 @@ class PlaceObj(nn.Module):
 
     def build_elmore_delay_op(
             self, params, placedb, data_collections):
-
-        return
+        rc_timing = RCTiming(data_collections.flat_net2pin_map,
+                             data_collections.flat_net2pin_start_map,
+                             data_collections.pin2node_map,
+                             data_collections.pin_caps,
+                             data_collections.driver_pin_indices,
+                             r_unit=1.0,
+                             c_unit=1.0)
+        return rc_timing
 
     def build_timing_propagation_op(
             self, params, placedb, data_collections):

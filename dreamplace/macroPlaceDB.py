@@ -908,6 +908,14 @@ class MacroPlaceDB(object):
             weights[num_pins_in_net == k] = weights_dict[k]
         self.net_weights *= weights
 
+    def get_inhomogeneous_list_to_ndarray(self, inhomogeneous_list, dtype=np.int32):
+        res = inhomogeneous_list.copy()
+        for i in range(len(res)):
+            res[i] = np.array(
+                res[i], dtype=dtype)
+        res = np.array(res)
+        return res
+
     def initialize_from_rawdb(self, pydb, params):
         """
         @brief initialize data members from raw database 
@@ -1012,8 +1020,9 @@ class MacroPlaceDB(object):
         if params.with_sta:
             self.start_points = np.array(pydb.start_points, dtype=self.dtype)
             self.end_points = np.array(pydb.end_points, dtype=self.dtype)
-            self.cells_by_level = np.array(pydb.cells_by_level, dtype=np.int32)
-            self.cells_by_reverse_level = np.array(
+            self.cells_by_level = self.get_inhomogeneous_list_to_ndarray(
+                pydb.cells_by_level, dtype=np.int32)
+            self.cells_by_reverse_level = self.get_inhomogeneous_list_to_ndarray(
                 pydb.cells_by_reverse_level, dtype=np.int32)
 
             self.inrdelays = np.array(pydb.inrdelays, dtype=self.dtype)

@@ -108,7 +108,6 @@ class RCTiming(nn.Module):
                  flat_net2pin_map,
                  flat_net2pin_start_map,
                  pin2node_map,
-                 pin_caps,
                  driver_pin_indices,
                  r_unit=1.0,
                  c_unit=1.0,
@@ -128,7 +127,6 @@ class RCTiming(nn.Module):
         self.register_buffer('flat_net2pin_map', flat_net2pin_map)
         self.register_buffer('flat_net2pin_start_map', flat_net2pin_start_map)
         self.register_buffer('pin2node_map', pin2node_map)
-        self.register_buffer('pin_caps', pin_caps)
         self.register_buffer('driver_pin_indices', driver_pin_indices)
         
         # 设置RC参数
@@ -138,7 +136,7 @@ class RCTiming(nn.Module):
         # 设置忽略网络的度数阈值
         self.ignore_net_degree = ignore_net_degree if ignore_net_degree else flat_net2pin_map.numel()
 
-    def forward(self, pos, steiner_output=None, branch_u=None, branch_v=None, net_branch_start=None):
+    def forward(self, pos, steiner_output, branch_u, branch_v, net_branch_start, pin_caps):
         """
         @brief 前向传播主函数
         @param pos 节点位置张量 [num_nodes*2]
@@ -166,7 +164,7 @@ class RCTiming(nn.Module):
             branch_u,
             branch_v,
             net_branch_start,
-            self.pin_caps,
+            pin_caps,
             self.driver_pin_indices,
             self.r_unit,
             self.c_unit,

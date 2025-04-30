@@ -16,7 +16,7 @@ from torch.autograd import Function
 import logging
 from torch.func import vmap
 import unittest
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field
 
 # Mock Timing Arc representation (can be a simple dict or class)
 
@@ -36,10 +36,10 @@ len(flat_luts_values_start) == len(flat_arcs)
 
 @dataclass
 class LUTS_INFO:
-    flat_luts_values: torch.Tensor
-    flat_luts_trans_table: torch.Tensor
-    flat_luts_cap_table: torch.Tensor
-    flat_luts_dim: torch.Tensor
+    flat_luts_values: torch.Tensor = None # Provide default values or use field(default_factory=...)
+    flat_luts_trans_table: torch.Tensor = None
+    flat_luts_cap_table: torch.Tensor = None
+    flat_luts_dim: torch.Tensor = None
 
 
 '''
@@ -51,10 +51,11 @@ need arc_idx to calc something
 
 @dataclass
 class ARCS_INFO:
-    f_delay_luts: LUTS_INFO
-    r_delay_luts: LUTS_INFO
-    f_tran_luts: LUTS_INFO
-    r_tran_luts: LUTS_INFO
+# Use default_factory to ensure a new LUTS_INFO instance is created for each ARCS_INFO instance
+    f_delay_luts: LUTS_INFO = field(default_factory=LUTS_INFO)
+    r_delay_luts: LUTS_INFO = field(default_factory=LUTS_INFO)
+    f_trans_luts: LUTS_INFO = field(default_factory=LUTS_INFO)
+    r_trans_luts: LUTS_INFO = field(default_factory=LUTS_INFO) 
 
 
 '''
@@ -87,7 +88,6 @@ class TimingPropagation(nn.Module):
                  inftrans,
                  outcaps,
                  pin_net,
-                 cells_by_level,
                  start_points,
                  end_points,
                  net_flat_arcs_start,
@@ -95,7 +95,10 @@ class TimingPropagation(nn.Module):
                  arcs_info: ARCS_INFO,
                  cell_flat_arcs_start,
                  cell_flat_arcs,
-                 cells_by_reverse_level):
+                 flat_cells_by_level,
+                 flat_cells_by_level_start,
+                 flat_cells_by_reverse_level,
+                 flat_cells_by_reverse_level_start):
         super(TimingPropagation, self).__init__()
 
         self.num_pins = pin_net.shape[0]
@@ -105,14 +108,16 @@ class TimingPropagation(nn.Module):
         self.inftrans = inftrans
         self.outcaps = outcaps
         self.pin_net = pin_net
-        self.cells_by_level = cells_by_level
         self.start_points = start_points
         self.end_points = end_points
         self.net_flat_arcs_start = net_flat_arcs_start
         self.net_flat_arcs = net_flat_arcs
         self.cell_flat_arcs_start = cell_flat_arcs_start
         self.cell_flat_arcs = cell_flat_arcs
-        self.cells_by_reverse_level = cells_by_reverse_level
+        self.flat_cells_by_level = flat_cells_by_level
+        self.flat_cells_by_level_start =flat_cells_by_level_start
+        self.flat_cells_by_reverse_level = flat_cells_by_reverse_level
+        self.flat_cells_by_reverse_level_start = flat_cells_by_reverse_level_start
         self.arcs_info = arcs_info
         self.device = inrdelays.device
         self.dtype = inrdelays.dtype  # Use dtype from inputs

@@ -299,8 +299,12 @@ class PlaceObj(nn.Module):
             name=name,
         )
 
-        self.op_collections.timing_propagation_op = self.build_timing_propagation_op()
-        self.op_collections.elmore_delay_op = self.build_elmore_delay_op()
+        self.op_collections.timing_propagation_op = self.build_timing_propagation_op(params,
+                                                                                     placedb,
+                                                                                     self.data_collections)
+        self.op_collections.elmore_delay_op = self.build_elmore_delay_op(params,
+                                                                         placedb,
+                                                                         self.data_collections,)
 
         # build multiple density op for multi-electric field
         if len(self.placedb.regions) > 0:
@@ -424,7 +428,7 @@ class PlaceObj(nn.Module):
             result = torch.add(
                 result, self.macro_overlap, alpha=self.macro_overlap_weight.item()
             )
-        if self.with_sta:
+        if self.params.with_sta:
             slack = self.timing_obj(pos)
             result = torch.add(result, slack)
 
@@ -731,8 +735,7 @@ class PlaceObj(nn.Module):
         rc_timing = RCTiming(data_collections.flat_net2pin_map,
                              data_collections.flat_net2pin_start_map,
                              data_collections.pin2node_map,
-                             data_collections.pin_caps,
-                             data_collections.driver_pin_indices,
+                             data_collections.net2driver_pin_map,
                              r_unit=1.0,
                              c_unit=1.0)
         return rc_timing
@@ -746,8 +749,7 @@ class PlaceObj(nn.Module):
             data_collections.inrtrans,
             data_collections.inftrans,
             data_collections.outcaps,
-            data_collections.pin_net,
-            data_collections.cells_by_level,
+            data_collections.pin2net_map,
             data_collections.start_points,
             data_collections.end_points,
             data_collections.net_flat_arcs_start,
@@ -755,7 +757,10 @@ class PlaceObj(nn.Module):
             data_collections.arcs_info,
             data_collections.cell_flat_arcs_start,
             data_collections.cell_flat_arcs,
-            data_collections.cells_by_reverse_level)
+            data_collections.flat_cells_by_level,
+            data_collections.flat_cells_by_level_start,
+            data_collections.flat_cells_by_reverse_level,
+            data_collections.flat_cells_by_reverse_level_start)
 
     def build_density_overflow(
         self, params, placedb, data_collections, num_bins_x, num_bins_y

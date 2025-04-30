@@ -49,6 +49,7 @@ import dreamplace.ops.independent_set_matching.independent_set_matching as indep
 import dreamplace.ops.pin_weight_sum.pin_weight_sum as pws
 import dreamplace.ops.timing.timing as timingimport
 import dreamplace.ops.steiner_topo.steiner_topo as steiner_topo
+from dreamplace.ops.timing_propagation.timing_propagation import ARCS_INFO
 import pdb
 
 
@@ -287,10 +288,21 @@ class PlaceDataCollection(object):
             self.inrtrans = torch.from_numpy(placedb.inrtrans).to(device)
             self.inftrans = torch.from_numpy(placedb.inftrans).to(device)
             self.outcaps = torch.from_numpy(placedb.outcaps).to(device)
-            self.pin_net = torch.from_numpy(placedb.pin_net).to(device)
-            
-            self.cells_by_level = torch.from_numpy(
-                placedb.cells_by_level).to(device)
+            # self.pin_net = torch.from_numpy(placedb.pin_net).to(device)
+
+            self.flat_cells_by_level = torch.from_numpy(
+                placedb.flat_cells_by_level).to(device)
+            self.flat_cells_by_reverse_level = torch.from_numpy(
+                placedb.flat_cells_by_reverse_level).to(device)
+            self.flat_cells_by_level_start = torch.from_numpy(
+                placedb.flat_cells_by_level_start).to(device)
+            self.flat_cells_by_reverse_level_start = torch.from_numpy(
+                placedb.flat_cells_by_reverse_level_start).to(device)
+
+            # self.cells_by_level = torch.from_numpy(
+            #     placedb.cells_by_level).to(device)
+            # self.cells_by_reverse_level = torch.from_numpy(
+            #     placedb.cells_by_reverse_level).to(device)
             self.start_points = torch.from_numpy(
                 placedb.start_points).to(device)
             self.end_points = torch.from_numpy(placedb.end_points).to(device)
@@ -302,10 +314,45 @@ class PlaceDataCollection(object):
                 placedb.cell_flat_arcs_start).to(device)
             self.cell_flat_arcs = torch.from_numpy(
                 placedb.cell_flat_arcs).to(device)
-            self.cells_by_reverse_level = torch.from_numpy(
-                placedb.cells_by_reverse_level).to(device)
-            
-            self.arcs_info = torch.from_numpy(placedb.arcs_info).to(device)
+            self.net2driver_pin_map = torch.from_numpy(
+                placedb.net2driver_pin_map).to(device)
+            self.arcs_info = ARCS_INFO()
+
+            self.arcs_info.f_delay_luts.flat_luts_trans_table = torch.from_numpy(
+                placedb.f_delay_flat_luts_trans_table).to(device)
+            self.arcs_info.f_delay_luts.flat_luts_cap_table = torch.from_numpy(
+                placedb.f_delay_flat_luts_cap_table).to(device)
+            self.arcs_info.f_delay_luts.flat_luts_dim = torch.from_numpy(
+                placedb.f_delay_flat_luts_dim).to(device)
+            self.arcs_info.f_delay_luts.flat_luts_values = torch.from_numpy(
+                placedb.f_delay_flat_luts_values).to(device)
+
+            self.arcs_info.r_delay_luts.flat_luts_values = torch.from_numpy(
+                placedb.r_delay_flat_luts_values).to(device)
+            self.arcs_info.r_delay_luts.flat_luts_trans_table = torch.from_numpy(
+                placedb.r_delay_flat_luts_trans_table).to(device)
+            self.arcs_info.r_delay_luts.flat_luts_cap_table = torch.from_numpy(
+                placedb.r_delay_flat_luts_cap_table).to(device)
+            self.arcs_info.r_delay_luts.flat_luts_dim = torch.from_numpy(
+                placedb.r_delay_flat_luts_dim).to(device)
+
+            self.arcs_info.f_trans_luts.flat_luts_values = torch.from_numpy(
+                placedb.f_trans_flat_luts_values).to(device)
+            self.arcs_info.f_trans_luts.flat_luts_trans_table = torch.from_numpy(
+                placedb.f_trans_flat_luts_trans_table).to(device)
+            self.arcs_info.f_trans_luts.flat_luts_cap_table = torch.from_numpy(
+                placedb.f_trans_flat_luts_cap_table).to(device)
+            self.arcs_info.f_trans_luts.flat_luts_dim = torch.from_numpy(
+                placedb.f_trans_flat_luts_dim).to(device)
+
+            self.arcs_info.r_trans_luts.flat_luts_values = torch.from_numpy(
+                placedb.r_trans_flat_luts_values).to(device)
+            self.arcs_info.r_trans_luts.flat_luts_trans_table = torch.from_numpy(
+                placedb.r_trans_flat_luts_trans_table).to(device)
+            self.arcs_info.r_trans_luts.flat_luts_cap_table = torch.from_numpy(
+                placedb.r_trans_flat_luts_cap_table).to(device)
+            self.arcs_info.r_trans_luts.flat_luts_dim = torch.from_numpy(
+                placedb.r_trans_flat_luts_dim).to(device)
 
     def bin_center_x_padded(self, placedb, padding, num_bins_x):
         """

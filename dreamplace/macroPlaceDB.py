@@ -143,8 +143,13 @@ class MacroPlaceDB(object):
         # Timing model
         self.start_points = None
         self.end_points = None
-        self.cells_by_level = None
-        self.cells_by_reverse_level = None
+        # self.cells_by_level = None
+        # self.cells_by_reverse_level = None
+
+        self.flat_cells_by_level = None  # //
+        self.flat_cells_by_reverse_level = None  # //
+        self.flat_cells_by_level_start = None  # //
+        self.flat_cells_by_reverse_level_start = None  # //
 
         self.inrdelays = None
         self.infdelays = None
@@ -1020,11 +1025,22 @@ class MacroPlaceDB(object):
         if params.with_sta:
             self.start_points = np.array(pydb.start_points, dtype=self.dtype)
             self.end_points = np.array(pydb.end_points, dtype=self.dtype)
-            self.cells_by_level = self.get_inhomogeneous_list_to_ndarray(
-                pydb.cells_by_level, dtype=np.int32)
-            self.cells_by_reverse_level = self.get_inhomogeneous_list_to_ndarray(
-                pydb.cells_by_reverse_level, dtype=np.int32)
 
+            self.flat_cells_by_level = np.array(
+                pydb.flat_cells_by_level, dtype=np.int32)
+            self.flat_cells_by_reverse_level = np.array(
+                pydb.flat_cells_by_reverse_level, dtype=np.int32)
+            self.flat_cells_by_level_start = np.array(
+                pydb.flat_cells_by_level_start, dtype=np.int32)
+            self.flat_cells_by_reverse_level_start = np.array(
+                pydb.flat_cells_by_reverse_level_start, dtype=np.int32)
+            # self.cells_by_level = self.get_inhomogeneous_list_to_ndarray(
+            #     pydb.cells_by_level, dtype=np.int32)
+            # self.cells_by_reverse_level = self.get_inhomogeneous_list_to_ndarray(
+            #     pydb.cells_by_reverse_level, dtype=np.int32)
+            self.net2driver_pin_map = np.array(
+                pydb.net2driver_pin_map, dtype=np.int32)
+            
             self.inrdelays = np.array(pydb.inrdelays, dtype=self.dtype)
             self.infdelays = np.array(pydb.infdelays, dtype=self.dtype)
             self.inrtrans = np.array(pydb.inrtrans, dtype=self.dtype)

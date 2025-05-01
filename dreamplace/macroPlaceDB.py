@@ -162,8 +162,8 @@ class MacroPlaceDB(object):
         self.cell_flat_arcs_start = None
         self.cell_flat_arcs = None
 
-        self.cell_main_id_start = None
-        self.libcell_arc_start = None
+        self.main_id_2_cell_id_start = None
+        self.cell_id_2_arc_id_start = None
 
         self.inst_main_id = None
         self.inst_width = None
@@ -1054,10 +1054,10 @@ class MacroPlaceDB(object):
                 pydb.cell_flat_arcs_start, dtype=np.int32)
             self.cell_flat_arcs = np.array(pydb.cell_flat_arcs, dtype=np.int32)
 
-            self.cell_main_id_start = np.array(
-                pydb.cell_main_id_start, dtype=np.int32)
-            self.libcell_arc_start = np.array(
-                pydb.libcell_arc_start, dtype=np.int32)
+            self.main_id_2_cell_id_start = np.array(
+                pydb.main_id_2_cell_id_start, dtype=np.int32)
+            self.cell_id_2_arc_id_start = np.array(
+                pydb.cell_id_2_arc_id_start, dtype=np.int32)
 
             self.inst_main_id = np.array(pydb.inst_main_id, dtype=np.int32)
             self.inst_width = np.array(pydb.inst_width, dtype=self.dtype)
@@ -1098,6 +1098,18 @@ class MacroPlaceDB(object):
                 pydb.r_trans_flat_luts_cap_table, dtype=self.dtype)
             self.r_trans_flat_luts_dim = np.array(
                 pydb.r_trans_flat_luts_dim, dtype=np.int32)
+
+            self.cell_id_2_libpin_id_start = np.array(
+                pydb.cell_id_2_libpin_id_start, dtype=np.int32)
+            self.pin_2_libpin_offset = np.array(
+                pydb.pin_2_libpin_offset, dtype=np.int32)
+            self.flat_lib_pin_cap = np.array(
+                pydb.flat_lib_pin_cap, dtype=self.dtype)
+            self.flat_lib_pin_cap_limit = np.array(
+                pydb.flat_lib_pin_cap_limit, dtype=self.dtype)
+            self.flat_lib_pin_slew_limit = np.array(
+                pydb.flat_lib_pin_slew_limit, dtype=self.dtype)
+
 
     def __call__(self, params):
         """

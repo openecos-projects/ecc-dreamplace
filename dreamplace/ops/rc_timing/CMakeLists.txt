@@ -15,7 +15,11 @@ set(LINK_LIBS
 )
 
 add_pytorch_extension(${TARGET_NAME}_cpp 
-  src/rc_timing.cpp
+  src/beta_op.cpp
+  src/delay_op.cpp
+  src/ldelay_op.cpp
+  src/load_op.cpp
+  src/binds.cpp
   EXTRA_INCLUDE_DIRS ${INCLUDE_DIRS}
   EXTRA_LINK_LIBRARIES ${LINK_LIBS}
 )

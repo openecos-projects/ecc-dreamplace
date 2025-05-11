@@ -36,7 +36,8 @@ len(flat_luts_values_start) == len(flat_arcs)
 
 @dataclass
 class LUTS_INFO:
-    flat_luts_values: torch.Tensor = None # Provide default values or use field(default_factory=...)
+    # Provide default values or use field(default_factory=...)
+    flat_luts_values: torch.Tensor = None
     flat_luts_trans_table: torch.Tensor = None
     flat_luts_cap_table: torch.Tensor = None
     flat_luts_dim: torch.Tensor = None
@@ -51,11 +52,11 @@ need arc_idx to calc something
 
 @dataclass
 class ARCS_INFO:
-# Use default_factory to ensure a new LUTS_INFO instance is created for each ARCS_INFO instance
+    # Use default_factory to ensure a new LUTS_INFO instance is created for each ARCS_INFO instance
     f_delay_luts: LUTS_INFO = field(default_factory=LUTS_INFO)
     r_delay_luts: LUTS_INFO = field(default_factory=LUTS_INFO)
     f_trans_luts: LUTS_INFO = field(default_factory=LUTS_INFO)
-    r_trans_luts: LUTS_INFO = field(default_factory=LUTS_INFO) 
+    r_trans_luts: LUTS_INFO = field(default_factory=LUTS_INFO)
 
 
 '''
@@ -115,13 +116,13 @@ class TimingPropagation(nn.Module):
         self.cell_flat_arcs_start = cell_flat_arcs_start
         self.cell_flat_arcs = cell_flat_arcs
         self.flat_cells_by_level = flat_cells_by_level
-        self.flat_cells_by_level_start =flat_cells_by_level_start
+        self.flat_cells_by_level_start = flat_cells_by_level_start
         self.flat_cells_by_reverse_level = flat_cells_by_reverse_level
         self.flat_cells_by_reverse_level_start = flat_cells_by_reverse_level_start
         self.arcs_info = arcs_info
         self.device = inrdelays.device
         self.dtype = inrdelays.dtype  # Use dtype from inputs
-        
+
     def lut_entry_vectorized(self,
                              # Batched inputs
                              # [B] - For potential future use

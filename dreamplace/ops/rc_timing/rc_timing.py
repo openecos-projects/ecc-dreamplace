@@ -318,8 +318,6 @@ flat_pin_from: 展开的from形式，最后会形如 [1,1,1,2,2,3,...]
 
 class RCTiming(nn.Module):
     def __init__(self,
-                 pin2node_map,
-                 driver_pin_indices,
                  r_unit=1.0,
                  c_unit=1.0):
         """
@@ -333,14 +331,11 @@ class RCTiming(nn.Module):
         """
         super(RCTiming, self).__init__()
 
-        self.pin2node_map = pin2node_map
-        self.driver_pin_indices = driver_pin_indices
-
         # 设置RC参数
         self.r_unit = r_unit
         self.c_unit = c_unit
 
-    def forward(self, steiner_pos,
+    def forward(self, new_x, new_y,
                 net_flat_topo_sort,
                 net_flat_topo_sort_start,
                 pin_fa,
@@ -350,7 +345,8 @@ class RCTiming(nn.Module):
                 pin_caps_base):
 
         length = torch.abs(
-            steiner_pos[flat_pin_from] - steiner_pos[flat_pin_to])
+            new_x[flat_pin_from] - new_x[flat_pin_to]) + torch.abs(
+            new_y[flat_pin_from] - new_y[flat_pin_to])
         flat_pin_to_res = length * self.r_unit
         cap = length * self.c_unit
         pin_caps = pin_caps_base.clone()

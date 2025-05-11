@@ -51,7 +51,7 @@ import dreamplace.ops.macro_overlap.macro_overlap as macro_overlap
 import dreamplace.ops.macro_refinement.macro_refinement as macro_refinement
 from dreamplace.ops.timing_propagation.timing_propagation import TimingPropagation
 from dreamplace.ops.rc_timing.rc_timing import RCTiming
-
+from dreamplace.BasicPlace import PlaceDataCollection
 
 class PreconditionOp:
     """Preconditioning engine is critical for convergence.
@@ -178,7 +178,7 @@ class PlaceObj(nn.Module):
         density_weight,
         params,
         placedb,
-        data_collections,
+        data_collections: PlaceDataCollection,
         op_collections,
         global_place_params,
     ):
@@ -442,32 +442,23 @@ class PlaceObj(nn.Module):
         @return objective value
         """
 
-        steiner_topo_res = self.op_collections.steiner_topo_op(
+        new_x, new_y = self.op_collections.steiner_topo_op(
             self.op_collections.pin_pos_op(pos))
-        # Index 0: Steiner X coords (1D Int32 Tensor)
-        newx = steiner_topo_res[0]
-        # Index 1: Steiner Y coords (1D Int32 Tensor)
-        newy = steiner_topo_res[1]
-        # Index 2: Pin mapping X (1D Int32 Tensor)
-        pin_relate_x = steiner_topo_res[2]
-        # Index 3: Pin mapping Y (1D Int32 Tensor)
-        pin_relate_y = steiner_topo_res[3]
-        # Index 4: Branch start nodes (1D Int32 Tensor)
-        branch_u = steiner_topo_res[4]
-        # Index 5: Branch end nodes (1D Int32 Tensor)
-        branch_v = steiner_topo_res[5]
-        # Index 6: Net branch starts (1D Int32 Tensor)
-        net_branch_start = steiner_topo_res[6]
 
+        pin_caps_base
         # ELMORE DELAY
-        pin_net_delay, pin_net_impulse, pin_net_cap = self.op_collections.elmore_delay_op(
-            newx, newy, pin_relate_x, pin_relate_y,
-            branch_u,
-            branch_v,
-            net_branch_start
+        pin_net_cap, pin_net_delay, pin_net_impulse = self.op_collections.elmore_delay_op(
+            new_x, new_y, self.data_collections.net_flat_topo_sort,
+            self.data_collections.net_flat_topo_sort_start,
+            self.data_collections.pin_fa,
+            self.data_collections.flat_pin_to_start,
+            self.data_collections.flat_pin_to,
+            self.data_collections.flat_pin_from,
+            pin_caps_base
         )
+
         ##
-        wns, tns = self.op_collections.timing_propagation_op(
+        wns, tns= self.op_collections.timing_propagation_op(
             pin_net_delay, pin_net_impulse, pin_net_cap)
 
         # Index 0: WNS (1D Float Tensor)
@@ -732,12 +723,9 @@ class PlaceObj(nn.Module):
 
     def build_elmore_delay_op(
             self, params, placedb, data_collections):
-        rc_timing = RCTiming(data_collections.flat_net2pin_map,
-                             data_collections.flat_net2pin_start_map,
-                             data_collections.pin2node_map,
-                             data_collections.net2driver_pin_map,
-                             r_unit=1.0,
-                             c_unit=1.0)
+        rc_timing = RCTiming(
+                             r_unit=data_collections.r_unit,
+                             c_unit=data_collections.c_unit)
         return rc_timing
 
     def build_timing_propagation_op(

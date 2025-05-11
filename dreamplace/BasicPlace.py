@@ -354,6 +354,13 @@ class PlaceDataCollection(object):
             self.arcs_info.r_trans_luts.flat_luts_dim = torch.from_numpy(
                 placedb.r_trans_flat_luts_dim).to(device)
 
+            self.net_flat_topo_sort = None
+            self.net_flat_topo_sort_start = None
+            self.pin_fa = None
+            self.flat_pin_to = None
+            self.flat_pin_to_start = None
+            self.flat_pin_from = None
+
     def bin_center_x_padded(self, placedb, padding, num_bins_x):
         """
         @brief compute array of bin center horizontal coordinates with padding

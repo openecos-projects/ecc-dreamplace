@@ -50,7 +50,6 @@ at::Tensor delay_forward_cpp(
     at::Tensor resistance_tensor,
     at::Tensor load_tensor,
     at::Tensor pin_fa_tensor,
-    at::Tensor net_driver_pin_tensor, // [[maybe_unused]]
     at::Tensor net_flat_topo,
     at::Tensor net_flat_topo_start);
 
@@ -64,7 +63,6 @@ std::vector<at::Tensor> delay_backward_cpp(
     at::Tensor resistance_tensor, // From forward pass context
     at::Tensor load_tensor,       // From forward pass context
     at::Tensor pin_fa_tensor,     // From forward pass context
-    at::Tensor net_driver_pin_tensor, // [[maybe_unused]]
     at::Tensor net_flat_topo,
     at::Tensor net_flat_topo_start);
 
@@ -110,7 +108,6 @@ at::Tensor beta_forward_cpp(
     at::Tensor resistance_tensor,
     at::Tensor ldelay_tensor,
     at::Tensor pin_fa_tensor,
-    at::Tensor net_driver_pin_tensor, // [[maybe_unused]]
     at::Tensor net_flat_topo,
     at::Tensor net_flat_topo_start);
 
@@ -124,7 +121,6 @@ std::vector<at::Tensor> beta_backward_cpp(
     at::Tensor resistance_tensor, // From forward pass context
     at::Tensor ldelay_tensor,     // From forward pass context
     at::Tensor pin_fa_tensor,     // From forward pass context
-    at::Tensor net_driver_pin_tensor, // [[maybe_unused]]
     at::Tensor net_flat_topo,
     at::Tensor net_flat_topo_start);
 

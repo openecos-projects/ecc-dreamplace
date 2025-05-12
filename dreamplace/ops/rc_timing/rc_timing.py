@@ -111,7 +111,6 @@ class DelayOpFunction(Function):
             res,
             load,
             pin_fa,
-            None,  # net_driver_pin_tensor (unused)
             net_flat_topo,
             net_flat_topo_start
         )
@@ -144,7 +143,6 @@ class DelayOpFunction(Function):
             res,
             load,
             pin_fa,
-            None,  # net_driver_pin_tensor (unused)
             net_flat_topo,
             net_flat_topo_start
         )
@@ -257,7 +255,6 @@ class BetaOpFunction(Function):
             res,
             ldelay,
             pin_fa,
-            None,  # net_driver_pin_tensor (unused)
             net_flat_topo,
             net_flat_topo_start
         )
@@ -290,7 +287,6 @@ class BetaOpFunction(Function):
             res,
             ldelay,
             pin_fa,
-            None,  # net_driver_pin_tensor (unused)
             net_flat_topo,
             net_flat_topo_start
         )
@@ -349,7 +345,8 @@ class RCTiming(nn.Module):
             new_y[flat_pin_from] - new_y[flat_pin_to])
         flat_pin_to_res = length * self.r_unit / length_scale
         cap = length * self.c_unit / length_scale
-        pin_caps = pin_caps_base.clone()
+        pin_caps = torch.zeros_like(new_x, dtype=pin_caps_base.dtype)
+        pin_caps[:pin_caps_base.size(0)] = pin_caps_base
         pin_caps[flat_pin_from] += cap / 2
         pin_caps[flat_pin_to] += cap / 2
 

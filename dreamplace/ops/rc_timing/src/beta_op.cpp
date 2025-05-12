@@ -10,9 +10,9 @@ template <typename scalar_t>
 void betaForwardLauncher(
     const scalar_t *resistance_ptr,
     const scalar_t *ldelay_ptr,   // Input: LDelay tensor
-    const int64_t *pin_fa_ptr,    // Parent index for each node (-1 for roots)
-    const int64_t *topo_sort_ptr, // Assumed parent-first order
-    const int64_t *topo_sort_start_ptr, int64_t num_nodes, int64_t num_nets,
+    const int32_t *pin_fa_ptr,    // Parent index for each node (-1 for roots)
+    const int32_t *topo_sort_ptr, // Assumed parent-first order
+    const int32_t *topo_sort_start_ptr, int32_t num_nodes, int32_t num_nets,
     scalar_t *beta_ptr // Output: Beta tensor
 );
 
@@ -37,7 +37,6 @@ at::Tensor
 beta_forward_cpp(at::Tensor resistance_tensor,
                  at::Tensor ldelay_tensor, // Input changed from load_tensor
                  at::Tensor pin_fa_tensor,
-                 at::Tensor net_driver_pin_tensor, // Potentially unused
                  at::Tensor net_flat_topo, at::Tensor net_flat_topo_start) {
   // --- Input Checks ---
   CHECK_CPU(resistance_tensor);
@@ -58,15 +57,15 @@ beta_forward_cpp(at::Tensor resistance_tensor,
 
   TORCH_CHECK(resistance_tensor.scalar_type() == ldelay_tensor.scalar_type(),
               "Input float dtypes mismatch"); // Changed
-  TORCH_CHECK(pin_fa_tensor.scalar_type() == at::kLong,
+  TORCH_CHECK(pin_fa_tensor.scalar_type() == at::kInt,
               "pin_fa_tensor must be int64 (Long)");
-  TORCH_CHECK(net_flat_topo.scalar_type() == at::kLong,
+  TORCH_CHECK(net_flat_topo.scalar_type() == at::kInt,
               "net_flat_topo must be int64 (Long)");
-  TORCH_CHECK(net_flat_topo_start.scalar_type() == at::kLong,
+  TORCH_CHECK(net_flat_topo_start.scalar_type() == at::kInt,
               "net_flat_topo_start must be int64 (Long)");
 
-  int64_t num_nodes = ldelay_tensor.numel(); // Base size check on ldelay_tensor
-  int64_t num_nets =
+  int32_t num_nodes = ldelay_tensor.numel(); // Base size check on ldelay_tensor
+  int32_t num_nets =
       net_flat_topo_start.numel() ? (net_flat_topo_start.numel() - 1) : 0;
 
   TORCH_CHECK(resistance_tensor.numel() == num_nodes,
@@ -82,9 +81,9 @@ beta_forward_cpp(at::Tensor resistance_tensor,
       {num_nodes}, resistance_tensor.options()); // Output tensor named beta
 
   // --- Get Pointers ---
-  const int64_t *pin_fa_ptr = pin_fa_tensor.data_ptr<int64_t>();
-  const int64_t *topo_sort_ptr = net_flat_topo.data_ptr<int64_t>();
-  const int64_t *topo_sort_start_ptr = net_flat_topo_start.data_ptr<int64_t>();
+  const int32_t *pin_fa_ptr = pin_fa_tensor.data_ptr<int32_t>();
+  const int32_t *topo_sort_ptr = net_flat_topo.data_ptr<int32_t>();
+  const int32_t *topo_sort_start_ptr = net_flat_topo_start.data_ptr<int32_t>();
 
   // --- Dispatch ---
   AT_DISPATCH_FLOATING_TYPES(
@@ -111,25 +110,25 @@ template <typename scalar_t>
 void betaForwardLauncher( // Renamed launcher
     const scalar_t *resistance_ptr,
     const scalar_t *ldelay_ptr, // Renamed input
-    const int64_t *pin_fa_ptr, const int64_t *topo_sort_ptr,
-    const int64_t *topo_sort_start_ptr, int64_t num_nodes, int64_t num_nets,
+    const int32_t *pin_fa_ptr, const int32_t *topo_sort_ptr,
+    const int32_t *topo_sort_start_ptr, int32_t num_nodes, int32_t num_nets,
     scalar_t *beta_ptr // Renamed output
 ) {
   // Iterate through each net
-  for (int64_t net_idx = 0; net_idx < num_nets; ++net_idx) {
-    int64_t start_topo_idx = topo_sort_start_ptr[net_idx];
-    int64_t end_topo_idx = topo_sort_start_ptr[net_idx + 1];
+  for (int32_t net_idx = 0; net_idx < num_nets; ++net_idx) {
+    int32_t start_topo_idx = topo_sort_start_ptr[net_idx];
+    int32_t end_topo_idx = topo_sort_start_ptr[net_idx + 1];
 
     // Iterate nodes in FORWARD topological order (top-down)
     // Assumes net_flat_topo processes parents before children.
-    for (int64_t i = start_topo_idx; i < end_topo_idx; ++i) {
-      int64_t u = topo_sort_ptr[i]; // Current node index
+    for (int32_t i = start_topo_idx; i < end_topo_idx; ++i) {
+      int32_t u = topo_sort_ptr[i]; // Current node index
 
       if (u < 0 || u >= num_nodes) {
         continue;
       } // Bounds check
 
-      int64_t parent_idx = pin_fa_ptr[u]; // Get parent index
+      int32_t parent_idx = pin_fa_ptr[u]; // Get parent index
 
       // If parent_idx is valid (>= 0) and within bounds, it's not a root.
       if (parent_idx >= 0 && parent_idx < num_nodes) {
@@ -150,10 +149,10 @@ void betaBackwardLauncher(                // Renamed launcher
     const scalar_t *grad_output_beta_ptr, // Input: dF/dBeta
     const scalar_t *resistance_ptr,       // Res(fa(u)->u) at index u
     const scalar_t *ldelay_ptr,           // LDelay(u) at index u
-    const int64_t *pin_fa_ptr,            // Parent index for node u
-    const int64_t
+    const int32_t *pin_fa_ptr,            // Parent index for node u
+    const int32_t
         *topo_sort_ptr, // Parent-first order, use backward for bottom-up
-    const int64_t *topo_sort_start_ptr, int64_t num_nodes, int64_t num_nets,
+    const int32_t *topo_sort_start_ptr, int32_t num_nodes, int32_t num_nets,
     scalar_t *accum_grad_beta_ptr,  // Intermediate buffer (In/Out)
     scalar_t *grad_input_res_ptr,   // Output: dF/dRes
     scalar_t *grad_input_ldelay_ptr // Output: dF/dLDelay
@@ -180,7 +179,6 @@ std::vector<at::Tensor> beta_backward_cpp( // Renamed function
     at::Tensor resistance_tensor,          // From forward pass context
     at::Tensor ldelay_tensor,              // Input LDelay from forward context
     at::Tensor pin_fa_tensor,              // From forward pass context
-    at::Tensor net_driver_pin_tensor,      // Unused
     at::Tensor net_flat_topo, at::Tensor net_flat_topo_start) {
   // --- Input Checks ---
   CHECK_CPU(grad_output_beta);
@@ -207,12 +205,12 @@ std::vector<at::Tensor> beta_backward_cpp( // Renamed function
                   grad_output_beta.scalar_type() ==
                       ldelay_tensor.scalar_type(), // Renamed & Changed
               "Input floating point dtypes mismatch");
-  TORCH_CHECK(pin_fa_tensor.scalar_type() == at::kLong,
+  TORCH_CHECK(pin_fa_tensor.scalar_type() == at::kInt,
               "pin_fa_tensor must be int64 (Long)");
   // ... other dtype checks
 
-  int64_t num_nodes = ldelay_tensor.numel(); // Base size check on ldelay_tensor
-  int64_t num_nets =
+  int32_t num_nodes = ldelay_tensor.numel(); // Base size check on ldelay_tensor
+  int32_t num_nets =
       net_flat_topo_start.numel() ? (net_flat_topo_start.numel() - 1) : 0;
 
   TORCH_CHECK(grad_output_beta.numel() == num_nodes,
@@ -236,9 +234,9 @@ std::vector<at::Tensor> beta_backward_cpp( // Renamed function
   at::Tensor accum_grad_beta = grad_output_beta.clone(); // Renamed accumulator
 
   // --- Get Pointers ---
-  const int64_t *pin_fa_ptr = pin_fa_tensor.data_ptr<int64_t>();
-  const int64_t *topo_sort_ptr = net_flat_topo.data_ptr<int64_t>();
-  const int64_t *topo_sort_start_ptr = net_flat_topo_start.data_ptr<int64_t>();
+  const int32_t *pin_fa_ptr = pin_fa_tensor.data_ptr<int32_t>();
+  const int32_t *topo_sort_ptr = net_flat_topo.data_ptr<int32_t>();
+  const int32_t *topo_sort_start_ptr = net_flat_topo_start.data_ptr<int32_t>();
 
   // --- Dispatch ---
   AT_DISPATCH_FLOATING_TYPES(
@@ -278,10 +276,10 @@ void betaBackwardLauncher(                // Renamed launcher
     const scalar_t *grad_output_beta_ptr, // Renamed: dF/dBeta (initial)
     const scalar_t *resistance_ptr,       // Res(fa(u)->u) at index u
     const scalar_t *ldelay_ptr,           // LDelay(u) at index u
-    const int64_t *pin_fa_ptr,            // Parent index for node u
-    const int64_t
+    const int32_t *pin_fa_ptr,            // Parent index for node u
+    const int32_t
         *topo_sort_ptr, // Parent-first order, use backward for bottom-up
-    const int64_t *topo_sort_start_ptr, int64_t num_nodes, int64_t num_nets,
+    const int32_t *topo_sort_start_ptr, int32_t num_nodes, int32_t num_nets,
     scalar_t *
         accum_grad_beta_ptr, // Renamed: In/Out buffer for dF/dBeta accumulation
     scalar_t *grad_input_res_ptr,   // Output: dF/dRes
@@ -289,20 +287,20 @@ void betaBackwardLauncher(                // Renamed launcher
 ) {
   // --- Step 1: Accumulate dF/dBeta bottom-up ---
   // accum_grad_beta_ptr is pre-initialized with grad_output_beta values.
-  for (int64_t net_idx = 0; net_idx < num_nets; ++net_idx) {
-    int64_t start_topo_idx = topo_sort_start_ptr[net_idx];
-    int64_t end_topo_idx = topo_sort_start_ptr[net_idx + 1];
+  for (int32_t net_idx = 0; net_idx < num_nets; ++net_idx) {
+    int32_t start_topo_idx = topo_sort_start_ptr[net_idx];
+    int32_t end_topo_idx = topo_sort_start_ptr[net_idx + 1];
 
     // Iterate nodes in REVERSE topological order (bottom-up)
     // Assumes iterating topo_sort_ptr backward gives child-first order.
-    for (int64_t i = end_topo_idx - 1; i >= start_topo_idx; --i) {
-      int64_t u = topo_sort_ptr[i]; // Current node index
+    for (int32_t i = end_topo_idx - 1; i >= start_topo_idx; --i) {
+      int32_t u = topo_sort_ptr[i]; // Current node index
 
       if (u < 0 || u >= num_nodes) {
         continue;
       } // Bounds check
 
-      int64_t parent_idx = pin_fa_ptr[u]; // Get parent index
+      int32_t parent_idx = pin_fa_ptr[u]; // Get parent index
 
       // If parent_idx is valid, propagate gradient upwards.
       if (parent_idx >= 0 && parent_idx < num_nodes) {
@@ -316,8 +314,8 @@ void betaBackwardLauncher(                // Renamed launcher
   // --- Step 2: Calculate gradients dF/dRes and dF/dLDelay ---
   // This step uses the *final* accumulated gradients `accum_grad_beta_ptr`.
   // Iterate over all nodes.
-  for (int64_t u = 0; u < num_nodes; ++u) {
-    int64_t parent_idx = pin_fa_ptr[u]; // Get parent index
+  for (int32_t u = 0; u < num_nodes; ++u) {
+    int32_t parent_idx = pin_fa_ptr[u]; // Get parent index
 
     // Gradients are computed only for non-root nodes.
     if (parent_idx >= 0 && parent_idx < num_nodes) {

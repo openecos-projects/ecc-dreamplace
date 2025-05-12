@@ -9,10 +9,10 @@
 template <typename scalar_t>
 void ldelayForwardLauncher(
     const scalar_t *cap_ptr, const scalar_t *delay_ptr,
-    const int64_t *pin_start_ptr, const int64_t *pin_to_ptr,
-    const int64_t *
+    const int32_t *pin_start_ptr, const int32_t *pin_to_ptr,
+    const int32_t *
         topo_sort_ptr, // Assumed parent-first order, use backward for bottom-up
-    const int64_t *topo_sort_start_ptr, int64_t num_nodes, int64_t num_nets,
+    const int32_t *topo_sort_start_ptr, int32_t num_nodes, int32_t num_nets,
     scalar_t *ldelay_ptr // Output
 );
 
@@ -58,17 +58,17 @@ at::Tensor ldelay_forward_cpp(at::Tensor cap_tensor, at::Tensor delay_tensor,
 
   TORCH_CHECK(cap_tensor.scalar_type() == delay_tensor.scalar_type(),
               "Input float dtypes mismatch");
-  TORCH_CHECK(pin_start_tensor.scalar_type() == at::kLong,
+  TORCH_CHECK(pin_start_tensor.scalar_type() == at::kInt,
               "pin_start_tensor must be int64 (Long)");
-  TORCH_CHECK(pin_to_tensor.scalar_type() == at::kLong,
+  TORCH_CHECK(pin_to_tensor.scalar_type() == at::kInt,
               "pin_to_tensor must be int64 (Long)");
-  TORCH_CHECK(net_flat_topo.scalar_type() == at::kLong,
+  TORCH_CHECK(net_flat_topo.scalar_type() == at::kInt,
               "net_flat_topo must be int64 (Long)");
-  TORCH_CHECK(net_flat_topo_start.scalar_type() == at::kLong,
+  TORCH_CHECK(net_flat_topo_start.scalar_type() == at::kInt,
               "net_flat_topo_start must be int64 (Long)");
 
-  int64_t num_nodes = cap_tensor.numel();
-  int64_t num_nets =
+  int32_t num_nodes = cap_tensor.numel();
+  int32_t num_nets =
       net_flat_topo_start.numel() ? (net_flat_topo_start.numel() - 1) : 0;
 
   TORCH_CHECK(delay_tensor.numel() == num_nodes, "delay_tensor size mismatch");
@@ -82,10 +82,10 @@ at::Tensor ldelay_forward_cpp(at::Tensor cap_tensor, at::Tensor delay_tensor,
   at::Tensor ldelay_tensor = at::zeros({num_nodes}, cap_tensor.options());
 
   // --- Get Pointers ---
-  const int64_t *pin_start_ptr = pin_start_tensor.data_ptr<int64_t>();
-  const int64_t *pin_to_ptr = pin_to_tensor.data_ptr<int64_t>();
-  const int64_t *topo_sort_ptr = net_flat_topo.data_ptr<int64_t>();
-  const int64_t *topo_sort_start_ptr = net_flat_topo_start.data_ptr<int64_t>();
+  const int32_t *pin_start_ptr = pin_start_tensor.data_ptr<int32_t>();
+  const int32_t *pin_to_ptr = pin_to_tensor.data_ptr<int32_t>();
+  const int32_t *topo_sort_ptr = net_flat_topo.data_ptr<int32_t>();
+  const int32_t *topo_sort_start_ptr = net_flat_topo_start.data_ptr<int32_t>();
 
   // --- Dispatch ---
   AT_DISPATCH_FLOATING_TYPES(
@@ -106,21 +106,21 @@ at::Tensor ldelay_forward_cpp(at::Tensor cap_tensor, at::Tensor delay_tensor,
 template <typename scalar_t>
 void ldelayForwardLauncher(
     const scalar_t *cap_ptr, const scalar_t *delay_ptr,
-    const int64_t *pin_start_ptr, const int64_t *pin_to_ptr,
-    const int64_t
+    const int32_t *pin_start_ptr, const int32_t *pin_to_ptr,
+    const int32_t
         *topo_sort_ptr, // Parent-first order, use backward for bottom-up
-    const int64_t *topo_sort_start_ptr, int64_t num_nodes, int64_t num_nets,
+    const int32_t *topo_sort_start_ptr, int32_t num_nodes, int32_t num_nets,
     scalar_t *ldelay_ptr // Output
 ) {
   // Iterate through each net
-  for (int64_t net_idx = 0; net_idx < num_nets; ++net_idx) {
-    int64_t start_topo_idx = topo_sort_start_ptr[net_idx];
-    int64_t end_topo_idx = topo_sort_start_ptr[net_idx + 1];
+  for (int32_t net_idx = 0; net_idx < num_nets; ++net_idx) {
+    int32_t start_topo_idx = topo_sort_start_ptr[net_idx];
+    int32_t end_topo_idx = topo_sort_start_ptr[net_idx + 1];
 
     // Iterate nodes in REVERSE topological order (bottom-up)
     // Assumes iterating topo_sort_ptr backward gives child-first order.
-    for (int64_t i = end_topo_idx - 1; i >= start_topo_idx; --i) {
-      int64_t u = topo_sort_ptr[i]; // Current node index
+    for (int32_t i = end_topo_idx - 1; i >= start_topo_idx; --i) {
+      int32_t u = topo_sort_ptr[i]; // Current node index
 
       if (u < 0 || u >= num_nodes) {
         continue;
@@ -131,12 +131,12 @@ void ldelayForwardLauncher(
 
       // 2. Sum LDelay(v) for children v
       scalar_t sum_children_ldelay = 0.0;
-      int64_t edge_start_idx = pin_start_ptr[u];
-      int64_t edge_end_idx = pin_start_ptr[u + 1];
+      int32_t edge_start_idx = pin_start_ptr[u];
+      int32_t edge_end_idx = pin_start_ptr[u + 1];
 
-      for (int64_t edge_idx = edge_start_idx; edge_idx < edge_end_idx;
+      for (int32_t edge_idx = edge_start_idx; edge_idx < edge_end_idx;
            ++edge_idx) {
-        int64_t v = pin_to_ptr[edge_idx]; // Get child node index
+        int32_t v = pin_to_ptr[edge_idx]; // Get child node index
         if (v >= 0 && v < num_nodes) {    // Check bounds for child
           sum_children_ldelay += ldelay_ptr[v];
         }
@@ -155,12 +155,12 @@ void ldelayBackwardLauncher(
     const scalar_t *grad_output_ldelay_ptr, // dF/dLDelay (initial)
     const scalar_t *cap_ptr,                // Cap(u) needed for dF/dDelay
     const scalar_t *delay_ptr,              // Delay(u) needed for dF/dCap
-    const int64_t
+    const int32_t
         *pin_start_ptr,        // Children structure for top-down accumulation
-    const int64_t *pin_to_ptr, // Children structure
-    const int64_t
+    const int32_t *pin_to_ptr, // Children structure
+    const int32_t
         *topo_sort_ptr, // Parent-first order, use forward for top-down
-    const int64_t *topo_sort_start_ptr, int64_t num_nodes, int64_t num_nets,
+    const int32_t *topo_sort_start_ptr, int32_t num_nodes, int32_t num_nets,
     scalar_t *accum_grad_ldelay_ptr, // Intermediate buffer (In/Out)
     scalar_t *grad_input_cap_ptr,    // Output: dF/dCap
     scalar_t
@@ -208,12 +208,12 @@ ldelay_backward_cpp(at::Tensor grad_output_ldelay,
                   grad_output_ldelay.scalar_type() ==
                       delay_tensor.scalar_type(),
               "Input floating point dtypes mismatch");
-  TORCH_CHECK(pin_start_tensor.scalar_type() == at::kLong,
+  TORCH_CHECK(pin_start_tensor.scalar_type() == at::kInt,
               "pin_start_tensor must be int64 (Long)");
   // ... other dtype checks ...
 
-  int64_t num_nodes = cap_tensor.numel();
-  int64_t num_nets =
+  int32_t num_nodes = cap_tensor.numel();
+  int32_t num_nets =
       net_flat_topo_start.numel() ? (net_flat_topo_start.numel() - 1) : 0;
 
   TORCH_CHECK(grad_output_ldelay.numel() == num_nodes,
@@ -235,10 +235,10 @@ ldelay_backward_cpp(at::Tensor grad_output_ldelay,
   at::Tensor accum_grad_ldelay = grad_output_ldelay.clone();
 
   // --- Get Pointers ---
-  const int64_t *pin_start_ptr = pin_start_tensor.data_ptr<int64_t>();
-  const int64_t *pin_to_ptr = pin_to_tensor.data_ptr<int64_t>();
-  const int64_t *topo_sort_ptr = net_flat_topo.data_ptr<int64_t>();
-  const int64_t *topo_sort_start_ptr = net_flat_topo_start.data_ptr<int64_t>();
+  const int32_t *pin_start_ptr = pin_start_tensor.data_ptr<int32_t>();
+  const int32_t *pin_to_ptr = pin_to_tensor.data_ptr<int32_t>();
+  const int32_t *topo_sort_ptr = net_flat_topo.data_ptr<int32_t>();
+  const int32_t *topo_sort_start_ptr = net_flat_topo_start.data_ptr<int32_t>();
 
   // --- Dispatch ---
   AT_DISPATCH_FLOATING_TYPES(
@@ -275,12 +275,12 @@ void ldelayBackwardLauncher(
     const scalar_t *grad_output_ldelay_ptr, // dF/dLDelay (initial)
     const scalar_t *cap_ptr,                // Cap(u) needed for dF/dDelay
     const scalar_t *delay_ptr,              // Delay(u) needed for dF/dCap
-    const int64_t
+    const int32_t
         *pin_start_ptr,        // Children structure for top-down accumulation
-    const int64_t *pin_to_ptr, // Children structure
-    const int64_t
+    const int32_t *pin_to_ptr, // Children structure
+    const int32_t
         *topo_sort_ptr, // Parent-first order, use forward for top-down
-    const int64_t *topo_sort_start_ptr, int64_t num_nodes, int64_t num_nets,
+    const int32_t *topo_sort_start_ptr, int32_t num_nodes, int32_t num_nets,
     scalar_t *accum_grad_ldelay_ptr, // In: cloned dF/dLDelay, Out: accumulated
                                      // dF/dLDelay
     scalar_t *grad_input_cap_ptr,    // Out: dF/dCap
@@ -289,13 +289,13 @@ void ldelayBackwardLauncher(
   // --- Step 1: Accumulate dF/dLDelay top-down ---
   // accum_grad_ldelay_ptr is pre-initialized with grad_output_ldelay values.
   // This propagation is identical to the Load backward pass's accumulation.
-  for (int64_t net_idx = 0; net_idx < num_nets; ++net_idx) {
-    int64_t start_topo_idx = topo_sort_start_ptr[net_idx];
-    int64_t end_topo_idx = topo_sort_start_ptr[net_idx + 1];
+  for (int32_t net_idx = 0; net_idx < num_nets; ++net_idx) {
+    int32_t start_topo_idx = topo_sort_start_ptr[net_idx];
+    int32_t end_topo_idx = topo_sort_start_ptr[net_idx + 1];
 
     // Iterate nodes in FORWARD topological order (top-down)
-    for (int64_t i = start_topo_idx; i < end_topo_idx; ++i) {
-      int64_t u =
+    for (int32_t i = start_topo_idx; i < end_topo_idx; ++i) {
+      int32_t u =
           topo_sort_ptr[i]; // Current node index u (parent in this context)
 
       if (u < 0 || u >= num_nodes) {
@@ -306,12 +306,12 @@ void ldelayBackwardLauncher(
       scalar_t parent_accum_grad = accum_grad_ldelay_ptr[u];
 
       // Find children v of u and propagate gradient
-      int64_t edge_start_idx = pin_start_ptr[u];
-      int64_t edge_end_idx = pin_start_ptr[u + 1];
+      int32_t edge_start_idx = pin_start_ptr[u];
+      int32_t edge_end_idx = pin_start_ptr[u + 1];
 
-      for (int64_t edge_idx = edge_start_idx; edge_idx < edge_end_idx;
+      for (int32_t edge_idx = edge_start_idx; edge_idx < edge_end_idx;
            ++edge_idx) {
-        int64_t v = pin_to_ptr[edge_idx]; // Get child node index v
+        int32_t v = pin_to_ptr[edge_idx]; // Get child node index v
         if (v >= 0 && v < num_nodes) {    // Check bounds
           // Propagate gradient: AccumGrad(v) += AccumGrad(u)
           accum_grad_ldelay_ptr[v] += parent_accum_grad;
@@ -323,7 +323,7 @@ void ldelayBackwardLauncher(
   // --- Step 2: Calculate gradients dF/dCap and dF/dDelay ---
   // This step uses the *final* accumulated gradients `accum_grad_ldelay_ptr`.
   // Iterate over all nodes (this part is embarrassingly parallel).
-  for (int64_t u = 0; u < num_nodes; ++u) {
+  for (int32_t u = 0; u < num_nodes; ++u) {
     // Get the final accumulated gradient for node u
     scalar_t accumulated_grad_u = accum_grad_ldelay_ptr[u];
 

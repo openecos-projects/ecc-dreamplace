@@ -7,9 +7,9 @@
 
 template <typename scalar_t>
 void loadForwardLauncher( // Renamed
-    const int64_t *pin_start_ptr, const int64_t *pin_to_ptr,
-    const int64_t *topo_sort_ptr, const int64_t *topo_sort_start_ptr,
-    int64_t num_nodes, int64_t num_nets,
+    const int32_t *pin_start_ptr, const int32_t *pin_to_ptr,
+    const int32_t *topo_sort_ptr, const int32_t *topo_sort_start_ptr,
+    int32_t num_nodes, int32_t num_nets,
     scalar_t *load_ptr // Input/Output pointer (initialized with cap)
 );
 
@@ -24,11 +24,11 @@ at::Tensor load_forward_cpp(at::Tensor cap_tensor, at::Tensor pin_start_tensor,
   CHECK_CPU(pin_start_tensor);
   CHECK_FLAT(pin_start_tensor);
   CHECK_CONTIGUOUS(pin_start_tensor); // etc.
-  TORCH_CHECK(pin_start_tensor.scalar_type() == at::kLong,
+  TORCH_CHECK(pin_start_tensor.scalar_type() == at::kInt,
               "pin_start_tensor must be int64 (Long)"); // etc.
 
-  int64_t num_nodes = cap_tensor.numel();
-  int64_t num_nets =
+  int32_t num_nodes = cap_tensor.numel();
+  int32_t num_nets =
       net_flat_topo_start.numel() ? (net_flat_topo_start.numel() - 1) : 0;
 
   TORCH_CHECK(pin_start_tensor.numel() == num_nodes + 1,
@@ -41,11 +41,11 @@ at::Tensor load_forward_cpp(at::Tensor cap_tensor, at::Tensor pin_start_tensor,
   // ones.
   at::Tensor load_tensor = cap_tensor.clone();
 
-  // --- Get Pointers for Index Tensors (int64_t) ---
-  const int64_t *pin_start_ptr = pin_start_tensor.data_ptr<int64_t>();
-  const int64_t *pin_to_ptr = pin_to_tensor.data_ptr<int64_t>();
-  const int64_t *topo_sort_ptr = net_flat_topo.data_ptr<int64_t>();
-  const int64_t *topo_sort_start_ptr = net_flat_topo_start.data_ptr<int64_t>();
+  // --- Get Pointers for Index Tensors (int32_t) ---
+  const int32_t *pin_start_ptr = pin_start_tensor.data_ptr<int32_t>();
+  const int32_t *pin_to_ptr = pin_to_tensor.data_ptr<int32_t>();
+  const int32_t *topo_sort_ptr = net_flat_topo.data_ptr<int32_t>();
+  const int32_t *topo_sort_start_ptr = net_flat_topo_start.data_ptr<int32_t>();
 
   // --- Dispatch to Templated Launcher ---
   AT_DISPATCH_FLOATING_TYPES(
@@ -68,31 +68,31 @@ at::Tensor load_forward_cpp(at::Tensor cap_tensor, at::Tensor pin_start_tensor,
 
 template <typename scalar_t>
 void loadForwardLauncher( // Renamed
-    const int64_t *pin_start_ptr, const int64_t *pin_to_ptr,
-    const int64_t *topo_sort_ptr, const int64_t *topo_sort_start_ptr,
-    int64_t num_nodes, int64_t num_nets,
+    const int32_t *pin_start_ptr, const int32_t *pin_to_ptr,
+    const int32_t *topo_sort_ptr, const int32_t *topo_sort_start_ptr,
+    int32_t num_nodes, int32_t num_nets,
     scalar_t *load_ptr // Input/Output pointer (initialized with cap)
 ) {
   // Iterate through each net
-  for (int64_t net_idx = 0; net_idx < num_nets; ++net_idx) {
-    int64_t start_topo_idx = topo_sort_start_ptr[net_idx];
-    int64_t end_topo_idx = topo_sort_start_ptr[net_idx + 1];
+  for (int32_t net_idx = 0; net_idx < num_nets; ++net_idx) {
+    int32_t start_topo_idx = topo_sort_start_ptr[net_idx];
+    int32_t end_topo_idx = topo_sort_start_ptr[net_idx + 1];
 
     // Iterate nodes in REVERSE topological order (bottom-up)
-    for (int64_t i = end_topo_idx - 1; i >= start_topo_idx; --i) {
-      int64_t u = topo_sort_ptr[i];
+    for (int32_t i = end_topo_idx - 1; i >= start_topo_idx; --i) {
+      int32_t u = topo_sort_ptr[i];
       if (u < 0 || u >= num_nodes) {
         continue;
       }
 
       // Load(u) is already initialized with Cap(u).
       // Just add children's loads.
-      int64_t edge_start_idx = pin_start_ptr[u];
-      int64_t edge_end_idx = pin_start_ptr[u + 1];
+      int32_t edge_start_idx = pin_start_ptr[u];
+      int32_t edge_end_idx = pin_start_ptr[u + 1];
 
-      for (int64_t edge_idx = edge_start_idx; edge_idx < edge_end_idx;
+      for (int32_t edge_idx = edge_start_idx; edge_idx < edge_end_idx;
            ++edge_idx) {
-        int64_t v = pin_to_ptr[edge_idx];
+        int32_t v = pin_to_ptr[edge_idx];
         if (v < 0 || v >= num_nodes) {
           continue;
         }
@@ -107,9 +107,9 @@ void loadForwardLauncher( // Renamed
 // Forward declaration
 template <typename scalar_t>
 void loadBackwardLauncher(
-    const int64_t *pin_start_ptr, const int64_t *pin_to_ptr,
-    const int64_t *topo_sort_ptr, const int64_t *topo_sort_start_ptr,
-    int64_t num_nodes, int64_t num_nets,
+    const int32_t *pin_start_ptr, const int32_t *pin_to_ptr,
+    const int32_t *topo_sort_ptr, const int32_t *topo_sort_start_ptr,
+    int32_t num_nodes, int32_t num_nets,
     scalar_t *grad_input_cap_ptr // Input is grad_output, Output is grad_cap
                                  // (accumulated)
 );
@@ -158,17 +158,17 @@ at::Tensor load_backward_cpp(at::Tensor grad_output,
   CHECK_FLAT(net_flat_topo_start);
   CHECK_CONTIGUOUS(net_flat_topo_start);
 
-  TORCH_CHECK(pin_start_tensor.scalar_type() == at::kLong,
+  TORCH_CHECK(pin_start_tensor.scalar_type() == at::kInt,
               "pin_start_tensor must be int64 (Long)");
-  TORCH_CHECK(pin_to_tensor.scalar_type() == at::kLong,
+  TORCH_CHECK(pin_to_tensor.scalar_type() == at::kInt,
               "pin_to_tensor must be int64 (Long)");
-  TORCH_CHECK(net_flat_topo.scalar_type() == at::kLong,
+  TORCH_CHECK(net_flat_topo.scalar_type() == at::kInt,
               "net_flat_topo must be int64 (Long)");
-  TORCH_CHECK(net_flat_topo_start.scalar_type() == at::kLong,
+  TORCH_CHECK(net_flat_topo_start.scalar_type() == at::kInt,
               "net_flat_topo_start must be int64 (Long)");
 
-  int64_t num_nodes = grad_output.numel();
-  int64_t num_nets =
+  int32_t num_nodes = grad_output.numel();
+  int32_t num_nets =
       net_flat_topo_start.numel() ? (net_flat_topo_start.numel() - 1) : 0;
 
   TORCH_CHECK(pin_start_tensor.numel() == num_nodes + 1,
@@ -185,11 +185,11 @@ at::Tensor load_backward_cpp(at::Tensor grad_output,
   // AccumGrad(u) starts as dF/dLoad(u).
   at::Tensor grad_input_cap = grad_output.clone();
 
-  // --- Get Pointers for Index Tensors (int64_t) ---
-  const int64_t *pin_start_ptr = pin_start_tensor.data_ptr<int64_t>();
-  const int64_t *pin_to_ptr = pin_to_tensor.data_ptr<int64_t>();
-  const int64_t *topo_sort_ptr = net_flat_topo.data_ptr<int64_t>();
-  const int64_t *topo_sort_start_ptr = net_flat_topo_start.data_ptr<int64_t>();
+  // --- Get Pointers for Index Tensors (int32_t) ---
+  const int32_t *pin_start_ptr = pin_start_tensor.data_ptr<int32_t>();
+  const int32_t *pin_to_ptr = pin_to_tensor.data_ptr<int32_t>();
+  const int32_t *topo_sort_ptr = net_flat_topo.data_ptr<int32_t>();
+  const int32_t *topo_sort_start_ptr = net_flat_topo_start.data_ptr<int32_t>();
 
   // --- Dispatch to Templated Launcher ---
   AT_DISPATCH_FLOATING_TYPES(
@@ -211,22 +211,22 @@ at::Tensor load_backward_cpp(at::Tensor grad_output,
 // --- Launcher Implementation ---
 template <typename scalar_t>
 void loadBackwardLauncher(
-    const int64_t *pin_start_ptr, const int64_t *pin_to_ptr,
-    const int64_t *topo_sort_ptr, const int64_t *topo_sort_start_ptr,
-    int64_t num_nodes, int64_t num_nets,
+    const int32_t *pin_start_ptr, const int32_t *pin_to_ptr,
+    const int32_t *topo_sort_ptr, const int32_t *topo_sort_start_ptr,
+    int32_t num_nodes, int32_t num_nets,
     scalar_t *grad_input_cap_ptr // Input: Initialized with dF/dLoad. Output:
                                  // Accumulated dF/dCap.
 ) {
   // Iterate through each net defined by the topological sort segments
-  for (int64_t net_idx = 0; net_idx < num_nets; ++net_idx) {
-    int64_t start_topo_idx = topo_sort_start_ptr[net_idx];
-    int64_t end_topo_idx = topo_sort_start_ptr[net_idx + 1];
+  for (int32_t net_idx = 0; net_idx < num_nets; ++net_idx) {
+    int32_t start_topo_idx = topo_sort_start_ptr[net_idx];
+    int32_t end_topo_idx = topo_sort_start_ptr[net_idx + 1];
 
     // Iterate through nodes of the CURRENT net in FORWARD topological order
     // (top-down) Assumes the order in net_flat_topo[start:end] processes
     // parents before children.
-    for (int64_t i = start_topo_idx; i < end_topo_idx; ++i) {
-      int64_t u = topo_sort_ptr[i]; // Get the parent node index u
+    for (int32_t i = start_topo_idx; i < end_topo_idx; ++i) {
+      int32_t u = topo_sort_ptr[i]; // Get the parent node index u
 
       // Basic bounds check
       if (u < 0 || u >= num_nodes) {
@@ -243,12 +243,12 @@ void loadBackwardLauncher(
       // }
 
       // Find children v of u and propagate gradient
-      int64_t edge_start_idx = pin_start_ptr[u];
-      int64_t edge_end_idx = pin_start_ptr[u + 1];
+      int32_t edge_start_idx = pin_start_ptr[u];
+      int32_t edge_end_idx = pin_start_ptr[u + 1];
 
-      for (int64_t edge_idx = edge_start_idx; edge_idx < edge_end_idx;
+      for (int32_t edge_idx = edge_start_idx; edge_idx < edge_end_idx;
            ++edge_idx) {
-        int64_t v = pin_to_ptr[edge_idx]; // Get child node index v
+        int32_t v = pin_to_ptr[edge_idx]; // Get child node index v
 
         // Basic bounds check
         if (v < 0 || v >= num_nodes) {

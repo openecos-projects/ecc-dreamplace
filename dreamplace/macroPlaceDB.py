@@ -1023,8 +1023,8 @@ class MacroPlaceDB(object):
         self.net2pin_map = np.array(self.net2pin_map)
 
         if params.with_sta:
-            self.start_points = np.array(pydb.start_points, dtype=self.dtype)
-            self.end_points = np.array(pydb.end_points, dtype=self.dtype)
+            self.start_points = np.array(pydb.start_points, dtype=np.int32)
+            self.end_points = np.array(pydb.end_points, dtype=np.int32)
 
             self.flat_cells_by_level = np.array(
                 pydb.flat_cells_by_level, dtype=np.int32)

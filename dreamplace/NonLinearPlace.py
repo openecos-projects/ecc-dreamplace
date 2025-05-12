@@ -362,7 +362,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 self.data_collections.pin_fa, self.data_collections.flat_pin_to, self.data_collections.flat_pin_to_start, \
                                 self.data_collections.flat_pin_from = self.op_collections.steiner_topo_op.rebuild_tree(
                                     self.op_collections.pin_pos_op(pos))
-
+                            model.use_timing_obj = True
                         logging.info("Update steiner topo %.3f ms" %
                                      ((time.time() - t_steiner) * 1000))
 

@@ -342,13 +342,13 @@ class RCTiming(nn.Module):
                 flat_pin_to_start,
                 flat_pin_to,
                 flat_pin_from,
-                pin_caps_base):
+                pin_caps_base, length_scale):
 
         length = torch.abs(
             new_x[flat_pin_from] - new_x[flat_pin_to]) + torch.abs(
             new_y[flat_pin_from] - new_y[flat_pin_to])
-        flat_pin_to_res = length * self.r_unit
-        cap = length * self.c_unit
+        flat_pin_to_res = length * self.r_unit / length_scale
+        cap = length * self.c_unit / length_scale
         pin_caps = pin_caps_base.clone()
         pin_caps[flat_pin_from] += cap / 2
         pin_caps[flat_pin_to] += cap / 2

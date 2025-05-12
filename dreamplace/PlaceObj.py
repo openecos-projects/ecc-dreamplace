@@ -205,7 +205,10 @@ class PlaceObj(nn.Module):
         else:
             # non fence region will use first-order density penalty by default
             self.quad_penalty = False
-
+        
+        # timing diff
+        self.use_timing_obj = False
+        
         # fence region
         # update mask controls whether stop gradient/updating, 1 represents allow grad/update
         self.update_mask = None
@@ -428,7 +431,7 @@ class PlaceObj(nn.Module):
             result = torch.add(
                 result, self.macro_overlap, alpha=self.macro_overlap_weight.item()
             )
-        if self.params.with_sta:
+        if self.use_timing_obj:
             slack = self.timing_obj(pos)
             result = torch.add(result, slack)
 
@@ -737,8 +740,8 @@ class PlaceObj(nn.Module):
     def build_elmore_delay_op(
             self, params, placedb, data_collections):
         rc_timing = RCTiming(
-                             r_unit=data_collections.r_unit,
-                             c_unit=data_collections.c_unit)
+                             r_unit=placedb.r_unit,
+                             c_unit=placedb.c_unit)
         return rc_timing
 
     def build_timing_propagation_op(

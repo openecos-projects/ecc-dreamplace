@@ -1110,6 +1110,9 @@ class MacroPlaceDB(object):
             self.flat_lib_pin_slew_limit = np.array(
                 pydb.flat_lib_pin_slew_limit, dtype=self.dtype)
 
+            # RC
+            self.r_unit = float(pydb.r_unit)
+            self.c_unit = float(pydb.c_unit)
 
     def __call__(self, params):
         """

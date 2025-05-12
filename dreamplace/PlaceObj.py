@@ -434,6 +434,19 @@ class PlaceObj(nn.Module):
 
         return result
 
+    def pin_2_libpin_ids(self, inst_size, data_collections):
+        nodes_id = data_collections.pin2node_map
+        pins_main_id = data_collections.inst_main_id[nodes_id]
+        pins_cell_id = data_collections.main_id_2_cell_id_start[pins_main_id] + inst_size[nodes_id]
+        libpin_ids = data_collections.cell_id_2_libpin_id_start[pins_cell_id] + data_collections.pin_2_libpin_offset
+        return libpin_ids
+    
+    def pin_caps_op(self, inst_size, data_collections):
+        self.pin2libpin_flat_ids = self.pin_2_libpin_ids(inst_size, data_collections)
+        pin_cap_base = data_collections.flat_lib_pin_cap[self.pin2libpin_flat_ids]
+
+        return pin_cap_base
+    
     def timing_obj(self, pos):
         """
         @brief Compute objective.
@@ -445,7 +458,7 @@ class PlaceObj(nn.Module):
         new_x, new_y = self.op_collections.steiner_topo_op(
             self.op_collections.pin_pos_op(pos))
 
-        pin_caps_base
+        pin_caps_base = self.pin_caps_op(self.data_collections.inst_size, self.data_collections) # TODO: FIXME WHEN SIZING
         # ELMORE DELAY
         pin_net_cap, pin_net_delay, pin_net_impulse = self.op_collections.elmore_delay_op(
             new_x, new_y, self.data_collections.net_flat_topo_sort,

@@ -17,27 +17,20 @@ import dreamplace.configure as configure
 
 class SteinerTopoFunction(Function):
     @staticmethod
-    def forward(ctx, pos, flat_netpin, netpin_start,
-                # Topology information passed as arguments
-                pin_relate_x, pin_relate_y, local2global_index,
-                net_vertex_start, num_total_vertices):
+    def forward(ctx, pos, pin_relate_x, pin_relate_y,
+                net_vertex_start, num_vertices):
 
         updated_newx, updated_newy = steiner_topo_cpp.forward(
             pos,
             pin_relate_x.contiguous(),
             pin_relate_y.contiguous(),
-            local2global_index.contiguous(),
-            netpin_start.contiguous(),
-            net_vertex_start.contiguous(),
-            num_total_vertices
+            num_vertices
         )
 
         ctx.save_for_backward(pos,
-                              netpin_start,
                               net_vertex_start.contiguous(),
                               pin_relate_x.contiguous(),
-                              pin_relate_y.contiguous(),
-                              local2global_index.contiguous()
+                              pin_relate_y.contiguous()
                               )
 
         return updated_newx, updated_newy
@@ -45,19 +38,15 @@ class SteinerTopoFunction(Function):
     @staticmethod
     def backward(ctx, grad_newx, grad_newy):
 
-        grad_vertices = torch.cat([grad_newx, grad_newy], dim=0).contiguous()
-
         grad_pos = steiner_topo_cpp.backward(
-            grad_vertices,
+            grad_newx,
+            grad_newy,
             ctx.pos,
             ctx.pin_relate_x,
-            ctx.pin_relate_y,
-            ctx.netpin_start,
-            ctx.net_vertex_start,
-            ctx.local2global_index
+            ctx.pin_relate_y
         )
 
-        return grad_pos, None, None, None, None, None, None, None
+        return grad_pos, None, None, None, None, None, None
 
 
 class SteinerTopo(nn.Module):
@@ -66,12 +55,6 @@ class SteinerTopo(nn.Module):
                  flat_net2pin_start_map,
                  ignore_net_degree=None,
                  algorithm="FLUTE"):
-        """
-        @param flat_net2pin_map 网络到引脚的扁平化映射
-        @param flat_net2pin_start_map 每个网络的起始索引
-        @param ignore_net_degree 忽略网络的度数阈值
-        @param compute_interval int: Recompute topology every N iterations.
-        """
         super(SteinerTopo, self).__init__()
         # Register buffers
         self.register_buffer('flat_net2pin_map', flat_net2pin_map.contiguous())
@@ -85,7 +68,6 @@ class SteinerTopo(nn.Module):
         self.newy = None
         self.pin_relate_x = None
         self.pin_relate_y = None
-        self.local2global_index = None
         self.net_vertex_start = None
         self.net_steiner_start = None
         self.pin_fa = None
@@ -94,47 +76,57 @@ class SteinerTopo(nn.Module):
         self.flat_pin_to_start = None
         self.net_flat_topo_sort = None
         self.net_flat_topo_sort_start = None
-        self.num_total_vertices = None
+        self.num_vertices = None
 
         self.algorithm = algorithm
 
     def forward(self, pos):
 
         if self.pin_relate_x is None or self.pin_relate_y is None \
-           or self.local2global_index is None or self.net_vertex_start is None \
-           or self.num_total_vertices is None:
+           or self.net_vertex_start is None \
+           or self.num_vertices is None:
             raise RuntimeError(
                 "SteinerTopo topology not initialized. Call rebuild_tree and update_topology first.")
 
-        outputs = SteinerTopoFunction.apply(
+        updated_newx, updated_newy = SteinerTopoFunction.apply(
             pos,
-            self.flat_net2pin_map,
-            self.flat_net2pin_start_map,
-            # Topology info stored in self:
             self.pin_relate_x,
             self.pin_relate_y,
-            self.local2global_index,
             self.net_vertex_start,
-            self.num_total_vertices
+            self.num_vertices
         )
-        return outputs
+        # outputs = (
+        #     updated_newx,
+        #     updated_newy,
+        #     self.net_flat_topo_sort,
+        #     self.net_flat_topo_sort_start,
+        #     self.pin_fa,
+        #     self.flat_pin_to,
+        #     self.flat_pin_to_start,
+        #     self.flat_pin_from
+        # )
+        return updated_newx, updated_newy
 
     def update_cache(self, build_tree_outputs):
 
         (self.newx, self.newy, self.pin_relate_x, self.pin_relate_y,
-            self.local2global_index, self.net_vertex_start, self.net_steiner_start,
+            self.net_vertex_start, self.net_steiner_start,
             self.pin_fa, self.flat_pin_to, self.flat_pin_from, self.flat_pin_to_start,
             self.net_flat_topo_sort, self.net_flat_topo_sort_start) = build_tree_outputs
 
-        self.num_total_vertices = self.newx.numel()
+        self.num_vertices = self.newx.numel()
         self.pin_relate_x = self.pin_relate_x.contiguous()
         self.pin_relate_y = self.pin_relate_y.contiguous()
         self.net_vertex_start = self.net_vertex_start.contiguous()
-        self.local2global_index = self.local2global_index.contiguous()
+        self.net_steiner_start = self.net_steiner_start.contiguous()
+        self.pin_fa = self.pin_fa.contiguous()
+        self.flat_pin_to = self.flat_pin_to.contiguous()
+        self.flat_pin_from = self.flat_pin_from.contiguous()
+        self.flat_pin_to_start = self.flat_pin_to_start.contiguous()
+        self.net_flat_topo_sort = self.net_flat_topo_sort.contiguous()
+        self.net_flat_topo_sort_start = self.net_flat_topo_sort_start.contiguous()
 
     def rebuild_tree(self, pos):
-
-        print("SteinerTopo: Rebuilding tree...")
 
         new_outputs_tuple = steiner_topo_cpp.build_tree(
             pos,
@@ -144,24 +136,12 @@ class SteinerTopo(nn.Module):
         )
 
         self.update_cache(new_outputs_tuple)
-        print("SteinerTopo: Tree rebuild complete and cache updated.")
         return self.net_flat_topo_sort, self.net_flat_topo_sort_start, self.pin_fa, \
             self.flat_pin_to, self.flat_pin_to_start, self.flat_pin_from
 
-    def clear_cache(self):
-        """Clears the internal topology cache."""
-        # print("Clearing SteinerTopo cache.")
-        self.former_outputs['steiner'] = None
 
-    @property
-    def output_names(self):
-        """输出张量描述信息"""
-        return [
-            "wirelength",         # wl
-            "steiner_nodes",      # nodes
-            "x_pin_mapping",      # pin_relate_x
-            "y_pin_mapping",      # pin_relate_y
-            "branch_u",           # branch_u
-            "branch_v",           # branch_v
-            "net_branch_indices"  # net_branch_start
-        ]
+'''
+self.net_flat_topo_sort, self.net_flat_topo_sort_start, self.pin_fa, \
+            self.flat_pin_to, self.flat_pin_to_start, self.flat_pin_from
+
+'''

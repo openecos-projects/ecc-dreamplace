@@ -166,7 +166,7 @@ class MacroPlaceDB(object):
         self.cell_id_2_arc_id_start = None
 
         self.inst_main_id = None
-        self.inst_width = None
+        self.inst_size = None
 
         # LUTs table
         self.f_delay_flat_luts_values = None
@@ -1060,7 +1060,7 @@ class MacroPlaceDB(object):
                 pydb.cell_id_2_arc_id_start, dtype=np.int32)
 
             self.inst_main_id = np.array(pydb.inst_main_id, dtype=np.int32)
-            self.inst_width = np.array(pydb.inst_width, dtype=self.dtype)
+            self.inst_size = np.array(pydb.inst_size, dtype=self.dtype)
 
             # LUTs table
             self.f_delay_flat_luts_values = np.array(

@@ -354,6 +354,28 @@ class PlaceDataCollection(object):
             self.arcs_info.r_trans_luts.flat_luts_dim = torch.from_numpy(
                 placedb.r_trans_flat_luts_dim).to(device)
 
+            self.main_id_2_cell_id_start = torch.from_numpy(
+                placedb.main_id_2_cell_id_start).to(device)
+            self.cell_id_2_arc_id_start = torch.from_numpy(
+                placedb.cell_id_2_arc_id_start).to(device)
+
+            self.inst_main_id = torch.from_numpy(
+                placedb.inst_main_id).to(device)
+            self.inst_size = torch.from_numpy(
+                placedb.inst_size).to(device)
+
+            self.cell_id_2_libpin_id_start = torch.from_numpy(
+                placedb.cell_id_2_libpin_id_start).to(device)
+            self.pin_2_libpin_offset = torch.from_numpy(
+                placedb.pin_2_libpin_offset).to(device)
+            self.flat_lib_pin_cap = torch.from_numpy(
+                placedb.flat_lib_pin_cap).to(device)
+            self.flat_lib_pin_cap_limit = torch.from_numpy(
+                placedb.flat_lib_pin_cap_limit).to(device)
+            self.flat_lib_pin_slew_limit = torch.from_numpy(
+                placedb.flat_lib_pin_slew_limit).to(device)
+
+
             self.net_flat_topo_sort = None
             self.net_flat_topo_sort_start = None
             self.pin_fa = None

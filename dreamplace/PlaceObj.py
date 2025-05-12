@@ -437,10 +437,10 @@ class PlaceObj(nn.Module):
 
         return result
 
-    def pin_2_libpin_ids(self, inst_size, data_collections):
+    def pin_2_libpin_ids(self, inst_size: torch.tensor, data_collections):
         nodes_id = data_collections.pin2node_map
         pins_main_id = data_collections.inst_main_id[nodes_id]
-        pins_cell_id = data_collections.main_id_2_cell_id_start[pins_main_id] + inst_size[nodes_id]
+        pins_cell_id = data_collections.main_id_2_cell_id_start[pins_main_id] + inst_size[nodes_id].long()
         libpin_ids = data_collections.cell_id_2_libpin_id_start[pins_cell_id] + data_collections.pin_2_libpin_offset
         return libpin_ids
     
@@ -470,7 +470,8 @@ class PlaceObj(nn.Module):
             self.data_collections.flat_pin_to_start,
             self.data_collections.flat_pin_to,
             self.data_collections.flat_pin_from,
-            pin_caps_base
+            pin_caps_base,
+            self.params.scale_factor
         )
 
         ##

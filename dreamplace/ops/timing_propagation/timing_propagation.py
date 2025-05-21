@@ -305,7 +305,7 @@ class TimingPropagation(nn.Module):
         )
 
     def r_tran_entry(self, lib_cell_idxs, pin_rtrans, pin_net_caps, lib_arc_idxs):
-        luts = self.arcs_info.r_tran_luts
+        luts = self.arcs_info.r_trans_luts
         return self.lut_entry_vectorized(
             lib_cell_idxs, pin_rtrans, pin_net_caps, lib_arc_idxs,
             luts.flat_luts_values, luts.flat_luts_trans_table,
@@ -313,7 +313,7 @@ class TimingPropagation(nn.Module):
         )
 
     def f_tran_entry(self, lib_cell_idxs, pin_ftrans, pin_net_caps, lib_arc_idxs):
-        luts = self.arcs_info.f_tran_luts
+        luts = self.arcs_info.f_trans_luts
         return self.lut_entry_vectorized(
             lib_cell_idxs, pin_ftrans, pin_net_caps, lib_arc_idxs,
             luts.flat_luts_values, luts.flat_luts_trans_table,
@@ -504,9 +504,12 @@ class TimingPropagation(nn.Module):
         self.calculate_net_aat_level(pi_nets, pin_rAAT, pin_fAAT, pin_ftran, pin_rtran, pin_net_delay, pin_net_impulse, pin_net_cap
                                      )
 
-        for level in range(len(self.cells_by_level)):
+        for level in range(len(self.flat_cells_by_level_start) - 1):
+            start = self.flat_cells_by_level_start[level]
+            end = self.flat_cells_by_level_start[level + 1]
+            level_cells = self.flat_cells_by_level[start: end]
             cur_nets = self.calculate_cell_aat_level(
-                self.cells_by_level[level], pin_rAAT, pin_fAAT, pin_ftran, pin_rtran, pin_net_delay, pin_net_impulse, pin_net_cap, cell_arc_f_delays, cell_arc_r_delays
+                level_cells, pin_rAAT, pin_fAAT, pin_ftran, pin_rtran, pin_net_delay, pin_net_impulse, pin_net_cap, cell_arc_f_delays, cell_arc_r_delays
             )
             self.calculate_net_aat_level(
                 cur_nets, pin_rAAT, pin_fAAT, pin_ftran, pin_rtran, pin_net_delay, pin_net_impulse, pin_net_cap
@@ -516,9 +519,12 @@ class TimingPropagation(nn.Module):
         self.calculate_net_rat_level(po_nets, pin_rRAT, pin_fRAT, pin_net_delay, pin_net_impulse, pin_net_cap
                                      )
 
-        for level in range(len(self.cells_by_reverse_level)):
+        for level in range(len(self.flat_cells_by_reverse_level_start) - 1):
+            start = self.flat_cells_by_level_start[level]
+            end = self.flat_cells_by_level_start[level + 1]
+            level_cells = self.flat_cells_by_level[start: end]
             cur_nets = self.calculate_cell_rat_level(
-                self.cells_by_reverse_level[level], pin_rRAT, pin_fRAT, pin_net_delay, pin_net_impulse, pin_net_cap, cell_arc_f_delays, cell_arc_r_delays
+                level_cells, pin_rRAT, pin_fRAT, pin_net_delay, pin_net_impulse, pin_net_cap, cell_arc_f_delays, cell_arc_r_delays
             )
             self.calculate_net_rat_level(
                 cur_nets, pin_rRAT, pin_fRAT, pin_net_delay, pin_net_impulse, pin_net_cap

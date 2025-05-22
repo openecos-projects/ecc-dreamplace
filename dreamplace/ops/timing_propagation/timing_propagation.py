@@ -216,9 +216,9 @@ class TimingPropagation(nn.Module):
 
         # --- 6. Gather Corner Values (v00, v01, v10, v11) ---
         # Reshape the batch of 2D LUT values to be flat for 1D indexing
-        B, MaxT, MaxC = lut_values_batch.shape
-        lut_values_batch_flat = lut_values_batch.reshape(
-            B, MaxT * MaxC)  # [B, MaxT*MaxC]
+        # TODO:
+        # B, MaxT, MaxC = lut_values_batch.shape
+        lut_values_batch_flat = lut_values_batch
 
         # Check bounds before gathering (indices should be < actual_T * actual_C)
         # This check is complex with varying dimensions. Trusting the index calculation for now.

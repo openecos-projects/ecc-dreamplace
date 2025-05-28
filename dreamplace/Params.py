@@ -37,18 +37,7 @@ class Params:
         """
         @brief initialization
         """
-        filename = os.path.join(os.path.dirname(__file__), "params.json")
-        self.__dict__ = {}
-        params_dict = {}
-        with open(filename, "r") as f:
-            params_dict = json.load(f, object_pairs_hook=OrderedDict)
-        for key, value in params_dict.items():
-            if "default" in value:
-                self.__dict__[key] = value["default"]
-            else:
-                self.__dict__[key] = None
-        self.__dict__["params_dict"] = params_dict
-        self.base_design_name = "default"
+        pass
 
     def printWelcome(self):
         """

@@ -15,3 +15,5 @@ install
 .DS_Store
 .vscode/*
 bin
+include
+unittest

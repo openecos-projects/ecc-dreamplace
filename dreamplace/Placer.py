@@ -336,7 +336,7 @@ class PlacementEngine:
         # print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=20))
         # print(p.key_averages().table(sort_by="self_cpu_time_total", row_limit=20))
 
-        if self.rsmt != float("inf"):
+        if self.hpwl != float("inf"):
             # self.save_placement()
             self.density = float(self.params.target_density)
 

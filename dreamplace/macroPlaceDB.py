@@ -1310,10 +1310,15 @@ row height = %g, site width = %g
         # set number of bins
         # derive bin dimensions by keeping the aspect ratio
         aspect_ratio = (self.yh - self.yl) / (self.xh - self.xl)
-        num_bins_x = params.num_bins_x
-        num_bins_y = params.num_bins_y
-        self.num_bins_x = max(params.num_bins_x, num_bins_x)
-        self.num_bins_y = max(params.num_bins_y, num_bins_y)
+        if params.auto_adjust_bins:
+            num_bins = math.sqrt(math.pow(2, round(math.log2(self.num_physical_nodes)))) 
+            num_bins_x = int(num_bins)
+            num_bins_y = int(num_bins)
+        else:    
+            num_bins_x = params.num_bins_x
+            num_bins_y = params.num_bins_y
+        self.num_bins_x = num_bins_x
+        self.num_bins_y = num_bins_y
         # set bin size
         self.bin_size_x = (self.xh - self.xl) / self.num_bins_x
         self.bin_size_y = (self.yh - self.yl) / self.num_bins_y

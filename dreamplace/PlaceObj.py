@@ -243,16 +243,8 @@ class PlaceObj(nn.Module):
                 device=self.data_collections.pos[0].device,
             )
         # Note: even for multi-electric fields, they use the same gamma
-        num_bins_x = (
-            global_place_params["num_bins_x"]
-            if global_place_params["num_bins_x"]
-            else placedb.num_bins_x
-        )
-        num_bins_y = (
-            global_place_params["num_bins_y"]
-            if global_place_params["num_bins_y"]
-            else placedb.num_bins_y
-        )
+        num_bins_x = placedb.num_bins_x
+        num_bins_y = placedb.num_bins_y
         name = "Global placement: %dx%d bins by default" % (
             num_bins_x, num_bins_y)
         logging.info(name)

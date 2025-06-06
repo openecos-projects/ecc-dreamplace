@@ -52,15 +52,7 @@ from tools.iEDA.module.sta import IEDASta
 from tools.iEDA.module.io import IEDAIO
 import dreamplace.Timer as Timer
 
-# set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(levelname)-7s] %(name)s - %(message)s",
-    handlers=[
-        # logging.FileHandler("DREAMPlace.log", mode="w"),
-        logging.StreamHandler(sys.stdout),
-    ],
-)
+
 
 
 def seed_all(seed):

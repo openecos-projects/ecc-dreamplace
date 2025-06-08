@@ -96,7 +96,6 @@ AUTODMP_BASE_CONFIG = {
     "macro_overlap_weight": 8e-06,
     "macro_overlap_mult_weight": 1,
     "cell_padding_x": 0,
-    "cell_padding_y": 0,
     "bndry_padding_x": 0,
     "bndry_padding_y": 0,
     "pin_density": -1,

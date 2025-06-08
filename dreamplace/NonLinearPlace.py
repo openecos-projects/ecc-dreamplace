@@ -1034,26 +1034,31 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             iteration += 1
 
         # after_legalization recover node sizes, pins shifts, and positions of cells
-        if params.cell_padding_x >= 0 and params.cell_padding_y >= 0:
+        if params.cell_padding_x >= 0:
             with torch.no_grad():
                 # node sizes
-                self.data_collections.node_size_x[:placedb.num_physical_nodes] -= (
+                self.data_collections.node_size_x[:placedb.num_movable_nodes] -= (
                     2 * params.cell_padding_x
                 )
-                self.data_collections.node_size_y[:placedb.num_physical_nodes] -= (
-                    2 * params.cell_padding_y
-                )
-                
-                # pin offsets
-                self.data_collections.pin_offset_x -= params.cell_padding_x
-                self.data_collections.pin_offset_y -= params.cell_padding_y
+                # self.data_collections.node_size_y[:placedb.num_movable_nodes] -= (
+                #     2 * params.cell_padding_y
+                # )
+                movable_cell_tensor = np.arange(
+                    0, placedb.num_movable_nodes, dtype=placedb.pin2node_map.dtype)
+                # shift macro pins
+                movable_cell_pins = np.isin(
+                    placedb.pin2node_map, movable_cell_tensor)
 
-                self.pos[0][:placedb.num_physical_nodes] += params.cell_padding_x
-                self.pos[0][
-                    placedb.num_nodes: placedb.num_nodes + placedb.num_physical_nodes
-                ] += params.cell_padding_y
+                # pin offsets
+                self.data_collections.pin_offset_x[movable_cell_pins] -= params.cell_padding_x
+                # self.data_collections.pin_offset_y -= params.cell_padding_y
+
+                self.pos[0][:placedb.num_movable_nodes] += params.cell_padding_x
+                # self.pos[0][
+                #     placedb.num_nodes: placedb.num_nodes + placedb.num_movable_nodes
+                # ] += params.cell_padding_y
         
-        # rescale everything
+        # # rescale everything
         # cur_scale_factor = self.data_collections.fp_info.scale_factor
         # gcd_site_scale_factor = 1 / math.gcd(
         #     placedb.origin_site_width, placedb.origin_row_height
@@ -1079,7 +1084,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         #         params.macro_halo_y *= rescale_factor
         #         params.macro_pin_halo_x *= rescale_factor
         #         params.macro_pin_halo_y *= rescale_factor
-                # TODO: rescale fence regions
+        #         params.cell_padding_x *= rescale_factor
+        #         params.cell_padding_y *= rescale_factor
+        #         # TODO: rescale fence regions
 
         # plot placement
         if params.plot_flag:

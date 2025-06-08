@@ -279,10 +279,6 @@
         "description": "horizontal padding around macros for MFP macro overlap",
         "default": 0
     },
-    "cell_padding_y": {
-        "description": "vertical padding around macros for MFP macro overlap",
-        "default": 0
-    },
     "bndry_padding_x": {
         "description": "horizontal padding around the edges of the floorplan",
         "default": 0

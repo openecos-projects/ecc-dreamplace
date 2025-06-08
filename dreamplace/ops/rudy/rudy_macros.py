@@ -31,7 +31,7 @@ import dreamplace.configure as configure
 if configure.compile_configurations["CUDA_FOUND"] == "TRUE":
     import dreamplace.ops.rudy.rudy_cuda as rudy_cuda
 
-matplotlib.use("Agg")
+# matplotlib.use("Agg")
 
 
 class RudyWithMacros(nn.Module):

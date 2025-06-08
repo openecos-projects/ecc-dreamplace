@@ -275,11 +275,11 @@
         "description": "weight multiplier for MFP macro overlap",
         "default": 1
     },
-    "macro_padding_x": {
+    "cell_padding_x": {
         "description": "horizontal padding around macros for MFP macro overlap",
         "default": 0
     },
-    "macro_padding_y": {
+    "cell_padding_y": {
         "description": "vertical padding around macros for MFP macro overlap",
         "default": 0
     },

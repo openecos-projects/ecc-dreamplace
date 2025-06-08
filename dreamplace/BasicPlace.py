@@ -70,8 +70,8 @@ class FloorplanInfo:
     routing_H: float
     macro_util_V: torch.Tensor
     macro_util_H: torch.Tensor
-    macro_padding_x: float
-    macro_padding_y: float
+    cell_padding_x: float
+    cell_padding_y: float
     bndry_padding_x: float
     bndry_padding_y: float
 
@@ -274,8 +274,8 @@ class PlaceDataCollection(object):
                 placedb.routing_H,
                 torch.from_numpy(placedb.macro_util_V).to(device),
                 torch.from_numpy(placedb.macro_util_H).to(device),
-                placedb.macro_padding_x,
-                placedb.macro_padding_y,
+                placedb.cell_padding_x,
+                placedb.cell_padding_y,
                 placedb.bndry_padding_x,
                 placedb.bndry_padding_y,
             )

@@ -22,7 +22,7 @@
 import matplotlib
 from matplotlib import pyplot as plt
 import json
-matplotlib.use("Agg")
+# matplotlib.use("Agg")
 import os
 import sys
 import time

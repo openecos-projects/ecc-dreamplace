@@ -1290,8 +1290,8 @@ class MacroPlaceDB(object):
         params.macro_halo_y *= params.scale_factor
         params.macro_pin_halo_x *= params.scale_factor
         params.macro_pin_halo_y *= params.scale_factor
-        self.macro_padding_x *= params.scale_factor
-        self.macro_padding_y *= params.scale_factor
+        # self.cell_padding_x *= params.scale_factor # macro_padding is site width
+        # self.cell_padding_y *= params.scale_factor
         self.bndry_padding_x *= params.scale_factor
         self.bndry_padding_y *= params.scale_factor
 
@@ -1750,8 +1750,8 @@ row height = %g, site width = %g
                                self.node_size_y[self.movable_slice][self.movable_macro_mask]).astype('float64')
 
         # setup macro padding for overlap loss
-        self.macro_padding_x = params.macro_padding_x
-        self.macro_padding_y = params.macro_padding_y
+        self.cell_padding_x = params.cell_padding_x
+        self.cell_padding_y = params.cell_padding_y
         self.bndry_padding_x = params.bndry_padding_x
         self.bndry_padding_y = params.bndry_padding_y
 
@@ -1791,6 +1791,27 @@ row height = %g, site width = %g
             # self.fixed_macro_pins = np.isin(self.pin2node_map, self.fixed_macro_idx)
             # self.pin_offset_x[self.fixed_macro_pins] += params.macro_halo_x
             # self.pin_offset_y[self.fixed_macro_pins] += params.macro_halo_y
+        
+        # add padding around all_cells
+        if params.cell_padding_x >= 0 and params.cell_padding_y >= 0:
+            # increase macro sizes
+            self.node_size_x[:self.num_physical_nodes] += 2 * params.cell_padding_x
+            self.node_size_y[:self.num_physical_nodes] += 2 * params.cell_padding_y
+            # self.node_size_x[self.fixed_macro_idx] += 2 * params.macro_halo_x
+            # self.node_size_y[self.fixed_macro_idx] += 2 * params.macro_halo_y
+
+            # shift macro positions
+            self.node_x[:self.num_physical_nodes] -= params.cell_padding_x
+            self.node_y[:self.num_physical_nodes] -= params.cell_padding_y
+            # self.node_x[self.fixed_macro_idx] -= params.macro_halo_x
+            # self.node_y[self.fixed_macro_idx] -= params.macro_halo_y
+
+            # shift macro pins
+            # self.movable_macro_pins = np.isin(
+            #     self.pin2node_map, self.movable_macro_idx)
+            self.pin_offset_x += params.cell_padding_x
+            self.pin_offset_y += params.cell_padding_y
+        
         if params.macro_pin_halo_x >= 0:
             self.node_size_x[self.movable_macro_idx] += self.is_pin_lower_x * \
                 params.macro_pin_halo_x + self.is_pin_upper_x * params.macro_pin_halo_x

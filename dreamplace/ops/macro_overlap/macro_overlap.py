@@ -84,8 +84,8 @@ class MacroOverlap(nn.Module):
             return
 
         # pad movable macros
-        self.macro_size_x += 2 * self.fp_info.macro_padding_x
-        self.macro_size_y += 2 * self.fp_info.macro_padding_y
+        self.macro_size_x += 2 * self.fp_info.cell_padding_x
+        self.macro_size_y += 2 * self.fp_info.cell_padding_y
 
         # add the boundary nodes
         if self.fp_info.bndry_padding_x > 0 and self.fp_info.bndry_padding_y > 0:

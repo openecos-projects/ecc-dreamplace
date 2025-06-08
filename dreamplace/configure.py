@@ -6,11 +6,11 @@
 #
 
 compile_configurations = {
-        "CMAKE_CXX_COMPILER" : "/usr/bin/g++", 
+        "CMAKE_CXX_COMPILER" : "/usr/bin/c++", 
         "CMAKE_CC_COMPILER" : "", 
-        "CMAKE_BUILD_TYPE" : "Debug", 
+        "CMAKE_BUILD_TYPE" : "Release", 
         "CMAKE_CXX_ABI" : "0", 
-        "CMAKE_CXX_STANDARD" : "14", 
+        "CMAKE_CXX_STANDARD" : "17", 
         "PYTHON" : "", 
         "Boost_DIR" : "", 
         "Boost_INCLUDE_DIRS" : "/usr/local/include", 

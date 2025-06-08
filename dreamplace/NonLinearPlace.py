@@ -675,6 +675,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     plt.imsave(
                                         figname, route_utilization_map.data.cpu().numpy().T, origin="lower"
                                     )
+                                    logging.info(
+                                        "plot route utilization map to %s" % (figname)
+                                    )
                             if adjust_pin_area_flag:
                                 pin_utilization_map = model.op_collections.pin_utilization_map_op(
                                     pos)
@@ -1030,32 +1033,52 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             logging.info(cur_metric)
             iteration += 1
 
-        # rescale everything
-        cur_scale_factor = self.data_collections.fp_info.scale_factor
-        gcd_site_scale_factor = 1 / math.gcd(
-            placedb.origin_site_width, placedb.origin_row_height
-        )
-        if cur_scale_factor != gcd_site_scale_factor:
-            logging.warn(
-                f"Rescaling by GCD(site_width, row_height) = {gcd_site_scale_factor} before legalization and detailed placement"
-            )
-            params.scale_factor = gcd_site_scale_factor
-            rescale_factor = gcd_site_scale_factor / cur_scale_factor
+        # after_legalization recover node sizes, pins shifts, and positions of cells
+        if params.cell_padding_x >= 0 and params.cell_padding_y >= 0:
             with torch.no_grad():
-                self.pos[0].mul_(rescale_factor).round_()
-                self.data_collections.node_size_x.mul_(rescale_factor).round_()
-                self.data_collections.node_size_y.mul_(rescale_factor).round_()
-                self.data_collections.flat_region_boxes.mul_(
-                    rescale_factor).round_()
-                self.data_collections.pin_offset_x.mul_(rescale_factor)
-                self.data_collections.pin_offset_y.mul_(rescale_factor)
-                # self.data_collections.node_areas.mul_(rescale_factor * rescale_factor)
-                self.data_collections.fp_info.scale(rescale_factor)
-                self.data_collections.fp_info.scale_factor = gcd_site_scale_factor
-                params.macro_halo_x *= rescale_factor
-                params.macro_halo_y *= rescale_factor
-                params.macro_pin_halo_x *= rescale_factor
-                params.macro_pin_halo_y *= rescale_factor
+                # node sizes
+                self.data_collections.node_size_x[:placedb.num_physical_nodes] -= (
+                    2 * params.cell_padding_x
+                )
+                self.data_collections.node_size_y[:placedb.num_physical_nodes] -= (
+                    2 * params.cell_padding_y
+                )
+                
+                # pin offsets
+                self.data_collections.pin_offset_x -= params.cell_padding_x
+                self.data_collections.pin_offset_y -= params.cell_padding_y
+
+                self.pos[0][:placedb.num_physical_nodes] += params.cell_padding_x
+                self.pos[0][
+                    placedb.num_nodes: placedb.num_nodes + placedb.num_physical_nodes
+                ] += params.cell_padding_y
+        
+        # rescale everything
+        # cur_scale_factor = self.data_collections.fp_info.scale_factor
+        # gcd_site_scale_factor = 1 / math.gcd(
+        #     placedb.origin_site_width, placedb.origin_row_height
+        # )
+        # if cur_scale_factor != gcd_site_scale_factor:
+        #     logging.warn(
+        #         f"Rescaling by GCD(site_width, row_height) = {gcd_site_scale_factor} before legalization and detailed placement"
+        #     )
+        #     params.scale_factor = gcd_site_scale_factor
+        #     rescale_factor = gcd_site_scale_factor / cur_scale_factor
+        #     with torch.no_grad():
+        #         self.pos[0].mul_(rescale_factor).round_()
+        #         self.data_collections.node_size_x.mul_(rescale_factor).round_()
+        #         self.data_collections.node_size_y.mul_(rescale_factor).round_()
+        #         self.data_collections.flat_region_boxes.mul_(
+        #             rescale_factor).round_()
+        #         self.data_collections.pin_offset_x.mul_(rescale_factor)
+        #         self.data_collections.pin_offset_y.mul_(rescale_factor)
+        #         # self.data_collections.node_areas.mul_(rescale_factor * rescale_factor)
+        #         self.data_collections.fp_info.scale(rescale_factor)
+        #         self.data_collections.fp_info.scale_factor = gcd_site_scale_factor
+        #         params.macro_halo_x *= rescale_factor
+        #         params.macro_halo_y *= rescale_factor
+        #         params.macro_pin_halo_x *= rescale_factor
+        #         params.macro_pin_halo_y *= rescale_factor
                 # TODO: rescale fence regions
 
         # plot placement

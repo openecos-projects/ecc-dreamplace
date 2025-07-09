@@ -26,8 +26,6 @@ struct NetResult {
   std::vector<int> vtx_relate_x;
   std::vector<int> vtx_relate_y;
   std::vector<int> vtx_fa;
-  std::vector<int> flat_vtx_to;
-  std::vector<int> flat_vtx_to_start;
   std::vector<int> net_flat_topo_idx;
   std::vector<int> local2global_idx;
 };
@@ -90,11 +88,9 @@ int computeSteinerTreeLauncher(
     };
 
     if (num_valid_pins == 1) {
-
       // --- net with only one unique pin location ---
       wl[netid] = 0;
       net_result[netid].vtx_fa.resize(degree);
-      net_result[netid].flat_vtx_to_start.resize(degree + 1);
       net_result[netid].net_flat_topo_idx.resize(degree);
       net_result[netid].vtx_relate_x.resize(degree);
       net_result[netid].vtx_relate_y.resize(degree);
@@ -109,7 +105,6 @@ int computeSteinerTreeLauncher(
         }
       }
     } else {
-
       // --- nets with >= 2 unique pin locations ---
       flute::Tree ftree =
           flute::flute(num_valid_pins, vx.data(), vy.data(), ACCURACY);
@@ -142,7 +137,6 @@ int computeSteinerTreeLauncher(
       net_result[netid].vtx_relate_x.resize(total_vertex_local);
       net_result[netid].vtx_relate_y.resize(total_vertex_local);
       net_result[netid].vtx_fa.resize(total_vertex_local);
-      net_result[netid].flat_vtx_to_start.resize(total_vertex_local + 1);
       net_result[netid].net_flat_topo_idx.resize(total_vertex_local);
 
       // store adjacency for Steiner diagonal connections
@@ -259,34 +253,22 @@ int computeSteinerTreeLauncher(
           net_result[netid].vtx_fa[v] = u;
         }
       }
-      net_result[netid].flat_vtx_to_start[0] = 0;
-      for (int local_idx = 0; local_idx < vtx_degree; ++local_idx) {
-        int num_son = 0;
-        for (auto v : edge[local_idx]) {
-          if (v == -1)
-            continue;
-          ++num_son;
-          net_result[netid].flat_vtx_to.push_back(v);
-        }
-        net_result[netid].flat_vtx_to_start[local_idx + 1] =
-            net_result[netid].flat_vtx_to_start[local_idx] + num_son;
-      }
     };
     topo_sort(netid);
   }
 
   // --- merge net results ---
-  newx.resize(num_pins + total_steiner);
-  newy.resize(num_pins + total_steiner);
-  vtx_relate_x.resize(num_pins + total_steiner);
-  vtx_relate_y.resize(num_pins + total_steiner);
-  vtx_fa.resize(num_pins + total_steiner);
-  flat_vtx_from.resize(num_pins + total_steiner);
-  flat_vtx_to.resize(num_pins + total_steiner);
-  flat_vtx_to_start.resize(num_pins + total_steiner + 1);
-  net_flat_topo_idx.resize(num_pins + total_steiner);
+  int total_vtx = num_pins + total_steiner;
+  std::vector<std::vector<int>> global_adj(total_vtx);
+  newx.resize(total_vtx);
+  newy.resize(total_vtx);
+  vtx_relate_x.resize(total_vtx);
+  vtx_relate_y.resize(total_vtx);
+  vtx_fa.resize(total_vtx);
+  net_flat_topo_idx.resize(total_vtx);
   netsteiner_start[0] = num_pins;
-  for (int netid = 0, prefix_steiner = 0; netid < num_nets; ++netid) {
+  
+  for (int netid = 0; netid < num_nets; ++netid) {
     int degree = netpin_start[netid + 1] - netpin_start[netid];
     int degree_steiner = net_result[netid].num_steiner;
 
@@ -304,42 +286,33 @@ int computeSteinerTreeLauncher(
         return netsteiner_start[netid] + idx - degree;
       }
     };
-    auto merge_result = [&net_result, &newx, &newy, &vtx_relate_x,
-                         &vtx_relate_y, &vtx_fa, &flat_vtx_to,
-                         &flat_vtx_to_start, &net_flat_topo_idx, &netpin_start,
-                         &prefix_steiner, &degree, &netsteiner_start,
-                         &local2global](int netid, int from, int to) {
-      newx[to] = net_result[netid].newx[from] / scale;
-      newy[to] = net_result[netid].newy[from] / scale;
-      vtx_relate_x[to] = local2global(net_result[netid].vtx_relate_x[from]);
-      vtx_relate_y[to] = local2global(net_result[netid].vtx_relate_y[from]);
-      vtx_fa[to] = local2global(net_result[netid].vtx_fa[from]);
-      flat_vtx_to_start[to] = net_result[netid].flat_vtx_to_start[from];
-      net_flat_topo_idx[to] = local2global(net_result[netid].net_flat_topo_idx[from]);
-      for (int i = net_result[netid].flat_vtx_to_start[from];
-           i < net_result[netid].flat_vtx_to_start[from + 1]; ++i) {
-        int prefix_vertices = netpin_start[netid];
-        flat_vtx_to[prefix_vertices + i] =
-            local2global(net_result[netid].flat_vtx_to[i]);
+    for (int local_id = 0; local_id < degree + degree_steiner; ++local_id) {
+      int global_idx = local2global(local_id);
+      newx[global_idx] = net_result[netid].newx[local_id] / scale;
+      newy[global_idx] = net_result[netid].newy[local_id] / scale;
+      vtx_fa[global_idx] = local2global(net_result[netid].vtx_fa[local_id]);
+      vtx_relate_x[global_idx] = local2global(net_result[netid].vtx_relate_x[local_id]);
+      vtx_relate_y[global_idx] = local2global(net_result[netid].vtx_relate_y[local_id]);
+      net_flat_topo_idx[global_idx] = local2global(net_result[netid].net_flat_topo_idx[local_id]);
+      if (vtx_fa[global_idx] != -1) {
+        global_adj[vtx_fa[global_idx]].push_back(global_idx);
       }
-    };
-    for (int pin = 0; pin < degree; ++pin) {
-      int global_idx = net_result[netid].local2global_idx[pin];
-      merge_result(netid, pin, global_idx);
-    }
-    for (int steiner = 0; steiner < degree_steiner; ++steiner) {
-      int global_idx = num_pins + prefix_steiner + steiner;
-      merge_result(netid, degree + steiner, global_idx);
-    }
-    prefix_steiner += degree_steiner;
-    for (int i = 0; i < net_result[netid].newx.size(); ++i) {
-      int begin_idx = net_result[netid].flat_vtx_to_start[i];
-      int end_idx = net_result[netid].flat_vtx_to_start[i + 1];
-      int from_vtx = local2global(i);
-      std::fill(flat_vtx_from.begin() + begin_idx,
-                flat_vtx_from.begin() + end_idx, from_vtx);
     }
   }
+  
+  flat_vtx_to.reserve(total_vtx);
+  flat_vtx_from.reserve(total_vtx);
+  flat_vtx_to_start.resize(total_vtx + 1);
+  flat_vtx_to_start[0] = 0;
+
+  for (int i = 0; i < total_vtx; ++i) {
+      for (int neighbor : global_adj[i]) {
+          flat_vtx_to.push_back(neighbor);
+          flat_vtx_from.push_back(i);
+      }
+      flat_vtx_to_start[i + 1] = flat_vtx_to.size();
+  }
+  
   // DEBUG
   std::cout << "build tree done" << std::endl;
   return 0;

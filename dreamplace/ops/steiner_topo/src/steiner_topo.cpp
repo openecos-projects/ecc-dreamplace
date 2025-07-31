@@ -219,7 +219,8 @@ int computeSteinerTreeLauncher(
           std::cout << "Position (" << pos.x() << ", " << pos.y()
                     << ") has local indices: ";
           for (const auto &idx : indices) {
-            std::cout << idx << " ";
+            std::cout << idx << "(" << net_result[netid].local2global_idx[idx]
+                      << ") ";
           }
           std::cout << std::endl;
         }
@@ -266,6 +267,7 @@ int computeSteinerTreeLauncher(
   vtx_relate_y.resize(total_vtx);
   vtx_fa.resize(total_vtx);
   net_flat_topo_idx.resize(total_vtx);
+  net_flat_topo_idx_start[0] = 0;
   netsteiner_start[0] = num_pins;
   
   for (int netid = 0; netid < num_nets; ++netid) {
@@ -293,7 +295,8 @@ int computeSteinerTreeLauncher(
       vtx_fa[global_idx] = local2global(net_result[netid].vtx_fa[local_id]);
       vtx_relate_x[global_idx] = local2global(net_result[netid].vtx_relate_x[local_id]);
       vtx_relate_y[global_idx] = local2global(net_result[netid].vtx_relate_y[local_id]);
-      net_flat_topo_idx[global_idx] = local2global(net_result[netid].net_flat_topo_idx[local_id]);
+      net_flat_topo_idx[net_flat_topo_idx_start[netid] + local_id] = 
+          local2global(net_result[netid].net_flat_topo_idx[local_id]);
       if (vtx_fa[global_idx] != -1) {
         global_adj[vtx_fa[global_idx]].push_back(global_idx);
       }

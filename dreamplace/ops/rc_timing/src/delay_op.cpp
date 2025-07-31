@@ -68,9 +68,9 @@ delay_forward_cpp(at::Tensor resistance_tensor, at::Tensor load_tensor,
   int32_t num_nodes = load_tensor.numel();
   int32_t num_nets =
       net_flat_topo_start.numel() ? (net_flat_topo_start.numel() - 1) : 0;
-
-  TORCH_CHECK(resistance_tensor.numel() == num_nodes,
-              "resistance_tensor size mismatch");
+  // FIX ME: res_tensor should match size of edges, approximately (num_nodes - num_nets)
+  // TORCH_CHECK(resistance_tensor.numel() == num_nodes,
+  //             "resistance_tensor size mismatch");
   TORCH_CHECK(pin_fa_tensor.numel() == num_nodes,
               "pin_fa_tensor size mismatch");
   TORCH_CHECK(net_flat_topo_start.numel() == num_nets + 1 || num_nets == 0,

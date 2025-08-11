@@ -21,7 +21,7 @@ import itertools
 from tools.iEDA.data.design import IEDADesign
 from tools.iEDA.data.idm import IEDADataManager
 from tools.iEDA.module.io import IEDAIO
-from data_manager.aimp_dm import AimpDataManager
+# from data_manager.aimp_dm import AimpDataManager
 # import macro_placer.database.fence_region.fence_region as fence_region
 
 datatypes = {
@@ -35,7 +35,7 @@ class MacroPlaceDB(object):
     @brief placement database
     """
 
-    def __init__(self, data_manager: AimpDataManager):
+    def __init__(self, data_manager: IEDADataManager):
         """
         initialization
         To avoid the usage of list, I flatten everything.

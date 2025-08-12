@@ -306,16 +306,21 @@ class PlaceDataCollection(object):
                 #     placedb.cells_by_reverse_level).to(device)
                 self.start_points = torch.from_numpy(
                     placedb.start_points).to(device)
-                self.end_points = torch.from_numpy(
-                    placedb.end_points).to(device)
+                self.end_points = torch.from_numpy(placedb.end_points).to(device)
+                self.clock_pins = torch.from_numpy(placedb.clock_pins).to(device)
+                self.FF_ids = torch.from_numpy(placedb.FF_ids).to(device)
+                self.clk_pin_rtran = torch.from_numpy(placedb.clk_pin_rtran).to(device)
+                self.clk_pin_ftran = torch.from_numpy(placedb.clk_pin_ftran).to(device)
                 self.net_flat_arcs_start = torch.from_numpy(
                     placedb.net_flat_arcs_start).to(device)
                 self.net_flat_arcs = torch.from_numpy(
                     placedb.net_flat_arcs).to(device)
-                self.cell_flat_arcs_start = torch.from_numpy(
-                    placedb.cell_flat_arcs_start).to(device)
-                self.cell_flat_arcs = torch.from_numpy(
-                    placedb.cell_flat_arcs).to(device)
+                self.inst_flat_arcs_start = torch.from_numpy(
+                    placedb.inst_flat_arcs_start).to(device)
+                self.inst_flat_arcs = torch.from_numpy(
+                    placedb.inst_flat_arcs).to(device)
+                self.cell_flat_clk_arcs = torch.from_numpy(
+                    placedb.cell_flat_clk_arcs).to(device)
                 self.net2driver_pin_map = torch.from_numpy(
                     placedb.net2driver_pin_map).to(device)
                 self.arcs_info = ARCS_INFO()
@@ -372,10 +377,15 @@ class PlaceDataCollection(object):
                     placedb.pin_2_libpin_offset).to(device)
                 self.flat_lib_pin_cap = torch.from_numpy(
                     placedb.flat_lib_pin_cap).to(device)
+                self.flat_lib_pin_rcap = torch.from_numpy(
+                    placedb.flat_lib_pin_rcap).to(device)
+                self.flat_lib_pin_fcap = torch.from_numpy(
+                    placedb.flat_lib_pin_fcap).to(device)
                 self.flat_lib_pin_cap_limit = torch.from_numpy(
                     placedb.flat_lib_pin_cap_limit).to(device)
                 self.flat_lib_pin_slew_limit = torch.from_numpy(
                     placedb.flat_lib_pin_slew_limit).to(device)
+
 
                 self.net_flat_topo_sort = None
                 self.net_flat_topo_sort_start = None

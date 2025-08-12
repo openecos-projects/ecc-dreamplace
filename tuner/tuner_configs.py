@@ -19,7 +19,7 @@ AUTODMP_BASE_CONFIG = {
     "lef_input": "",
     "def_input": "",
     "verilog_input": "",
-    "gpu": 0,
+    "gpu": 1,
     "gpu_id": 0,
     "num_bins_x": 512,
     "num_bins_y": 512,
@@ -33,7 +33,7 @@ AUTODMP_BASE_CONFIG = {
             "optimizer": "adam",
             "Llambda_density_weight_iteration": 1,
             "Lsub_iteration": 1,
-            "learning_rate_decay": 1.0,
+            "learning_rate_decay": 1.0
         }
     ],
     "target_density": 0.7,
@@ -53,10 +53,6 @@ AUTODMP_BASE_CONFIG = {
     "dtype": "float32",
     "detailed_place_engine": "",
     "detailed_place_command": "",
-    "timing_opt_flag": 0,
-    "macro_place_flag": 1,
-    "use_bb": 1,
-    "two_stage_density_scaler" : 1000,
     "plot_flag": 0,
     "RePlAce_ref_hpwl": 350000,
     "RePlAce_LOWER_PCOF": 0.94,
@@ -88,6 +84,10 @@ AUTODMP_BASE_CONFIG = {
     "route_opt_adjust_exponent": 2.0,
     "pin_stretch_ratio": 1.414213562,
     "max_pin_opt_adjust_rate": 1.5,
+    "timing_opt_flag": 0,
+    "macro_place_flag": 1,
+    "use_bb": 0,
+    "two_stage_density_scaler": 1000,
     "deterministic_flag": 1,
     "get_congestion_map": 1,
     "macro_halo_x": 0,
@@ -101,9 +101,14 @@ AUTODMP_BASE_CONFIG = {
     "bndry_padding_y": 0,
     "pin_density": -1,
     "route_info_input": "default",
-    "risa_weights": 0,
     "evaluate_pl": 0,
+    "risa_weights": 0,
+    "base_design_name": "default",
+    "macro_pin_halo_x": 20000,
+    "macro_pin_halo_y": 20000,
+    "with_sta": 0,
 }
+
 
 
 # Cost ratio for unfinished AutoDMP runs

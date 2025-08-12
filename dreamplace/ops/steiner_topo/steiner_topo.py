@@ -38,12 +38,13 @@ class SteinerTopoFunction(Function):
     @staticmethod
     def backward(ctx, grad_newx, grad_newy):
 
+        pos, net_vertex_start, pin_relate_x, pin_relate_y = ctx.saved_tensors
         grad_pos = steiner_topo_cpp.backward(
             grad_newx,
             grad_newy,
-            ctx.pos,
-            ctx.pin_relate_x,
-            ctx.pin_relate_y
+            pos,
+            pin_relate_x,
+            pin_relate_y
         )
 
         return grad_pos, None, None, None, None, None, None

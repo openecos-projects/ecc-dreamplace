@@ -63,6 +63,7 @@ class MacroPlaceDB(object):
         self.pin_direct = None  # 1D array, pin direction IO
         self.pin_offset_x = None  # 1D array, pin offset x to its node
         self.pin_offset_y = None  # 1D array, pin offset y to its node
+        self.pin_names = None  # 1D array, pin name
 
         self.net_name2id_map = {}  # net name to id map
         self.net_names = None  # net name
@@ -105,6 +106,8 @@ class MacroPlaceDB(object):
         self.bin_center_x = None
         self.bin_center_y = None
 
+        self.dbu = None  # database unit, used for scaling
+
         self.num_movable_pins = None
 
         self.total_movable_node_area = None  # total movable cell area
@@ -143,6 +146,10 @@ class MacroPlaceDB(object):
         # Timing model
         self.start_points = None
         self.end_points = None
+        self.clock_pins = None
+        self.FF_ids = None
+        self.clk_pin_rtran = None
+        self.clk_pin_ftran = None
         # self.cells_by_level = None
         # self.cells_by_reverse_level = None
 
@@ -159,8 +166,9 @@ class MacroPlaceDB(object):
 
         self.net_flat_arcs_start = None
         self.net_flat_arcs = None
-        self.cell_flat_arcs_start = None
-        self.cell_flat_arcs = None
+        self.inst_flat_arcs_start = None
+        self.inst_flat_arcs = None
+        self.cell_flat_clk_arcs = None
 
         self.main_id_2_cell_id_start = None
         self.cell_id_2_arc_id_start = None
@@ -277,6 +285,7 @@ class MacroPlaceDB(object):
             ieda_dm = IEDADataManager(self.data_manager.dir_workspace)
             self.get_dmInst_ptr = ieda_dm.get_dmInst_ptr()
             self.pydb = ieda_dm.pydb(self.get_dmInst_ptr, params.with_sta)
+            # self.pin_names = ieda_dm.ieda.get_all_pin_names_from_db()
 
     def init_db(self, params):
         self.setup_rawdb(params)
@@ -949,6 +958,7 @@ class MacroPlaceDB(object):
         # BUG all the pin offsets are -1
         self.pin_offset_x = np.array(pydb.pin_offset_x, dtype=self.dtype)
         self.pin_offset_y = np.array(pydb.pin_offset_y, dtype=self.dtype)
+        self.pin_names = np.array(pydb.pin_names, dtype=np.string_)
         self.net_name2id_map = pydb.net_name2id_map
         self.net_names = np.array(pydb.net_names, dtype=np.string_)
         self.net2pin_map = pydb.net2pin_map
@@ -1025,6 +1035,10 @@ class MacroPlaceDB(object):
         if params.with_sta:
             self.start_points = np.array(pydb.start_points, dtype=np.int32)
             self.end_points = np.array(pydb.end_points, dtype=np.int32)
+            self.clock_pins = np.array(pydb.clock_pins, dtype=np.int32)
+            self.FF_ids = np.array(pydb.FF_ids, dtype=np.int32)
+            self.clk_pin_rtran = np.array(pydb.clk_pin_rtran, dtype=np.int32)
+            self.clk_pin_ftran = np.array(pydb.clk_pin_ftran, dtype=np.int32)
 
             self.flat_cells_by_level = np.array(
                 pydb.flat_cells_by_level, dtype=np.int32)
@@ -1041,18 +1055,22 @@ class MacroPlaceDB(object):
             self.net2driver_pin_map = np.array(
                 pydb.net2driver_pin_map, dtype=np.int32)
             
+            self.dbu = float(pydb.dbu)
             self.inrdelays = np.array(pydb.inrdelays, dtype=self.dtype)
             self.infdelays = np.array(pydb.infdelays, dtype=self.dtype)
             self.inrtrans = np.array(pydb.inrtrans, dtype=self.dtype)
             self.inftrans = np.array(pydb.inftrans, dtype=self.dtype)
             self.outcaps = np.array(pydb.outcaps, dtype=self.dtype)
+            self.endpoints_rRAT = np.array(pydb.endpoints_rRAT, dtype=self.dtype)
+            self.endpoints_fRAT = np.array(pydb.endpoints_fRAT, dtype=self.dtype)
 
             self.net_flat_arcs_start = np.array(
                 pydb.net_flat_arcs_start, dtype=np.int32)
             self.net_flat_arcs = np.array(pydb.net_flat_arcs, dtype=np.int32)
-            self.cell_flat_arcs_start = np.array(
-                pydb.cell_flat_arcs_start, dtype=np.int32)
-            self.cell_flat_arcs = np.array(pydb.cell_flat_arcs, dtype=np.int32)
+            self.inst_flat_arcs_start = np.array(
+                pydb.inst_flat_arcs_start, dtype=np.int32)
+            self.inst_flat_arcs = np.array(pydb.inst_flat_arcs, dtype=np.int32)
+            self.cell_flat_clk_arcs = np.array(pydb.cell_flat_clk_arcs, dtype=np.int32)
 
             self.main_id_2_cell_id_start = np.array(
                 pydb.main_id_2_cell_id_start, dtype=np.int32)
@@ -1105,6 +1123,10 @@ class MacroPlaceDB(object):
                 pydb.pin_2_libpin_offset, dtype=np.int32)
             self.flat_lib_pin_cap = np.array(
                 pydb.flat_lib_pin_cap, dtype=self.dtype)
+            self.flat_lib_pin_rcap = np.array(
+                pydb.flat_lib_pin_rcap, dtype=self.dtype)
+            self.flat_lib_pin_fcap = np.array(
+                pydb.flat_lib_pin_fcap, dtype=self.dtype)
             self.flat_lib_pin_cap_limit = np.array(
                 pydb.flat_lib_pin_cap_limit, dtype=self.dtype)
             self.flat_lib_pin_slew_limit = np.array(

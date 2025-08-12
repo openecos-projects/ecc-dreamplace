@@ -367,7 +367,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                      ((time.time() - t_steiner) * 1000))
 
                     # plot placement
-                    if params.plot_flag and (iteration % 100 == 0 or iteration == 999):
+                    if params.plot_flag and (iteration % 2 == 0 or iteration == 999):
                         cur_pos = self.pos[0].data.clone().cpu().numpy()
                         self.plot(params, placedb, iteration, cur_pos)
 

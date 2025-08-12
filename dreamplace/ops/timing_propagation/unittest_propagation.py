@@ -81,13 +81,13 @@ class TestTimingPropagation(unittest.TestCase):
         # [inpin, outpin, lib_cell_idx, lib_arc_idx, arc_type]
         # Arc Instance 0: INV input (1) -> INV output (2), LibCell 0 (INV), LibArc 0, type 0 (neg)
         # Arc Instance 1: BUF input (3) -> BUF output (4), LibCell 1 (BUF), LibArc 0, type 1 (pos)
-        self.cell_flat_arcs = torch.tensor([
+        self.inst_flat_arcs = torch.tensor([
             [1, 2, 0, 0, 0],
             [3, 4, 1, 0, 1]
         ], device=self.device, dtype=torch.long)
         # Starts for cell instance 0, cell instance 1, and end marker
-        self.cell_flat_arcs_start = torch.tensor([0, 1, 2], device=self.device, dtype=torch.long)
-        self.num_total_cell_arc_instances = self.cell_flat_arcs.shape[0]
+        self.inst_flat_arcs_start = torch.tensor([0, 1, 2], device=self.device, dtype=torch.long)
+        self.num_total_cell_arc_instances = self.inst_flat_arcs.shape[0]
 
         # --- Net Arcs ---
         # [src_pin, sink_pin]
@@ -191,8 +191,8 @@ class TestTimingPropagation(unittest.TestCase):
             net_flat_arcs_start=self.net_flat_arcs_start,
             net_flat_arcs=self.net_flat_arcs,
             arcs_info=self.arcs_info,
-            cell_flat_arcs_start=self.cell_flat_arcs_start,
-            cell_flat_arcs=self.cell_flat_arcs,
+            inst_flat_arcs_start=self.inst_flat_arcs_start,
+            inst_flat_arcs=self.inst_flat_arcs,
             cells_by_reverse_level=self.cells_by_reverse_level
         ).to(self.device, self.dtype) # Ensure model parameters are also float64
 

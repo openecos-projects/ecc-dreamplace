@@ -396,8 +396,8 @@ if __name__ == "__main__":
     # exit()
     # init workspace
     # workspace_path = "/data/project_share/aimp_test/XSTop/workspace_XSTop"
-    workspace_path = "/home/zhaoxueyan/code/benchmark/workspace_case/KIANV/workspace"
-    # workspace_path = "/home/zhaoxueyan/code/benchmark/workspace_case/retrosoc_asic_flatten/workspace"
+    # workspace_path = "/home/xingchaoyu/KIANV_workspace/workspace"
+    workspace_path = "/nfs/share/home/zhaoxueyan/flow_110_commercial/KIANV_workspace/workspace"
     # init aimp
     data_manager = AimpDataManager(workspace_path)
     params = Params.Params()
@@ -408,10 +408,10 @@ if __name__ == "__main__":
     ieda_io.read_def()
     params.with_sta = False
     # init PlacementEngine
-    # json_file = '/home/zhaoxueyan/code/ai-mp/workspace_aimp/workspace_NutShell/aimp/log/run-0_0_0/parameters.json'
-    json_file = '/home/zhaoxueyan/code/ai-mp/AutoDMP/dreamplace/params2.json'
-    # json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/test/XS_TOP_TSMC28_0208/mobohb_log/XS_TOP/run-1_0_0/parameters.json'
-    # json_file = '/home/zhaoxueyan/code/ai-mp/workspace_aimp/workspace_NutShell/aimp/log/run-0_0_8/parameters.json'
+    # json_file = '/home/xingchaoyu/code/ai-mp/workspace_aimp/workspace_NutShell/aimp/log/run-0_0_0/parameters.json'
+    json_file = '/home/xingchaoyu/code/ai-mp/AutoDMP/dreamplace/params2.json'
+    # json_file = '/home/xingchaoyu/code/ai-eda/app/AutoDMP/test/XS_TOP_TSMC28_0208/mobohb_log/XS_TOP/run-1_0_0/parameters.json'
+    # json_file = '/home/xingchaoyu/code/ai-mp/workspace_aimp/workspace_NutShell/aimp/log/run-0_0_8/parameters.json'
     with open(json_file, 'r') as f:
         params.fromJson(json.load(f))
     # params.base_design_name = data_manager.
@@ -421,7 +421,7 @@ if __name__ == "__main__":
     ppa = engine.run()
 
     ''' 
-    path = '/home/zhaoxueyan/code/ai-eda/'
+    path = '/home/xingchaoyu/code/ai-eda/'
     json_file = path + 'app/AutoDMP/test/ariane133_nangate45_51/mobohb_log/NV_ariane133_partition_c/run-0_0_0/parameters.json'
 
 

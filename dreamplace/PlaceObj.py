@@ -43,12 +43,12 @@ import dreamplace.ops.electric_potential.electric_overflow as electric_overflow
 import dreamplace.ops.electric_potential.electric_potential as electric_potential
 import dreamplace.ops.density_potential.density_potential as density_potential
 import dreamplace.ops.rudy.rudy as rudy
-import dreamplace.ops.rudy.rudy_macros as rudy_macros
+# import dreamplace.ops.rudy.rudy_macros as rudy_macros
 import dreamplace.ops.pin_utilization.pin_utilization as pin_utilization
 import dreamplace.ops.nctugr_binary.nctugr_binary as nctugr_binary
 import dreamplace.ops.adjust_node_area.adjust_node_area as adjust_node_area
-import dreamplace.ops.macro_overlap.macro_overlap as macro_overlap
-import dreamplace.ops.macro_refinement.macro_refinement as macro_refinement
+# import dreamplace.ops.macro_overlap.macro_overlap as macro_overlap
+# import dreamplace.ops.macro_refinement.macro_refinement as macro_refinement
 from dreamplace.ops.timing_propagation.timing_propagation import TimingPropagation
 from dreamplace.ops.rc_timing.rc_timing import RCTiming
 from dreamplace.BasicPlace import PlaceDataCollection

@@ -48,7 +48,8 @@ import dreamplace.configure as configure
 import dreamplace.Params as Params
 from dreamplace.macroPlaceDB import MacroPlaceDB as PlaceDB
 import dreamplace.NonLinearPlace as NonLinearPlace
-from data_manager.aimp_dm import AimpDataManager
+from tools.iEDA.data.idm import IEDADataManager
+# from data_manager.aimp_dm import AimpDataManager
 from tools.iEDA.module.sta import IEDASta
 from tools.iEDA.module.io import IEDAIO
 import dreamplace.Timer as Timer
@@ -123,7 +124,7 @@ class PlacementEngine:
         self.density = float("inf")
         self.metrics = None
 
-    def setup_rawdb(self, data_manager: AimpDataManager):
+    def setup_rawdb(self, data_manager: IEDADataManager):
         # read cpp database
         tt = time.time()
         if self.placedb is None:

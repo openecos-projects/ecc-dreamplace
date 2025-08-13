@@ -22,7 +22,7 @@
 import matplotlib
 from matplotlib import pyplot as plt
 import json
-matplotlib.use("Agg")
+# matplotlib.use("Agg")
 import os
 import sys
 import time
@@ -45,25 +45,16 @@ if top_root_dir not in sys.path:
     sys.path.append(top_root_dir)
     sys.path.append(top_root_dir + "/third_party/aieda")
 import dreamplace.configure as configure
-import dreamplace.Params as Params
+from dreamplace.Params import Params
 from dreamplace.macroPlaceDB import MacroPlaceDB as PlaceDB
 import dreamplace.NonLinearPlace as NonLinearPlace
-from tools.iEDA.data.idm import IEDADataManager
+
 # from data_manager.aimp_dm import AimpDataManager
 from tools.iEDA.module.sta import IEDASta
 from tools.iEDA.module.io import IEDAIO
 import dreamplace.Timer as Timer
 
-# set up logging
-logging.root.name = "DREAMPlace"
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(levelname)-7s] %(name)s - %(message)s",
-    handlers=[
-        # logging.FileHandler("DREAMPlace.log", mode="w"),
-        logging.StreamHandler(sys.stdout),
-    ],
-)
+
 
 
 def seed_all(seed):
@@ -83,11 +74,11 @@ class PlacementEngine:
     @param params parameters
     """
 
-    def __init__(self, params):
+    def __init__(self, params: Params):
         # load parameters
-        self.params = Params.Params()
+        self.params = Params()
         self.update_params(params)
-        self.params.printWelcome()
+        # self.params.printWelcome()
         if self.params.evaluate_pl == 1:
             self.params.global_place_flag = 1
             self.params.global_place_stages[0]["iteration"] = 0
@@ -124,7 +115,7 @@ class PlacementEngine:
         self.density = float("inf")
         self.metrics = None
 
-    def setup_rawdb(self, data_manager: IEDADataManager):
+    def setup_rawdb(self, data_manager: IEDAIO):
         # read cpp database
         tt = time.time()
         if self.placedb is None:
@@ -153,8 +144,9 @@ class PlacementEngine:
         ieda_io = IEDAIO(self.data_manager.dir_workspace)
         ieda_io.def_save(def_file)
 
-    def update_params(self, new_params):
-        self.params.update(new_params)
+    def update_params(self, new_params: Params):
+        self.params.fromJson(new_params.__dict__)
+        # self.params = new_params.clone()
         logging.info("parameters = %s" % (self.params))
 
     def place(self):
@@ -164,19 +156,21 @@ class PlacementEngine:
         timer = None
         if self.params.timing_opt_flag:
             tt = time.time()
-            timer = Timer.Timer()
-            timer(params, self.placedb)
+            # timer = Timer.Timer()
+            # timer(params, self.placedb)
             # This must be done to explicitly execute the parser builders.
             # The parsers in OpenTimer are all in lazy mode.
-            timer.update_timing()
-            logging.info("reading timer takes %.2f seconds" % (time.time() - tt))
+            # timer.update_timing()
+            logging.info("reading timer takes %.2f seconds" %
+                         (time.time() - tt))
 
             # Dump example here. Some dump functions are defined.
             # Check instance methods defined in Timer.py for debugging.
             # timer.dump_pin_cap("pin_caps.txt")
             # timer.dump_graph("timing_graph.txt")
 
-        self.placer = NonLinearPlace.NonLinearPlace(self.params, self.placedb, timer)
+        self.placer = NonLinearPlace.NonLinearPlace(
+            self.params, self.placedb, timer)
         logging.info(
             "non-linear placement initialization takes %.2f seconds"
             % (time.time() - tt)
@@ -336,8 +330,8 @@ class PlacementEngine:
         # print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=20))
         # print(p.key_averages().table(sort_by="self_cpu_time_total", row_limit=20))
 
-        if self.rsmt != float("inf"):
-            self.save_placement()
+        if self.hpwl != float("inf"):
+            # self.save_placement()
             self.density = float(self.params.target_density)
 
             if self.params.detailed_place_engine and os.path.exists(
@@ -400,7 +394,7 @@ if __name__ == "__main__":
     # workspace_path = "/home/xingchaoyu/KIANV_workspace/workspace"
     workspace_path = "/nfs/share/home/zhaoxueyan/flow_110_commercial/KIANV_workspace/workspace"
     # init aimp
-    data_manager = AimpDataManager(workspace_path)
+    data_manager = DataManager(workspace_path)
     params = Params.Params()
     workspace = data_manager.workspace
     ieda_io = IEDAIO(dir_workspace=workspace.workspace,

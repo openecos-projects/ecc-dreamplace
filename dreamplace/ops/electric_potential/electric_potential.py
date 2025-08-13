@@ -36,7 +36,7 @@ if configure.compile_configurations["CUDA_FOUND"] == "TRUE":
 
 import pdb
 import matplotlib
-matplotlib.use('Agg')
+# matplotlib.use('Agg')
 
 logger = logging.getLogger(__name__)
 

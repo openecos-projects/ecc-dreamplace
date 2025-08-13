@@ -243,16 +243,8 @@ class PlaceObj(nn.Module):
                 device=self.data_collections.pos[0].device,
             )
         # Note: even for multi-electric fields, they use the same gamma
-        num_bins_x = (
-            global_place_params["num_bins_x"]
-            if global_place_params["num_bins_x"]
-            else placedb.num_bins_x
-        )
-        num_bins_y = (
-            global_place_params["num_bins_y"]
-            if global_place_params["num_bins_y"]
-            else placedb.num_bins_y
-        )
+        num_bins_x = placedb.num_bins_x
+        num_bins_y = placedb.num_bins_y
         name = "Global placement: %dx%d bins by default" % (
             num_bins_x, num_bins_y)
         logging.info(name)
@@ -384,10 +376,10 @@ class PlaceObj(nn.Module):
                 self.build_update_macro_overlap_weight(params, placedb)
             )
 
-        # refine macro orientations
-        self.op_collections.macro_refinement_op = self.build_macro_refinement(
-            params, placedb, self.data_collections, self.op_collections.hpwl_op
-        )
+        # # refine macro orientations
+        # self.op_collections.macro_refinement_op = self.build_macro_refinement(
+        #     params, placedb, self.data_collections, self.op_collections.hpwl_op
+        # )
 
     def obj_fn(self, pos):
         """

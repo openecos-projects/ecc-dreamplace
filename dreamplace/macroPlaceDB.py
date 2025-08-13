@@ -19,7 +19,6 @@ import pdb
 import itertools
 
 from tools.iEDA.data.design import IEDADesign
-from tools.iEDA.data.idm import IEDADataManager
 from tools.iEDA.module.io import IEDAIO
 # from data_manager.aimp_dm import AimpDataManager
 # import macro_placer.database.fence_region.fence_region as fence_region
@@ -35,7 +34,7 @@ class MacroPlaceDB(object):
     @brief placement database
     """
 
-    def __init__(self, data_manager: IEDADataManager):
+    def __init__(self, data_manager: IEDAIO):
         """
         initialization
         To avoid the usage of list, I flatten everything.
@@ -282,7 +281,7 @@ class MacroPlaceDB(object):
     def setup_rawdb(self, params):
         self.dtype = datatypes[params.dtype]
         if self.pydb is None:
-            ieda_dm = IEDADataManager(self.data_manager.dir_workspace)
+            ieda_dm = IEDAIO(self.data_manager.dir_workspace)
             self.get_dmInst_ptr = ieda_dm.get_dmInst_ptr()
             self.pydb = ieda_dm.pydb(self.get_dmInst_ptr, params.with_sta)
             # self.pin_names = ieda_dm.ieda.get_all_pin_names_from_db()
@@ -930,6 +929,20 @@ class MacroPlaceDB(object):
         res = np.array(res)
         return res
 
+    def pad_sequences(self, sequences, dtype, pad_value=0.0):
+        """Pad sequences to the same length"""
+        if not sequences:
+            return np.array([])
+        max_len = max(len(seq) for seq in sequences)
+        padded = []
+        for seq in sequences:
+            if len(seq) < max_len:
+                padded_seq = list(seq) + [pad_value] * (max_len - len(seq))
+            else:
+                padded_seq = list(seq)
+            padded.append(padded_seq)
+        return np.array(padded, dtype=dtype)
+
     def initialize_from_rawdb(self, pydb, params):
         """
         @brief initialize data members from raw database 
@@ -1081,38 +1094,39 @@ class MacroPlaceDB(object):
             self.inst_size = np.array(pydb.inst_size, dtype=self.dtype)
 
             # LUTs table
-            self.f_delay_flat_luts_values = np.array(
+            self.f_delay_flat_luts_values = self.pad_sequences(
                 pydb.f_delay_flat_luts_values, dtype=self.dtype)
-            self.f_delay_flat_luts_trans_table = np.array(
+            self.f_delay_flat_luts_trans_table = self.pad_sequences(
                 pydb.f_delay_flat_luts_trans_table, dtype=self.dtype)
-            self.f_delay_flat_luts_cap_table = np.array(
+            self.f_delay_flat_luts_cap_table = self.pad_sequences(
                 pydb.f_delay_flat_luts_cap_table, dtype=self.dtype)
             self.f_delay_flat_luts_dim = np.array(
                 pydb.f_delay_flat_luts_dim, dtype=np.int32)
+            
 
-            self.r_delay_flat_luts_values = np.array(
+            self.r_delay_flat_luts_values = self.pad_sequences(
                 pydb.r_delay_flat_luts_values, dtype=self.dtype)
-            self.r_delay_flat_luts_trans_table = np.array(
+            self.r_delay_flat_luts_trans_table = self.pad_sequences(
                 pydb.r_delay_flat_luts_trans_table, dtype=self.dtype)
-            self.r_delay_flat_luts_cap_table = np.array(
+            self.r_delay_flat_luts_cap_table = self.pad_sequences(
                 pydb.r_delay_flat_luts_cap_table, dtype=self.dtype)
             self.r_delay_flat_luts_dim = np.array(
                 pydb.r_delay_flat_luts_dim, dtype=np.int32)
 
-            self.f_trans_flat_luts_values = np.array(
+            self.f_trans_flat_luts_values = self.pad_sequences(
                 pydb.f_trans_flat_luts_values, dtype=self.dtype)
-            self.f_trans_flat_luts_trans_table = np.array(
+            self.f_trans_flat_luts_trans_table = self.pad_sequences(
                 pydb.f_trans_flat_luts_trans_table, dtype=self.dtype)
-            self.f_trans_flat_luts_cap_table = np.array(
+            self.f_trans_flat_luts_cap_table = self.pad_sequences(
                 pydb.f_trans_flat_luts_cap_table, dtype=self.dtype)
             self.f_trans_flat_luts_dim = np.array(
                 pydb.f_trans_flat_luts_dim, dtype=np.int32)
 
-            self.r_trans_flat_luts_values = np.array(
+            self.r_trans_flat_luts_values = self.pad_sequences(
                 pydb.r_trans_flat_luts_values, dtype=self.dtype)
-            self.r_trans_flat_luts_trans_table = np.array(
+            self.r_trans_flat_luts_trans_table = self.pad_sequences(
                 pydb.r_trans_flat_luts_trans_table, dtype=self.dtype)
-            self.r_trans_flat_luts_cap_table = np.array(
+            self.r_trans_flat_luts_cap_table = self.pad_sequences(
                 pydb.r_trans_flat_luts_cap_table, dtype=self.dtype)
             self.r_trans_flat_luts_dim = np.array(
                 pydb.r_trans_flat_luts_dim, dtype=np.int32)
@@ -1313,8 +1327,9 @@ class MacroPlaceDB(object):
         params.macro_halo_y *= params.scale_factor
         params.macro_pin_halo_x *= params.scale_factor
         params.macro_pin_halo_y *= params.scale_factor
-        self.macro_padding_x *= params.scale_factor
-        self.macro_padding_y *= params.scale_factor
+        params.cell_padding_x *= params.scale_factor
+        self.cell_padding_x *= params.scale_factor
+        # self.cell_padding_y *= params.scale_factor
         self.bndry_padding_x *= params.scale_factor
         self.bndry_padding_y *= params.scale_factor
 
@@ -1333,10 +1348,18 @@ row height = %g, site width = %g
         # set number of bins
         # derive bin dimensions by keeping the aspect ratio
         aspect_ratio = (self.yh - self.yl) / (self.xh - self.xl)
-        num_bins_x = params.num_bins_x
-        num_bins_y = params.num_bins_y
-        self.num_bins_x = max(params.num_bins_x, num_bins_x)
-        self.num_bins_y = max(params.num_bins_y, num_bins_y)
+        if params.auto_adjust_bins:
+            num_bins = math.pow(2, math.floor(math.log2(math.sqrt(self.num_physical_nodes))))
+            num_bins_x = int(num_bins)
+            num_bins_y = int(num_bins)
+            params.num_bins_x = num_bins_x
+            params.num_bins_y = num_bins_y
+            
+        else:    
+            num_bins_x = params.num_bins_x
+            num_bins_y = params.num_bins_y
+        self.num_bins_x = num_bins_x
+        self.num_bins_y = num_bins_y
         # set bin size
         self.bin_size_x = (self.xh - self.xl) / self.num_bins_x
         self.bin_size_y = (self.yh - self.yl) / self.num_bins_y
@@ -1574,7 +1597,7 @@ row height = %g, site width = %g
                     0.0,
                 )
                 self.num_filler_nodes = int(
-                    round(self.total_filler_node_area /
+                    math.floor(self.total_filler_node_area /
                           (filler_size_x * filler_size_y))
                 )
                 self.node_size_x = np.concatenate(
@@ -1765,8 +1788,8 @@ row height = %g, site width = %g
                                self.node_size_y[self.movable_slice][self.movable_macro_mask]).astype('float64')
 
         # setup macro padding for overlap loss
-        self.macro_padding_x = params.macro_padding_x
-        self.macro_padding_y = params.macro_padding_y
+        # self.cell_padding_x = params.cell_padding_x
+        # self.cell_padding_y = params.cell_padding_y
         self.bndry_padding_x = params.bndry_padding_x
         self.bndry_padding_y = params.bndry_padding_y
 
@@ -1777,6 +1800,11 @@ row height = %g, site width = %g
             params.macro_pin_halo_x, "x")
         params.macro_pin_halo_y = self.crop_to_site(
             params.macro_pin_halo_y, "y")
+        params.cell_padding_x = self.crop_to_site(
+            params.cell_padding_x, "x")
+        self.cell_padding_x = params.cell_padding_x
+        # params.cell_padding_y = self.crop_to_site(
+        #     params.cell_padding_y, "y")
         self.node_size_x[self.movable_macro_idx] = self.crop_to_site(
             self.node_size_x[self.movable_macro_idx], "x"
         )
@@ -1806,6 +1834,29 @@ row height = %g, site width = %g
             # self.fixed_macro_pins = np.isin(self.pin2node_map, self.fixed_macro_idx)
             # self.pin_offset_x[self.fixed_macro_pins] += params.macro_halo_x
             # self.pin_offset_y[self.fixed_macro_pins] += params.macro_halo_y
+        
+        # add padding around all_cells
+        if params.cell_padding_x >= 0:
+            # increase macro sizes
+            self.node_size_x[:self.num_movable_nodes] += 2 * params.cell_padding_x
+            # self.node_size_y[:self.num_physical_nodes] += 2 * params.cell_padding_y
+            # self.node_size_x[self.fixed_macro_idx] += 2 * params.macro_halo_x
+            # self.node_size_y[self.fixed_macro_idx] += 2 * params.macro_halo_y
+
+            # shift macro positions
+            self.node_x[:self.num_movable_nodes] -= params.cell_padding_x
+            # self.node_y[:self.num_physical_nodes] -= params.cell_padding_y
+            # self.node_x[self.fixed_macro_idx] -= params.macro_halo_x
+            # self.node_y[self.fixed_macro_idx] -= params.macro_halo_y
+
+            movable_cell_tensor = np.arange(
+                0, self.num_movable_nodes, dtype=self.pin2node_map.dtype)
+            # shift macro pins
+            movable_cell_pins = np.isin(
+                self.pin2node_map, movable_cell_tensor)
+            self.pin_offset_x[movable_cell_pins] += params.cell_padding_x
+            # self.pin_offset_y += params.cell_padding_y
+        
         if params.macro_pin_halo_x >= 0:
             self.node_size_x[self.movable_macro_idx] += self.is_pin_lower_x * \
                 params.macro_pin_halo_x + self.is_pin_upper_x * params.macro_pin_halo_x

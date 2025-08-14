@@ -15,6 +15,7 @@
 #include <queue>
 #include <utility>
 #include <vector>
+#include <filesystem>
 
 DREAMPLACE_BEGIN_NAMESPACE
 
@@ -43,8 +44,11 @@ int computeSteinerTreeLauncher(
   static bool is_lut_loaded = false;
   if (!is_lut_loaded) {
     is_lut_loaded = true;
-    flute::readLUT("thirdparty/flute/lut.ICCAD2015/POWV9.dat",
-                   "thirdparty/flute/lut.ICCAD2015/POST9.dat");
+    std::filesystem::path source_dir = std::filesystem::path(__FILE__).parent_path();
+    std::filesystem::path project_root = source_dir.parent_path().parent_path().parent_path().parent_path();
+    std::string powv9_path = (project_root / "thirdparty/flute/lut.ICCAD2015/POWV9.dat").string();
+    std::string post9_path = (project_root / "thirdparty/flute/lut.ICCAD2015/POST9.dat").string();
+    flute::readLUT(powv9_path.c_str(), post9_path.c_str());
   }
 
   constexpr int scale = 1000;

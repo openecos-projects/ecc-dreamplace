@@ -97,6 +97,7 @@ class TimingPropagation(nn.Module):
                  clk_pin_ftran,
                  net_flat_arcs_start,
                  net_flat_arcs,
+                 net2driver_pin_map,
                  arcs_info: ARCS_INFO,
                  inst_flat_arcs_start,
                  inst_flat_arcs,
@@ -124,6 +125,7 @@ class TimingPropagation(nn.Module):
         self.clk_pin_ftran = clk_pin_ftran
         self.net_flat_arcs_start = net_flat_arcs_start
         self.net_flat_arcs = net_flat_arcs
+        self.net2driver_pin_map = net2driver_pin_map
         self.inst_flat_arcs_start = inst_flat_arcs_start
         self.inst_flat_arcs = inst_flat_arcs
         self.cell_flat_clk_arcs = cell_flat_clk_arcs
@@ -157,7 +159,7 @@ class TimingPropagation(nn.Module):
                              # [B] - LongTensor indices for the LUTs
                              arc_idxs,
                              # Padded LUT Tensors (Constant for the call)
-                             flat_luts_values,      # [N, MaxT, MaxC]
+                             flat_luts_values,      # [N, MaxT * MaxC]
                              flat_luts_trans_table,  # [N, MaxT]
                              flat_luts_cap_table,   # [N, MaxC]
                              flat_luts_dim):        # [N, 2] - Actual dims [trans_dim, cap_dim]
@@ -230,30 +232,53 @@ class TimingPropagation(nn.Module):
         t1 = trans_tables_batch[batch_indices, trans_idx]     # [B]
         c0 = cap_tables_batch[batch_indices, cap_idx_low]     # [B]
         c1 = cap_tables_batch[batch_indices, cap_idx]         # [B]
-
         # --- 5. Calculate Flattened Indices for lut_values ---
-        # num_cols is the *actual* cap dimension for each arc
-        num_cols_batch = cap_dims_actual  # [B]
-        idx00 = trans_idx_low * num_cols_batch + cap_idx_low  # [B]
-        idx01 = trans_idx_low * num_cols_batch + cap_idx     # [B]
-        idx10 = trans_idx * num_cols_batch + cap_idx_low     # [B]
-        idx11 = trans_idx * num_cols_batch + cap_idx         # [B]
+        # ★★★ 修正开始 ★★★
+        # 从 cap 坐标轴张量获取物理（填充后）的列数 MaxC
+        # 这是获取内存步长(stride)的正确方法
+        padded_max_cols = flat_luts_cap_table.shape[1]
+
+        # 使用正确的物理列数来计算一维索引
+        idx00 = trans_idx_low * padded_max_cols + cap_idx_low  # [B]
+        idx01 = trans_idx_low * padded_max_cols + cap_idx     # [B]
+        idx10 = trans_idx * padded_max_cols + cap_idx_low     # [B]
+        idx11 = trans_idx * padded_max_cols + cap_idx         # [B]
+        # ★★★ 修正结束 ★★★
 
         # --- 6. Gather Corner Values (v00, v01, v10, v11) ---
-        # Reshape the batch of 2D LUT values to be flat for 1D indexing
-        # TODO:
-        # B, MaxT, MaxC = lut_values_batch.shape
+        # ★★★ 修正开始 ★★★
+        # lut_values_batch 已经是 [B, MaxFlatSize] 的二维张量，无需再做 view()
         lut_values_batch_flat = lut_values_batch
 
-        # Check bounds before gathering (indices should be < actual_T * actual_C)
-        # This check is complex with varying dimensions. Trusting the index calculation for now.
-        # A robust implementation might involve masking indices that fall outside the true area.
+        # 使用 gather 从已经压平的张量中安全地提取数值
+        v00 = lut_values_batch_flat.gather(1, idx00.unsqueeze(1)).squeeze(1) # [B]
+        v01 = lut_values_batch_flat.gather(1, idx01.unsqueeze(1)).squeeze(1) # [B]
+        v10 = lut_values_batch_flat.gather(1, idx10.unsqueeze(1)).squeeze(1) # [B]
+        v11 = lut_values_batch_flat.gather(1, idx11.unsqueeze(1)).squeeze(1) # [B]
+        # ★★★ 修正结束 ★★★
+        # # --- 5. Calculate Flattened Indices for lut_values ---
+        # # num_cols is the *actual* cap dimension for each arc
+        # num_cols_batch = cap_dims_actual  # [B]
+        # idx00 = trans_idx_low * num_cols_batch + cap_idx_low  # [B]
+        # idx01 = trans_idx_low * num_cols_batch + cap_idx     # [B]
+        # idx10 = trans_idx * num_cols_batch + cap_idx_low     # [B]
+        # idx11 = trans_idx * num_cols_batch + cap_idx         # [B]
 
-        # Gather using batch_indices and the calculated 1D indices
-        v00 = lut_values_batch_flat[batch_indices, idx00]  # [B]
-        v01 = lut_values_batch_flat[batch_indices, idx01]  # [B]
-        v10 = lut_values_batch_flat[batch_indices, idx10]  # [B]
-        v11 = lut_values_batch_flat[batch_indices, idx11]  # [B]
+        # # --- 6. Gather Corner Values (v00, v01, v10, v11) ---
+        # # Reshape the batch of 2D LUT values to be flat for 1D indexing
+        # # TODO:
+        # # B, MaxT, MaxC = lut_values_batch.shape
+        # lut_values_batch_flat = lut_values_batch
+
+        # # Check bounds before gathering (indices should be < actual_T * actual_C)
+        # # This check is complex with varying dimensions. Trusting the index calculation for now.
+        # # A robust implementation might involve masking indices that fall outside the true area.
+
+        # # Gather using batch_indices and the calculated 1D indices
+        # v00 = lut_values_batch_flat[batch_indices, idx00]  # [B]
+        # v01 = lut_values_batch_flat[batch_indices, idx01]  # [B]
+        # v10 = lut_values_batch_flat[batch_indices, idx10]  # [B]
+        # v11 = lut_values_batch_flat[batch_indices, idx11]  # [B]
 
         # --- 7. Perform Interpolation (Vectorized) ---
         t_interval = t1 - t0  # [B]
@@ -374,6 +399,9 @@ class TimingPropagation(nn.Module):
         lib_cell_idxs = level_inst_arcs[:, 2]
         lib_arc_idxs = level_inst_arcs[:, 3]
         timing_senses = level_inst_arcs[:, 4]
+        
+        if (arc_in_pins==15754).any() and (arc_out_pins==15771).any():
+            logging.warning(f"lib_arc_idxs: {lib_arc_idxs}")
 
         # 1. 准备输入条件
         #    - Rise Slew/Load at Input for Rise Delay/Tran calculation
@@ -389,53 +417,61 @@ class TimingPropagation(nn.Module):
         pin_r_load_out = pin_net_cap_rise[arc_out_pins]
         pin_f_load_out = pin_net_cap_fall[arc_out_pins]
 
-        # 2. 计算所有可能的延时和转换时间
-        #    - r_delays_r_load: Rise Delay with Rise Load (for positive unate)
-        #    - r_delays_f_load: Rise Delay with Fall Load (for negative unate)
-        r_delays_r_load = self.r_delay_entry(lib_cell_idxs, pin_r_slew_in, pin_r_load_out, lib_arc_idxs)
-        r_delays_f_load = self.r_delay_entry(lib_cell_idxs, pin_r_slew_in, pin_f_load_out, lib_arc_idxs)
-        f_delays_r_load = self.f_delay_entry(lib_cell_idxs, pin_f_slew_in, pin_r_load_out, lib_arc_idxs)
-        f_delays_f_load = self.f_delay_entry(lib_cell_idxs, pin_f_slew_in, pin_f_load_out, lib_arc_idxs)
-
-        r_trans_r_load = self.r_tran_entry(lib_cell_idxs, pin_r_slew_in, pin_r_load_out, lib_arc_idxs)
-        r_trans_f_load = self.r_tran_entry(lib_cell_idxs, pin_r_slew_in, pin_f_load_out, lib_arc_idxs)
-        f_trans_r_load = self.f_tran_entry(lib_cell_idxs, pin_f_slew_in, pin_r_load_out, lib_arc_idxs)
-        f_trans_f_load = self.f_tran_entry(lib_cell_idxs, pin_f_slew_in, pin_f_load_out, lib_arc_idxs)
+        # --- 2. 计算四种基础情况的延时(Delay)和转换时间(Transition) ---
         
-        # 3. 根据TimingSense进行选择
-        #    - is_pos_unate: sense=1 (positive) 或 sense=1 (default)
-        #    - is_neg_unate: sense=-1 (negative)
-        #    - is_non_unate: sense=0 (non-unate)
+        # Rise -> Rise (r->r)
+        delay_rr = self.r_delay_entry(lib_cell_idxs, pin_r_slew_in, pin_r_load_out, lib_arc_idxs)
+        tran_rr = self.r_tran_entry(lib_cell_idxs, pin_r_slew_in, pin_r_load_out, lib_arc_idxs)
+        
+        # Fall -> Fall (f->f)
+        delay_ff = self.f_delay_entry(lib_cell_idxs, pin_f_slew_in, pin_f_load_out, lib_arc_idxs)
+        tran_ff = self.f_tran_entry(lib_cell_idxs, pin_f_slew_in, pin_f_load_out, lib_arc_idxs)
+
+        # Rise -> Fall (r->f)
+        delay_rf = self.f_delay_entry(lib_cell_idxs, pin_r_slew_in, pin_f_load_out, lib_arc_idxs)
+        tran_rf = self.f_tran_entry(lib_cell_idxs, pin_r_slew_in, pin_f_load_out, lib_arc_idxs)
+
+        # Fall -> Rise (f->r)
+        delay_fr = self.r_delay_entry(lib_cell_idxs, pin_f_slew_in, pin_r_load_out, lib_arc_idxs)
+        tran_fr = self.r_tran_entry(lib_cell_idxs, pin_f_slew_in, pin_r_load_out, lib_arc_idxs)
+
+        # --- 3. 根据 Timing Sense 组合最终结果 ---
+        # is_non_unate mask is implicitly `not (is_pos_unate or is_neg_unate)`
         is_pos_unate = (timing_senses == 1)
         is_neg_unate = (timing_senses == -1)
-        is_non_unate = (timing_senses == 0)
 
-        # Non-unate: R->R, R->F, F->R, F->F all possible. We take the worst case.
-        # Rise Input -> Rise/Fall Output
-        r_delays_non_unate = torch.maximum(r_delays_r_load, r_delays_f_load)
-        r_trans_non_unate = torch.maximum(r_trans_r_load, r_trans_f_load)
-        # Fall Input -> Rise/Fall Output
-        f_delays_non_unate = torch.maximum(f_delays_r_load, f_delays_f_load)
-        f_trans_non_unate = torch.maximum(f_trans_r_load, f_trans_f_load)
+        # --- 计算最终的上升输出延时 (r_delays) ---
+        # Positive unate : r->r / f->f
+        # Negative unate : f->r / r->f
+        # Non-unate : worst of r->r, f->r, f->f, r->f
+        r_delays_non_unate = torch.maximum(delay_rr, delay_fr)
+        f_delays_non_unate = torch.maximum(delay_ff, delay_rf)
+        r_delays = torch.where(is_pos_unate, delay_rr,
+                            torch.where(is_neg_unate, delay_fr, r_delays_non_unate))
+        f_delays = torch.where(is_pos_unate, delay_ff,
+                            torch.where(is_neg_unate, delay_rf, f_delays_non_unate))
 
-        # 4. 组合最终的更新值
-        # Rise Output Delays/Trans
-        r_delays = torch.where(is_pos_unate, r_delays_r_load, 
-                           torch.where(is_neg_unate, f_delays_r_load, r_delays_non_unate))
-        r_trans = torch.where(is_pos_unate, r_trans_r_load,
-                          torch.where(is_neg_unate, f_trans_r_load, r_trans_non_unate))
+        # --- 计算最终的上升输出转换时间 (r_trans) ---
+        r_trans_non_unate = torch.maximum(tran_rr, tran_fr)
+        r_trans = torch.where(is_pos_unate, tran_rr,
+                            torch.where(is_neg_unate, tran_fr, r_trans_non_unate))
 
-        # Fall Output Delays/Trans
-        f_delays = torch.where(is_pos_unate, f_delays_f_load,
-                           torch.where(is_neg_unate, r_delays_f_load, f_delays_non_unate))
-        f_trans = torch.where(is_pos_unate, f_trans_f_load,
-                          torch.where(is_neg_unate, r_trans_f_load, f_trans_non_unate))
+        # --- 计算最终的下降输出转换时间 (f_trans) ---
+        f_trans_non_unate = torch.maximum(tran_ff, tran_rf)
+        f_trans = torch.where(is_pos_unate, tran_ff,
+                            torch.where(is_neg_unate, tran_rf, f_trans_non_unate))
+
+        # --- 4. 存储和更新 (最终修正版) ---
         
-        # 5. 存储用于RAT分析的延时值 (保持不变，因为rat是反向的，只关心延时值)
-        cell_arc_r_delays.scatter_(0, lib_arc_idxs.long(), r_delays)
-        cell_arc_f_delays.scatter_(0, lib_arc_idxs.long(), f_delays)
+        # ★★★ 核心修正: 获取当前批次中所有有效弧的、扁平化的全局索引 ★★★
+        # 这个操作会生成一个一维张量，其大小 (5104) 与 r_delays 的大小完全匹配
+        scatter_indices = arcs_global_indices[arcs_mask]
+        
+        # 使用这个正确的一维索引张量进行scatter操作
+        cell_arc_r_delays.scatter_(0, scatter_indices.long(), r_delays)
+        cell_arc_f_delays.scatter_(0, scatter_indices.long(), f_delays)
 
-        # 6. 更新AAT和Slew
+        # 后续的AAT和Slew更新逻辑保持不变
         r_aat_updates = pin_rAAT[arc_in_pins] + r_delays
         f_aat_updates = pin_fAAT[arc_in_pins] + f_delays
         
@@ -501,42 +537,35 @@ class TimingPropagation(nn.Module):
 
         arc_in_pins = level_inst_arcs[:, 0]
         arc_out_pins = level_inst_arcs[:, 1]
+        
+        scatter_indices = arcs_global_indices[arcs_mask]
 
-        f_delays = cell_arc_f_delays[level_inst_arcs[:, 2]]
-        r_delays = cell_arc_r_delays[level_inst_arcs[:, 2]]
+        f_delays = cell_arc_f_delays[scatter_indices]
+        r_delays = cell_arc_r_delays[scatter_indices]
 
+        assert pin_rRAT[arc_out_pins].min() >= 0, "Negative r_rat_updates detected"
         r_rat_updates = pin_rRAT[arc_out_pins] - r_delays
         f_rat_updates = pin_fRAT[arc_out_pins] - f_delays
+
         pin_rRAT = torch.scatter_reduce(pin_rRAT, 0, arc_in_pins.long(), r_rat_updates, reduce="amin", include_self=True)
         pin_fRAT = torch.scatter_reduce(pin_fRAT, 0, arc_in_pins.long(), f_rat_updates, reduce="amin", include_self=True)
 
-        curnets = torch.unique(self.pin_net[arc_in_pins])
-        return curnets, pin_rRAT, pin_fRAT
+        cur_endpoints = torch.unique(arc_in_pins)
+        return cur_endpoints, pin_rRAT, pin_fRAT
 
-    def calculate_net_rat_level(self, curnets, pin_rRAT, pin_fRAT, pin_net_delay_rise, pin_net_delay_fall):
-        net_arcs_starts = self.net_flat_arcs_start[curnets]
-        net_arcs_ends = self.net_flat_arcs_start[curnets + 1]
-        num_net_fopins = net_arcs_ends - net_arcs_starts
-        if num_net_fopins.numel() == 0:
-            return pin_rRAT, pin_fRAT
-        max_net_fopins = num_net_fopins.max().item()
-        net_arcs_indices = torch.arange(
-            max_net_fopins, device=pin_rRAT.device).unsqueeze(0)
-        net_arcs_mask = net_arcs_indices < num_net_fopins.unsqueeze(1)
-        net_arcs_global_indices = net_arcs_indices + \
-            net_arcs_starts.unsqueeze(1)
-        net_arcs_level = self.net_flat_arcs[net_arcs_global_indices[net_arcs_mask]]
+    def calculate_net_rat_level(self, cur_endpoint, pin_rRAT, pin_fRAT, pin_net_delay_rise, pin_net_delay_fall):
+        
+        curnets = self.pin_net[cur_endpoint]
 
-        arc_fopins = net_arcs_level[:, 1]
-        arc_fipins = net_arcs_level[:, 0]
-        wire_delays_rise = pin_net_delay_rise[arc_fopins]
-        wire_delays_fall = pin_net_delay_fall[arc_fopins]
-
-        r_rat_updates = pin_rRAT[arc_fopins] - wire_delays_rise
-        f_rat_updates = pin_fRAT[arc_fopins] - wire_delays_fall
+        arc_fipins = self.net2driver_pin_map[curnets]
+        wire_delays_rise = pin_net_delay_rise[cur_endpoint]
+        wire_delays_fall = pin_net_delay_fall[cur_endpoint]
+        assert pin_rRAT[cur_endpoint].min() >= 0, "Negative r_rat_updates detected"
+        r_rat_updates = pin_rRAT[cur_endpoint] - wire_delays_rise
+        f_rat_updates = pin_fRAT[cur_endpoint] - wire_delays_fall
         pin_rRAT = torch.scatter_reduce(pin_rRAT, 0, arc_fipins.long(), r_rat_updates, reduce="amin", include_self=True)
         pin_fRAT = torch.scatter_reduce(pin_fRAT, 0, arc_fipins.long(), f_rat_updates, reduce="amin", include_self=True)
-
+        assert pin_rRAT[arc_fipins].min() >= 0, "Negative r_rat_updates detected after scatter_reduce"
         return pin_rRAT, pin_fRAT
 
     def forward(self, pin_net_delays, pin_net_impulses, pin_net_caps):
@@ -561,8 +590,7 @@ class TimingPropagation(nn.Module):
         pin_rRAT[self.end_points] = torch.tensor(self.endpoints_rRAT, device=self.device, dtype=self.dtype)
         pin_fRAT[self.end_points] = torch.tensor(self.endpoints_fRAT, device=self.device, dtype=self.dtype)
 
-        num_arcs_total = torch.max(
-            self.inst_flat_arcs[:, 3]).item() + 1 if self.inst_flat_arcs.numel() > 0 else 1
+        num_arcs_total = self.inst_flat_arcs[:, 3].shape[0] + 1 if self.inst_flat_arcs.numel() > 0 else 1
         cell_arc_r_delays = torch.zeros(num_arcs_total, device=device, dtype=dtype)
         cell_arc_f_delays = torch.zeros(num_arcs_total, device=device, dtype=dtype)
 
@@ -573,7 +601,7 @@ class TimingPropagation(nn.Module):
         # pin_net_cap = pin_net_cap.clone()  # Clone to avoid modifying the original tensor
         # pin_net_cap[self.end_points] = pin_net_cap[self.end_points] + self.outcaps
 
-        self.calculate_cell_aat_level(
+        cur_nets, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran, cell_arc_r_delays, cell_arc_f_delays = self.calculate_cell_aat_level(
                 self.FF_ids, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
                 pin_net_cap_rise, pin_net_cap_fall,
                 cell_arc_r_delays, cell_arc_f_delays, True, self.clk_pin_rtran, self.clk_pin_ftran)
@@ -600,20 +628,19 @@ class TimingPropagation(nn.Module):
                 pin_net_impulse_rise, pin_net_impulse_fall
             )
 
-        po_nets = torch.unique(self.pin_net[self.end_points])
         pin_rRAT, pin_fRAT = self.calculate_net_rat_level(
-            po_nets, pin_rRAT, pin_fRAT, pin_net_delay_rise, pin_net_delay_fall
+            self.end_points, pin_rRAT, pin_fRAT, pin_net_delay_rise, pin_net_delay_fall
         )
 
         for level in range(len(self.flat_cells_by_reverse_level_start) - 1):
             start = self.flat_cells_by_reverse_level_start[level]
             end = self.flat_cells_by_reverse_level_start[level + 1]
             level_cells = self.flat_cells_by_reverse_level[start: end]
-            cur_nets, pin_rRAT, pin_fRAT = self.calculate_cell_rat_level(
+            cur_endpoints, pin_rRAT, pin_fRAT = self.calculate_cell_rat_level(
                 level_cells, pin_rRAT, pin_fRAT, cell_arc_r_delays, cell_arc_f_delays
             )
             pin_rRAT, pin_fRAT = self.calculate_net_rat_level(
-                cur_nets, pin_rRAT, pin_fRAT, pin_net_delay_rise, pin_net_delay_fall
+                cur_endpoints, pin_rRAT, pin_fRAT, pin_net_delay_rise, pin_net_delay_fall
             )
         rslack = pin_rRAT - pin_rAAT
         fslack = pin_fRAT - pin_fAAT

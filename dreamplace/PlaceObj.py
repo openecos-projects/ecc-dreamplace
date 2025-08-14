@@ -43,12 +43,12 @@ import dreamplace.ops.electric_potential.electric_overflow as electric_overflow
 import dreamplace.ops.electric_potential.electric_potential as electric_potential
 import dreamplace.ops.density_potential.density_potential as density_potential
 import dreamplace.ops.rudy.rudy as rudy
-# import dreamplace.ops.rudy.rudy_macros as rudy_macros
+import dreamplace.ops.rudy.rudy_macros as rudy_macros
 import dreamplace.ops.pin_utilization.pin_utilization as pin_utilization
 import dreamplace.ops.nctugr_binary.nctugr_binary as nctugr_binary
 import dreamplace.ops.adjust_node_area.adjust_node_area as adjust_node_area
-# import dreamplace.ops.macro_overlap.macro_overlap as macro_overlap
-# import dreamplace.ops.macro_refinement.macro_refinement as macro_refinement
+import dreamplace.ops.macro_overlap.macro_overlap as macro_overlap
+import dreamplace.ops.macro_refinement.macro_refinement as macro_refinement
 from dreamplace.ops.timing_propagation.timing_propagation import TimingPropagation
 from dreamplace.ops.rc_timing.rc_timing import RCTiming
 from dreamplace.BasicPlace import PlaceDataCollection
@@ -580,335 +580,387 @@ class PlaceObj(nn.Module):
         # # --- 步骤 4: 生成所有Pin的详细时序参数对比报告并写入文件 ---
         # # ==============================================================================
         
-        # # ★★★ 核心修改 1: 定义报告文件名，并使用 with open() 打开文件 ★★★
-        # report_filename = "timing_analysis_report.log"
-        # print(f"\n正在生成详细时序对比报告，结果将写入文件: {report_filename}")
+        # 定义报告文件名
+        report_filename = "timing_analysis_report.log"
+        print(f"\n正在生成详细时序对比报告，结果将写入文件: {report_filename}")
 
-        # with open(report_filename, "w", encoding="utf-8") as f:
-        #     f.write("--- 所有Pin详细时序参数对比报告 (按Impulse差异降序排序) ---\n")
+        with open(report_filename, "w", encoding="utf-8") as f:
+            f.write("--- 所有Pin详细时序参数对比报告 (按Slew差异降序排序) ---\n")
 
-        #     # 4a. 预处理iEDA返回的Net Pin数据
-        #     ieda_pin_map = {
-        #         (info['pin_name'], info['mode'], info['transition']): info
-        #         for info in net_timing_details_cpp
-        #     }
-
-        #     # 4b. 预处理Python端计算的所有Pin的数据
-        #     op_elmore = self.op_collections.elmore_delay_op
-        #     py_pin_r_load = op_elmore.loads['rise'].clone().detach().cpu().numpy()
-        #     py_pin_f_load = op_elmore.loads['fall'].clone().detach().cpu().numpy()
-        #     py_pin_r_delay = op_elmore.delays['rise'].clone().detach().cpu().numpy()
-        #     py_pin_f_delay = op_elmore.delays['fall'].clone().detach().cpu().numpy()
-        #     py_pin_r_ldelay = op_elmore.ldelays['rise'].clone().detach().cpu().numpy()
-        #     py_pin_f_ldelay = op_elmore.ldelays['fall'].clone().detach().cpu().numpy()
-        #     py_pin_r_beta = op_elmore.betas['rise'].clone().detach().cpu().numpy()
-        #     py_pin_f_beta = op_elmore.betas['fall'].clone().detach().cpu().numpy()
-        #     py_pin_r_impulse = op_elmore.impulses['rise'].clone().detach().cpu().numpy()
-        #     py_pin_f_impulse = op_elmore.impulses['fall'].clone().detach().cpu().numpy()
+            # 4a. 预处理iEDA返回的Net Pin数据
             
-        #     op_timing = self.op_collections.timing_propagation_op
-        #     py_pin_r_slew = op_timing.pin_rtran.clone().detach().cpu().numpy()
-        #     py_pin_f_slew = op_timing.pin_ftran.clone().detach().cpu().numpy()
-
-        #     python_pin_map = {}
-        #     pin_names = self.placedb.pin_names
+            # ★★★ 核心修改: 过滤掉 slew_ns 为 nan 的条目 ★★★
+            # 确保文件顶部有 import math
+            import math
+            net_timing_details_cpp_filtered = [
+                info for info in net_timing_details_cpp if not math.isnan(info['slew_ns'])
+            ]
             
-        #     for pin_id in range(num_pins):
-        #         full_pin_name = pin_names[pin_id].decode('utf-8')
-                
-        #         key_rise = (full_pin_name, "Max", "Rise")
-        #         python_pin_map[key_rise] = {
-        #             "load": py_pin_r_load[pin_id], "delay": py_pin_r_delay[pin_id],
-        #             "ldelay": py_pin_r_ldelay[pin_id], "beta": py_pin_r_beta[pin_id],
-        #             "impulse": py_pin_r_impulse[pin_id], "slew": py_pin_r_slew[pin_id]
-        #         }
+            # 使用过滤后的干净数据来创建 ieda_pin_map
+            ieda_pin_map = {
+                (info['pin_name'], info['mode'], info['transition']): info
+                for info in net_timing_details_cpp_filtered
+            }
 
-        #         key_fall = (full_pin_name, "Max", "Fall")
-        #         python_pin_map[key_fall] = {
-        #             "load": py_pin_f_load[pin_id], "delay": py_pin_f_delay[pin_id],
-        #             "ldelay": py_pin_f_ldelay[pin_id], "beta": py_pin_f_beta[pin_id],
-        #             "impulse": py_pin_f_impulse[pin_id], "slew": py_pin_f_slew[pin_id]
-        #         }
-                
-        #     # 4c. 构建用于排序和报告的中间列表
-        #     report_data = []
-        #     common_keys = set(python_pin_map.keys()).intersection(set(ieda_pin_map.keys()))
-
-        #     for key in common_keys:
-        #         py_data = python_pin_map[key]
-        #         ieda_data = ieda_pin_map[key]
-        #         ieda_impulse_val = math.sqrt(ieda_data['impulse']) if ieda_data['impulse'] >= 0 else 0.0
-        #         diff = abs(py_data['impulse'] - ieda_impulse_val)
-        #         report_data.append({'key': key, 'py_data': py_data, 'ieda_data': ieda_data, 'sort_diff': diff})
-                
-        #     # 4d. 按Impulse差异进行降序排序
-        #     report_data.sort(key=lambda item: item['sort_diff'], reverse=True)
-
-        #     # 4e. 打印报告到文件
-        #     header = (f"{'Pin Name':<45} | {'Mode':<5} | {'Trans':<8} | "
-        #               f"{'Py Delay':<12} | {'iEDA Delay':<12} | "
-        #               f"{'Py Load':<12} | {'iEDA Load':<12} | "
-        #               f"{'Py Slew':<12} | {'iEDA Slew':<12} | "
-        #               f"{'Py LDelay':<12} | {'iEDA LDelay':<12} | "
-        #               f"{'Py Beta':<12} | {'iEDA Beta':<12} | "
-        #               f"{'Py Impulse':<12} | {'iEDA Impulse':<12}\n")
-        #     f.write(header)
-        #     f.write("-" * (len(header) + 2) + "\n")
-
-        #     for item in report_data: # 将所有对比结果写入文件
-        #         pin_name, mode, trans = item['key']
-        #         py_data = item['py_data']
-        #         ieda_data = item['ieda_data']
-        #         ieda_impulse_val = math.sqrt(ieda_data['impulse']) if ieda_data['impulse'] >= 0 else 0.0
-                
-        #         f.write(f"{pin_name:<45} | {mode:<5} | {trans:<8} | "
-        #                 f"{py_data['delay']:<12.6f} | {ieda_data['delay']:<12.6f} | "
-        #                 f"{py_data['load']:<12.6f} | {ieda_data['load']:<12.6f} | "
-        #                 f"{py_data['slew']:<12.6f} | {ieda_data['slew_ns']:<12.6f} | "
-        #                 f"{py_data['ldelay']:<12.6f} | {ieda_data['ldelay']:<12.6f} | "
-        #                 f"{py_data['beta']:<12.6f} | {ieda_data['beta']:<12.6f} | "
-        #                 f"{py_data['impulse']:<12.6f} | {ieda_impulse_val:<12.6f}\n")
-
-        # # ★★★ 核心修改 2: 在 with 块结束后，向控制台打印一条确认信息 ★★★
-        # print(f"详细的对比报告已成功写入文件: {report_filename}")
-
-
-        # ==============================================================================
-        # --- 步骤 4: 识别第一层传播引脚并生成专属Slew/Impulse对比报告 ---
-        # ==============================================================================
-        print("\n--- [专属报告] 第一层传播引脚Slew与Impulse对比 (按起点分组) ---")
-
-        # 4a. 找出所有“第一层传播”的引脚及其驱动源 (不变)
-        start_pin_ids = self.data_collections.start_points.cpu().numpy()
-        
-        pin_id_to_net_id_map = {}
-        for net_id, net_name in id2net_name_map.items():
-            start = self.data_collections.flat_net2pin_start_map[net_id]
-            end = self.data_collections.flat_net2pin_start_map[net_id + 1]
-            for pin_id_tensor in self.data_collections.flat_net2pin_map[start:end]:
-                pin_id_to_net_id_map[pin_id_tensor.item()] = net_id
-
-        start_pin_to_sinks_map = {}
-        for start_pin_id in start_pin_ids:
-            net_id = pin_id_to_net_id_map.get(start_pin_id)
-            if net_id is not None:
-                sinks = []
-                start = self.data_collections.flat_net2pin_start_map[net_id]
-                end = self.data_collections.flat_net2pin_start_map[net_id + 1]
-                for pin_id_tensor in self.data_collections.flat_net2pin_map[start:end]:
-                    pin_id = pin_id_tensor.item()
-                    if pin_id != start_pin_id:
-                        sinks.append(pin_id)
-                if sinks:
-                    start_pin_to_sinks_map[start_pin_id] = sinks
-        
-        print(f"识别出 {len(start_pin_to_sinks_map)} 个有效起点，共驱动 {sum(len(s) for s in start_pin_to_sinks_map.values())} 个第一层传播引脚。")
-
-        # 4b. 预处理Python和iEDA的数据
-        op_timing = self.op_collections.timing_propagation_op
-        op_elmore = self.op_collections.elmore_delay_op
-        
-        # ★★★ 新增：获取Python端的Impulse张量 ★★★
-        py_pin_r_impulse = op_elmore.impulses['rise'].clone().detach().cpu().numpy()
-        py_pin_f_impulse = op_elmore.impulses['fall'].clone().detach().cpu().numpy()
-
-        py_pin_r_slew = op_timing.pin_rtran.cpu().numpy()
-        py_pin_f_slew = op_timing.pin_ftran.cpu().numpy()
-
-        ieda_pin_map = {
-            (info['pin_name'], info['mode'], info['transition']): info
-            for info in net_timing_details_cpp
-        }
-        pin_names = self.placedb.pin_names
-
-        # 4c. 生成层级对比报告
-        # ★★★ 新增：更新表头以包含Impulse信息 ★★★
-        header = (f"{'Pin Type':<12} | {'Pin Name':<45} | "
-                  f"{'Py Rise Slew':<18} | {'iEDA Rise Slew':<18} | "
-                  f"{'Py Fall Slew':<18} | {'iEDA Fall Slew':<18} | "
-                  f"{'Py Rise Impulse':<18} | {'iEDA Rise Impulse':<18} | "
-                  f"{'Py Fall Impulse':<18} | {'iEDA Fall Impulse':<18}")
-        print(header)
-        print("-" * (len(header) + 5))
-        
-        report_count = 0
-        max_reports = 3000000
-        
-        for start_pin_id, sink_pin_ids in sorted(start_pin_to_sinks_map.items()):
-            if report_count >= max_reports:
-                print(f"\n已达到报告上限 ({max_reports}个起点)，停止输出...")
-                break
-
-            # --- 打印 Start Pin 的信息 ---
-            start_pin_name = pin_names[start_pin_id].decode('utf-8')
-            # 获取Slew
-            py_r_slew_start = py_pin_r_slew[start_pin_id]
-            py_f_slew_start = py_pin_f_slew[start_pin_id]
-            # ★★★ 新增：获取Impulse ★★★
-            py_r_impulse_start = py_pin_r_impulse[start_pin_id]
-            py_f_impulse_start = py_pin_f_impulse[start_pin_id]
+            # 4b. 预处理Python端计算的所有Pin的数据
+            op_elmore = self.op_collections.elmore_delay_op
+            py_pin_r_load = op_elmore.loads['rise'].clone().detach().cpu().numpy()
+            py_pin_f_load = op_elmore.loads['fall'].clone().detach().cpu().numpy()
+            py_pin_r_delay = op_elmore.delays['rise'].clone().detach().cpu().numpy()
+            py_pin_f_delay = op_elmore.delays['fall'].clone().detach().cpu().numpy()
+            py_pin_r_ldelay = op_elmore.ldelays['rise'].clone().detach().cpu().numpy()
+            py_pin_f_ldelay = op_elmore.ldelays['fall'].clone().detach().cpu().numpy()
+            py_pin_r_beta = op_elmore.betas['rise'].clone().detach().cpu().numpy()
+            py_pin_f_beta = op_elmore.betas['fall'].clone().detach().cpu().numpy()
+            py_pin_r_impulse = op_elmore.impulses['rise'].clone().detach().cpu().numpy()
+            py_pin_f_impulse = op_elmore.impulses['fall'].clone().detach().cpu().numpy()
             
-            # 从iEDA数据中查找
-            key_rise_start = (start_pin_name, "Max", "Rise")
-            key_fall_start = (start_pin_name, "Max", "Fall")
-            ieda_data_rise = ieda_pin_map.get(key_rise_start, {})
-            ieda_data_fall = ieda_pin_map.get(key_fall_start, {})
-
-            ieda_r_slew_start = ieda_data_rise.get('slew_ns', float('nan'))
-            ieda_f_slew_start = ieda_data_fall.get('slew_ns', float('nan'))
-            # ★★★ 新增：获取iEDA Impulse并开方 ★★★
-            ieda_r_impulse_sq = ieda_data_rise.get('impulse', -1.0)
-            ieda_r_impulse_start = math.sqrt(ieda_r_impulse_sq) if ieda_r_impulse_sq >= 0 else float('nan')
-            ieda_f_impulse_sq = ieda_data_fall.get('impulse', -1.0)
-            ieda_f_impulse_start = math.sqrt(ieda_f_impulse_sq) if ieda_f_impulse_sq >= 0 else float('nan')
+            op_timing = self.op_collections.timing_propagation_op
+            py_pin_r_slew = op_timing.pin_rtran.clone().detach().cpu().numpy()
+            py_pin_f_slew = op_timing.pin_ftran.clone().detach().cpu().numpy()
             
-            if report_count > 0: print("-" * (len(header) + 5))
+            # ★★★ 新增: 获取Python端的AT和RT数据 ★★★
+            py_at_late = torch.max(op_timing.pin_rAAT, op_timing.pin_fAAT).clone().detach().cpu().numpy()
+            py_rt_late = torch.min(op_timing.pin_rRAT, op_timing.pin_fRAT).clone().detach().cpu().numpy()
 
-            # ★★★ 新增：打印Impulse信息 ★★★
-            print(f"{'Start Pin':<12} | {start_pin_name:<45} | "
-                  f"{py_r_slew_start:<18.6f} | {ieda_r_slew_start:<18.6f} | "
-                  f"{py_f_slew_start:<18.6f} | {ieda_f_slew_start:<18.6f} | "
-                  f"{py_r_impulse_start:<18.6f} | {ieda_r_impulse_start:<18.6f} | "
-                  f"{py_f_impulse_start:<18.6f} | {ieda_f_impulse_start:<18.6f}")
-
-            # --- 打印该 Start Pin 驱动的所有 Sink Pin 的信息 ---
-            for sink_pin_id in sorted(sink_pin_ids):
-                sink_pin_name = pin_names[sink_pin_id].decode('utf-8')
-                # 获取Slew
-                py_r_slew_sink = py_pin_r_slew[sink_pin_id]
-                py_f_slew_sink = py_pin_f_slew[sink_pin_id]
-                # ★★★ 新增：获取Impulse ★★★
-                py_r_impulse_sink = py_pin_r_impulse[sink_pin_id]
-                py_f_impulse_sink = py_pin_f_impulse[sink_pin_id]
+            python_pin_map = {}
+            pin_names = self.placedb.pin_names
+            
+            for pin_id in range(num_pins):
+                full_pin_name = pin_names[pin_id].decode('utf-8')
                 
-                # 从iEDA数据中查找
-                key_rise_sink = (sink_pin_name, "Max", "Rise")
-                key_fall_sink = (sink_pin_name, "Max", "Fall")
-                ieda_data_rise_sink = ieda_pin_map.get(key_rise_sink, {})
-                ieda_data_fall_sink = ieda_pin_map.get(key_fall_sink, {})
+                # 为Rise和Fall transition分别创建数据条目
+                key_rise = (full_pin_name, "Max", "Rise")
+                python_pin_map[key_rise] = {
+                    "load": py_pin_r_load[pin_id], "delay": py_pin_r_delay[pin_id],
+                    "ldelay": py_pin_r_ldelay[pin_id], "beta": py_pin_r_beta[pin_id],
+                    "impulse": py_pin_r_impulse[pin_id], "slew": py_pin_r_slew[pin_id],
+                    "at": py_at_late[pin_id], "rt": py_rt_late[pin_id] # ★★★ 新增AT/RT
+                }
 
-                ieda_r_slew_sink = ieda_data_rise_sink.get('slew_ns', float('nan'))
-                ieda_f_slew_sink = ieda_data_fall_sink.get('slew_ns', float('nan'))
-                # ★★★ 新增：获取iEDA Impulse并开方 ★★★
-                ieda_r_impulse_sq_sink = ieda_data_rise_sink.get('impulse', -1.0)
-                ieda_r_impulse_sink = math.sqrt(ieda_r_impulse_sq_sink) if ieda_r_impulse_sq_sink >= 0 else float('nan')
-                ieda_f_impulse_sq_sink = ieda_data_fall_sink.get('impulse', -1.0)
-                ieda_f_impulse_sink = math.sqrt(ieda_f_impulse_sq_sink) if ieda_f_impulse_sq_sink >= 0 else float('nan')
-
-                # ★★★ 新增：打印Impulse信息 ★★★
-                print(f"{'  └─ Sink Pin':<12} | {sink_pin_name:<45} | "
-                      f"{py_r_slew_sink:<18.6f} | {ieda_r_slew_sink:<18.6f} | "
-                      f"{py_f_slew_sink:<18.6f} | {ieda_f_slew_sink:<18.6f} | "
-                      f"{py_r_impulse_sink:<18.6f} | {ieda_r_impulse_sink:<18.6f} | "
-                      f"{py_f_impulse_sink:<18.6f} | {ieda_f_impulse_sink:<18.6f}")
+                key_fall = (full_pin_name, "Max", "Fall")
+                python_pin_map[key_fall] = {
+                    "load": py_pin_f_load[pin_id], "delay": py_pin_f_delay[pin_id],
+                    "ldelay": py_pin_f_ldelay[pin_id], "beta": py_pin_f_beta[pin_id],
+                    "impulse": py_pin_f_impulse[pin_id], "slew": py_pin_f_slew[pin_id],
+                    "at": py_at_late[pin_id], "rt": py_rt_late[pin_id] # ★★★ 新增AT/RT
+                }
+                
+            # 4c. 构建用于排序和报告的中间列表
+            report_data = []
+            common_keys = set(python_pin_map.keys()).intersection(set(ieda_pin_map.keys()))
             
-            report_count += 1
+            # ★★★ 新增: 创建一个从pin name到id的反向映射，以便查找AT/RT ★★★
+            pin_name_to_id_map = {pin_names[i].decode('utf-8'): i for i in range(num_pins)}
 
+            for key in common_keys:
+                pin_name, _, _ = key
+                py_data = python_pin_map[key]
+                ieda_data = ieda_pin_map[key]
+                
+                # 获取pin_id，如果找不到则跳过 (更稳健)
+                pin_id = pin_name_to_id_map.get(pin_name)
+                if pin_id is None:
+                    continue
+                
+                # ★★★ 新增: 从iEDA的列表中获取AT/RT ★★★
+                ieda_at_val = at_late_cpp[pin_id]
+                ieda_rt_val = rt_late_cpp[pin_id]
+                
+                # 计算用于排序的差异值 (仍然是slew)
+                diff = abs(py_data['rt'] - ieda_rt_val* 1000)
+                # diff = 0 if math.isnan(diff) else diff  # 确保差异值有效
+                report_data.append({
+                    'key': key, 
+                    'py_data': py_data, 
+                    'ieda_data': ieda_data, 
+                    'ieda_at': ieda_at_val * 1000, # ★★★ 新增
+                    'ieda_rt': ieda_rt_val * 1000, # ★★★ 新增
+                    'sort_diff': diff
+                })
+                
+            # 4d. 按 Slew 差异进行降序排序
+            report_data.sort(key=lambda item: item['sort_diff'], reverse=True)
+
+            # 4e. 打印报告到文件
+            # ★★★ 新增: 更新报告头 ★★★
+            header = (f"{'Pin Name':<45} | {'Mode':<5} | {'Trans':<8} | "
+                      f"{'Py AT':<12} | {'iEDA AT':<12} | "
+                      f"{'Py RT':<12} | {'iEDA RT':<12} | "
+                      f"{'Py Slew':<12} | {'iEDA Slew':<12} | "
+                      f"{'Py Delay':<12} | {'iEDA Delay':<12} | "
+                      f"{'Py Load':<12} | {'iEDA Load':<12} | "
+                      f"{'Py LDelay':<12} | {'iEDA LDelay':<12} | "
+                      f"{'Py Beta':<12} | {'iEDA Beta':<12} | "
+                      f"{'Py Impulse':<12} | {'iEDA Impulse':<12}\n")
+            f.write(header)
+            f.write("-" * (len(header) + 2) + "\n")
+
+            for item in report_data:
+                pin_name, mode, trans = item['key']
+                py_data = item['py_data']
+                ieda_data = item['ieda_data']
+                ieda_impulse_val = math.sqrt(ieda_data['impulse']) if ieda_data['impulse'] >= 0 else 0.0
+                
+                # ★★★ 新增: 更新文件写入行 ★★★
+                f.write(f"{pin_name:<45} | {mode:<5} | {trans:<8} | "
+                        f"{py_data['at']:<12.6f} | {item['ieda_at']:<12.6f} | "
+                        f"{py_data['rt']:<12.6f} | {item['ieda_rt']:<12.6f} | "
+                        f"{py_data['slew']:<12.6f} | {ieda_data['slew_ns']:<12.6f} | "
+                        f"{py_data['delay']:<12.6f} | {ieda_data['delay']:<12.6f} | "
+                        f"{py_data['load']:<12.6f} | {ieda_data['load']:<12.6f} | "
+                        f"{py_data['ldelay']:<12.6f} | {ieda_data['ldelay']:<12.6f} | "
+                        f"{py_data['beta']:<12.6f} | {ieda_data['beta']:<12.6f} | "
+                        f"{py_data['impulse']:<12.6f} | {ieda_impulse_val:<12.6f}\n")
+
+        # 在 with 块结束后，向控制台打印一条确认信息
+        print(f"详细的对比报告已成功写入文件: {report_filename}")
         # # ==============================================================================
-        # # --- 步骤 4: 对齐Cell Arc Delay (新增Arc Sense列) ---
+        # # --- 步骤 4: 识别第一层传播引脚并生成专属Slew/Impulse对比报告 ---
         # # ==============================================================================
-        # print("\n--- Cell Arc Delay 详细对比 (按差异绝对值降序排序) ---")
-        # import math
-        # import numpy as np
+        # print("\n--- [专属报告] 第一层传播引脚Slew与Impulse对比 (按起点分组) ---")
 
-        # # 4a. 预处理iEDA返回的Cell Arc数据 (不变)
-        # ieda_arc_map = {
-        #     (arc['inst_name'], arc['from_pin'], arc['to_pin'], arc['transition'], arc['arc_sense']): arc
-        #     for arc in cell_arc_delays_cpp
-        # }
+        # # 4a. 找出所有“第一层传播”的引脚及其驱动源 (不变)
+        # start_pin_ids = self.data_collections.start_points.cpu().numpy()
+        
+        # pin_id_to_net_id_map = {}
+        # for net_id, net_name in id2net_name_map.items():
+        #     start = self.data_collections.flat_net2pin_start_map[net_id]
+        #     end = self.data_collections.flat_net2pin_start_map[net_id + 1]
+        #     for pin_id_tensor in self.data_collections.flat_net2pin_map[start:end]:
+        #         pin_id_to_net_id_map[pin_id_tensor.item()] = net_id
 
-        # # 4b. 预处理Python端计算的Cell Arc数据 (核心修正)
+        # start_pin_to_sinks_map = {}
+        # for start_pin_id in start_pin_ids:
+        #     net_id = pin_id_to_net_id_map.get(start_pin_id)
+        #     if net_id is not None:
+        #         sinks = []
+        #         start = self.data_collections.flat_net2pin_start_map[net_id]
+        #         end = self.data_collections.flat_net2pin_start_map[net_id + 1]
+        #         for pin_id_tensor in self.data_collections.flat_net2pin_map[start:end]:
+        #             pin_id = pin_id_tensor.item()
+        #             if pin_id != start_pin_id:
+        #                 sinks.append(pin_id)
+        #         if sinks:
+        #             start_pin_to_sinks_map[start_pin_id] = sinks
+        
+        # print(f"识别出 {len(start_pin_to_sinks_map)} 个有效起点，共驱动 {sum(len(s) for s in start_pin_to_sinks_map.values())} 个第一层传播引脚。")
+
+        # # 4b. 预处理Python和iEDA的数据
         # op_timing = self.op_collections.timing_propagation_op
         # op_elmore = self.op_collections.elmore_delay_op
-
-        # py_cell_arc_r_delays = op_timing.cell_arc_r_delays
-        # py_cell_arc_f_delays = op_timing.cell_arc_f_delays
-        # py_pin_r_slew = op_timing.pin_rtran
-        # py_pin_f_slew = op_timing.pin_ftran
-        # py_pin_r_load = op_elmore.loads['rise'].clone().detach().cpu().numpy()
-        # py_pin_f_load = op_elmore.loads['fall'].clone().detach().cpu().numpy()
         
-        # python_arc_map = {}
-        # id2cell_name_map = {v: k for k, v in self.placedb.node_name2id_map.items()}
+        # # ★★★ 新增：获取Python端的Impulse张量 ★★★
+        # py_pin_r_impulse = op_elmore.impulses['rise'].clone().detach().cpu().numpy()
+        # py_pin_f_impulse = op_elmore.impulses['fall'].clone().detach().cpu().numpy()
+
+        # py_pin_r_slew = op_timing.pin_rtran.cpu().numpy()
+        # py_pin_f_slew = op_timing.pin_ftran.cpu().numpy()
+
+        # ieda_pin_map = {
+        #     (info['pin_name'], info['mode'], info['transition']): info
+        #     for info in net_timing_details_cpp
+        # }
         # pin_names = self.placedb.pin_names
-        # cell_arcs = self.data_collections.inst_flat_arcs.cpu().numpy()
-        # cell_arcs_start = self.data_collections.inst_flat_arcs_start.cpu().numpy()
 
-        # for cell_id, cell_name in id2cell_name_map.items():
-        #     start_index = cell_arcs_start[cell_id]
-        #     end_index = cell_arcs_start[cell_id + 1]
-        #     if start_index == end_index: continue
-            
-        #     for arc_info in cell_arcs[start_index:end_index]:
-        #         in_pin_id, out_pin_id, _, lib_cell_arc_idx, arc_sense = arc_info
-                
-        #         from_pin_name = pin_names[in_pin_id].decode('utf-8')
-        #         to_pin_name = pin_names[out_pin_id].decode('utf-8')
-                
-        #         is_inverting = (arc_sense == -1)
-
-        #         # --- 分别处理Rise和Fall Transition ---
-                
-        #         # 1. Rise Transition at INPUT
-        #         py_rise_delay = py_cell_arc_r_delays[lib_cell_arc_idx].item()
-        #         if py_rise_delay != 0.0:
-        #             key = (cell_name, from_pin_name, to_pin_name, "Rise", arc_sense)
-        #             input_slew = py_pin_r_slew[in_pin_id].item()
-        #             # output_load = py_pin_r_load[out_pin_id]
-        #             output_load = py_pin_f_load[out_pin_id] if is_inverting else py_pin_r_load[out_pin_id]
-                    
-        #             # ★★★ 核心修正点 1: 将arc_sense存入字典 ★★★
-        #             python_arc_map[key] = {'delay': py_rise_delay, 'slew': input_slew, 'load': output_load, 'arc_sense': arc_sense}
-
-        #         # 2. Fall Transition at INPUT
-        #         py_fall_delay = py_cell_arc_f_delays[lib_cell_arc_idx].item()
-        #         if py_fall_delay != 0.0:
-        #             key = (cell_name, from_pin_name, to_pin_name, "Fall", arc_sense)
-        #             input_slew = py_pin_f_slew[in_pin_id].item()
-        #             # output_load = py_pin_f_load[out_pin_id]
-        #             output_load = py_pin_r_load[out_pin_id] if is_inverting else py_pin_f_load[out_pin_id]
-
-        #             # ★★★ 核心修正点 1: 将arc_sense存入字典 ★★★
-        #             python_arc_map[key] = {'delay': py_fall_delay, 'slew': input_slew, 'load': output_load, 'arc_sense': arc_sense}
-        
-        # # 4c. 构建用于排序和报告的中间列表 (不变)
-        # report_data = []
-        # common_keys = set(python_arc_map.keys()).intersection(set(ieda_arc_map.keys()))
-
-        # for key in common_keys:
-        #     py_data = python_arc_map[key]
-        #     ieda_data = ieda_arc_map[key]
-        #     delay_diff = py_data['delay'] - ieda_data['delay_ns']
-        #     report_item = {'key': key, 'py_data': py_data, 'ieda_data': ieda_data, 'delay_diff': delay_diff}
-        #     report_data.append(report_item)
-            
-        # # 4d. 按需排序 (当前为按Load差异)
-        # report_data.sort(key=lambda item: abs(item['py_data']['load'] - item['ieda_data']['load_cap']), reverse=True)
-        # # report_data.sort(key=lambda item: item['py_data']['arc_sense'], reverse=True)
-
-        # # 4e. 打印报告
-        # print(f"\n--- 1. 公共时序弧详细对比 (按Load差异绝对值降序排序, 共 {len(common_keys)} 条) ---")
-        
-        # # ★★★ 核心修正点 2: 更新表头 ★★★
-        # header = (f"{'Instance':<25} | {'Arc':<20} | {'Trans':<8} | {'Sense':<7} | "
-        #           f"{'Py Delay':<12} | {'iEDA Delay':<12} | {'Diff':<12} | "
-        #           f"{'Py Slew':<12} | {'iEDA Slew':<12} | "
-        #           f"{'Py Load':<12} | {'iEDA Load':<12}")
+        # # 4c. 生成层级对比报告
+        # # ★★★ 新增：更新表头以包含Impulse信息 ★★★
+        # header = (f"{'Pin Type':<12} | {'Pin Name':<45} | "
+        #           f"{'Py Rise Slew':<18} | {'iEDA Rise Slew':<18} | "
+        #           f"{'Py Fall Slew':<18} | {'iEDA Fall Slew':<18} | "
+        #           f"{'Py Rise Impulse':<18} | {'iEDA Rise Impulse':<18} | "
+        #           f"{'Py Fall Impulse':<18} | {'iEDA Fall Impulse':<18}")
         # print(header)
-        # print("-" * (len(header) + 2))
+        # print("-" * (len(header) + 5))
+        
+        # report_count = 0
+        # max_reports = 3000000
+        
+        # for start_pin_id, sink_pin_ids in sorted(start_pin_to_sinks_map.items()):
+        #     if report_count >= max_reports:
+        #         print(f"\n已达到报告上限 ({max_reports}个起点)，停止输出...")
+        #         break
 
-        # for item in report_data[:200]:
-        #     inst, from_p, to_p, trans, arc_sense = item['key']
-        #     py_data = item['py_data']
-        #     ieda_data = item['ieda_data']
+        #     # --- 打印 Start Pin 的信息 ---
+        #     start_pin_name = pin_names[start_pin_id].decode('utf-8')
+        #     # 获取Slew
+        #     py_r_slew_start = py_pin_r_slew[start_pin_id]
+        #     py_f_slew_start = py_pin_f_slew[start_pin_id]
+        #     # ★★★ 新增：获取Impulse ★★★
+        #     py_r_impulse_start = py_pin_r_impulse[start_pin_id]
+        #     py_f_impulse_start = py_pin_f_impulse[start_pin_id]
             
-        #     # ★★★ 核心修正点 3: 打印arc_sense值 ★★★
-        #     arc_sense_val = py_data['arc_sense']
+        #     # 从iEDA数据中查找
+        #     key_rise_start = (start_pin_name, "Max", "Rise")
+        #     key_fall_start = (start_pin_name, "Max", "Fall")
+        #     ieda_data_rise = ieda_pin_map.get(key_rise_start, {})
+        #     ieda_data_fall = ieda_pin_map.get(key_fall_start, {})
+
+        #     ieda_r_slew_start = ieda_data_rise.get('slew_ns', float('nan'))
+        #     ieda_f_slew_start = ieda_data_fall.get('slew_ns', float('nan'))
+        #     # ★★★ 新增：获取iEDA Impulse并开方 ★★★
+        #     ieda_r_impulse_sq = ieda_data_rise.get('impulse', -1.0)
+        #     ieda_r_impulse_start = math.sqrt(ieda_r_impulse_sq) if ieda_r_impulse_sq >= 0 else float('nan')
+        #     ieda_f_impulse_sq = ieda_data_fall.get('impulse', -1.0)
+        #     ieda_f_impulse_start = math.sqrt(ieda_f_impulse_sq) if ieda_f_impulse_sq >= 0 else float('nan')
             
-        #     print(f"{inst:<25} | {f'{from_p}->{to_p}':<20} | {trans:<8} | {arc_sense_val:<7} | "
-        #           f"{py_data['delay']:<12.6f} | {ieda_data['delay_ns']:<12.6f} | {item['delay_diff']:<+12.6f} | "
-        #           f"{py_data['slew']:<12.6f} | {ieda_data['in_slew_ns']:<12.6f} | "
-        #           f"{py_data['load']:<12.6f} | {ieda_data['load_cap']:<12.6f}")
+        #     if report_count > 0: print("-" * (len(header) + 5))
+
+        #     # ★★★ 新增：打印Impulse信息 ★★★
+        #     print(f"{'Start Pin':<12} | {start_pin_name:<45} | "
+        #           f"{py_r_slew_start:<18.6f} | {ieda_r_slew_start:<18.6f} | "
+        #           f"{py_f_slew_start:<18.6f} | {ieda_f_slew_start:<18.6f} | "
+        #           f"{py_r_impulse_start:<18.6f} | {ieda_r_impulse_start:<18.6f} | "
+        #           f"{py_f_impulse_start:<18.6f} | {ieda_f_impulse_start:<18.6f}")
+
+        #     # --- 打印该 Start Pin 驱动的所有 Sink Pin 的信息 ---
+        #     for sink_pin_id in sorted(sink_pin_ids):
+        #         sink_pin_name = pin_names[sink_pin_id].decode('utf-8')
+        #         # 获取Slew
+        #         py_r_slew_sink = py_pin_r_slew[sink_pin_id]
+        #         py_f_slew_sink = py_pin_f_slew[sink_pin_id]
+        #         # ★★★ 新增：获取Impulse ★★★
+        #         py_r_impulse_sink = py_pin_r_impulse[sink_pin_id]
+        #         py_f_impulse_sink = py_pin_f_impulse[sink_pin_id]
+                
+        #         # 从iEDA数据中查找
+        #         key_rise_sink = (sink_pin_name, "Max", "Rise")
+        #         key_fall_sink = (sink_pin_name, "Max", "Fall")
+        #         ieda_data_rise_sink = ieda_pin_map.get(key_rise_sink, {})
+        #         ieda_data_fall_sink = ieda_pin_map.get(key_fall_sink, {})
+
+        #         ieda_r_slew_sink = ieda_data_rise_sink.get('slew_ns', float('nan'))
+        #         ieda_f_slew_sink = ieda_data_fall_sink.get('slew_ns', float('nan'))
+        #         # ★★★ 新增：获取iEDA Impulse并开方 ★★★
+        #         ieda_r_impulse_sq_sink = ieda_data_rise_sink.get('impulse', -1.0)
+        #         ieda_r_impulse_sink = math.sqrt(ieda_r_impulse_sq_sink) if ieda_r_impulse_sq_sink >= 0 else float('nan')
+        #         ieda_f_impulse_sq_sink = ieda_data_fall_sink.get('impulse', -1.0)
+        #         ieda_f_impulse_sink = math.sqrt(ieda_f_impulse_sq_sink) if ieda_f_impulse_sq_sink >= 0 else float('nan')
+
+        #         # ★★★ 新增：打印Impulse信息 ★★★
+        #         print(f"{'  └─ Sink Pin':<12} | {sink_pin_name:<45} | "
+        #               f"{py_r_slew_sink:<18.6f} | {ieda_r_slew_sink:<18.6f} | "
+        #               f"{py_f_slew_sink:<18.6f} | {ieda_f_slew_sink:<18.6f} | "
+        #               f"{py_r_impulse_sink:<18.6f} | {ieda_r_impulse_sink:<18.6f} | "
+        #               f"{py_f_impulse_sink:<18.6f} | {ieda_f_impulse_sink:<18.6f}")
+            
+        #     report_count += 1
+
+        # ==============================================================================
+        # --- 步骤 4: 对齐Cell Arc Delay (新增Arc Sense列) ---
+        # ==============================================================================
+        print("\n--- Cell Arc Delay 详细对比 (按差异绝对值降序排序) ---")
+        import math
+        import numpy as np
+
+        # 4a. 预处理iEDA返回的Cell Arc数据 (不变)
+        ieda_arc_map = {
+            (arc['inst_name'], arc['from_pin'], arc['to_pin'], arc['transition'], arc['arc_sense']): arc
+            for arc in cell_arc_delays_cpp
+        }
+
+        # 4b. 预处理Python端计算的Cell Arc数据 (逻辑修正版)
+        op_timing = self.op_collections.timing_propagation_op
+        op_elmore = self.op_collections.elmore_delay_op
+
+        py_cell_arc_r_delays = op_timing.cell_arc_r_delays.cpu().numpy() # Delay for OUTPUT Rise
+        py_cell_arc_f_delays = op_timing.cell_arc_f_delays.cpu().numpy() # Delay for OUTPUT Fall
+        
+        py_pin_r_slew = op_timing.pin_rtran.cpu().numpy()
+        py_pin_f_slew = op_timing.pin_ftran.cpu().numpy()
+        py_pin_r_load = op_elmore.loads['rise'].clone().detach().cpu().numpy()
+        py_pin_f_load = op_elmore.loads['fall'].clone().detach().cpu().numpy()
+        
+        python_arc_map = {}
+        id2cell_name_map = {v: k for k, v in self.placedb.node_name2id_map.items()}
+        pin_names = self.placedb.pin_names
+        
+        cell_arcs = self.data_collections.inst_flat_arcs.cpu().numpy()
+        cell_arcs_start = self.data_collections.inst_flat_arcs_start.cpu().numpy()
+
+        for cell_id, cell_name in id2cell_name_map.items():
+            start_index = cell_arcs_start[cell_id]
+            end_index = cell_arcs_start[cell_id + 1]
+            if start_index == end_index: continue
+            
+            for inst_arc_idx in range(start_index, end_index):
+                arc_info = cell_arcs[inst_arc_idx]
+                
+                in_pin_id, out_pin_id, _, _, arc_sense = arc_info
+                
+                from_pin_name = pin_names[in_pin_id].decode('utf-8')
+                to_pin_name = pin_names[out_pin_id].decode('utf-8')
+                
+                is_inverting = (arc_sense == -1) # negative_unate
+
+                # --- ★★★ 核心修正逻辑开始 ★★★ ---
+                
+                # --- 情况一: 报告中对应 INPUT "Rise" 的行 ---
+                # 我们需要找到当输入上升时，对应的延时、Slew和Load
+                
+                # 根据arc_sense决定使用哪个延时结果
+                # 如果是反相的(negative_unate)，输入Rise导致输出Fall，所以用 _f_delays
+                # 否则 (positive/non-unate)，输入Rise导致输出Rise，用 _r_delays
+                delay_for_input_rise = py_cell_arc_r_delays[inst_arc_idx]
+
+                key_rise = (cell_name, from_pin_name, to_pin_name, "Rise", arc_sense)
+                input_slew_rise = py_pin_f_slew[in_pin_id] if is_inverting else py_pin_r_slew[in_pin_id]
+                output_load_rise = py_pin_f_load[out_pin_id] if is_inverting else py_pin_r_load[out_pin_id]
+                python_arc_map[key_rise] = {'delay': delay_for_input_rise, 'slew': input_slew_rise, 'load': output_load_rise, 'arc_sense': arc_sense}
+
+                # --- 情况二: 报告中对应 INPUT "Fall" 的行 ---
+                # 我们需要找到当输入下降时，对应的延时、Slew和Load
+                
+                # 根据arc_sense决定使用哪个延时结果
+                # 如果是反相的(negative_unate)，输入Fall导致输出Rise，所以用 _r_delays
+                # 否则 (positive/non-unate)，输入Fall导致输出Fall，用 _f_delays
+                delay_for_input_fall = py_cell_arc_f_delays[inst_arc_idx]
+                
+                key_fall = (cell_name, from_pin_name, to_pin_name, "Fall", arc_sense)
+                input_slew_fall = py_pin_r_slew[in_pin_id] if is_inverting else py_pin_f_slew[in_pin_id]
+                output_load_fall = py_pin_r_load[out_pin_id] if is_inverting else py_pin_f_load[out_pin_id]
+                python_arc_map[key_fall] = {'delay': delay_for_input_fall, 'slew': input_slew_fall, 'load': output_load_fall, 'arc_sense': arc_sense}
+
+                # --- ★★★ 核心修正逻辑结束 ★★★ ---
+        
+        # 4c. 构建用于排序和报告的中间列表 (不变)
+        report_data = []
+        common_keys = set(python_arc_map.keys()).intersection(set(ieda_arc_map.keys()))
+
+        for key in common_keys:
+            py_data = python_arc_map[key]
+            ieda_data = ieda_arc_map[key]
+            delay_diff = py_data['delay'] - ieda_data['delay_ns'] * 1000
+            report_item = {'key': key, 'py_data': py_data, 'ieda_data': ieda_data, 'delay_diff': delay_diff}
+            report_data.append(report_item)
+            
+        # 4d. 按需排序 (当前为按Load差异)
+        report_data.sort(key=lambda item: item['delay_diff'], reverse=True)
+        # report_data.sort(key=lambda item: item['py_data']['arc_sense'], reverse=True)
+
+        # 4e. 打印报告
+        print(f"\n--- 1. 公共时序弧详细对比 (按Load差异绝对值降序排序, 共 {len(common_keys)} 条) ---")
+        
+        # ★★★ 核心修正点 2: 更新表头 ★★★
+        header = (f"{'Instance':<25} | {'Arc':<20} | {'Trans':<8} | {'Sense':<7} | "
+                  f"{'Py Delay':<12} | {'iEDA Delay':<12} | {'Diff':<12} | "
+                  f"{'Py Slew':<12} | {'iEDA Slew':<12} | "
+                  f"{'Py Load':<12} | {'iEDA Load':<12}")
+        print(header)
+        print("-" * (len(header) + 2))
+
+        for item in report_data[:200]:
+            inst, from_p, to_p, trans, arc_sense = item['key']
+            py_data = item['py_data']
+            ieda_data = item['ieda_data']
+            
+            # ★★★ 核心修正点 3: 打印arc_sense值 ★★★
+            arc_sense_val = py_data['arc_sense']
+            
+            print(f"{inst:<25} | {f'{from_p}->{to_p}':<20} | {trans:<8} | {arc_sense_val:<7} | "
+                  f"{py_data['delay']:<12.6f} | {ieda_data['delay_ns'] * 1000:<12.6f} | {item['delay_diff']:<+12.6f} | "
+                  f"{py_data['slew']:<12.6f} | {ieda_data['in_slew_ns'] * 1000:<12.6f} | "
+                  f"{py_data['load']:<12.6f} | {ieda_data['load_cap']:<12.6f}")
 
         # ==============================================================================
         # --- 步骤 6: 计算并返回最终的目标函数值 ---
@@ -1281,6 +1333,7 @@ class PlaceObj(nn.Module):
             data_collections.clk_pin_ftran,
             data_collections.net_flat_arcs_start,
             data_collections.net_flat_arcs,
+            data_collections.net2driver_pin_map,
             data_collections.arcs_info,
             data_collections.inst_flat_arcs_start,
             data_collections.inst_flat_arcs,

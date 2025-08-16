@@ -92,7 +92,7 @@ class TimingPropagation(nn.Module):
                  start_points,
                  end_points,
                  clock_pins,
-                 FF_ids, 
+                 FF_ids,
                  clk_pin_rtran,
                  clk_pin_ftran,
                  net_flat_arcs_start,
@@ -105,8 +105,8 @@ class TimingPropagation(nn.Module):
                  flat_cells_by_level,
                  flat_cells_by_level_start,
                  flat_cells_by_reverse_level,
-                 flat_cells_by_reverse_level_start, 
-                 endpoints_rRAT, 
+                 flat_cells_by_reverse_level_start,
+                 endpoints_rRAT,
                  endpoints_fRAT):
         super(TimingPropagation, self).__init__()
 
@@ -146,7 +146,7 @@ class TimingPropagation(nn.Module):
         self.pin_fRAT = None
         self.pin_rtran = None
         self.pin_ftran = None
-        self.pin_net_cap = None 
+        self.pin_net_cap = None
         self.cell_arc_r_delays = None
         self.cell_arc_f_delays = None
 
@@ -251,10 +251,14 @@ class TimingPropagation(nn.Module):
         lut_values_batch_flat = lut_values_batch
 
         # 使用 gather 从已经压平的张量中安全地提取数值
-        v00 = lut_values_batch_flat.gather(1, idx00.unsqueeze(1)).squeeze(1) # [B]
-        v01 = lut_values_batch_flat.gather(1, idx01.unsqueeze(1)).squeeze(1) # [B]
-        v10 = lut_values_batch_flat.gather(1, idx10.unsqueeze(1)).squeeze(1) # [B]
-        v11 = lut_values_batch_flat.gather(1, idx11.unsqueeze(1)).squeeze(1) # [B]
+        v00 = lut_values_batch_flat.gather(
+            1, idx00.unsqueeze(1)).squeeze(1)  # [B]
+        v01 = lut_values_batch_flat.gather(
+            1, idx01.unsqueeze(1)).squeeze(1)  # [B]
+        v10 = lut_values_batch_flat.gather(
+            1, idx10.unsqueeze(1)).squeeze(1)  # [B]
+        v11 = lut_values_batch_flat.gather(
+            1, idx11.unsqueeze(1)).squeeze(1)  # [B]
         # ★★★ 修正结束 ★★★
         # # --- 5. Calculate Flattened Indices for lut_values ---
         # # num_cols is the *actual* cap dimension for each arc
@@ -370,10 +374,10 @@ class TimingPropagation(nn.Module):
             luts.flat_luts_cap_table, luts.flat_luts_dim
         )
 
-    def calculate_cell_aat_level(self, level_cells, 
-                                 pin_rAAT, pin_fAAT, 
-                                 pin_rtran, pin_ftran, 
-                                 pin_net_cap_rise, pin_net_cap_fall, 
+    def calculate_cell_aat_level(self, level_cells,
+                                 pin_rAAT, pin_fAAT,
+                                 pin_rtran, pin_ftran,
+                                 pin_net_cap_rise, pin_net_cap_fall,
                                  cell_arc_r_delays, cell_arc_f_delays, is_clk2q=False, clk_pin_rtran=None, clk_pin_ftran=None):
         device = pin_rAAT.device
 
@@ -399,8 +403,8 @@ class TimingPropagation(nn.Module):
         lib_cell_idxs = level_inst_arcs[:, 2]
         lib_arc_idxs = level_inst_arcs[:, 3]
         timing_senses = level_inst_arcs[:, 4]
-        
-        if (arc_in_pins==15754).any() and (arc_out_pins==15771).any():
+
+        if (arc_in_pins == 15754).any() and (arc_out_pins == 15771).any():
             logging.warning(f"lib_arc_idxs: {lib_arc_idxs}")
 
         # 1. 准备输入条件
@@ -413,27 +417,35 @@ class TimingPropagation(nn.Module):
         else:
             pin_r_slew_in = pin_rtran[arc_in_pins]
             pin_f_slew_in = pin_ftran[arc_in_pins]
-        
+
         pin_r_load_out = pin_net_cap_rise[arc_out_pins]
         pin_f_load_out = pin_net_cap_fall[arc_out_pins]
 
         # --- 2. 计算四种基础情况的延时(Delay)和转换时间(Transition) ---
-        
+
         # Rise -> Rise (r->r)
-        delay_rr = self.r_delay_entry(lib_cell_idxs, pin_r_slew_in, pin_r_load_out, lib_arc_idxs)
-        tran_rr = self.r_tran_entry(lib_cell_idxs, pin_r_slew_in, pin_r_load_out, lib_arc_idxs)
-        
+        delay_rr = self.r_delay_entry(
+            lib_cell_idxs, pin_r_slew_in, pin_r_load_out, lib_arc_idxs)
+        tran_rr = self.r_tran_entry(
+            lib_cell_idxs, pin_r_slew_in, pin_r_load_out, lib_arc_idxs)
+
         # Fall -> Fall (f->f)
-        delay_ff = self.f_delay_entry(lib_cell_idxs, pin_f_slew_in, pin_f_load_out, lib_arc_idxs)
-        tran_ff = self.f_tran_entry(lib_cell_idxs, pin_f_slew_in, pin_f_load_out, lib_arc_idxs)
+        delay_ff = self.f_delay_entry(
+            lib_cell_idxs, pin_f_slew_in, pin_f_load_out, lib_arc_idxs)
+        tran_ff = self.f_tran_entry(
+            lib_cell_idxs, pin_f_slew_in, pin_f_load_out, lib_arc_idxs)
 
         # Rise -> Fall (r->f)
-        delay_rf = self.f_delay_entry(lib_cell_idxs, pin_r_slew_in, pin_f_load_out, lib_arc_idxs)
-        tran_rf = self.f_tran_entry(lib_cell_idxs, pin_r_slew_in, pin_f_load_out, lib_arc_idxs)
+        delay_rf = self.f_delay_entry(
+            lib_cell_idxs, pin_r_slew_in, pin_f_load_out, lib_arc_idxs)
+        tran_rf = self.f_tran_entry(
+            lib_cell_idxs, pin_r_slew_in, pin_f_load_out, lib_arc_idxs)
 
         # Fall -> Rise (f->r)
-        delay_fr = self.r_delay_entry(lib_cell_idxs, pin_f_slew_in, pin_r_load_out, lib_arc_idxs)
-        tran_fr = self.r_tran_entry(lib_cell_idxs, pin_f_slew_in, pin_r_load_out, lib_arc_idxs)
+        delay_fr = self.r_delay_entry(
+            lib_cell_idxs, pin_f_slew_in, pin_r_load_out, lib_arc_idxs)
+        tran_fr = self.r_tran_entry(
+            lib_cell_idxs, pin_f_slew_in, pin_r_load_out, lib_arc_idxs)
 
         # --- 3. 根据 Timing Sense 组合最终结果 ---
         # is_non_unate mask is implicitly `not (is_pos_unate or is_neg_unate)`
@@ -447,26 +459,26 @@ class TimingPropagation(nn.Module):
         r_delays_non_unate = torch.maximum(delay_rr, delay_fr)
         f_delays_non_unate = torch.maximum(delay_ff, delay_rf)
         r_delays = torch.where(is_pos_unate, delay_rr,
-                            torch.where(is_neg_unate, delay_fr, r_delays_non_unate))
+                               torch.where(is_neg_unate, delay_fr, r_delays_non_unate))
         f_delays = torch.where(is_pos_unate, delay_ff,
-                            torch.where(is_neg_unate, delay_rf, f_delays_non_unate))
+                               torch.where(is_neg_unate, delay_rf, f_delays_non_unate))
 
         # --- 计算最终的上升输出转换时间 (r_trans) ---
         r_trans_non_unate = torch.maximum(tran_rr, tran_fr)
         r_trans = torch.where(is_pos_unate, tran_rr,
-                            torch.where(is_neg_unate, tran_fr, r_trans_non_unate))
+                              torch.where(is_neg_unate, tran_fr, r_trans_non_unate))
 
         # --- 计算最终的下降输出转换时间 (f_trans) ---
         f_trans_non_unate = torch.maximum(tran_ff, tran_rf)
         f_trans = torch.where(is_pos_unate, tran_ff,
-                            torch.where(is_neg_unate, tran_rf, f_trans_non_unate))
+                              torch.where(is_neg_unate, tran_rf, f_trans_non_unate))
 
         # --- 4. 存储和更新 (最终修正版) ---
-        
+
         # ★★★ 核心修正: 获取当前批次中所有有效弧的、扁平化的全局索引 ★★★
         # 这个操作会生成一个一维张量，其大小 (5104) 与 r_delays 的大小完全匹配
         scatter_indices = arcs_global_indices[arcs_mask]
-        
+
         # 使用这个正确的一维索引张量进行scatter操作
         cell_arc_r_delays.scatter_(0, scatter_indices.long(), r_delays)
         cell_arc_f_delays.scatter_(0, scatter_indices.long(), f_delays)
@@ -474,18 +486,22 @@ class TimingPropagation(nn.Module):
         # 后续的AAT和Slew更新逻辑保持不变
         r_aat_updates = pin_rAAT[arc_in_pins] + r_delays
         f_aat_updates = pin_fAAT[arc_in_pins] + f_delays
-        
-        pin_rAAT = torch.scatter_reduce(pin_rAAT, 0, arc_out_pins.long(), r_aat_updates, reduce="amax", include_self=False)
-        pin_fAAT = torch.scatter_reduce(pin_fAAT, 0, arc_out_pins.long(), f_aat_updates, reduce="amax", include_self=False)
-        pin_rtran = torch.scatter_reduce(pin_rtran, 0, arc_out_pins.long(), r_trans, reduce="amax", include_self=False)
-        pin_ftran = torch.scatter_reduce(pin_ftran, 0, arc_out_pins.long(), f_trans, reduce="amax", include_self=False)
-        
+
+        pin_rAAT = torch.scatter_reduce(pin_rAAT, 0, arc_out_pins.long(
+        ), r_aat_updates, reduce="amax", include_self=False)
+        pin_fAAT = torch.scatter_reduce(pin_fAAT, 0, arc_out_pins.long(
+        ), f_aat_updates, reduce="amax", include_self=False)
+        pin_rtran = torch.scatter_reduce(
+            pin_rtran, 0, arc_out_pins.long(), r_trans, reduce="amax", include_self=False)
+        pin_ftran = torch.scatter_reduce(
+            pin_ftran, 0, arc_out_pins.long(), f_trans, reduce="amax", include_self=False)
+
         net_in_pins = torch.unique(self.pin_net[arc_out_pins])
 
         return net_in_pins, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran, cell_arc_r_delays, cell_arc_f_delays
 
-    def calculate_net_aat_level(self, curnets, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran, 
-                                pin_net_delay_rise, pin_net_delay_fall, 
+    def calculate_net_aat_level(self, curnets, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
+                                pin_net_delay_rise, pin_net_delay_fall,
                                 pin_net_impulse_rise, pin_net_impulse_fall):
         net_arcs_starts = self.net_flat_arcs_start[curnets]
         net_arcs_ends = self.net_flat_arcs_start[curnets + 1]
@@ -514,10 +530,14 @@ class TimingPropagation(nn.Module):
         r_tran_updates = torch.sqrt(pin_rtran[arc_fipins]**2 + impulse_rise**2)
         f_tran_updates = torch.sqrt(pin_ftran[arc_fipins]**2 + impulse_fall**2)
 
-        pin_rAAT = torch.scatter_reduce(pin_rAAT, 0, arc_fopins.long(), r_aat_updates, reduce="amax", include_self=True)
-        pin_fAAT = torch.scatter_reduce(pin_fAAT, 0, arc_fopins.long(), f_aat_updates, reduce="amax", include_self=True)
-        pin_rtran = torch.scatter_reduce(pin_rtran, 0, arc_fopins.long(), r_tran_updates, reduce="amax", include_self=True)
-        pin_ftran = torch.scatter_reduce(pin_ftran, 0, arc_fopins.long(), f_tran_updates, reduce="amax", include_self=True)
+        pin_rAAT = torch.scatter_reduce(pin_rAAT, 0, arc_fopins.long(
+        ), r_aat_updates, reduce="amax", include_self=True)
+        pin_fAAT = torch.scatter_reduce(pin_fAAT, 0, arc_fopins.long(
+        ), f_aat_updates, reduce="amax", include_self=True)
+        pin_rtran = torch.scatter_reduce(pin_rtran, 0, arc_fopins.long(
+        ), r_tran_updates, reduce="amax", include_self=True)
+        pin_ftran = torch.scatter_reduce(pin_ftran, 0, arc_fopins.long(
+        ), f_tran_updates, reduce="amax", include_self=True)
 
         return pin_rAAT, pin_fAAT, pin_rtran, pin_ftran
 
@@ -537,35 +557,42 @@ class TimingPropagation(nn.Module):
 
         arc_in_pins = level_inst_arcs[:, 0]
         arc_out_pins = level_inst_arcs[:, 1]
-        
+
         scatter_indices = arcs_global_indices[arcs_mask]
 
         f_delays = cell_arc_f_delays[scatter_indices]
         r_delays = cell_arc_r_delays[scatter_indices]
 
-        assert pin_rRAT[arc_out_pins].min() >= 0, "Negative r_rat_updates detected"
+        assert pin_rRAT[arc_out_pins].min(
+        ) >= 0, "Negative r_rat_updates detected"
         r_rat_updates = pin_rRAT[arc_out_pins] - r_delays
         f_rat_updates = pin_fRAT[arc_out_pins] - f_delays
 
-        pin_rRAT = torch.scatter_reduce(pin_rRAT, 0, arc_in_pins.long(), r_rat_updates, reduce="amin", include_self=True)
-        pin_fRAT = torch.scatter_reduce(pin_fRAT, 0, arc_in_pins.long(), f_rat_updates, reduce="amin", include_self=True)
+        pin_rRAT = torch.scatter_reduce(pin_rRAT, 0, arc_in_pins.long(
+        ), r_rat_updates, reduce="amin", include_self=True)
+        pin_fRAT = torch.scatter_reduce(pin_fRAT, 0, arc_in_pins.long(
+        ), f_rat_updates, reduce="amin", include_self=True)
 
         cur_endpoints = torch.unique(arc_in_pins)
         return cur_endpoints, pin_rRAT, pin_fRAT
 
     def calculate_net_rat_level(self, cur_endpoint, pin_rRAT, pin_fRAT, pin_net_delay_rise, pin_net_delay_fall):
-        
+
         curnets = self.pin_net[cur_endpoint]
 
         arc_fipins = self.net2driver_pin_map[curnets]
         wire_delays_rise = pin_net_delay_rise[cur_endpoint]
         wire_delays_fall = pin_net_delay_fall[cur_endpoint]
-        assert pin_rRAT[cur_endpoint].min() >= 0, "Negative r_rat_updates detected"
+        assert pin_rRAT[cur_endpoint].min(
+        ) >= 0, "Negative r_rat_updates detected"
         r_rat_updates = pin_rRAT[cur_endpoint] - wire_delays_rise
         f_rat_updates = pin_fRAT[cur_endpoint] - wire_delays_fall
-        pin_rRAT = torch.scatter_reduce(pin_rRAT, 0, arc_fipins.long(), r_rat_updates, reduce="amin", include_self=True)
-        pin_fRAT = torch.scatter_reduce(pin_fRAT, 0, arc_fipins.long(), f_rat_updates, reduce="amin", include_self=True)
-        assert pin_rRAT[arc_fipins].min() >= 0, "Negative r_rat_updates detected after scatter_reduce"
+        pin_rRAT = torch.scatter_reduce(pin_rRAT, 0, arc_fipins.long(
+        ), r_rat_updates, reduce="amin", include_self=True)
+        pin_fRAT = torch.scatter_reduce(pin_fRAT, 0, arc_fipins.long(
+        ), f_rat_updates, reduce="amin", include_self=True)
+        assert pin_rRAT[arc_fipins].min(
+        ) >= 0, "Negative r_rat_updates detected after scatter_reduce"
         return pin_rRAT, pin_fRAT
 
     def forward(self, pin_net_delays, pin_net_impulses, pin_net_caps):
@@ -585,14 +612,21 @@ class TimingPropagation(nn.Module):
         pin_rtran = torch.zeros(self.num_pins, device=device, dtype=dtype)
         pin_ftran = torch.zeros(self.num_pins, device=device, dtype=dtype)
         inf_val = torch.tensor(2e8, device=self.device, dtype=self.dtype)
-        pin_rRAT = torch.full((self.num_pins,), inf_val, device=self.device, dtype=self.dtype)
-        pin_fRAT = torch.full((self.num_pins,), inf_val, device=self.device, dtype=self.dtype)
-        pin_rRAT[self.end_points] = torch.tensor(self.endpoints_rRAT, device=self.device, dtype=self.dtype)
-        pin_fRAT[self.end_points] = torch.tensor(self.endpoints_fRAT, device=self.device, dtype=self.dtype)
+        pin_rRAT = torch.full((self.num_pins,), inf_val,
+                              device=self.device, dtype=self.dtype)
+        pin_fRAT = torch.full((self.num_pins,), inf_val,
+                              device=self.device, dtype=self.dtype)
+        pin_rRAT[self.end_points] = torch.tensor(
+            self.endpoints_rRAT, device=self.device, dtype=self.dtype)
+        pin_fRAT[self.end_points] = torch.tensor(
+            self.endpoints_fRAT, device=self.device, dtype=self.dtype)
 
-        num_arcs_total = self.inst_flat_arcs[:, 3].shape[0] + 1 if self.inst_flat_arcs.numel() > 0 else 1
-        cell_arc_r_delays = torch.zeros(num_arcs_total, device=device, dtype=dtype)
-        cell_arc_f_delays = torch.zeros(num_arcs_total, device=device, dtype=dtype)
+        num_arcs_total = self.inst_flat_arcs[:, 3].shape[0] + \
+            1 if self.inst_flat_arcs.numel() > 0 else 1
+        cell_arc_r_delays = torch.zeros(
+            num_arcs_total, device=device, dtype=dtype)
+        cell_arc_f_delays = torch.zeros(
+            num_arcs_total, device=device, dtype=dtype)
 
         pin_rAAT[self.start_points] = self.inrdelays
         pin_fAAT[self.start_points] = self.infdelays
@@ -602,14 +636,14 @@ class TimingPropagation(nn.Module):
         # pin_net_cap[self.end_points] = pin_net_cap[self.end_points] + self.outcaps
 
         cur_nets, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran, cell_arc_r_delays, cell_arc_f_delays = self.calculate_cell_aat_level(
-                self.FF_ids, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
-                pin_net_cap_rise, pin_net_cap_fall,
-                cell_arc_r_delays, cell_arc_f_delays, True, self.clk_pin_rtran, self.clk_pin_ftran)
+            self.FF_ids, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
+            pin_net_cap_rise, pin_net_cap_fall,
+            cell_arc_r_delays, cell_arc_f_delays, True, self.clk_pin_rtran, self.clk_pin_ftran)
 
         pi_nets = torch.unique(self.pin_net[self.start_points])
         pin_rAAT, pin_fAAT, pin_rtran, pin_ftran = self.calculate_net_aat_level(
-            pi_nets, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran, 
-            pin_net_delay_rise, pin_net_delay_fall, 
+            pi_nets, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
+            pin_net_delay_rise, pin_net_delay_fall,
             pin_net_impulse_rise, pin_net_impulse_fall
         )
 
@@ -624,7 +658,7 @@ class TimingPropagation(nn.Module):
             )
             pin_rAAT, pin_fAAT, pin_rtran, pin_ftran = self.calculate_net_aat_level(
                 cur_nets, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
-                pin_net_delay_rise, pin_net_delay_fall, 
+                pin_net_delay_rise, pin_net_delay_fall,
                 pin_net_impulse_rise, pin_net_impulse_fall
             )
 
@@ -649,9 +683,13 @@ class TimingPropagation(nn.Module):
         wns = torch.min(neg_slack)
         tns = torch.sum(neg_slack)
 
-        self.pin_rAAT, self.pin_fAAT, self.pin_rRAT, self.pin_fRAT = (t.clone().detach() for t in [pin_rAAT, pin_fAAT, pin_rRAT, pin_fRAT])
-        self.pin_rtran, self.pin_ftran = (t.clone().detach() for t in [pin_rtran, pin_ftran])
-        self.pin_net_cap_rise, self.pin_net_cap_fall = (t.clone().detach() for t in [pin_net_cap_rise, pin_net_cap_fall])
-        self.cell_arc_r_delays, self.cell_arc_f_delays = (t.clone().detach() for t in [cell_arc_r_delays, cell_arc_f_delays])
+        self.pin_rAAT, self.pin_fAAT, self.pin_rRAT, self.pin_fRAT = (
+            t.clone().detach() for t in [pin_rAAT, pin_fAAT, pin_rRAT, pin_fRAT])
+        self.pin_rtran, self.pin_ftran = (
+            t.clone().detach() for t in [pin_rtran, pin_ftran])
+        self.pin_net_cap_rise, self.pin_net_cap_fall = (
+            t.clone().detach() for t in [pin_net_cap_rise, pin_net_cap_fall])
+        self.cell_arc_r_delays, self.cell_arc_f_delays = (
+            t.clone().detach() for t in [cell_arc_r_delays, cell_arc_f_delays])
 
         return wns, tns

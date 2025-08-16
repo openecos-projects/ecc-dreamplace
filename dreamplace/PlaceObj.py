@@ -1329,7 +1329,7 @@ class PlaceObj(nn.Module):
             data_collections.arcs_info,
             data_collections.inst_flat_arcs_start,
             data_collections.inst_flat_arcs,
-            data_collections.cell_flat_clk_arcs,
+            data_collections.endpoints_constraint_arcs,
             data_collections.flat_cells_by_level,
             data_collections.flat_cells_by_level_start,
             data_collections.flat_cells_by_reverse_level,

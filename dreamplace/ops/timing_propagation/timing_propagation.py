@@ -101,7 +101,7 @@ class TimingPropagation(nn.Module):
                  arcs_info: ARCS_INFO,
                  inst_flat_arcs_start,
                  inst_flat_arcs,
-                 cell_flat_clk_arcs,
+                 endpoints_constraint_arcs,
                  flat_cells_by_level,
                  flat_cells_by_level_start,
                  flat_cells_by_reverse_level,
@@ -128,7 +128,7 @@ class TimingPropagation(nn.Module):
         self.net2driver_pin_map = net2driver_pin_map
         self.inst_flat_arcs_start = inst_flat_arcs_start
         self.inst_flat_arcs = inst_flat_arcs
-        self.cell_flat_clk_arcs = cell_flat_clk_arcs
+        self.endpoints_constraint_arcs = endpoints_constraint_arcs
         self.flat_cells_by_level = flat_cells_by_level
         self.flat_cells_by_level_start = flat_cells_by_level_start
         self.flat_cells_by_reverse_level = flat_cells_by_reverse_level
@@ -339,6 +339,22 @@ class TimingPropagation(nn.Module):
             final_value), final_value, torch.tensor(0.0, device=device, dtype=dtype))
 
         return final_value
+
+    def r_setup_entry(self, lib_cell_idxs, clk_pin_rtrans, data_pin_trans, lib_arc_idxs):
+        luts = self.arcs_info.r_delay_luts
+        return self.lut_entry_vectorized(
+            lib_cell_idxs, clk_pin_rtrans, data_pin_trans, lib_arc_idxs,
+            luts.flat_luts_values, luts.flat_luts_trans_table,
+            luts.flat_luts_cap_table, luts.flat_luts_dim
+        )
+
+    def f_setup_entry(self, lib_cell_idxs, clk_pin_rtrans, data_pin_trans, lib_arc_idxs):
+        luts = self.arcs_info.f_delay_luts
+        return self.lut_entry_vectorized(
+            lib_cell_idxs, clk_pin_rtrans, data_pin_trans, lib_arc_idxs,
+            luts.flat_luts_values, luts.flat_luts_trans_table,
+            luts.flat_luts_cap_table, luts.flat_luts_dim
+        )
 
     # --- Vectorized LUT Entry Functions (Updated to call vectorized lut_entry) ---
     # These now directly call the vectorized function, no vmap needed here.
@@ -595,6 +611,32 @@ class TimingPropagation(nn.Module):
         ) >= 0, "Negative r_rat_updates detected after scatter_reduce"
         return pin_rRAT, pin_fRAT
 
+    def calculate_setup_rat(self, pin_rRAT, pin_fRAT, clk_pin_rtran, clk_pin_ftran, pin_rtran, pin_ftran):
+
+        arc_in_pins = self.endpoints_constraint_arcs[:, 0]
+        arc_out_pins = self.endpoints_constraint_arcs[:, 1]
+        lib_cell_idxs = self.endpoints_constraint_arcs[:, 2]
+        lib_arc_idxs = self.endpoints_constraint_arcs[:, 3]
+        timing_senses = self.endpoints_constraint_arcs[:, 4]
+
+        pin_clk_rtran_in = clk_pin_rtran[arc_in_pins]
+        pin_clk_ftran_in = clk_pin_ftran[arc_in_pins]
+        pin_data_rtran_in = pin_rtran[arc_out_pins]
+        pin_data_ftran_in = pin_ftran[arc_out_pins]
+
+        r_setup_time = self.r_setup_entry(lib_cell_idxs, pin_clk_rtran_in,
+                                          pin_data_rtran_in, lib_arc_idxs)
+        f_setup_time = self.f_setup_entry(lib_cell_idxs, pin_clk_ftran_in,
+                                          pin_data_ftran_in, lib_arc_idxs)
+
+        # TODO: Need to handle non-unate timing sense if needed
+        assert pin_rRAT[arc_out_pins].min(
+        ) >= 0, "Negative r_rat_updates detected"
+        pin_rRAT[arc_out_pins] = pin_rRAT[arc_out_pins] - r_setup_time
+        pin_fRAT[arc_out_pins] = pin_fRAT[arc_out_pins] - f_setup_time
+
+        return pin_rRAT, pin_fRAT
+
     def forward(self, pin_net_delays, pin_net_impulses, pin_net_caps):
         pin_net_delay_rise = pin_net_delays['rise'].clone()
         pin_net_delay_fall = pin_net_delays['fall'].clone()
@@ -661,6 +703,10 @@ class TimingPropagation(nn.Module):
                 pin_net_delay_rise, pin_net_delay_fall,
                 pin_net_impulse_rise, pin_net_impulse_fall
             )
+        # --- Calculate RAT Levels ---
+
+        pin_rRAT, pin_fRAT = self.calculate_setup_rat(
+            pin_rRAT, pin_fRAT, self.clk_pin_rtran, self.clk_pin_ftran, pin_rtran, pin_ftran)
 
         pin_rRAT, pin_fRAT = self.calculate_net_rat_level(
             self.end_points, pin_rRAT, pin_fRAT, pin_net_delay_rise, pin_net_delay_fall

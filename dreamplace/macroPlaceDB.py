@@ -167,7 +167,7 @@ class MacroPlaceDB(object):
         self.net_flat_arcs = None
         self.inst_flat_arcs_start = None
         self.inst_flat_arcs = None
-        self.cell_flat_clk_arcs = None
+        self.endpoints_constraint_arcs = None
 
         self.main_id_2_cell_id_start = None
         self.cell_id_2_arc_id_start = None
@@ -175,7 +175,7 @@ class MacroPlaceDB(object):
         self.inst_main_id = None
         self.inst_size = None
 
-        # LUTs table
+        # delay LUTs table
         self.f_delay_flat_luts_values = None
         self.f_delay_flat_luts_trans_table = None
         self.f_delay_flat_luts_cap_table = None
@@ -195,6 +195,7 @@ class MacroPlaceDB(object):
         self.r_trans_flat_luts_trans_table = None
         self.r_trans_flat_luts_cap_table = None
         self.r_trans_flat_luts_dim = None
+
 
     def scale_pl(self, scale_factor):
         """
@@ -1083,7 +1084,7 @@ class MacroPlaceDB(object):
             self.inst_flat_arcs_start = np.array(
                 pydb.inst_flat_arcs_start, dtype=np.int32)
             self.inst_flat_arcs = np.array(pydb.inst_flat_arcs, dtype=np.int32)
-            self.cell_flat_clk_arcs = np.array(pydb.cell_flat_clk_arcs, dtype=np.int32)
+            self.endpoints_constraint_arcs = np.array(pydb.endpoints_constraint_arcs, dtype=np.int32)
 
             self.main_id_2_cell_id_start = np.array(
                 pydb.main_id_2_cell_id_start, dtype=np.int32)

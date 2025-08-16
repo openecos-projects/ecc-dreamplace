@@ -319,8 +319,8 @@ class PlaceDataCollection(object):
                     placedb.inst_flat_arcs_start).to(device)
                 self.inst_flat_arcs = torch.from_numpy(
                     placedb.inst_flat_arcs).to(device)
-                self.cell_flat_clk_arcs = torch.from_numpy(
-                    placedb.cell_flat_clk_arcs).to(device)
+                self.endpoints_constraint_arcs = torch.from_numpy(
+                    placedb.endpoints_constraint_arcs).to(device)
                 self.net2driver_pin_map = torch.from_numpy(
                     placedb.net2driver_pin_map).to(device)
                 self.arcs_info = ARCS_INFO()

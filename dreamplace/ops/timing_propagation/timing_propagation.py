@@ -624,14 +624,34 @@ class TimingPropagation(nn.Module):
         pin_data_rtran_in = pin_rtran[arc_out_pins]
         pin_data_ftran_in = pin_ftran[arc_out_pins]
 
-        r_setup_time = self.r_setup_entry(lib_cell_idxs, pin_clk_rtran_in,
-                                          pin_data_rtran_in, lib_arc_idxs)
-        f_setup_time = self.f_setup_entry(lib_cell_idxs, pin_clk_ftran_in,
-                                          pin_data_ftran_in, lib_arc_idxs)
+        # R->R
+        rr_setup_time = self.r_setup_entry(lib_cell_idxs, pin_clk_rtran_in,
+                                           pin_data_rtran_in, lib_arc_idxs)
+        ff_setup_time = self.f_setup_entry(lib_cell_idxs, pin_clk_ftran_in,
+                                           pin_data_ftran_in, lib_arc_idxs)
 
-        # TODO: Need to handle non-unate timing sense if needed
+        fr_setup_time = self.r_setup_entry(lib_cell_idxs, pin_clk_ftran_in,
+                                           pin_data_rtran_in, lib_arc_idxs)
+        rf_setup_time = self.f_setup_entry(lib_cell_idxs, pin_clk_rtran_in,
+                                           pin_data_ftran_in, lib_arc_idxs)
+
+        is_pos_unate = (timing_senses == 1)
+        is_neg_unate = (timing_senses == -1)
+
+        # --- 计算最终的上升输出延时 (r_delays) ---
+        # Positive unate : r->r / f->f
+        # Negative unate : f->r / r->f
+        # Non-unate : worst of r->r, f->r, f->f, r->f
+        r_delays_non_unate = torch.maximum(rr_setup_time, fr_setup_time)
+        f_delays_non_unate = torch.maximum(ff_setup_time, rf_setup_time)
+        r_setup_time = torch.where(is_pos_unate, rr_setup_time,
+                                   torch.where(is_neg_unate, fr_setup_time, r_delays_non_unate))
+        f_setup_time = torch.where(is_pos_unate, ff_setup_time,
+                                   torch.where(is_neg_unate, rf_setup_time, f_delays_non_unate))
+
         assert pin_rRAT[arc_out_pins].min(
         ) >= 0, "Negative r_rat_updates detected"
+
         pin_rRAT[arc_out_pins] = pin_rRAT[arc_out_pins] - r_setup_time
         pin_fRAT[arc_out_pins] = pin_fRAT[arc_out_pins] - f_setup_time
 

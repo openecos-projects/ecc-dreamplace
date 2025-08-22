@@ -411,8 +411,9 @@ class RCTiming(nn.Module):
 
             # 计算 impulse
             inner_term = 2 * betas[mode] - delays[mode] ** 2
-            inner_term_stable = torch.clamp(inner_term, min=1e-12)
-            impulses[mode] = torch.sqrt(inner_term_stable)
+            assert torch.all(inner_term >= 0), \
+                f"Negative inner term detected in {mode} mode: {inner_term[inner_term < 0]}"
+            impulses[mode] = inner_term
 
         load, rload, fload = loads['generic'], loads['rise'], loads['fall']
         delay, rdelay, fdelay = delays['generic'], delays['rise'], delays['fall']

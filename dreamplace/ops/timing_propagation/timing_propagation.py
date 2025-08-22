@@ -543,8 +543,8 @@ class TimingPropagation(nn.Module):
 
         r_aat_updates = pin_rAAT[arc_fipins] + wire_delays_rise
         f_aat_updates = pin_fAAT[arc_fipins] + wire_delays_fall
-        r_tran_updates = torch.sqrt(pin_rtran[arc_fipins]**2 + impulse_rise**2)
-        f_tran_updates = torch.sqrt(pin_ftran[arc_fipins]**2 + impulse_fall**2)
+        r_tran_updates = torch.sqrt(pin_rtran[arc_fipins]**2 + impulse_rise)
+        f_tran_updates = torch.sqrt(pin_ftran[arc_fipins]**2 + impulse_fall)
 
         pin_rAAT = torch.scatter_reduce(pin_rAAT, 0, arc_fopins.long(
         ), r_aat_updates, reduce="amax", include_self=True)
@@ -745,7 +745,12 @@ class TimingPropagation(nn.Module):
         rslack = pin_rRAT - pin_rAAT
         fslack = pin_fRAT - pin_fAAT
         slack = torch.min(rslack, fslack)
-        neg_slack = torch.clamp(slack, max=0)
+        RAT_THRESHOLD = 1.9e8 
+        valid_mask = (pin_rRAT < RAT_THRESHOLD) & (pin_fRAT < RAT_THRESHOLD)
+        valid_slacks = slack[valid_mask]
+        neg_slack = torch.clamp(valid_slacks, max=0)
+        ws = torch.min(valid_slacks)
+        ts = torch.sum(valid_slacks)
         wns = torch.min(neg_slack)
         tns = torch.sum(neg_slack)
 
@@ -758,4 +763,4 @@ class TimingPropagation(nn.Module):
         self.cell_arc_r_delays, self.cell_arc_f_delays = (
             t.clone().detach() for t in [cell_arc_r_delays, cell_arc_f_delays])
 
-        return wns, tns
+        return wns, tns, ts, ws

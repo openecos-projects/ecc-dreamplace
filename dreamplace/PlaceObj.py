@@ -798,7 +798,7 @@ class PlaceObj(nn.Module):
                 ieda_ldelay_val = ieda_data.get("ldelay", float("nan"))
                 ieda_beta_val = ieda_data.get("beta", float("nan"))
                 ieda_impulse_val = (
-                    math.sqrt(ieda_data.get("impulse", 0.0))
+                    ieda_data.get("impulse", 0.0)
                     if ieda_data.get("impulse", 0.0) >= 0
                     else 0.0
                 )
@@ -1001,7 +1001,7 @@ class PlaceObj(nn.Module):
 
         print(f"Cell arc 对比已写入CSV文件: {csv_filename}")
 
-    def show_tns_compare(self, at_late_cpp, rt_late_cpp, wns, tns):
+    def show_slack_compare(self, at_late_cpp, rt_late_cpp, wns, tns, ws, ts):
         # ==============================================================================
         # --- 步骤 6: 计算并返回最终的目标函数值 ---
         # ==============================================================================
@@ -1034,8 +1034,8 @@ class PlaceObj(nn.Module):
         setup_slack_cpp_valid = setup_slack_cpp[valid_setup_mask]
 
         if setup_slack_cpp_valid.numel() > 0:
-            wns_cpp_calc = torch.min(torch.clamp(setup_slack_cpp_valid, max=0)).item()
-            tns_cpp_calc = torch.sum(torch.clamp(setup_slack_cpp_valid, max=0)).item()
+            wns_cpp_calc = torch.min(setup_slack_cpp_valid).item()
+            tns_cpp_calc = torch.sum(setup_slack_cpp_valid).item()
         else:
             wns_cpp_calc = 0.0
             tns_cpp_calc = 0.0
@@ -1047,8 +1047,142 @@ class PlaceObj(nn.Module):
             f"TNS (Python Calculated): {tns_py_calc:<15.4f} | TNS (iEDA): {tns_cpp_calc:<15.4f}"
         )
         print("-" * 60)
-        print(f"原始 op 输出的 WNS (orig wns): {wns.item():.4f}")
-        print(f"原始 op 输出的 TNS (orig tns): {tns.item():.4f}")
+        print(f"flow 输出的 WNS (orig wns): {wns.item():.4f}")
+        print(f"flow 输出的 TNS (orig tns): {tns.item():.4f}")
+        print(f"flow 输出的 WS (orig ws): {ws.item():.4f}")
+        print(f"flow 输出的 TS (orig ts): {ts.item():.4f}")
+
+    def write_first_level_pin_timing_log(self, net_timing_details_cpp):
+        """
+        @brief [修改后] 识别第一层传播引脚，并将详细的Slew/Impulse时序对比报告
+            (精度为9位小数) 写入到一个名为 "timing_first_level_pins_report.csv" 的文件中。
+        @param net_timing_details_cpp: 从 C++/iEDA 获取的包含 net pin 时序细节的列表。
+        """
+        import math
+        import csv
+        # ==============================================================================
+        # --- 步骤 1: 定义文件名并准备数据 ---
+        # ==============================================================================
+        report_filename = "timing_first_level_pins_report.csv"
+        print(f"\n--- [专属报告] 正在生成第一层传播引脚的详细报告 -> {report_filename}", flush=True)
+
+        # 1a. 找出所有“第一层传播”的引脚及其驱动源
+        start_pin_ids = self.data_collections.start_points.cpu().numpy()
+        
+        pin_id_to_net_id_map = {}
+        for net_id in range(len(self.data_collections.flat_net2pin_start_map) - 1):
+            start_idx = self.data_collections.flat_net2pin_start_map[net_id]
+            end_idx = self.data_collections.flat_net2pin_start_map[net_id + 1]
+            for pin_id_tensor in self.data_collections.flat_net2pin_map[start_idx:end_idx]:
+                pin_id_to_net_id_map[pin_id_tensor.item()] = net_id
+
+        start_pin_to_sinks_map = {}
+        for start_pin_id in start_pin_ids:
+            net_id = pin_id_to_net_id_map.get(start_pin_id)
+            if net_id is not None:
+                sinks = []
+                start_idx = self.data_collections.flat_net2pin_start_map[net_id]
+                end_idx = self.data_collections.flat_net2pin_start_map[net_id + 1]
+                for pin_id_tensor in self.data_collections.flat_net2pin_map[start_idx:end_idx]:
+                    pin_id = pin_id_tensor.item()
+                    if pin_id != start_pin_id:
+                        sinks.append(pin_id)
+                if sinks:
+                    start_pin_to_sinks_map[start_pin_id] = sinks
+        
+        # 1b. 预处理Python和iEDA的数据
+        op_timing = self.op_collections.timing_propagation_op
+        op_elmore = self.op_collections.elmore_delay_op
+        
+        py_pin_r_impulse = op_elmore.impulses['rise'].clone().detach().cpu().numpy()
+        py_pin_f_impulse = op_elmore.impulses['fall'].clone().detach().cpu().numpy()
+        py_pin_r_slew = op_timing.pin_rtran.clone().detach().cpu().numpy()
+        py_pin_f_slew = op_timing.pin_ftran.clone().detach().cpu().numpy()
+
+        ieda_pin_map = {
+            (info['pin_name'], info['mode'], info['transition']): info
+            for info in net_timing_details_cpp
+        }
+        pin_names = self.placedb.pin_names
+
+        # ==============================================================================
+        # --- 步骤 2: 将报告写入CSV文件 ---
+        # ==============================================================================
+        csv_header = [
+            "Group", "Pin Type", "Pin Name",
+            "Py Rise Slew (ps)", "iEDA Rise Slew (ns)",
+            "Py Fall Slew (ps)", "iEDA Fall Slew (ns)",
+            "Py Rise Impulse", "iEDA Rise Impulse",
+            "Py Fall Impulse", "iEDA Fall Impulse"
+        ]
+
+        with open(report_filename, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(csv_header)
+            
+            # 按 start_pin_id 排序，确保报告顺序一致
+            for start_pin_id, sink_pin_ids in sorted(start_pin_to_sinks_map.items()):
+                # --- 处理 Start Pin ---
+                start_pin_name = pin_names[start_pin_id].decode('utf-8')
+                py_r_slew_start = py_pin_r_slew[start_pin_id]
+                py_f_slew_start = py_pin_f_slew[start_pin_id]
+                py_r_impulse_start = py_pin_r_impulse[start_pin_id]
+                py_f_impulse_start = py_pin_f_impulse[start_pin_id]
+                
+                key_rise_start = (start_pin_name, "Max", "Rise")
+                key_fall_start = (start_pin_name, "Max", "Fall")
+                ieda_data_rise = ieda_pin_map.get(key_rise_start, {})
+                ieda_data_fall = ieda_pin_map.get(key_fall_start, {})
+
+                ieda_r_slew_start = ieda_data_rise.get('slew_ns', float('nan'))
+                ieda_f_slew_start = ieda_data_fall.get('slew_ns', float('nan'))
+                
+                ieda_r_impulse_sq = ieda_data_rise.get('impulse', -1.0)
+                ieda_r_impulse_start = math.sqrt(ieda_r_impulse_sq) if ieda_r_impulse_sq >= 0 else float('nan')
+                ieda_f_impulse_sq = ieda_data_fall.get('impulse', -1.0)
+                ieda_f_impulse_start = math.sqrt(ieda_f_impulse_sq) if ieda_f_impulse_sq >= 0 else float('nan')
+
+                start_pin_row = [
+                    start_pin_name, "Start Pin", start_pin_name,
+                    f"{py_r_slew_start:.9f}", f"{ieda_r_slew_start:.9f}",
+                    f"{py_f_slew_start:.9f}", f"{ieda_f_slew_start:.9f}",
+                    f"{py_r_impulse_start:.9f}", f"{ieda_r_impulse_start:.9f}",
+                    f"{py_f_impulse_start:.9f}", f"{ieda_f_impulse_start:.9f}"
+                ]
+                writer.writerow(start_pin_row)
+
+                # --- 处理该 Start Pin 驱动的所有 Sink Pin ---
+                for sink_pin_id in sorted(sink_pin_ids):
+                    sink_pin_name = pin_names[sink_pin_id].decode('utf-8')
+                    py_r_slew_sink = py_pin_r_slew[sink_pin_id]
+                    py_f_slew_sink = py_pin_f_slew[sink_pin_id]
+                    py_r_impulse_sink = py_pin_r_impulse[sink_pin_id]
+                    py_f_impulse_sink = py_pin_f_impulse[sink_pin_id]
+                    
+                    key_rise_sink = (sink_pin_name, "Max", "Rise")
+                    key_fall_sink = (sink_pin_name, "Max", "Fall")
+                    ieda_data_rise_sink = ieda_pin_map.get(key_rise_sink, {})
+                    ieda_data_fall_sink = ieda_pin_map.get(key_fall_sink, {})
+
+                    ieda_r_slew_sink = ieda_data_rise_sink.get('slew_ns', float('nan'))
+                    ieda_f_slew_sink = ieda_data_fall_sink.get('slew_ns', float('nan'))
+
+                    ieda_r_impulse_sq_sink = ieda_data_rise_sink.get('impulse', -1.0)
+                    ieda_r_impulse_sink = math.sqrt(ieda_r_impulse_sq_sink) if ieda_r_impulse_sq_sink >= 0 else float('nan')
+                    ieda_f_impulse_sq_sink = ieda_data_fall_sink.get('impulse', -1.0)
+                    ieda_f_impulse_sink = math.sqrt(ieda_f_impulse_sq_sink) if ieda_f_impulse_sq_sink >= 0 else float('nan')
+
+                    sink_pin_row = [
+                        start_pin_name, "Sink Pin", sink_pin_name,
+                        f"{py_r_slew_sink:.9f}", f"{ieda_r_slew_sink:.9f}",
+                        f"{py_f_slew_sink:.9f}", f"{ieda_f_slew_sink:.9f}",
+                        f"{py_r_impulse_sink:.9f}", f"{ieda_r_impulse_sink:.9f}",
+                        f"{py_f_impulse_sink:.9f}", f"{ieda_f_impulse_sink:.9f}"
+                    ]
+                    writer.writerow(sink_pin_row)
+        
+        print(f"第一层传播引脚的详细报告已成功写入: {report_filename}", flush=True)
+
 
     def timing_obj(self, pos):
         """
@@ -1088,7 +1222,7 @@ class PlaceObj(nn.Module):
         )
 
         # 时序传播算子 (为获取WNS/TNS和完整的slew/load值，仍然需要运行)
-        wns, tns = self.op_collections.timing_propagation_op(delays, impulses, loads)
+        wns, tns, ws, ts = self.op_collections.timing_propagation_op(delays, impulses, loads)
         num_pins = len(self.placedb.pin_names)
 
         # ==============================================================================
@@ -1116,8 +1250,11 @@ class PlaceObj(nn.Module):
         )
         
         self.write_arc_all(cell_arc_delays_cpp)
-        self.show_tns_compare(at_late_cpp, rt_late_cpp, wns, tns)
+        self.show_slack_compare(at_late_cpp, rt_late_cpp, wns, tns, ws, ts)
         
+        # DEBUG
+        self.write_first_level_pin_timing_log(net_timing_details_cpp)
+        # DEBUG
         # ==============================================================================
         # --- 额外调试步骤: 输出特定引脚所在网络的完整信息 ---
         # ==============================================================================
@@ -1129,7 +1266,7 @@ class PlaceObj(nn.Module):
         self.debug_target_pin_net_info(target_pin_full_name)
         
         alpha = 0.2
-        return -(tns + alpha * wns)
+        return -(tns + alpha * wns) * 1e-3
 
     def debug_target_pin_net_info(self, target_pin_full_name):
         

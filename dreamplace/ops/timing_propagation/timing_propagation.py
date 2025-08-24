@@ -236,7 +236,8 @@ class TimingPropagation(nn.Module):
         # ★★★ 修正开始 ★★★
         # 从 cap 坐标轴张量获取物理（填充后）的列数 MaxC
         # 这是获取内存步长(stride)的正确方法
-        padded_max_cols = flat_luts_cap_table.shape[1]
+        # FIXME: There maye be some bugs.
+        padded_max_cols = lut_dims_batch[:,1]
 
         # 使用正确的物理列数来计算一维索引
         idx00 = trans_idx_low * padded_max_cols + cap_idx_low  # [B]
@@ -420,7 +421,7 @@ class TimingPropagation(nn.Module):
         lib_arc_idxs = level_inst_arcs[:, 3]
         timing_senses = level_inst_arcs[:, 4]
 
-        if (arc_in_pins == 15754).any() and (arc_out_pins == 15771).any():
+        if (arc_out_pins == 4720 ).any():
             logging.warning(f"lib_arc_idxs: {lib_arc_idxs}")
 
         # 1. 准备输入条件
@@ -624,6 +625,10 @@ class TimingPropagation(nn.Module):
         pin_data_rtran_in = pin_rtran[arc_out_pins]
         pin_data_ftran_in = pin_ftran[arc_out_pins]
 
+        if (arc_out_pins == 4720 ).any():
+            logging.info(torch.where(arc_out_pins == 4720))
+            logging.warning(f"lib_arc_idxs: {lib_arc_idxs}")
+            
         # R->R
         rr_setup_time = self.r_setup_entry(lib_cell_idxs, pin_clk_rtran_in,
                                            pin_data_rtran_in, lib_arc_idxs)

@@ -149,6 +149,7 @@ class MacroPlaceDB(object):
         self.FF_ids = None
         self.clk_pin_rtran = None
         self.clk_pin_ftran = None
+        self.clk_pin_names = None  # // added for clk pin names
         # self.cells_by_level = None
         # self.cells_by_reverse_level = None
 
@@ -1053,7 +1054,8 @@ class MacroPlaceDB(object):
             self.FF_ids = np.array(pydb.FF_ids, dtype=np.int32)
             self.clk_pin_rtran = np.array(pydb.clk_pin_rtran, dtype=np.int32)
             self.clk_pin_ftran = np.array(pydb.clk_pin_ftran, dtype=np.int32)
-
+            self.clk_pin_names = np.array(
+                pydb.clk_pin_names, dtype=np.string_)            
             self.flat_cells_by_level = np.array(
                 pydb.flat_cells_by_level, dtype=np.int32)
             self.flat_cells_by_reverse_level = np.array(
@@ -1098,9 +1100,9 @@ class MacroPlaceDB(object):
             self.f_delay_flat_luts_values = self.pad_sequences(
                 pydb.f_delay_flat_luts_values, dtype=self.dtype)
             self.f_delay_flat_luts_trans_table = self.pad_sequences(
-                pydb.f_delay_flat_luts_trans_table, dtype=self.dtype)
+                pydb.f_delay_flat_luts_trans_table, dtype=self.dtype, pad_value=np.inf)
             self.f_delay_flat_luts_cap_table = self.pad_sequences(
-                pydb.f_delay_flat_luts_cap_table, dtype=self.dtype)
+                pydb.f_delay_flat_luts_cap_table, dtype=self.dtype, pad_value=np.inf)
             self.f_delay_flat_luts_dim = np.array(
                 pydb.f_delay_flat_luts_dim, dtype=np.int32)
             
@@ -1108,27 +1110,27 @@ class MacroPlaceDB(object):
             self.r_delay_flat_luts_values = self.pad_sequences(
                 pydb.r_delay_flat_luts_values, dtype=self.dtype)
             self.r_delay_flat_luts_trans_table = self.pad_sequences(
-                pydb.r_delay_flat_luts_trans_table, dtype=self.dtype)
+                pydb.r_delay_flat_luts_trans_table, dtype=self.dtype, pad_value=np.inf)
             self.r_delay_flat_luts_cap_table = self.pad_sequences(
-                pydb.r_delay_flat_luts_cap_table, dtype=self.dtype)
+                pydb.r_delay_flat_luts_cap_table, dtype=self.dtype, pad_value=np.inf)
             self.r_delay_flat_luts_dim = np.array(
                 pydb.r_delay_flat_luts_dim, dtype=np.int32)
 
             self.f_trans_flat_luts_values = self.pad_sequences(
                 pydb.f_trans_flat_luts_values, dtype=self.dtype)
             self.f_trans_flat_luts_trans_table = self.pad_sequences(
-                pydb.f_trans_flat_luts_trans_table, dtype=self.dtype)
+                pydb.f_trans_flat_luts_trans_table, dtype=self.dtype, pad_value=np.inf)
             self.f_trans_flat_luts_cap_table = self.pad_sequences(
-                pydb.f_trans_flat_luts_cap_table, dtype=self.dtype)
+                pydb.f_trans_flat_luts_cap_table, dtype=self.dtype, pad_value=np.inf)
             self.f_trans_flat_luts_dim = np.array(
                 pydb.f_trans_flat_luts_dim, dtype=np.int32)
 
             self.r_trans_flat_luts_values = self.pad_sequences(
                 pydb.r_trans_flat_luts_values, dtype=self.dtype)
             self.r_trans_flat_luts_trans_table = self.pad_sequences(
-                pydb.r_trans_flat_luts_trans_table, dtype=self.dtype)
+                pydb.r_trans_flat_luts_trans_table, dtype=self.dtype, pad_value=np.inf)
             self.r_trans_flat_luts_cap_table = self.pad_sequences(
-                pydb.r_trans_flat_luts_cap_table, dtype=self.dtype)
+                pydb.r_trans_flat_luts_cap_table, dtype=self.dtype, pad_value=np.inf)
             self.r_trans_flat_luts_dim = np.array(
                 pydb.r_trans_flat_luts_dim, dtype=np.int32)
 

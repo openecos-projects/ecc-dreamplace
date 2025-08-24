@@ -311,6 +311,7 @@ class PlaceDataCollection(object):
                 self.FF_ids = torch.from_numpy(placedb.FF_ids).to(device)
                 self.clk_pin_rtran = torch.from_numpy(placedb.clk_pin_rtran).to(device)
                 self.clk_pin_ftran = torch.from_numpy(placedb.clk_pin_ftran).to(device)
+                self.clk_pin_names = placedb.clk_pin_names
                 self.net_flat_arcs_start = torch.from_numpy(
                     placedb.net_flat_arcs_start).to(device)
                 self.net_flat_arcs = torch.from_numpy(

@@ -1,5 +1,6 @@
 #include "utility/src/torch.h"
 #include "utility/src/utils.h"
+#include <omp.h>
 #include <pybind11/detail/common.h>
 #include <queue>
 #include <torch/torch.h>
@@ -13,7 +14,8 @@ void betaForwardLauncher(
     const int32_t *pin_fa_ptr,    // Parent index for each node (-1 for roots)
     const int32_t *topo_sort_ptr, // Assumed parent-first order
     const int32_t *topo_sort_start_ptr, int32_t num_nodes, int32_t num_nets,
-    scalar_t *beta_ptr // Output: Beta tensor
+    scalar_t *beta_ptr, // Output: Beta tensor
+    int num_threads
 );
 
 /**
@@ -99,7 +101,7 @@ beta_forward_cpp(at::Tensor resistance_tensor,
             resistance_ptr,
             ldelay_ptr, // Pass LDelay pointer
             pin_fa_ptr, topo_sort_ptr, topo_sort_start_ptr, num_nodes, num_nets,
-            beta_ptr); // Pass Beta output pointer
+            beta_ptr, at::get_num_threads()); // Pass Beta output pointer
       });
 
   return beta_tensor; // Return Beta tensor
@@ -112,9 +114,11 @@ void betaForwardLauncher( // Renamed launcher
     const scalar_t *ldelay_ptr, // Renamed input
     const int32_t *pin_fa_ptr, const int32_t *topo_sort_ptr,
     const int32_t *topo_sort_start_ptr, int32_t num_nodes, int32_t num_nets,
-    scalar_t *beta_ptr // Renamed output
+    scalar_t *beta_ptr, // Renamed output
+    int num_threads
 ) {
   // Iterate through each net
+#pragma omp parallel for num_threads(num_threads)
   for (int32_t net_idx = 0; net_idx < num_nets; ++net_idx) {
     int32_t start_topo_idx = topo_sort_start_ptr[net_idx];
     int32_t end_topo_idx = topo_sort_start_ptr[net_idx + 1];
@@ -155,7 +159,8 @@ void betaBackwardLauncher(                // Renamed launcher
     const int32_t *topo_sort_start_ptr, int32_t num_nodes, int32_t num_nets,
     scalar_t *accum_grad_beta_ptr,  // Intermediate buffer (In/Out)
     scalar_t *grad_input_res_ptr,   // Output: dF/dRes
-    scalar_t *grad_input_ldelay_ptr // Output: dF/dLDelay
+    scalar_t *grad_input_ldelay_ptr, // Output: dF/dLDelay
+    int num_threads
 );
 
 /**
@@ -262,7 +267,8 @@ std::vector<at::Tensor> beta_backward_cpp( // Renamed function
             pin_fa_ptr, topo_sort_ptr, topo_sort_start_ptr, num_nodes, num_nets,
             accum_grad_beta_ptr,  // Renamed, In/Out buffer
             grad_input_res_ptr,   // Out
-            grad_input_ldelay_ptr // Renamed, Out
+            grad_input_ldelay_ptr, // Renamed, Out
+            at::get_num_threads()
         );
       });
 
@@ -283,10 +289,12 @@ void betaBackwardLauncher(                // Renamed launcher
     scalar_t *
         accum_grad_beta_ptr, // Renamed: In/Out buffer for dF/dBeta accumulation
     scalar_t *grad_input_res_ptr,   // Output: dF/dRes
-    scalar_t *grad_input_ldelay_ptr // Renamed Output: dF/dLDelay
+    scalar_t *grad_input_ldelay_ptr, // Renamed Output: dF/dLDelay
+    int num_threads
 ) {
   // --- Step 1: Accumulate dF/dBeta bottom-up ---
   // accum_grad_beta_ptr is pre-initialized with grad_output_beta values.
+#pragma omp parallel for num_threads(num_threads)
   for (int32_t net_idx = 0; net_idx < num_nets; ++net_idx) {
     int32_t start_topo_idx = topo_sort_start_ptr[net_idx];
     int32_t end_topo_idx = topo_sort_start_ptr[net_idx + 1];
@@ -314,6 +322,7 @@ void betaBackwardLauncher(                // Renamed launcher
   // --- Step 2: Calculate gradients dF/dRes and dF/dLDelay ---
   // This step uses the *final* accumulated gradients `accum_grad_beta_ptr`.
   // Iterate over all nodes.
+#pragma omp parallel for num_threads(num_threads)
   for (int32_t u = 0; u < num_nodes; ++u) {
     int32_t parent_idx = pin_fa_ptr[u]; // Get parent index
 

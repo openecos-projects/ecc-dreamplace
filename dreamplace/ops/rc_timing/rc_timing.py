@@ -15,6 +15,8 @@ from torch.autograd import Function
 
 import dreamplace.ops.rc_timing.rc_timing_cpp as rc_timing_cpp
 import dreamplace.configure as configure
+import time
+import logging
 
 # ==========================
 # Load Operator
@@ -353,7 +355,7 @@ class RCTiming(nn.Module):
                 pin_caps_base, 
                 pin_rcaps_base, 
                 pin_fcaps_base):
-
+        start_time = time.time()
         # # the length is um
         self.dbu = torch.tensor(self.dbu, dtype=new_x.dtype, device=new_x.device)
         length = (torch.abs(new_x[flat_pin_from] - new_x[flat_pin_to])
@@ -488,7 +490,7 @@ class RCTiming(nn.Module):
         self.ldelays = ldelays
         self.betas = betas
         self.impulses = impulses
-
+        logging.info(f"Total RC timing Time: {time.time() - start_time:.4f}s")
         return pin_caps, loads, delays, ldelays, betas, impulses
 
     @property

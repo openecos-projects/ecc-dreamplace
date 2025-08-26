@@ -97,13 +97,13 @@ class PreconditionOp:
         with torch.no_grad():
             # The preconditioning step in python is time-consuming, as in each gradient
             # pass, the total net weight should be re-calculated.
-            sum_pin_weights_in_nodes = self.op_collections.pws_op(
-                self.data_collections.net_weights
-            )
+            # sum_pin_weights_in_nodes = self.op_collections.pws_op(
+            #     self.data_collections.net_weights
+            # )
             if density_weight.size(0) == 1:
                 precond = (
-                    sum_pin_weights_in_nodes
-                    + self.alpha * density_weight * self.data_collections.node_areas
+                    # sum_pin_weights_in_nodes
+                    0 + self.alpha * density_weight * self.data_collections.node_areas
                 )
             else:
                 # only precondition the non fence region
@@ -891,7 +891,7 @@ class PlaceObj(nn.Module):
             for inst_arc_idx in range(start_index, end_index):
                 arc_info = cell_arcs[inst_arc_idx]
 
-                in_pin_id, out_pin_id, _, _, arc_sense = arc_info
+                in_pin_id, out_pin_id, _, _, arc_sense, _ = arc_info # there shouldnt be fall if timingtype is rise
 
                 from_pin_name = pin_names[in_pin_id].decode("utf-8")
                 to_pin_name = pin_names[out_pin_id].decode("utf-8")

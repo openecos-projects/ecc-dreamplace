@@ -357,7 +357,6 @@ class RCTiming(nn.Module):
                 pin_fcaps_base):
         start_time = time.time()
         # # the length is um
-        self.dbu = torch.tensor(self.dbu, dtype=new_x.dtype, device=new_x.device)
         length = (torch.abs(new_x[flat_pin_from] - new_x[flat_pin_to])
                     + torch.abs(new_y[flat_pin_from] - new_y[flat_pin_to])) / self.scale_factor / self.dbu
         

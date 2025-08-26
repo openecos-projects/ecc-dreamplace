@@ -29,8 +29,8 @@ add_subdirectory(pinrudy)
 add_subdirectory(nctugr_binary)
 add_subdirectory(adjust_node_area)
 # timing operator
-add_subdirectory(pin_weight_sum)
-add_subdirectory(timing)
+# add_subdirectory(pin_weight_sum)
+# add_subdirectory(timing)
 
 #diff tdp 
 add_subdirectory(timing_propagation)

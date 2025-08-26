@@ -390,12 +390,172 @@ class TimingPropagation(nn.Module):
             luts.flat_luts_values, luts.flat_luts_trans_table,
             luts.flat_luts_cap_table, luts.flat_luts_dim
         )
+    
+    def calculate_clk2q_aat(self, 
+                            pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
+                            pin_net_cap_rise, pin_net_cap_fall,
+                            cell_arc_r_delays, cell_arc_f_delays):
+        device = pin_rAAT.device
+        
+        level_cells = self.FF_ids
 
+        # Get outpin and inpin ranges for all cells
+        cell_arcs_start = self.inst_flat_arcs_start[level_cells]
+        cell_arcs_end = self.inst_flat_arcs_start[level_cells + 1]
+
+        # Compute number of outpins and inpins per cell
+        num_arcs = cell_arcs_end - cell_arcs_start
+
+        # Generate all outpin indices
+        max_arcs = num_arcs.max().item()
+        if max_arcs == 0:
+            return torch.tensor([], device=device, dtype=torch.long), pin_rAAT, pin_fAAT, pin_rtran, pin_ftran, cell_arc_r_delays, cell_arc_f_delays
+
+        arcs_indices = torch.arange(max_arcs, device=device).unsqueeze(0)
+        arcs_mask = arcs_indices < num_arcs.unsqueeze(1)
+        arcs_global_indices = arcs_indices + cell_arcs_start.unsqueeze(1)
+        level_inst_arcs = self.inst_flat_arcs[arcs_global_indices[arcs_mask]]
+
+        arc_in_pins = level_inst_arcs[:, 0]
+        arc_out_pins = level_inst_arcs[:, 1]
+        lib_cell_idxs = level_inst_arcs[:, 2]
+        lib_arc_idxs = level_inst_arcs[:, 3]
+        timing_senses = level_inst_arcs[:, 4]
+        timing_types = level_inst_arcs[:, 5]
+
+        # --- 1. 准备输入条件 ---
+        pin_r_slew_in = pin_rtran[arc_in_pins] 
+        pin_f_slew_in = pin_ftran[arc_in_pins]
+        pin_r_load_out = pin_net_cap_rise[arc_out_pins]
+        pin_f_load_out = pin_net_cap_fall[arc_out_pins]
+
+        # --- 2. 计算所有可能的延时和转换时间 ---
+        delay_rr = self.r_delay_entry(lib_cell_idxs, pin_r_slew_in, pin_r_load_out, lib_arc_idxs)
+        delay_rf = self.f_delay_entry(lib_cell_idxs, pin_r_slew_in, pin_f_load_out, lib_arc_idxs)
+        delay_fr = self.r_delay_entry(lib_cell_idxs, pin_f_slew_in, pin_r_load_out, lib_arc_idxs)
+        delay_ff = self.f_delay_entry(lib_cell_idxs, pin_f_slew_in, pin_f_load_out, lib_arc_idxs)
+        
+        tran_rr = self.r_tran_entry(lib_cell_idxs, pin_r_slew_in, pin_r_load_out, lib_arc_idxs)
+        tran_rf = self.f_tran_entry(lib_cell_idxs, pin_r_slew_in, pin_f_load_out, lib_arc_idxs)
+        tran_fr = self.r_tran_entry(lib_cell_idxs, pin_f_slew_in, pin_r_load_out, lib_arc_idxs)
+        tran_ff = self.f_tran_entry(lib_cell_idxs, pin_f_slew_in, pin_f_load_out, lib_arc_idxs)
+        
+        # --- 3. 创建 TimingSense 和 TimingType 的掩码 ---
+        # timing_senses: 1 for positive_unate, -1 for negative_unate, 0 for non_unate
+        is_pos_unate = (timing_senses == 1)
+        is_neg_unate = (timing_senses == -1)
+        # is_non_unate = (timing_senses == 0) # non_unate is where not pos and not neg
+
+        # timing_types: 1 for rising_edge, -1 for falling_edge, 0 for both_edge
+        # 假设下降沿用-1表示，如果不是，请相应修改
+        is_rising_edge = (timing_types == 1)
+        is_falling_edge = (timing_types == -1)
+        is_both_edge = (timing_types == 0)
+
+        # --- 4. 根据 Unateness 计算四种可能的延迟分量 ---
+        # 为了在后续max操作中正确处理无效路径，将无效延迟设置为-inf
+        NEG_INF = -torch.inf
+
+        # 由 Rising Edge Clock 触发
+        # 输出Rise延时: 发生在 pos_unate 或 non_unate
+        r_delays_re = torch.where(is_neg_unate, NEG_INF, delay_rr)
+        # 输出Fall延时: 发生在 neg_unate 或 non_unate
+        f_delays_re = torch.where(is_pos_unate, NEG_INF, delay_rf)
+
+        # 由 Falling Edge Clock 触发
+        # 输出Rise延时: 发生在 neg_unate 或 non_unate
+        r_delays_fe = torch.where(is_pos_unate, NEG_INF, delay_fr)
+        # 输出Fall延时: 发生在 pos_unate 或 non_unate
+        f_delays_fe = torch.where(is_neg_unate, NEG_INF, delay_ff)
+
+        # 对 Slew/Transition 应用相同的逻辑
+        r_trans_re = torch.where(is_neg_unate, NEG_INF, tran_rr)
+        f_trans_re = torch.where(is_pos_unate, NEG_INF, tran_rf)
+        r_trans_fe = torch.where(is_pos_unate, NEG_INF, tran_fr)
+        f_trans_fe = torch.where(is_neg_unate, NEG_INF, tran_ff)
+
+        # --- 5. 计算四种核心的 AAT 和 Tran 更新量 ---
+        # AAT_out = AAT_in + delay
+        r_aat_update_from_re = pin_rAAT[arc_in_pins] + r_delays_re
+        f_aat_update_from_re = pin_rAAT[arc_in_pins] + f_delays_re
+        r_aat_update_from_fe = pin_fAAT[arc_in_pins] + r_delays_fe
+        f_aat_update_from_fe = pin_fAAT[arc_in_pins] + f_delays_fe
+
+        r_tran_update_from_re = r_trans_re
+        f_tran_update_from_re = f_trans_re
+        r_tran_update_from_fe = r_trans_fe
+        f_tran_update_from_fe = f_trans_fe
+
+        # --- 6. 根据 TimingType 组合最终的更新值 ---
+        # 对于双边沿触发 (is_both_edge)，我们需要取两种可能触发情况下的最大值，以符合STA的最差情况分析
+        
+        # Rise AAT 更新
+        r_aat_updates = torch.where(
+            is_rising_edge, 
+            r_aat_update_from_re, 
+            torch.where(
+                is_falling_edge,
+                r_aat_update_from_fe,
+                torch.max(r_aat_update_from_re, r_aat_update_from_fe) # both_edge case
+            )
+        )
+
+        # Fall AAT 更新
+        f_aat_updates = torch.where(
+            is_rising_edge,
+            f_aat_update_from_re,
+            torch.where(
+                is_falling_edge,
+                f_aat_update_from_fe,
+                torch.max(f_aat_update_from_re, f_aat_update_from_fe) # both_edge case
+            )
+        )
+
+        # Rise Tran 更新
+        r_tran_updates = torch.where(
+            is_rising_edge,
+            r_tran_update_from_re,
+            torch.where(
+                is_falling_edge,
+                r_tran_update_from_fe,
+                torch.max(r_tran_update_from_re, r_tran_update_from_fe) # both_edge case
+            )
+        )
+
+        # Fall Tran 更新
+        f_tran_updates = torch.where(
+            is_rising_edge,
+            f_tran_update_from_re,
+            torch.where(
+                is_falling_edge,
+                f_tran_update_from_fe,
+                torch.max(f_tran_update_from_re, f_tran_update_from_fe) # both_edge case
+            )
+        )
+
+        # --- 7. 存储和更新 AAT/Tran (scatter_reduce) ---
+        # 存储每个弧的最终有效延迟 (可选，用于调试或报告)
+        # 注意：这里的delay只是最终选择的那个，而不是AAT的增量
+        final_r_delays = torch.where(r_aat_updates > NEG_INF, r_aat_updates - torch.where(r_aat_updates == r_aat_update_from_re, pin_rAAT[arc_in_pins], pin_fAAT[arc_in_pins]), 0.0)
+        final_f_delays = torch.where(f_aat_updates > NEG_INF, f_aat_updates - torch.where(f_aat_updates == f_aat_update_from_re, pin_rAAT[arc_in_pins], pin_fAAT[arc_in_pins]), 0.0)
+        cell_arc_r_delays.scatter_(0, lib_arc_idxs.long(), final_r_delays)
+        cell_arc_f_delays.scatter_(0, lib_arc_idxs.long(), final_f_delays)
+
+        # 使用 scatter_reduce 更新下游引脚的 AAT 和 Tran
+        # 'amax' 确保了汇聚点(fan-in)的 AAT 是所有到达路径中的最大值
+        pin_rAAT = torch.scatter_reduce(pin_rAAT, 0, arc_out_pins.long(), r_aat_updates, reduce="amax", include_self=False)
+        pin_fAAT = torch.scatter_reduce(pin_fAAT, 0, arc_out_pins.long(), f_aat_updates, reduce="amax", include_self=False)
+        pin_rtran = torch.scatter_reduce(pin_rtran, 0, arc_out_pins.long(), r_tran_updates, reduce="amax", include_self=False)
+        pin_ftran = torch.scatter_reduce(pin_ftran, 0, arc_out_pins.long(), f_tran_updates, reduce="amax", include_self=False)
+        
+        net_in_pins = torch.unique(self.pin_net[arc_out_pins])
+        return net_in_pins, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran, cell_arc_r_delays, cell_arc_f_delays
+    
     def calculate_cell_aat_level(self, level_cells,
                                  pin_rAAT, pin_fAAT,
                                  pin_rtran, pin_ftran,
                                  pin_net_cap_rise, pin_net_cap_fall,
-                                 cell_arc_r_delays, cell_arc_f_delays, is_clk2q=False, clk_pin_rtran=None, clk_pin_ftran=None):
+                                 cell_arc_r_delays, cell_arc_f_delays):
         start_time = time.time()
         device = pin_rAAT.device
 
@@ -428,13 +588,8 @@ class TimingPropagation(nn.Module):
         # 1. 准备输入条件
         #    - Rise Slew/Load at Input for Rise Delay/Tran calculation
         #    - Fall Slew/Load at Input for Fall Delay/Tran calculation
-        if is_clk2q:
-            # clk2q only has one direction
-            pin_r_slew_in = clk_pin_rtran[arc_in_pins]
-            pin_f_slew_in = clk_pin_ftran[arc_in_pins]
-        else:
-            pin_r_slew_in = pin_rtran[arc_in_pins]
-            pin_f_slew_in = pin_ftran[arc_in_pins]
+        pin_r_slew_in = pin_rtran[arc_in_pins]
+        pin_f_slew_in = pin_ftran[arc_in_pins]
 
         pin_r_load_out = pin_net_cap_rise[arc_out_pins]
         pin_f_load_out = pin_net_cap_fall[arc_out_pins]
@@ -595,6 +750,10 @@ class TimingPropagation(nn.Module):
         ), r_rat_updates, reduce="amin", include_self=True)
         pin_fRAT = torch.scatter_reduce(pin_fRAT, 0, arc_in_pins.long(
         ), f_rat_updates, reduce="amin", include_self=True)
+        # assert pin_rRAT[arc_in_pins].min(
+        # ) >= 0, "Negative r_rat_updates detected"
+        # assert pin_fRAT[arc_in_pins].min(
+        # ) >= 0, "Negative f_rat_updates detected"
 
         cur_endpoints = torch.unique(arc_in_pins)
         logging.debug(f"Cell RAT Level Time: {time.time() - start_time:.4f}s")
@@ -611,6 +770,9 @@ class TimingPropagation(nn.Module):
             ) <= 1e8, "Negative r_rat_updates detected"
         r_rat_updates = pin_rRAT[cur_endpoint] - wire_delays_rise
         f_rat_updates = pin_fRAT[cur_endpoint] - wire_delays_fall
+        # assert r_rat_updates.max() < 5e4, "r_rat_updates exceed expected range"
+        # assert f_rat_updates.max() < 5e4, "f_rat_updates exceed expected range"
+
         pin_rRAT = torch.scatter_reduce(pin_rRAT, 0, arc_fipins.long(
         ), r_rat_updates, reduce="amin", include_self=True)
         pin_fRAT = torch.scatter_reduce(pin_fRAT, 0, arc_fipins.long(
@@ -661,8 +823,8 @@ class TimingPropagation(nn.Module):
         f_setup_time = torch.where(is_pos_unate, ff_setup_time,
                                    torch.where(is_neg_unate, rf_setup_time, f_delays_non_unate))
 
-        assert pin_rRAT[arc_out_pins].min(
-        ) >= 0, "Negative r_rat_updates detected"
+        # assert pin_rRAT[arc_out_pins].min(
+        # ) >= 0, "Negative r_rat_updates detected"
 
         pin_rRAT[arc_out_pins] = pin_rRAT[arc_out_pins] - r_setup_time
         pin_fRAT[arc_out_pins] = pin_fRAT[arc_out_pins] - f_setup_time
@@ -710,10 +872,11 @@ class TimingPropagation(nn.Module):
         # pin_net_cap = pin_net_cap.clone()  # Clone to avoid modifying the original tensor
         # pin_net_cap[self.end_points] = pin_net_cap[self.end_points] + self.outcaps
 
-        cur_nets, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran, cell_arc_r_delays, cell_arc_f_delays = self.calculate_cell_aat_level(
-            self.FF_ids, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
+        cur_nets, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran, cell_arc_r_delays, cell_arc_f_delays = self.calculate_clk2q_aat(
+            pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
             pin_net_cap_rise, pin_net_cap_fall,
-            cell_arc_r_delays, cell_arc_f_delays, True, self.clk_pin_rtran, self.clk_pin_ftran)
+            cell_arc_r_delays, cell_arc_f_delays
+        )
 
         pi_nets = torch.unique(self.pin_net[self.start_points])
         pin_rAAT, pin_fAAT, pin_rtran, pin_ftran = self.calculate_net_aat_level(

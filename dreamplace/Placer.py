@@ -52,7 +52,7 @@ import dreamplace.NonLinearPlace as NonLinearPlace
 # from data_manager.aimp_dm import AimpDataManager
 from tools.iEDA.module.sta import IEDASta
 from tools.iEDA.module.io import IEDAIO
-import dreamplace.Timer as Timer
+# import dreamplace.Timer as Timer
 
 
 
@@ -401,7 +401,7 @@ if __name__ == "__main__":
                      input_def=workspace.json_path.def_input_path)
     data_manager.set_ieda_io(ieda_io)
     ieda_io.read_def()
-    params.with_sta = False
+    # params.with_sta = False
     # init PlacementEngine
     # json_file = '/home/xingchaoyu/code/ai-mp/workspace_aimp/workspace_NutShell/aimp/log/run-0_0_0/parameters.json'
     json_file = '/home/xingchaoyu/code/ai-mp/AutoDMP/dreamplace/params2.json'

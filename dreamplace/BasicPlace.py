@@ -46,8 +46,8 @@ import dreamplace.ops.pin_pos.pin_pos as pin_pos
 import dreamplace.ops.global_swap.global_swap as global_swap
 import dreamplace.ops.k_reorder.k_reorder as k_reorder
 import dreamplace.ops.independent_set_matching.independent_set_matching as independent_set_matching
-import dreamplace.ops.pin_weight_sum.pin_weight_sum as pws
-import dreamplace.ops.timing.timing as timingimport
+# import dreamplace.ops.pin_weight_sum.pin_weight_sum as pws
+# import dreamplace.ops.timing.timing as timingimport
 import dreamplace.ops.steiner_topo.steiner_topo as steiner_topo
 from dreamplace.ops.timing_propagation.timing_propagation import ARCS_INFO
 import pdb
@@ -703,11 +703,11 @@ class BasicPlace(nn.Module):
             self.op_collections.pin_pos_op,
             self.device,
         )
-        self.op_collections.pws_op = self.build_pws(
-            placedb, self.data_collections)
         # rectilinear minimum steiner tree wirelength from flute
         # can only be called once
         if params.timing_opt_flag:
+            self.op_collections.pws_op = self.build_pws(
+                placedb, self.data_collections)
             self.op_collections.timing_op = self.build_timing_op(
                 params, placedb, timer)
 

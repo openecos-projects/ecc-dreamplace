@@ -219,7 +219,7 @@ class PlaceObj(nn.Module):
 
         # timing diff
         self.use_timing_obj = False
-
+        self.invoke_timing_count = 0
         # fence region
         # update mask controls whether stop gradient/updating, 1 represents allow grad/update
         self.update_mask = None
@@ -430,7 +430,12 @@ class PlaceObj(nn.Module):
                 result, self.macro_overlap, alpha=self.macro_overlap_weight.item()
             )
         if self.use_timing_obj:
-            slack = self.timing_obj(pos)
+            wns, tns, ws, ts = self.timing_obj(pos)
+            slack = - wns - 0.2 * tns
+            self.wns = wns
+            self.tns = tns
+            self.ws = ws
+            self.ts = ts
             # print(f"Timing slack: {slack}")
             result = torch.add(result, slack)
 
@@ -1223,8 +1228,15 @@ class PlaceObj(nn.Module):
 
         # 时序传播算子 (为获取WNS/TNS和完整的slew/load值，仍然需要运行)
         wns, tns, ws, ts = self.op_collections.timing_propagation_op(delays, impulses, loads)
-        num_pins = len(self.placedb.pin_names)
-
+        
+        if self.invoke_timing_count % 30 == 0:
+            print(f"\n--- [Timing Debug] 第 {self.invoke_timing_count} 次调用 timing_obj ---")
+            print(f"当前 WNS: {wns.item():.4f}, TNS: {tns.item():.4f}, WS: {ws.item():.4f}, TS: {ts.item():.4f}")
+            self.check_log(wns, tns, ws, ts)
+        self.invoke_timing_count += 1
+        return wns, tns, ws, ts
+    
+    def check_log(self, wns, tns, ws, ts):
         # ==============================================================================
         # --- 步骤 2: 初始化iEDA并使用正确的线电容为其构建RC树 ---
         # ==============================================================================
@@ -1258,15 +1270,12 @@ class PlaceObj(nn.Module):
         # ==============================================================================
         # --- 额外调试步骤: 输出特定引脚所在网络的完整信息 ---
         # ==============================================================================
-        print("\n--- [特定网络拓扑] 'uio_oe_1_' 所在网络的详细信息 ---")
+        print("\n--- [特定网络拓扑] 'DFF_659/Q_reg:Q' 所在网络的详细信息 ---")
 
         # ★★★ 您可以在这里修改想追踪的目标引脚名称 ★★★
-        target_pin_full_name = "uio_oe_1_"
+        target_pin_full_name = "DFF_659/Q_reg:Q"
         
         self.debug_target_pin_net_info(target_pin_full_name)
-        
-        alpha = 0.2
-        return -(tns + alpha * wns) * 1e-3
 
     def debug_target_pin_net_info(self, target_pin_full_name):
         

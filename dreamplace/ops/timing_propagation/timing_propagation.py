@@ -583,8 +583,11 @@ class TimingPropagation(nn.Module):
         f_delays = cell_arc_f_delays[scatter_indices]
         r_delays = cell_arc_r_delays[scatter_indices]
 
-        # assert pin_rRAT[arc_out_pins].min(
-        # ) >= 0, "Negative r_rat_updates detected"
+        if (arc_in_pins == 7850   ).any():
+            logging.warning(torch.where(arc_in_pins == 7850  ))
+
+        assert pin_rRAT[arc_out_pins].max(
+            ) <= 1e8, "Negative r_rat_updates detected"
         r_rat_updates = pin_rRAT[arc_out_pins] - r_delays
         f_rat_updates = pin_fRAT[arc_out_pins] - f_delays
 
@@ -604,16 +607,16 @@ class TimingPropagation(nn.Module):
         arc_fipins = self.net2driver_pin_map[curnets]
         wire_delays_rise = pin_net_delay_rise[cur_endpoint]
         wire_delays_fall = pin_net_delay_fall[cur_endpoint]
-        # assert pin_rRAT[cur_endpoint].min(
-        # ) >= 0, "Negative r_rat_updates detected"
+        assert pin_rRAT[cur_endpoint].max(
+            ) <= 1e8, "Negative r_rat_updates detected"
         r_rat_updates = pin_rRAT[cur_endpoint] - wire_delays_rise
         f_rat_updates = pin_fRAT[cur_endpoint] - wire_delays_fall
         pin_rRAT = torch.scatter_reduce(pin_rRAT, 0, arc_fipins.long(
         ), r_rat_updates, reduce="amin", include_self=True)
         pin_fRAT = torch.scatter_reduce(pin_fRAT, 0, arc_fipins.long(
         ), f_rat_updates, reduce="amin", include_self=True)
-        # assert pin_rRAT[arc_fipins].min(
-        # ) >= 0, "Negative r_rat_updates detected after scatter_reduce"
+        assert pin_rRAT[arc_fipins].max(
+            ) <= 1e8, "Negative r_rat_updates detected after scatter_reduce"
         return pin_rRAT, pin_fRAT
 
     def calculate_setup_rat(self, pin_rRAT, pin_fRAT, clk_pin_rtran, clk_pin_ftran, pin_rtran, pin_ftran):
@@ -755,7 +758,7 @@ class TimingPropagation(nn.Module):
         rslack = pin_rRAT - pin_rAAT
         fslack = pin_fRAT - pin_fAAT
         slack = torch.min(rslack, fslack)
-        RAT_THRESHOLD = 1.9e8 
+        RAT_THRESHOLD = 8e7 
         valid_mask = (pin_rRAT < RAT_THRESHOLD) & (pin_fRAT < RAT_THRESHOLD)
         valid_slacks = slack[valid_mask]
         neg_slack = torch.clamp(valid_slacks, max=0)
@@ -772,5 +775,6 @@ class TimingPropagation(nn.Module):
             t.clone().detach() for t in [pin_net_cap_rise, pin_net_cap_fall])
         self.cell_arc_r_delays, self.cell_arc_f_delays = (
             t.clone().detach() for t in [cell_arc_r_delays, cell_arc_f_delays])
+        logging.info(f"WNS: {wns:.4f}, TNS: {tns:.4f}")
         logging.info(f"Total Timing propagation Time: {time.time() - start_time:.4f}s")
-        return wns, tns, ts, ws
+        return wns, tns, ws, ts

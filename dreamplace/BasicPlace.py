@@ -49,7 +49,7 @@ import dreamplace.ops.independent_set_matching.independent_set_matching as indep
 # import dreamplace.ops.pin_weight_sum.pin_weight_sum as pws
 # import dreamplace.ops.timing.timing as timingimport
 import dreamplace.ops.steiner_topo.steiner_topo as steiner_topo
-from dreamplace.ops.timing_propagation.timing_propagation import ARCS_INFO
+from dreamplace.ops.timing_propagation.timing_propagation import ARCS_INFO, LUTS_INFO
 import pdb
 
 
@@ -324,43 +324,34 @@ class PlaceDataCollection(object):
                     placedb.endpoints_constraint_arcs).to(device)
                 self.net2driver_pin_map = torch.from_numpy(
                     placedb.net2driver_pin_map).to(device)
-                self.arcs_info = ARCS_INFO()
+                # self.arcs_info = ARCS_INFO()
 
-                self.arcs_info.f_delay_luts.flat_luts_trans_table = torch.from_numpy(
-                    placedb.f_delay_flat_luts_trans_table).to(device)
-                self.arcs_info.f_delay_luts.flat_luts_cap_table = torch.from_numpy(
-                    placedb.f_delay_flat_luts_cap_table).to(device)
-                self.arcs_info.f_delay_luts.flat_luts_dim = torch.from_numpy(
-                    placedb.f_delay_flat_luts_dim).to(device)
-                self.arcs_info.f_delay_luts.flat_luts_values = torch.from_numpy(
-                    placedb.f_delay_flat_luts_values).to(device)
+                # Initialize LUTS_INFO objects from placedb and construct ARCS_INFO
+                f_delay_values = torch.from_numpy(placedb.f_delay_flat_luts_values).to(device)
+                f_delay_trans = torch.from_numpy(placedb.f_delay_flat_luts_trans_table).to(device)
+                f_delay_cap = torch.from_numpy(placedb.f_delay_flat_luts_cap_table).to(device)
+                f_delay_dim = torch.from_numpy(placedb.f_delay_flat_luts_dim).to(device)
+                f_delay_luts = LUTS_INFO(f_delay_values, f_delay_trans, f_delay_cap, f_delay_dim)
 
-                self.arcs_info.r_delay_luts.flat_luts_values = torch.from_numpy(
-                    placedb.r_delay_flat_luts_values).to(device)
-                self.arcs_info.r_delay_luts.flat_luts_trans_table = torch.from_numpy(
-                    placedb.r_delay_flat_luts_trans_table).to(device)
-                self.arcs_info.r_delay_luts.flat_luts_cap_table = torch.from_numpy(
-                    placedb.r_delay_flat_luts_cap_table).to(device)
-                self.arcs_info.r_delay_luts.flat_luts_dim = torch.from_numpy(
-                    placedb.r_delay_flat_luts_dim).to(device)
+                r_delay_values = torch.from_numpy(placedb.r_delay_flat_luts_values).to(device)
+                r_delay_trans = torch.from_numpy(placedb.r_delay_flat_luts_trans_table).to(device)
+                r_delay_cap = torch.from_numpy(placedb.r_delay_flat_luts_cap_table).to(device)
+                r_delay_dim = torch.from_numpy(placedb.r_delay_flat_luts_dim).to(device)
+                r_delay_luts = LUTS_INFO(r_delay_values, r_delay_trans, r_delay_cap, r_delay_dim)
 
-                self.arcs_info.f_trans_luts.flat_luts_values = torch.from_numpy(
-                    placedb.f_trans_flat_luts_values).to(device)
-                self.arcs_info.f_trans_luts.flat_luts_trans_table = torch.from_numpy(
-                    placedb.f_trans_flat_luts_trans_table).to(device)
-                self.arcs_info.f_trans_luts.flat_luts_cap_table = torch.from_numpy(
-                    placedb.f_trans_flat_luts_cap_table).to(device)
-                self.arcs_info.f_trans_luts.flat_luts_dim = torch.from_numpy(
-                    placedb.f_trans_flat_luts_dim).to(device)
+                f_trans_values = torch.from_numpy(placedb.f_trans_flat_luts_values).to(device)
+                f_trans_trans = torch.from_numpy(placedb.f_trans_flat_luts_trans_table).to(device)
+                f_trans_cap = torch.from_numpy(placedb.f_trans_flat_luts_cap_table).to(device)
+                f_trans_dim = torch.from_numpy(placedb.f_trans_flat_luts_dim).to(device)
+                f_trans_luts = LUTS_INFO(f_trans_values, f_trans_trans, f_trans_cap, f_trans_dim)
 
-                self.arcs_info.r_trans_luts.flat_luts_values = torch.from_numpy(
-                    placedb.r_trans_flat_luts_values).to(device)
-                self.arcs_info.r_trans_luts.flat_luts_trans_table = torch.from_numpy(
-                    placedb.r_trans_flat_luts_trans_table).to(device)
-                self.arcs_info.r_trans_luts.flat_luts_cap_table = torch.from_numpy(
-                    placedb.r_trans_flat_luts_cap_table).to(device)
-                self.arcs_info.r_trans_luts.flat_luts_dim = torch.from_numpy(
-                    placedb.r_trans_flat_luts_dim).to(device)
+                r_trans_values = torch.from_numpy(placedb.r_trans_flat_luts_values).to(device)
+                r_trans_trans = torch.from_numpy(placedb.r_trans_flat_luts_trans_table).to(device)
+                r_trans_cap = torch.from_numpy(placedb.r_trans_flat_luts_cap_table).to(device)
+                r_trans_dim = torch.from_numpy(placedb.r_trans_flat_luts_dim).to(device)
+                r_trans_luts = LUTS_INFO(r_trans_values, r_trans_trans, r_trans_cap, r_trans_dim)
+
+                self.arcs_info = ARCS_INFO(f_delay_luts, r_delay_luts, f_trans_luts, r_trans_luts)
 
                 self.main_id_2_cell_id_start = torch.from_numpy(
                     placedb.main_id_2_cell_id_start).to(device)

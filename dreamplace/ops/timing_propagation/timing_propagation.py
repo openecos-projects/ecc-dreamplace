@@ -150,196 +150,223 @@ class TimingPropagation(nn.Module):
         self.cell_arc_r_delays = None
         self.cell_arc_f_delays = None
 
+    def _interpolate_1d_vectorized(self,
+                                   x,           # [B_sub] - Input values
+                                   x_table,     # [B_sub, MaxDim] - Table axes
+                                   y_table,     # [B_sub, MaxDim] - Table values
+                                   actual_dims  # [B_sub] - Actual table dimensions
+                                  ):
+        """
+        Performs vectorized 1D linear interpolation for a sub-batch.
+        """
+        device = x.device
+        dtype = x.dtype
+        batch_size = x.shape[0]
+
+        # Find neighboring indices using searchsorted on the padded table
+        x_b = x.unsqueeze(1)  # [B_sub, 1]
+        idx_padded = torch.searchsorted(x_table, x_b, right=True).squeeze(1) # [B_sub]
+
+        # Clamp indices to the actual valid range for each item
+        max_idx_actual = (actual_dims - 1).clamp(min=0) # [B_sub]
+        idx_high = idx_padded.clamp(min=1, max=max_idx_actual)
+        idx_low = (idx_high - 1).clamp(min=0)
+
+        # Gather boundary points (x0, x1, y0, y1)
+        batch_indices = torch.arange(batch_size, device=device)
+        x0 = x_table[batch_indices, idx_low]
+        x1 = x_table[batch_indices, idx_high]
+        # For y_table, we only need the first `MaxDim` values, which corresponds to the 1D data
+        y0 = y_table[batch_indices, idx_low]
+        y1 = y_table[batch_indices, idx_high]
+
+        # Perform linear interpolation
+        interval = x1 - x0
+        denom_epsilon = torch.tensor(1e-12, device=device, dtype=dtype)
+
+        # Handle degenerate case where interval is zero
+        is_degenerate = torch.abs(interval) < denom_epsilon
+
+        # Clamp input to the interval [x0, x1] to prevent extrapolation
+        x_clamped = x.clamp(min=x0, max=x1)
+
+        # Calculate interpolation factor, safely avoiding division by zero
+        safe_interval = torch.where(is_degenerate, denom_epsilon, interval)
+        factor = ((x_clamped - x0) / safe_interval).clamp(0.0, 1.0)
+
+        # Use torch.lerp for stable interpolation
+        interp_val = torch.lerp(y0, y1, factor)
+
+        # If the interval was degenerate, the value is simply y0
+        final_val = torch.where(is_degenerate, y0, interp_val)
+        return final_val
+
+
     def lut_entry_vectorized(self,
                              # Batched inputs
-                             # [B] - For potential future use
-                             lib_cell_idxs,
-                             input_trans,   # [B]
-                             output_caps,   # [B]
-                             # [B] - LongTensor indices for the LUTs
-                             arc_idxs,
+                             lib_cell_idxs,          # [B] - For potential future use
+                             input_trans,            # [B]
+                             output_caps,            # [B]
+                             arc_idxs,               # [B] - LongTensor indices for the LUTs
                              # Padded LUT Tensors (Constant for the call)
-                             flat_luts_values,      # [N, MaxT * MaxC]
+                             flat_luts_values,       # [N, MaxT * MaxC]
                              flat_luts_trans_table,  # [N, MaxT]
-                             flat_luts_cap_table,   # [N, MaxC]
-                             flat_luts_dim):        # [N, 2] - Actual dims [trans_dim, cap_dim]
+                             flat_luts_cap_table,    # [N, MaxC]
+                             flat_luts_dim):         # [N, 2] - Actual dims [trans_dim, cap_dim]
         """
-        Performs bilinear interpolation for a batch of arcs using padded LUT tensors.
-        Uses vectorized tensor operations instead of vmap.
+        Performs bilinear (2D) or linear (1D) interpolation for a batch of arcs
+        using padded LUT tensors. Handles 2D, 1D, and scalar LUTs.
         """
         device = input_trans.device
         dtype = input_trans.dtype
         batch_size = arc_idxs.shape[0]
 
         # --- 1. Gather data for the batch of arcs ---
-        # Ensure arc_idxs are valid before gathering
-        assert arc_idxs.min() >= 0, "Negative arc_idx detected"
-        assert arc_idxs.max(
-        ) < flat_luts_dim.shape[0], "arc_idx out of bounds for flat_luts_dim"
-        # Add similar checks for other flat tensors if necessary
-
-        lut_dims_batch = flat_luts_dim[arc_idxs]             # [B, 2]
-        trans_tables_batch = flat_luts_trans_table[arc_idxs]  # [B, MaxT]
+        lut_dims_batch = flat_luts_dim[arc_idxs]            # [B, 2]
+        trans_tables_batch = flat_luts_trans_table[arc_idxs] # [B, MaxT]
         cap_tables_batch = flat_luts_cap_table[arc_idxs]     # [B, MaxC]
-        lut_values_batch = flat_luts_values[arc_idxs]        # [B, MaxT, MaxC]
+        lut_values_batch = flat_luts_values[arc_idxs]        # [B, MaxT * MaxC]
 
-        # --- 2. Get actual dimensions and create masks ---
-        # [B] - Actual T dimension for each arc
-        trans_dims_actual = lut_dims_batch[:, 0].long()
-        # [B] - Actual C dimension for each arc
-        cap_dims_actual = lut_dims_batch[:, 1].long()
+        # --- 2. Get actual dimensions and create masks for different cases ---
+        trans_dims_actual = lut_dims_batch[:, 0].long() # [B]
+        cap_dims_actual = lut_dims_batch[:, 1].long()   # [B]
 
-        # Mask for valid arcs (dimension > 0)
-        valid_arc_mask = (trans_dims_actual > 0) & (cap_dims_actual > 0)  # [B]
-        if not torch.any(valid_arc_mask):
-            # Return all zeros if no valid arcs
-            return torch.zeros(batch_size, device=device, dtype=dtype)
+        # Master mask for any valid calculation (at least one element in LUT)
+        valid_arc_mask = (trans_dims_actual > 0) & (cap_dims_actual > 0)
 
-        # --- 3. Find Neighboring Indices (Vectorized Searchsorted on Padded) ---
-        # Unsqueeze inputs for broadcasting comparison with tables
-        input_trans_b = input_trans.unsqueeze(1)  # [B, 1]
-        output_caps_b = output_caps.unsqueeze(1)  # [B, 1]
+        # Masks for different interpolation scenarios
+        is_scalar = valid_arc_mask & (trans_dims_actual <= 1) & (cap_dims_actual <= 1)
+        is_trans_1d = valid_arc_mask & (trans_dims_actual > 1) & (cap_dims_actual <= 1)
+        is_cap_1d = valid_arc_mask & (trans_dims_actual <= 1) & (cap_dims_actual > 1)
+        is_2d = valid_arc_mask & (trans_dims_actual > 1) & (cap_dims_actual > 1)
 
-        # Perform searchsorted on the padded tables
-        # Note: This finds indices within the padded dimension length (MaxT or MaxC)
-        # We need to clamp based on actual dimensions later.
-        # Using left=True for lower bound index might simplify low/high index calculation later
-        # Let's stick to right=True and calculate low index as idx-1 for now.
-        trans_idx_padded = torch.searchsorted(
-            trans_tables_batch, input_trans_b, right=True).squeeze(-1)  # [B]
-        cap_idx_padded = torch.searchsorted(
-            cap_tables_batch, output_caps_b, right=True).squeeze(-1)     # [B]
-
-        # Calculate actual max indices (ensure non-negative)
-        max_trans_idx_actual = (trans_dims_actual - 1).clamp(min=0)  # [B]
-        max_cap_idx_actual = (cap_dims_actual - 1).clamp(min=0)     # [B]
-
-        # Clamp the indices found by searchsorted to the *actual* valid range [1, max_actual_idx]
-        # This ensures t1/c1 indices are within the real data bounds
-        trans_idx = trans_idx_padded.clamp(
-            min=1).clamp(max=max_trans_idx_actual)  # [B]
-        cap_idx = cap_idx_padded.clamp(
-            min=1).clamp(max=max_cap_idx_actual)         # [B]
-
-        # Calculate low indices [0, max_actual_idx - 1]
-        trans_idx_low = (trans_idx - 1).clamp(min=0)  # [B]
-        cap_idx_low = (cap_idx - 1).clamp(min=0)     # [B]
-
-        # --- 4. Gather Boundary Values (t0, t1, c0, c1) ---
-        # Use gather or advanced indexing with batch indices
-        batch_indices = torch.arange(batch_size, device=device)  # [B]
-        t0 = trans_tables_batch[batch_indices, trans_idx_low]  # [B]
-        t1 = trans_tables_batch[batch_indices, trans_idx]     # [B]
-        c0 = cap_tables_batch[batch_indices, cap_idx_low]     # [B]
-        c1 = cap_tables_batch[batch_indices, cap_idx]         # [B]
-        # --- 5. Calculate Flattened Indices for lut_values ---
-        # ★★★ 修正开始 ★★★
-        # 从 cap 坐标轴张量获取物理（填充后）的列数 MaxC
-        # 这是获取内存步长(stride)的正确方法
-        # FIXME: There maye be some bugs.
-        padded_max_cols = lut_dims_batch[:,1]
-
-        # 使用正确的物理列数来计算一维索引
-        idx00 = trans_idx_low * padded_max_cols + cap_idx_low  # [B]
-        idx01 = trans_idx_low * padded_max_cols + cap_idx     # [B]
-        idx10 = trans_idx * padded_max_cols + cap_idx_low     # [B]
-        idx11 = trans_idx * padded_max_cols + cap_idx         # [B]
-        # ★★★ 修正结束 ★★★
-
-        # --- 6. Gather Corner Values (v00, v01, v10, v11) ---
-        # ★★★ 修正开始 ★★★
-        # lut_values_batch 已经是 [B, MaxFlatSize] 的二维张量，无需再做 view()
-        lut_values_batch_flat = lut_values_batch
-
-        # 使用 gather 从已经压平的张量中安全地提取数值
-        v00 = lut_values_batch_flat.gather(
-            1, idx00.unsqueeze(1)).squeeze(1)  # [B]
-        v01 = lut_values_batch_flat.gather(
-            1, idx01.unsqueeze(1)).squeeze(1)  # [B]
-        v10 = lut_values_batch_flat.gather(
-            1, idx10.unsqueeze(1)).squeeze(1)  # [B]
-        v11 = lut_values_batch_flat.gather(
-            1, idx11.unsqueeze(1)).squeeze(1)  # [B]
-        # ★★★ 修正结束 ★★★
-        # # --- 5. Calculate Flattened Indices for lut_values ---
-        # # num_cols is the *actual* cap dimension for each arc
-        # num_cols_batch = cap_dims_actual  # [B]
-        # idx00 = trans_idx_low * num_cols_batch + cap_idx_low  # [B]
-        # idx01 = trans_idx_low * num_cols_batch + cap_idx     # [B]
-        # idx10 = trans_idx * num_cols_batch + cap_idx_low     # [B]
-        # idx11 = trans_idx * num_cols_batch + cap_idx         # [B]
-
-        # # --- 6. Gather Corner Values (v00, v01, v10, v11) ---
-        # # Reshape the batch of 2D LUT values to be flat for 1D indexing
-        # # TODO:
-        # # B, MaxT, MaxC = lut_values_batch.shape
-        # lut_values_batch_flat = lut_values_batch
-
-        # # Check bounds before gathering (indices should be < actual_T * actual_C)
-        # # This check is complex with varying dimensions. Trusting the index calculation for now.
-        # # A robust implementation might involve masking indices that fall outside the true area.
-
-        # # Gather using batch_indices and the calculated 1D indices
-        # v00 = lut_values_batch_flat[batch_indices, idx00]  # [B]
-        # v01 = lut_values_batch_flat[batch_indices, idx01]  # [B]
-        # v10 = lut_values_batch_flat[batch_indices, idx10]  # [B]
-        # v11 = lut_values_batch_flat[batch_indices, idx11]  # [B]
-
-        # --- 7. Perform Interpolation (Vectorized) ---
-        t_interval = t1 - t0  # [B]
-        c_interval = c1 - c0  # [B]
+        final_value = torch.zeros(batch_size, device=device, dtype=dtype)
         denom_epsilon = torch.tensor(1e-12, device=device, dtype=dtype)
 
-        is_t_degenerate = torch.abs(t_interval) < denom_epsilon  # [B]
-        is_c_degenerate = torch.abs(c_interval) < denom_epsilon  # [B]
+        # --- 3. Process each case separately ---
 
-        input_trans_clamped = input_trans.clamp(min=t0, max=t1)  # [B]
-        output_caps_clamped = output_caps.clamp(min=c0, max=c1)  # [B]
+        # Case: Scalar LUT (0D)
+        if torch.any(is_scalar):
+            # The value is simply the first element in the LUT values table.
+            final_value[is_scalar] = lut_values_batch[is_scalar, 0]
 
-        wa = (t1 - input_trans_clamped) * (c1 - output_caps_clamped)  # [B]
-        wb = (t1 - input_trans_clamped) * (output_caps_clamped - c0)  # [B]
-        wc = (input_trans_clamped - t0) * (c1 - output_caps_clamped)  # [B]
-        wd = (input_trans_clamped - t0) * (output_caps_clamped - c0)  # [B]
+        # Case: 1D LUT dependent on input_trans
+        if torch.any(is_trans_1d):
+            val = self._interpolate_1d_vectorized(
+                x=input_trans[is_trans_1d],
+                x_table=trans_tables_batch[is_trans_1d],
+                y_table=lut_values_batch[is_trans_1d], # Values are effectively [B_sub, MaxT]
+                actual_dims=trans_dims_actual[is_trans_1d]
+            )
+            final_value[is_trans_1d] = val
 
-        t_interval_safe = torch.where(
-            is_t_degenerate, denom_epsilon, t_interval)  # [B]
-        c_interval_safe = torch.where(
-            is_c_degenerate, denom_epsilon, c_interval)  # [B]
-        safe_denominator = t_interval_safe * c_interval_safe  # [B]
+        # Case: 1D LUT dependent on output_caps
+        if torch.any(is_cap_1d):
+            val = self._interpolate_1d_vectorized(
+                x=output_caps[is_cap_1d],
+                x_table=cap_tables_batch[is_cap_1d],
+                y_table=lut_values_batch[is_cap_1d], # Values are effectively [B_sub, MaxC]
+                actual_dims=cap_dims_actual[is_cap_1d]
+            )
+            final_value[is_cap_1d] = val
 
-        # Use torch.lerp for linear interpolation parts
-        lerp_c_factor = ((output_caps_clamped - c0) / c_interval_safe.clamp(
-            min=denom_epsilon)).clamp(0.0, 1.0)  # Clamp factor to [0, 1]
-        lerp_t_factor = ((input_trans_clamped - t0) / t_interval_safe.clamp(
-            min=denom_epsilon)).clamp(0.0, 1.0)  # Clamp factor to [0, 1]
-        val_t_degenerate = torch.lerp(v00, v01, lerp_c_factor)  # [B]
-        val_c_degenerate = torch.lerp(v00, v10, lerp_t_factor)  # [B]
+        # Case: 2D LUT (Bilinear Interpolation)
+        if torch.any(is_2d):
+            # Filter all inputs for the 2D case
+            input_trans_2d = input_trans[is_2d]
+            output_caps_2d = output_caps[is_2d]
+            trans_tables_2d = trans_tables_batch[is_2d]
+            cap_tables_2d = cap_tables_batch[is_2d]
+            lut_values_2d = lut_values_batch[is_2d]
+            trans_dims_actual_2d = trans_dims_actual[is_2d]
+            cap_dims_actual_2d = cap_dims_actual[is_2d]
+            batch_size_2d = input_trans_2d.shape[0]
 
-        # Bilinear calculation (avoid division by zero)
-        # Initialize bilinear_val with a fallback (e.g., v00)
-        bilinear_val = torch.full_like(wa, float('nan'))  # Initialize with NaN
-        # Mask where division is safe
-        valid_denom_mask = torch.abs(safe_denominator) >= denom_epsilon
-        bilinear_val[valid_denom_mask] = (v00 * wa + v01 * wb + v10 * wc + v11 * wd)[
-            valid_denom_mask] / safe_denominator[valid_denom_mask]
-        # Handle cases where denominator was zero but shouldn't have been (fallback)
-        bilinear_val = torch.where(torch.isfinite(
-            bilinear_val), bilinear_val, v00)  # Replace NaN with v00
+            # Find Neighboring Indices (Vectorized Searchsorted on Padded)
+            trans_idx_padded = torch.searchsorted(trans_tables_2d, input_trans_2d.unsqueeze(1), right=True).squeeze(1)
+            cap_idx_padded = torch.searchsorted(cap_tables_2d, output_caps_2d.unsqueeze(1), right=True).squeeze(1)
 
-        # Combine results using torch.where
+            max_trans_idx_actual = (trans_dims_actual_2d - 1).clamp(min=0)
+            max_cap_idx_actual = (cap_dims_actual_2d - 1).clamp(min=0)
+
+            trans_idx = trans_idx_padded.clamp(min=1).clamp(max=max_trans_idx_actual)
+            cap_idx = cap_idx_padded.clamp(min=1).clamp( max=max_cap_idx_actual)
+
+            trans_idx_low = (trans_idx - 1).clamp(min=0)
+            cap_idx_low = (cap_idx - 1).clamp(min=0)
+
+            # Gather Boundary Values (t0, t1, c0, c1)
+            batch_indices_2d = torch.arange(batch_size_2d, device=device)
+            t0 = trans_tables_2d[batch_indices_2d, trans_idx_low]
+            t1 = trans_tables_2d[batch_indices_2d, trans_idx]
+            c0 = cap_tables_2d[batch_indices_2d, cap_idx_low]
+            c1 = cap_tables_2d[batch_indices_2d, cap_idx]
+
+            # The stride for the flattened array is the padded width (MaxC),
+            # which we can get from the shape of the padded table.
+            cap_actual = cap_dims_actual_2d
+
+            # Calculate flattened indices for the 4 corner points
+            idx00 = trans_idx_low * cap_actual + cap_idx_low
+            idx01 = trans_idx_low * cap_actual + cap_idx
+            idx10 = trans_idx * cap_actual + cap_idx_low
+            idx11 = trans_idx * cap_actual + cap_idx
+
+            # Gather Corner Values (v00, v01, v10, v11)
+            v00 = lut_values_2d.gather(1, idx00.unsqueeze(1)).squeeze(1)
+            v01 = lut_values_2d.gather(1, idx01.unsqueeze(1)).squeeze(1)
+            v10 = lut_values_2d.gather(1, idx10.unsqueeze(1)).squeeze(1)
+            v11 = lut_values_2d.gather(1, idx11.unsqueeze(1)).squeeze(1)
+
+            # Perform Bilinear Interpolation
+            t_interval = t1 - t0
+            c_interval = c1 - c0
+
+            is_t_degenerate = torch.abs(t_interval) < denom_epsilon
+            is_c_degenerate = torch.abs(c_interval) < denom_epsilon
+
+            input_trans_clamped = input_trans_2d.clamp(min=t0, max=t1)
+            output_caps_clamped = output_caps_2d.clamp(min=c0, max=c1)
+
+            # --- Standard bilinear interpolation formula ---
+            # To avoid division by zero, we handle degenerate cases separately
+            # and use a safe denominator for the main calculation.
+            t_interval_safe = torch.where(is_t_degenerate, denom_epsilon, t_interval)
+            c_interval_safe = torch.where(is_c_degenerate, denom_epsilon, c_interval)
+            safe_denominator = t_interval_safe * c_interval_safe
+
+            wa = (t1 - input_trans_clamped) * (c1 - output_caps_clamped)
+            wb = (t1 - input_trans_clamped) * (output_caps_clamped - c0)
+            wc = (input_trans_clamped - t0) * (c1 - output_caps_clamped)
+            wd = (input_trans_clamped - t0) * (output_caps_clamped - c0)
+
+            bilinear_val = (v00 * wa + v01 * wb + v10 * wc + v11 * wd) / safe_denominator
+
+            # --- Handle degenerate cases using linear interpolation (lerp) ---
+            lerp_c_factor = ((output_caps_clamped - c0) / c_interval_safe).clamp(0.0, 1.0)
+            lerp_t_factor = ((input_trans_clamped - t0) / t_interval_safe).clamp(0.0, 1.0)
+
+            val_t_degenerate = torch.lerp(v00, v01, lerp_c_factor) # Lerp along cap axis
+            val_c_degenerate = torch.lerp(v00, v10, lerp_t_factor) # Lerp along trans axis
+
+            # Combine results based on which dimensions are degenerate
+            interp_2d_val = torch.where(
+                is_t_degenerate & is_c_degenerate, v00,
+                torch.where(is_t_degenerate, val_t_degenerate,
+                            torch.where(is_c_degenerate, val_c_degenerate, bilinear_val))
+            )
+            final_value[is_2d] = interp_2d_val
+
+        # --- 8. Apply Final Mask ---
+        # Ensure results for invalid arcs (dim <= 0) are zero and handle any NaNs
         final_value = torch.where(
-            is_t_degenerate & is_c_degenerate, v00,
-            torch.where(is_t_degenerate, val_t_degenerate,
-                        torch.where(is_c_degenerate, val_c_degenerate, bilinear_val))
+            valid_arc_mask & torch.isfinite(final_value),
+            final_value,
+            torch.tensor(0.0, device=device, dtype=dtype)
         )
 
-        # --- 8. Apply Mask and Handle Non-finite ---
-        # Ensure results for invalid arcs (dim <= 0) are zero
-        # Also handle any NaNs produced during calculation
-        final_value = torch.where(valid_arc_mask & torch.isfinite(
-            final_value), final_value, torch.tensor(0.0, device=device, dtype=dtype))
-
         return final_value
+
 
     def r_setup_entry(self, lib_cell_idxs, clk_pin_rtrans, data_pin_trans, lib_arc_idxs):
         luts = self.arcs_info.r_delay_luts

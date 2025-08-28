@@ -1052,8 +1052,8 @@ class MacroPlaceDB(object):
             self.end_points = np.array(pydb.end_points, dtype=np.int32)
             self.clock_pins = np.array(pydb.clock_pins, dtype=np.int32)
             self.FF_ids = np.array(pydb.FF_ids, dtype=np.int32)
-            self.clk_pin_rtran = np.array(pydb.clk_pin_rtran, dtype=np.int32)
-            self.clk_pin_ftran = np.array(pydb.clk_pin_ftran, dtype=np.int32)
+            self.clk_pin_rtran = np.array(pydb.clk_pin_rtran, dtype=self.dtype)
+            self.clk_pin_ftran = np.array(pydb.clk_pin_ftran, dtype=self.dtype)
             self.clk_pin_names = np.array(
                 pydb.clk_pin_names, dtype=np.string_)            
             self.flat_cells_by_level = np.array(

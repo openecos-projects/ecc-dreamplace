@@ -128,6 +128,12 @@ class PreconditionOp:
                 precond = sum_pin_weights_in_nodes + self.alpha * node_areas
 
             precond.clamp_(min=1.0)
+            grad[self.placedb.num_movable_nodes : self.placedb.num_physical_nodes] = 0
+            grad[
+                self.placedb.num_nodes
+                + self.placedb.num_movable_nodes : self.placedb.num_nodes
+                + self.placedb.num_physical_nodes
+            ] = 0
             grad[0 : self.placedb.num_nodes].div_(precond)
             grad[self.placedb.num_nodes : self.placedb.num_nodes * 2].div_(precond)
             # grad = grad.view(2, -1)
@@ -220,6 +226,8 @@ class PlaceObj(nn.Module):
         # timing diff
         self.use_timing_obj = False
         self.invoke_timing_count = 0
+        self.timing_wns_coeff = 0.01
+        self.timing_tns_coeff = 0.0001
         # fence region
         # update mask controls whether stop gradient/updating, 1 represents allow grad/update
         self.update_mask = None
@@ -431,7 +439,7 @@ class PlaceObj(nn.Module):
             )
         if self.use_timing_obj:
             wns, tns, ws, ts = self.timing_obj(pos)
-            slack = - wns - 0.2 * tns
+            slack = - (self.timing_wns_coeff * wns + self.timing_tns_coeff * tns)
             self.wns = wns
             self.tns = tns
             self.ws = ws
@@ -1229,10 +1237,10 @@ class PlaceObj(nn.Module):
         # 时序传播算子 (为获取WNS/TNS和完整的slew/load值，仍然需要运行)
         wns, tns, ws, ts = self.op_collections.timing_propagation_op(delays, impulses, loads)
         
-        if self.invoke_timing_count % 30 == 0:
-            print(f"\n--- [Timing Debug] 第 {self.invoke_timing_count} 次调用 timing_obj ---")
-            print(f"当前 WNS: {wns.item():.4f}, TNS: {tns.item():.4f}, WS: {ws.item():.4f}, TS: {ts.item():.4f}")
-            self.check_log(wns, tns, ws, ts)
+        # if self.invoke_timing_count % 30 == 0:
+        #     print(f"\n--- [Timing Debug] 第 {self.invoke_timing_count} 次调用 timing_obj ---")
+        #     print(f"当前 WNS: {wns.item():.4f}, TNS: {tns.item():.4f}, WS: {ws.item():.4f}, TS: {ts.item():.4f}")
+        #     self.check_log(wns, tns, ws, ts)
         self.invoke_timing_count += 1
         return wns, tns, ws, ts
     
@@ -1433,7 +1441,7 @@ class PlaceObj(nn.Module):
         obj = self.obj_fn(pos)
 
         obj.backward()
-
+        assert torch.isnan(pos.grad).any() == False, "Gradient contains NaN"
         self.op_collections.precondition_op(
             pos.grad, self.density_weight, self.update_mask, self.fix_nodes_mask
         )
@@ -2041,6 +2049,8 @@ class PlaceObj(nn.Module):
                         UPPER_PCOF, -delta_hpwl / ref_hpwl
                     ).clamp(min=LOWER_PCOF, max=UPPER_PCOF)
                 self.density_weight *= mu
+                self.timing_tns_coeff *= 1.01
+                self.timing_wns_coeff *= 1.01
 
         def update_density_weight_op_overflow(cur_metric, prev_metric, iteration):
             assert (
@@ -2088,6 +2098,8 @@ class PlaceObj(nn.Module):
                     + self.density_weight_step_size_inc_low
                 )
                 self.density_weight_step_size *= rate
+                self.timing_tns_coeff *= 1.01
+                self.timing_wns_coeff *= 1.01
 
         if not self.quad_penalty and algo == "overflow":
             logging.warn(

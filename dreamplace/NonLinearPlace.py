@@ -355,7 +355,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         assert 0, "unsupported optimizer %s" % (optimizer_name)
 
                     # diff tdp
-                    if params.with_sta and (iteration % 10 == 0 and iteration >= 20):
+                    if params.with_sta and (iteration % 10 == 0 and iteration >= 100):
                         t_steiner = time.time()
                         with torch.no_grad():
                             self.data_collections.net_flat_topo_sort, self.data_collections.net_flat_topo_sort_start, \

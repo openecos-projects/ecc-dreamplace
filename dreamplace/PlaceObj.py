@@ -1065,22 +1065,22 @@ class PlaceObj(nn.Module):
 
         if setup_slack_cpp_valid.numel() > 0:
             wns_cpp_calc = torch.min(setup_slack_cpp_valid).item()
-            tns_cpp_calc = torch.sum(setup_slack_cpp_valid).item()
+            tns_cpp_calc = torch.sum(setup_slack_cpp_valid.clamp(max=0)).item()
         else:
             wns_cpp_calc = 0.0
             tns_cpp_calc = 0.0
 
         print(
-            f"WNS (Python Calculated): {wns_py_calc:<15.4f} | WNS (iEDA): {wns_cpp_calc:<15.4f}"
+            f"WNS (Python Calculated): {wns / 1000:<15.4f} | WNS (iEDA): {wns_cpp_calc:<15.4f}"
         )
         print(
-            f"TNS (Python Calculated): {tns_py_calc:<15.4f} | TNS (iEDA): {tns_cpp_calc:<15.4f}"
+            f"TNS (Python Calculated): {tns / 1000:<15.4f} | TNS (iEDA): {tns_cpp_calc:<15.4f}"
         )
         print("-" * 60)
         print(f"flow 输出的 WNS (orig wns): {wns.item():.4f}")
         print(f"flow 输出的 TNS (orig tns): {tns.item():.4f}")
         print(f"flow 输出的 WS (orig ws): {ws.item():.4f}")
-        print(f"flow 输出的 TS (orig ts): {ts.item():.4f}")
+        # print(f"flow 输出的 TS (orig ts): {ts.item():.4f}")
 
     def write_first_level_pin_timing_log(self, net_timing_details_cpp):
         """
@@ -1254,10 +1254,10 @@ class PlaceObj(nn.Module):
         # 时序传播算子 (为获取WNS/TNS和完整的slew/load值，仍然需要运行)
         wns, tns, ws, ts = self.op_collections.timing_propagation_op(delays, impulses, loads)
         
-        # if self.invoke_timing_count % 30 == 0:
-        #     print(f"\n--- [Timing Debug] 第 {self.invoke_timing_count} 次调用 timing_obj ---")
-        #     print(f"当前 WNS: {wns.item():.4f}, TNS: {tns.item():.4f}, WS: {ws.item():.4f}, TS: {ts.item():.4f}")
-        #     self.check_log(wns, tns, ws, ts)
+        if self.invoke_timing_count % 3 == 0:
+            print(f"\n--- [Timing Debug] 第 {self.invoke_timing_count} 次调用 timing_obj ---")
+            self.check_log(wns, tns, ws, ts)
+            print(f"当前 WNS: {wns.item():.4f}, TNS: {tns.item():.4f}, WS: {ws.item():.4f}, TS: {ts.item():.4f}")
         self.invoke_timing_count += 1
         return wns, tns, ws, ts
     

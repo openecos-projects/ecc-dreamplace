@@ -17,7 +17,7 @@ import logging
 from torch.func import vmap
 import unittest
 from dataclasses import dataclass, field
-
+# torch._dynamo.config.suppress_errors = True
 # Mock Timing Arc representation (can be a simple dict or class)
 
 
@@ -168,9 +168,9 @@ class TimingPropagation(nn.Module):
         self.pin_net_cap = None
         self.cell_arc_r_delays = None
         self.cell_arc_f_delays = None
-
-    @staticmethod
-    def _lut_entry_1d_vectorized(x,           # [B] - Input values
+        
+    # @staticmethod
+    def _lut_entry_1d_vectorized(self, x,           # [B] - Input values
                                  x_table,     # [B, MaxDim] - Table axes
                                  y_table,     # [B, MaxDim] - Table values
                                  actual_dims  # [B] - Actual table dimensions
@@ -212,8 +212,9 @@ class TimingPropagation(nn.Module):
         final_val = torch.where(is_degenerate, y0, interp_val)
         return final_val
 
-    @staticmethod
-    def _lut_entry_2d_vectorized(input_trans,
+    # @staticmethod
+    # @torch.compile
+    def _lut_entry_2d_vectorized(self, input_trans,
                                  output_caps,
                                  trans_tables_batch,
                                  cap_tables_batch,
@@ -260,10 +261,24 @@ class TimingPropagation(nn.Module):
         idx10 = trans_idx * stride + cap_idx_low
         idx11 = trans_idx * stride + cap_idx
 
-        v00 = lut_values_batch.gather(1, idx00.unsqueeze(1)).squeeze(1)
-        v01 = lut_values_batch.gather(1, idx01.unsqueeze(1)).squeeze(1)
-        v10 = lut_values_batch.gather(1, idx10.unsqueeze(1)).squeeze(1)
-        v11 = lut_values_batch.gather(1, idx11.unsqueeze(1)).squeeze(1)
+        # === gather 操作优化方案 ===
+        # 原始代码使用4个独立的gather操作，这会造成性能瓶颈
+        
+        # # 优化方案2: 简单批量gather (备选)
+        # corner_indices = torch.stack([idx00, idx01, idx10, idx11], dim=1)  # [B, 4]
+        # corner_values = lut_values_batch.gather(1, corner_indices)  # [B, 4]
+        # v00, v01, v10, v11 = corner_values[:, 0], corner_values[:, 1], corner_values[:, 2], corner_values[:, 3]
+        
+        # 优化方案3: 高级索引 (某些情况下可能更快，但内存使用可能更高)
+        batch_indices = torch.arange(batch_size, device=device).unsqueeze(1)  # [B, 1]
+        corner_indices_2d = torch.stack([
+            torch.stack([batch_indices.squeeze(1), idx00], dim=1),
+            torch.stack([batch_indices.squeeze(1), idx01], dim=1), 
+            torch.stack([batch_indices.squeeze(1), idx10], dim=1),
+            torch.stack([batch_indices.squeeze(1), idx11], dim=1)
+        ], dim=1)  # [B, 4, 2]
+        corner_values = lut_values_batch[corner_indices_2d[:, :, 0], corner_indices_2d[:, :, 1]]
+        v00, v01, v10, v11 = corner_values[:, 0], corner_values[:, 1], corner_values[:, 2], corner_values[:, 3]
 
         # Perform Bilinear Interpolation
         t_interval = t1 - t0
@@ -574,11 +589,17 @@ class TimingPropagation(nn.Module):
         net_in_pins = torch.unique(self.pin_net[arc_out_pins])
         return net_in_pins, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran, cell_arc_r_delays, cell_arc_f_delays
     
+    # @torch.compile    
     def calculate_cell_aat_level(self, level_cells,
-                                 pin_rAAT, pin_fAAT,
-                                 pin_rtran, pin_ftran,
-                                 pin_net_cap_rise, pin_net_cap_fall,
-                                 cell_arc_r_delays, cell_arc_f_delays):
+                                pin_rAAT, pin_fAAT,
+                                pin_rtran, pin_ftran,
+                                pin_net_cap_rise, pin_net_cap_fall,
+                                cell_arc_r_delays, cell_arc_f_delays):
+        """
+        Optimized version of the AAT calculation function.
+        It groups arcs by their 'unate' property (timing sense) to avoid
+        redundant delay and transition calculations.
+        """
         start_time = time.time()
         device = pin_rAAT.device
 
@@ -586,10 +607,10 @@ class TimingPropagation(nn.Module):
         cell_arcs_start = self.inst_flat_arcs_start[level_cells]
         cell_arcs_end = self.inst_flat_arcs_start[level_cells + 1]
 
-        # Compute number of outpins and inpins per cell
+        # Compute number of arcs per cell
         num_arcs = cell_arcs_end - cell_arcs_start
 
-        # Generate all outpin indices
+        # Generate all arc indices for the current level
         max_arcs = num_arcs.max().item()
         if max_arcs == 0:
             return torch.tensor([], device=device, dtype=torch.long), pin_rAAT, pin_fAAT, pin_rtran, pin_ftran, cell_arc_r_delays, cell_arc_f_delays
@@ -605,92 +626,91 @@ class TimingPropagation(nn.Module):
         lib_arc_idxs = level_inst_arcs[:, 3]
         timing_senses = level_inst_arcs[:, 4]
 
-        if (arc_out_pins == 4720 ).any():
+        if (arc_out_pins == 332754 ).any():
             logging.warning(f"lib_arc_idxs: {lib_arc_idxs}")
 
-        # 1. 准备输入条件
-        #    - Rise Slew/Load at Input for Rise Delay/Tran calculation
-        #    - Fall Slew/Load at Input for Fall Delay/Tran calculation
+        # 1. 准备输入条件 (Prepare inputs)
         pin_r_slew_in = pin_rtran[arc_in_pins]
         pin_f_slew_in = pin_ftran[arc_in_pins]
-
         pin_r_load_out = pin_net_cap_rise[arc_out_pins]
         pin_f_load_out = pin_net_cap_fall[arc_out_pins]
 
-        # --- 2. 计算四种基础情况的延时(Delay)和转换时间(Transition) ---
-
-        # Rise -> Rise (r->r)
-        delay_rr = self.r_delay_entry(
-            lib_cell_idxs, pin_r_slew_in, pin_r_load_out, lib_arc_idxs)
-        tran_rr = self.r_tran_entry(
-            lib_cell_idxs, pin_r_slew_in, pin_r_load_out, lib_arc_idxs)
-
-        # Fall -> Fall (f->f)
-        delay_ff = self.f_delay_entry(
-            lib_cell_idxs, pin_f_slew_in, pin_f_load_out, lib_arc_idxs)
-        tran_ff = self.f_tran_entry(
-            lib_cell_idxs, pin_f_slew_in, pin_f_load_out, lib_arc_idxs)
-
-        # Rise -> Fall (r->f)
-        delay_rf = self.f_delay_entry(
-            lib_cell_idxs, pin_r_slew_in, pin_f_load_out, lib_arc_idxs)
-        tran_rf = self.f_tran_entry(
-            lib_cell_idxs, pin_r_slew_in, pin_f_load_out, lib_arc_idxs)
-
-        # Fall -> Rise (f->r)
-        delay_fr = self.r_delay_entry(
-            lib_cell_idxs, pin_f_slew_in, pin_r_load_out, lib_arc_idxs)
-        tran_fr = self.r_tran_entry(
-            lib_cell_idxs, pin_f_slew_in, pin_r_load_out, lib_arc_idxs)
-
-        # --- 3. 根据 Timing Sense 组合最终结果 ---
-        # is_non_unate mask is implicitly `not (is_pos_unate or is_neg_unate)`
+        # 2. 根据 Unate 类型进行分组 (Group arcs by unate type)
         is_pos_unate = (timing_senses == 1)
         is_neg_unate = (timing_senses == -1)
+        is_non_unate = ~ (is_pos_unate | is_neg_unate)
 
-        # --- 计算最终的上升输出延时 (r_delays) ---
-        # Positive unate : r->r / f->f
-        # Negative unate : f->r / r->f
-        # Non-unate : worst of r->r, f->r, f->f, r->f
-        r_delays_non_unate = torch.maximum(delay_rr, delay_fr)
-        f_delays_non_unate = torch.maximum(delay_ff, delay_rf)
-        r_delays = torch.where(is_pos_unate, delay_rr,
-                               torch.where(is_neg_unate, delay_fr, r_delays_non_unate))
-        f_delays = torch.where(is_pos_unate, delay_ff,
-                               torch.where(is_neg_unate, delay_rf, f_delays_non_unate))
+        num_level_arcs = level_inst_arcs.shape[0]
+        r_delays = torch.zeros(num_level_arcs, device=device, dtype=torch.float32)
+        f_delays = torch.zeros(num_level_arcs, device=device, dtype=torch.float32)
+        r_trans = torch.zeros(num_level_arcs, device=device, dtype=torch.float32)
+        f_trans = torch.zeros(num_level_arcs, device=device, dtype=torch.float32)
 
-        # --- 计算最终的上升输出转换时间 (r_trans) ---
-        r_trans_non_unate = torch.maximum(tran_rr, tran_fr)
-        r_trans = torch.where(is_pos_unate, tran_rr,
-                              torch.where(is_neg_unate, tran_fr, r_trans_non_unate))
+        # --- 3. 按需计算每种 Unate 类型的 Delay 和 Tran ---
 
-        # --- 计算最终的下降输出转换时间 (f_trans) ---
-        f_trans_non_unate = torch.maximum(tran_ff, tran_rf)
-        f_trans = torch.where(is_pos_unate, tran_ff,
-                              torch.where(is_neg_unate, tran_rf, f_trans_non_unate))
+        # A. Positive Unate (r->r, f->f)
+        if torch.any(is_pos_unate):
+            mask = is_pos_unate
+            # Rise -> Rise
+            delay_rr = self.r_delay_entry(lib_cell_idxs[mask], pin_r_slew_in[mask], pin_r_load_out[mask], lib_arc_idxs[mask])
+            tran_rr = self.r_tran_entry(lib_cell_idxs[mask], pin_r_slew_in[mask], pin_r_load_out[mask], lib_arc_idxs[mask])
+            # Fall -> Fall
+            delay_ff = self.f_delay_entry(lib_cell_idxs[mask], pin_f_slew_in[mask], pin_f_load_out[mask], lib_arc_idxs[mask])
+            tran_ff = self.f_tran_entry(lib_cell_idxs[mask], pin_f_slew_in[mask], pin_f_load_out[mask], lib_arc_idxs[mask])
 
-        # --- 4. 存储和更新 (最终修正版) ---
+            r_delays[mask] = delay_rr
+            f_delays[mask] = delay_ff
+            r_trans[mask] = tran_rr
+            f_trans[mask] = tran_ff
 
-        # ★★★ 核心修正: 获取当前批次中所有有效弧的、扁平化的全局索引 ★★★
-        # 这个操作会生成一个一维张量，其大小 (5104) 与 r_delays 的大小完全匹配
+        # B. Negative Unate (f->r, r->f)
+        if torch.any(is_neg_unate):
+            mask = is_neg_unate
+            # Fall -> Rise
+            delay_fr = self.r_delay_entry(lib_cell_idxs[mask], pin_f_slew_in[mask], pin_r_load_out[mask], lib_arc_idxs[mask])
+            tran_fr = self.r_tran_entry(lib_cell_idxs[mask], pin_f_slew_in[mask], pin_r_load_out[mask], lib_arc_idxs[mask])
+            # Rise -> Fall
+            delay_rf = self.f_delay_entry(lib_cell_idxs[mask], pin_r_slew_in[mask], pin_f_load_out[mask], lib_arc_idxs[mask])
+            tran_rf = self.f_tran_entry(lib_cell_idxs[mask], pin_r_slew_in[mask], pin_f_load_out[mask], lib_arc_idxs[mask])
+
+            r_delays[mask] = delay_fr
+            f_delays[mask] = delay_rf
+            r_trans[mask] = tran_fr
+            f_trans[mask] = tran_rf
+
+        # C. Non-Unate (worst of all applicable cases)
+        if torch.any(is_non_unate):
+            mask = is_non_unate
+            # Rise output calculation (worst of r->r and f->r)
+            delay_rr_non = self.r_delay_entry(lib_cell_idxs[mask], pin_r_slew_in[mask], pin_r_load_out[mask], lib_arc_idxs[mask])
+            tran_rr_non = self.r_tran_entry(lib_cell_idxs[mask], pin_r_slew_in[mask], pin_r_load_out[mask], lib_arc_idxs[mask])
+            delay_fr_non = self.r_delay_entry(lib_cell_idxs[mask], pin_f_slew_in[mask], pin_r_load_out[mask], lib_arc_idxs[mask])
+            tran_fr_non = self.r_tran_entry(lib_cell_idxs[mask], pin_f_slew_in[mask], pin_r_load_out[mask], lib_arc_idxs[mask])
+            r_delays[mask] = torch.maximum(delay_rr_non, delay_fr_non)
+            r_trans[mask] = torch.maximum(tran_rr_non, tran_fr_non)
+
+            # Fall output calculation (worst of f->f and r->f)
+            delay_ff_non = self.f_delay_entry(lib_cell_idxs[mask], pin_f_slew_in[mask], pin_f_load_out[mask], lib_arc_idxs[mask])
+            tran_ff_non = self.f_tran_entry(lib_cell_idxs[mask], pin_f_slew_in[mask], pin_f_load_out[mask], lib_arc_idxs[mask])
+            delay_rf_non = self.f_delay_entry(lib_cell_idxs[mask], pin_r_slew_in[mask], pin_f_load_out[mask], lib_arc_idxs[mask])
+            tran_rf_non = self.f_tran_entry(lib_cell_idxs[mask], pin_r_slew_in[mask], pin_f_load_out[mask], lib_arc_idxs[mask])
+            f_delays[mask] = torch.maximum(delay_ff_non, delay_rf_non)
+            f_trans[mask] = torch.maximum(tran_ff_non, tran_rf_non)
+
+        # --- 4. 存储和更新 (Store and Update) ---
+        # The logic from here remains the same, as r_delays, f_delays, etc. are now fully populated.
+
         scatter_indices = arcs_global_indices[arcs_mask]
-
-        # 使用这个正确的一维索引张量进行scatter操作
         cell_arc_r_delays.scatter_(0, scatter_indices.long(), r_delays)
         cell_arc_f_delays.scatter_(0, scatter_indices.long(), f_delays)
 
-        # 后续的AAT和Slew更新逻辑保持不变
         r_aat_updates = pin_rAAT[arc_in_pins] + r_delays
         f_aat_updates = pin_fAAT[arc_in_pins] + f_delays
 
-        pin_rAAT = torch.scatter_reduce(pin_rAAT, 0, arc_out_pins.long(
-        ), r_aat_updates, reduce="amax", include_self=False)
-        pin_fAAT = torch.scatter_reduce(pin_fAAT, 0, arc_out_pins.long(
-        ), f_aat_updates, reduce="amax", include_self=False)
-        pin_rtran = torch.scatter_reduce(
-            pin_rtran, 0, arc_out_pins.long(), r_trans, reduce="amax", include_self=False)
-        pin_ftran = torch.scatter_reduce(
-            pin_ftran, 0, arc_out_pins.long(), f_trans, reduce="amax", include_self=False)
+        pin_rAAT = torch.scatter_reduce(pin_rAAT, 0, arc_out_pins.long(), r_aat_updates, reduce="amax", include_self=False)
+        pin_fAAT = torch.scatter_reduce(pin_fAAT, 0, arc_out_pins.long(), f_aat_updates, reduce="amax", include_self=False)
+        pin_rtran = torch.scatter_reduce(pin_rtran, 0, arc_out_pins.long(), r_trans, reduce="amax", include_self=False)
+        pin_ftran = torch.scatter_reduce(pin_ftran, 0, arc_out_pins.long(), f_trans, reduce="amax", include_self=False)
 
         net_in_pins = torch.unique(self.pin_net[arc_out_pins])
         logging.debug(f"Cell AAT Level Time: {time.time() - start_time:.4f}s")

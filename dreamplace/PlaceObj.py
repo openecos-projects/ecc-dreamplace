@@ -438,6 +438,23 @@ class PlaceObj(nn.Module):
                 result, self.macro_overlap, alpha=self.macro_overlap_weight.item()
             )
         if self.use_timing_obj:
+            # log_dir = './log'
+            # os.makedirs(log_dir, exist_ok=True)
+            # with torch.profiler.profile(
+            #     activities=[
+            #         torch.profiler.ProfilerActivity.CPU,  # 追踪 CPU 上的操作
+            #         # torch.profiler.ProfilerActivity.CUDA, # 追踪 GPU 上的操作 (如果可用)
+            #     ],
+            #     schedule=torch.profiler.schedule(wait=0, warmup=0, active=1, repeat=1),
+            #     on_trace_ready=torch.profiler.tensorboard_trace_handler(log_dir),
+            #     record_shapes=True,  # 关闭形状记录以减少文件大小
+            #     profile_memory=True, # 关闭内存分析以减少文件大小
+            #     with_stack=True
+            # ) as prof:
+            #     wns, tns, ws, ts = self.timing_obj(pos)
+            #     prof.step()  # 标记一个新的分析步骤
+            #     exit(0)
+            
             wns, tns, ws, ts = self.timing_obj(pos)
             slack = - (self.timing_wns_coeff * wns + self.timing_tns_coeff * tns)
             self.wns = wns
@@ -1208,7 +1225,7 @@ class PlaceObj(nn.Module):
         # ==============================================================================
         import math
         import numpy as np
-
+        
         new_x, new_y = self.op_collections.steiner_topo_op(
             self.op_collections.pin_pos_op(pos)
         )
@@ -1445,7 +1462,6 @@ class PlaceObj(nn.Module):
         self.op_collections.precondition_op(
             pos.grad, self.density_weight, self.update_mask, self.fix_nodes_mask
         )
-
         return obj, pos.grad
 
     def forward(self):

@@ -1229,6 +1229,32 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         # run RSMT
         with torch.no_grad():
             tt = time.time()
+            self.data_collections.net_flat_topo_sort, self.data_collections.net_flat_topo_sort_start, \
+                self.data_collections.pin_fa, self.data_collections.flat_pin_to, self.data_collections.flat_pin_to_start, \
+                self.data_collections.flat_pin_from = self.op_collections.steiner_topo_op.rebuild_tree(
+                    self.op_collections.pin_pos_op(self.pos[0]))
+            new_x, new_y = self.op_collections.steiner_topo_op(
+                self.op_collections.pin_pos_op(self.pos[0])
+            )
+            self.data_collections.net_flat_topo_sort,
+            self.data_collections.net_flat_topo_sort_start,
+            self.data_collections.pin_fa,
+            self.data_collections.flat_pin_to_start,
+            flat_pin_to = self.data_collections.flat_pin_to
+            flat_pin_from = self.data_collections.flat_pin_from
+            
+            length = (torch.abs(new_x[flat_pin_from] - new_x[flat_pin_to])
+                    + torch.abs(new_y[flat_pin_from] - new_y[flat_pin_to])) / params.scale_factor  / placedb.dbu
+            
+            with open("flute_length.txt", "w") as f:
+                f.write("net_name, flute_length (um)\n")
+                for net_id in range(placedb.num_nets):
+                    start = self.data_collections.net_flat_topo_sort_start[net_id]
+                    end = self.data_collections.net_flat_topo_sort_start[net_id + 1]
+                    net_name = placedb.net_names[net_id]
+                    net_length = length[start:end].sum().item()
+                    f.write(f"{net_name}, {net_length}\n")
+
             wns, tns, ws, ts = model.timing_obj(self.pos[0])
             model.check_log(wns, tns, ws, ts)
             rsmt_wl = self.op_collections.rsmt_wl_op(self.pos[0]) / placedb.dbu

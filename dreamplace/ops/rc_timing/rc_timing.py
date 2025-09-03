@@ -360,6 +360,7 @@ class RCTiming(nn.Module):
         length = (torch.abs(new_x[flat_pin_from] - new_x[flat_pin_to])
                     + torch.abs(new_y[flat_pin_from] - new_y[flat_pin_to])) / self.scale_factor / self.dbu
         
+        logging.info(f"RC timing length : {length.sum().item():.4f} um")
         cap = length * self.c_unit
         net_caps = torch.zeros_like(new_x, dtype=pin_caps_base.dtype)
         net_caps = torch.scatter_add(net_caps, 0, flat_pin_from.long(), cap / 2)

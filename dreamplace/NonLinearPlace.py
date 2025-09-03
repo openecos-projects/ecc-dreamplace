@@ -118,6 +118,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     self.op_collections,
                     global_place_params,
                 ).to(self.data_collections.pos[0].device)
+                model.compile()
 
                 if params.macro_place_flag and macro_placed:
                     movable_macro_mask = self.data_collections.movable_macro_mask
@@ -1228,11 +1229,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         # run RSMT
         with torch.no_grad():
             tt = time.time()
-            # FIXME:
-            rsmt_wl = 0
+            wns, tns, ws, ts = model.timing_obj(self.pos[0])
+            model.check_log(wns, tns, ws, ts)
+            rsmt_wl = self.op_collections.rsmt_wl_op(self.pos[0]) / placedb.dbu
             logging.info("rsmt computation takes %.3f seconds" %
                          (time.time() - tt))
-            logging.info("flute rsmt %.6E" % rsmt_wl)
+            logging.info("flute rsmt %.6E um" % rsmt_wl)
 
         # get HPWL
         with torch.no_grad():

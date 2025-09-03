@@ -1254,10 +1254,10 @@ class PlaceObj(nn.Module):
         # 时序传播算子 (为获取WNS/TNS和完整的slew/load值，仍然需要运行)
         wns, tns, ws, ts = self.op_collections.timing_propagation_op(delays, impulses, loads)
         
-        if self.invoke_timing_count % 3 == 0:
-            print(f"\n--- [Timing Debug] 第 {self.invoke_timing_count} 次调用 timing_obj ---")
-            self.check_log(wns, tns, ws, ts)
-            print(f"当前 WNS: {wns.item():.4f}, TNS: {tns.item():.4f}, WS: {ws.item():.4f}, TS: {ts.item():.4f}")
+        # if self.invoke_timing_count % 280 == 0:
+        #     print(f"\n--- [Timing Debug] 第 {self.invoke_timing_count} 次调用 timing_obj ---")
+            
+        #     print(f"当前 WNS: {wns.item():.4f}, TNS: {tns.item():.4f}, WS: {ws.item():.4f}, TS: {ts.item():.4f}")
         self.invoke_timing_count += 1
         return wns, tns, ws, ts
     

@@ -503,7 +503,7 @@ at::Tensor steiner_topo_backward(at::Tensor grad_newx, at::Tensor grad_newy,
             DREAMPLACE_TENSOR_DATA_PTR(grad_newx, scalar_t),
             DREAMPLACE_TENSOR_DATA_PTR(grad_newy, scalar_t),
             DREAMPLACE_TENSOR_DATA_PTR(vtx_relate_x, int),
-            DREAMPLACE_TENSOR_DATA_PTR(vtx_relate_x, int), num_vertices,
+            DREAMPLACE_TENSOR_DATA_PTR(vtx_relate_y, int), num_vertices,
             DREAMPLACE_TENSOR_DATA_PTR(grad_pin, scalar_t),
             DREAMPLACE_TENSOR_DATA_PTR(grad_pin, scalar_t) + num_pins);
       });

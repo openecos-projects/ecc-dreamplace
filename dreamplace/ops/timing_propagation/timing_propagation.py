@@ -781,8 +781,8 @@ class TimingPropagation(nn.Module):
         f_delays = cell_arc_f_delays[scatter_indices]
         r_delays = cell_arc_r_delays[scatter_indices]
 
-        if (arc_in_pins == 7850   ).any():
-            logging.warning(torch.where(arc_in_pins == 7850  ))
+        # if (arc_in_pins == 7850   ).any():
+        #     logging.warning(torch.where(arc_in_pins == 7850  ))
 
         assert pin_rRAT[arc_out_pins].max(
             ) <= 1e8, "Negative r_rat_updates detected"
@@ -837,9 +837,9 @@ class TimingPropagation(nn.Module):
         pin_data_rtran_in = pin_rtran[arc_out_pins]
         pin_data_ftran_in = pin_ftran[arc_out_pins]
 
-        if (arc_out_pins == 4720 ).any():
-            logging.info(torch.where(arc_out_pins == 4720))
-            logging.warning(f"lib_arc_idxs: {lib_arc_idxs}")
+        # if (arc_out_pins == 4720 ).any():
+        #     logging.info(torch.where(arc_out_pins == 4720))
+        #     logging.warning(f"lib_arc_idxs: {lib_arc_idxs}")
             
         # R->R
         rr_setup_time = self.r_setup_entry(lib_cell_idxs, pin_clk_rtran_in,
@@ -965,13 +965,15 @@ class TimingPropagation(nn.Module):
         fslack = pin_fRAT - pin_fAAT
         slack = torch.min(rslack, fslack)
         RAT_THRESHOLD = 8e7 
-        valid_mask = (pin_rRAT < RAT_THRESHOLD) & (pin_fRAT < RAT_THRESHOLD)
-        valid_slacks = slack[valid_mask]
-        neg_slack = torch.clamp(valid_slacks, max=0)
-        ws = torch.min(valid_slacks)
-        ts = torch.sum(valid_slacks)
-        wns = torch.min(neg_slack)
-        tns = torch.sum(neg_slack)
+        # valid_mask = (pin_rRAT < RAT_THRESHOLD) & (pin_fRAT < RAT_THRESHOLD)
+        # all_valid_slacks = slack[valid_mask]
+        endpoints_slack = slack[self.end_points]
+        # neg_slack = torch.clamp(all_valid_slacks, max=0)
+        neg_endpoint_slack = torch.clamp(endpoints_slack, max=0)
+        ws = torch.min(endpoints_slack)
+        ts = 0
+        wns = torch.min(neg_endpoint_slack)
+        tns = torch.sum(neg_endpoint_slack)
 
         self.pin_rAAT, self.pin_fAAT, self.pin_rRAT, self.pin_fRAT = (
             t.clone().detach() for t in [pin_rAAT, pin_fAAT, pin_rRAT, pin_fRAT])

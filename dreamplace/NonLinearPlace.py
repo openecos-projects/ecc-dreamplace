@@ -1247,13 +1247,21 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     + torch.abs(new_y[flat_pin_from] - new_y[flat_pin_to])) / params.scale_factor  / placedb.dbu
             
             with open("flute_length.txt", "w") as f:
-                f.write("net_name, flute_length (um)\n")
+                f.write("net_name, flute_length (um), cap (pF)\n")
                 for net_id in range(placedb.num_nets):
                     start = self.data_collections.net_flat_topo_sort_start[net_id]
                     end = self.data_collections.net_flat_topo_sort_start[net_id + 1]
                     net_name = placedb.net_names[net_id]
-                    net_length = length[start:end].sum().item()
-                    f.write(f"{net_name}, {net_length}\n")
+                    net_flat_pins_nodes = self.data_collections.net_flat_topo_sort[start:end]
+                    net_flat_pin_start = self.data_collections.flat_pin_to_start[net_flat_pins_nodes]
+                    net_flat_pin_end = self.data_collections.flat_pin_to_start[net_flat_pins_nodes + 1]
+                    net_length = 0
+                    for i in range(len(net_flat_pins_nodes)):
+                        pin_start = net_flat_pin_start[i]
+                        pin_end = net_flat_pin_end[i]
+                        net_length += length[pin_start:pin_end].sum().item()
+                    # net_length = length[start:end].sum().item()
+                    f.write(f"{net_name}, {net_length}, {placedb.c_unit * net_length}\n")
 
             wns, tns, ws, ts = model.timing_obj(self.pos[0])
             model.check_log(wns, tns, ws, ts)

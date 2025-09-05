@@ -1061,7 +1061,7 @@ class PlaceObj(nn.Module):
         tns_py_calc = torch.sum(torch.clamp(setup_slack_py_pins_only, max=0)).item()
 
         valid_setup_mask = torch.isfinite(setup_slack_cpp)
-        setup_slack_cpp_valid = setup_slack_cpp[valid_setup_mask]
+        setup_slack_cpp_valid = setup_slack_cpp[self.data_collections.end_points]
 
         if setup_slack_cpp_valid.numel() > 0:
             wns_cpp_calc = torch.min(setup_slack_cpp_valid).item()

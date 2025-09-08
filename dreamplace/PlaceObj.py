@@ -874,15 +874,23 @@ class PlaceObj(nn.Module):
 
         # 4a. 预处理iEDA返回的Cell Arc数据 (不变)
         ieda_arc_map = {
-            (
+        }
+        for arc in cell_arc_delays_cpp:
+            key_t = (
                 arc["inst_name"],
                 arc["from_pin"],
                 arc["to_pin"],
                 arc["transition"],
                 arc["arc_sense"],
-            ): arc
-            for arc in cell_arc_delays_cpp
-        }
+            )
+            if ieda_arc_map.get(key_t) is not None:
+                tmp = ieda_arc_map[key_t]
+                if tmp['delay_ns'] < arc['delay_ns']:
+                    ieda_arc_map[key_t] = arc
+                # print(f"Warning: Duplicate arc key found: {key_t}. Overwriting previous entry.")
+            else:
+                ieda_arc_map[key_t] = arc
+            
 
         # 4b. 预处理Python端计算的Cell Arc数据 (逻辑修正版)
         op_timing = self.op_collections.timing_propagation_op

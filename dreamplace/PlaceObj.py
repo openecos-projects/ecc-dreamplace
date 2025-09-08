@@ -454,7 +454,7 @@ class PlaceObj(nn.Module):
             #     wns, tns, ws, ts = self.timing_obj(pos)
             #     prof.step()  # 标记一个新的分析步骤
             #     exit(0)
-            
+
             wns, tns, ws, ts = self.timing_obj(pos)
             slack = - (self.timing_wns_coeff * wns + self.timing_tns_coeff * tns)
             self.wns = wns
@@ -888,11 +888,18 @@ class PlaceObj(nn.Module):
         op_timing = self.op_collections.timing_propagation_op
         op_elmore = self.op_collections.elmore_delay_op
 
-        py_cell_arc_r_delays = (
-            op_timing.cell_arc_r_delays.cpu().numpy()
+        py_cell_arc_rr_delays = (
+            op_timing.cell_arc_rr_delays.cpu().numpy()
         )  # Delay for OUTPUT Rise
-        py_cell_arc_f_delays = (
-            op_timing.cell_arc_f_delays.cpu().numpy()
+        py_cell_arc_ff_delays = (
+            op_timing.cell_arc_ff_delays.cpu().numpy()
+        )  # Delay for OUTPUT Fall
+
+        py_cell_arc_rf_delays = (
+            op_timing.cell_arc_rf_delays.cpu().numpy()
+        )  # Delay for OUTPUT Rise
+        py_cell_arc_fr_delays = (
+            op_timing.cell_arc_fr_delays.cpu().numpy()
         )  # Delay for OUTPUT Fall
 
         py_pin_r_slew = op_timing.pin_rtran.cpu().numpy()
@@ -922,9 +929,21 @@ class PlaceObj(nn.Module):
                 to_pin_name = pin_names[out_pin_id].decode("utf-8")
 
                 is_inverting = arc_sense == -1  # negative_unate
+                is_unate = arc_sense == 0      # non_unate
 
                 # --- 情况一: 报告中对应 INPUT "Rise" 的行 ---
-                delay_for_input_rise = py_cell_arc_r_delays[inst_arc_idx]
+                delay_for_input_rise = (
+                    py_cell_arc_rf_delays[inst_arc_idx]
+                    if is_inverting
+                    else (
+                        py_cell_arc_rr_delays[inst_arc_idx]
+                        if not is_unate
+                        else max(
+                            py_cell_arc_rr_delays[inst_arc_idx],
+                            py_cell_arc_rf_delays[inst_arc_idx],
+                        )
+                    )
+                )
 
                 key_rise = (cell_name, from_pin_name, to_pin_name, "Rise", arc_sense)
                 input_slew_rise = (
@@ -945,8 +964,19 @@ class PlaceObj(nn.Module):
                 }
 
                 # --- 情况二: 报告中对应 INPUT "Fall" 的行 ---
-                delay_for_input_fall = py_cell_arc_f_delays[inst_arc_idx]
-
+                delay_for_input_fall = (
+                    py_cell_arc_fr_delays[inst_arc_idx]
+                    if is_inverting
+                    else (
+                        py_cell_arc_ff_delays[inst_arc_idx]
+                        if not is_unate
+                        else max(
+                            py_cell_arc_fr_delays[inst_arc_idx],
+                            py_cell_arc_ff_delays[inst_arc_idx],
+                        )
+                    )
+                )
+                
                 key_fall = (cell_name, from_pin_name, to_pin_name, "Fall", arc_sense)
                 input_slew_fall = (
                     py_pin_r_slew[in_pin_id]
@@ -1098,7 +1128,7 @@ class PlaceObj(nn.Module):
 
         # 1a. 找出所有“第一层传播”的引脚及其驱动源
         start_pin_ids = self.data_collections.start_points.cpu().numpy()
-        
+
         pin_id_to_net_id_map = {}
         for net_id in range(len(self.data_collections.flat_net2pin_start_map) - 1):
             start_idx = self.data_collections.flat_net2pin_start_map[net_id]
@@ -1119,11 +1149,11 @@ class PlaceObj(nn.Module):
                         sinks.append(pin_id)
                 if sinks:
                     start_pin_to_sinks_map[start_pin_id] = sinks
-        
+
         # 1b. 预处理Python和iEDA的数据
         op_timing = self.op_collections.timing_propagation_op
         op_elmore = self.op_collections.elmore_delay_op
-        
+
         py_pin_r_impulse = op_elmore.impulses['rise'].clone().detach().cpu().numpy()
         py_pin_f_impulse = op_elmore.impulses['fall'].clone().detach().cpu().numpy()
         py_pin_r_slew = op_timing.pin_rtran.clone().detach().cpu().numpy()
@@ -1149,7 +1179,7 @@ class PlaceObj(nn.Module):
         with open(report_filename, "w", newline="", encoding="utf-8") as csvfile:
             writer = csv.writer(csvfile)
             writer.writerow(csv_header)
-            
+
             # 按 start_pin_id 排序，确保报告顺序一致
             for start_pin_id, sink_pin_ids in sorted(start_pin_to_sinks_map.items()):
                 # --- 处理 Start Pin ---
@@ -1158,7 +1188,7 @@ class PlaceObj(nn.Module):
                 py_f_slew_start = py_pin_f_slew[start_pin_id]
                 py_r_impulse_start = py_pin_r_impulse[start_pin_id]
                 py_f_impulse_start = py_pin_f_impulse[start_pin_id]
-                
+
                 key_rise_start = (start_pin_name, "Max", "Rise")
                 key_fall_start = (start_pin_name, "Max", "Fall")
                 ieda_data_rise = ieda_pin_map.get(key_rise_start, {})
@@ -1166,7 +1196,7 @@ class PlaceObj(nn.Module):
 
                 ieda_r_slew_start = ieda_data_rise.get('slew_ns', float('nan'))
                 ieda_f_slew_start = ieda_data_fall.get('slew_ns', float('nan'))
-                
+
                 ieda_r_impulse_sq = ieda_data_rise.get('impulse', -1.0)
                 ieda_r_impulse_start = math.sqrt(ieda_r_impulse_sq) if ieda_r_impulse_sq >= 0 else float('nan')
                 ieda_f_impulse_sq = ieda_data_fall.get('impulse', -1.0)
@@ -1188,7 +1218,7 @@ class PlaceObj(nn.Module):
                     py_f_slew_sink = py_pin_f_slew[sink_pin_id]
                     py_r_impulse_sink = py_pin_r_impulse[sink_pin_id]
                     py_f_impulse_sink = py_pin_f_impulse[sink_pin_id]
-                    
+
                     key_rise_sink = (sink_pin_name, "Max", "Rise")
                     key_fall_sink = (sink_pin_name, "Max", "Fall")
                     ieda_data_rise_sink = ieda_pin_map.get(key_rise_sink, {})
@@ -1210,9 +1240,8 @@ class PlaceObj(nn.Module):
                         f"{py_f_impulse_sink:.9f}", f"{ieda_f_impulse_sink:.9f}"
                     ]
                     writer.writerow(sink_pin_row)
-        
-        print(f"第一层传播引脚的详细报告已成功写入: {report_filename}", flush=True)
 
+        print(f"第一层传播引脚的详细报告已成功写入: {report_filename}", flush=True)
 
     def timing_obj(self, pos):
         """
@@ -1225,7 +1254,7 @@ class PlaceObj(nn.Module):
         # ==============================================================================
         import math
         import numpy as np
-        
+
         new_x, new_y = self.op_collections.steiner_topo_op(
             self.op_collections.pin_pos_op(pos)
         )
@@ -1253,14 +1282,14 @@ class PlaceObj(nn.Module):
 
         # 时序传播算子 (为获取WNS/TNS和完整的slew/load值，仍然需要运行)
         wns, tns, ws, ts = self.op_collections.timing_propagation_op(delays, impulses, loads)
-        
+
         # if self.invoke_timing_count % 280 == 0:
         #     print(f"\n--- [Timing Debug] 第 {self.invoke_timing_count} 次调用 timing_obj ---")
-            
+
         #     print(f"当前 WNS: {wns.item():.4f}, TNS: {tns.item():.4f}, WS: {ws.item():.4f}, TS: {ts.item():.4f}")
         self.invoke_timing_count += 1
         return wns, tns, ws, ts
-    
+
     def check_log(self, wns, tns, ws, ts):
         # ==============================================================================
         # --- 步骤 2: 初始化iEDA并使用正确的线电容为其构建RC树 ---
@@ -1285,10 +1314,10 @@ class PlaceObj(nn.Module):
             cell_arc_delays_cpp,
             net_timing_details_cpp,
         )
-        
+
         self.write_arc_all(cell_arc_delays_cpp)
         self.show_slack_compare(at_late_cpp, rt_late_cpp, wns, tns, ws, ts)
-        
+
         # DEBUG
         self.write_first_level_pin_timing_log(net_timing_details_cpp)
         # DEBUG
@@ -1298,12 +1327,12 @@ class PlaceObj(nn.Module):
         print("\n--- [特定网络拓扑] 'DFF_659/Q_reg:Q' 所在网络的详细信息 ---")
 
         # ★★★ 您可以在这里修改想追踪的目标引脚名称 ★★★
-        target_pin_full_name = "DFF_659/Q_reg:Q"
-        
+        target_pin_full_name = "U4339:ZN"
+
         self.debug_target_pin_net_info(target_pin_full_name)
 
     def debug_target_pin_net_info(self, target_pin_full_name):
-        
+
         # 注意：请确保这个名字与 self.placedb.pin_names 中的某个条目完全匹配
         # 1. 准备必要的映射关系
         self.pin_names = self.placedb.pin_names

@@ -931,16 +931,16 @@ class PlaceObj(nn.Module):
                 is_inverting = arc_sense == -1  # negative_unate
                 is_unate = arc_sense == 0      # non_unate
 
-                # --- 情况一: 报告中对应 INPUT "Rise" 的行 ---
-                delay_for_input_rise = (
-                    py_cell_arc_rf_delays[inst_arc_idx]
+                # --- 情况一: 报告中对应 output "Rise" 的行 ---
+                delay_for_output_rise = (
+                    py_cell_arc_fr_delays[inst_arc_idx]
                     if is_inverting
                     else (
                         py_cell_arc_rr_delays[inst_arc_idx]
                         if not is_unate
                         else max(
                             py_cell_arc_rr_delays[inst_arc_idx],
-                            py_cell_arc_rf_delays[inst_arc_idx],
+                            py_cell_arc_fr_delays[inst_arc_idx],
                         )
                     )
                 )
@@ -951,28 +951,35 @@ class PlaceObj(nn.Module):
                     if is_inverting
                     else py_pin_r_slew[in_pin_id]
                 )
-                output_load_rise = (
-                    py_pin_f_load[out_pin_id]
-                    if is_inverting
-                    else py_pin_r_load[out_pin_id]
-                )
-                python_arc_map[key_rise] = {
-                    "delay": delay_for_input_rise,
-                    "slew": input_slew_rise,
-                    "load": output_load_rise,
-                    "arc_sense": arc_sense,
-                }
+                output_load_rise = py_pin_r_load[out_pin_id]
+                if python_arc_map.get(key_rise) is not None:
+                    tmp = python_arc_map[key_rise]
+                    if tmp['delay'] < delay_for_output_rise:
+                        python_arc_map[key_rise] = {
+                            "delay": delay_for_output_rise,
+                            "slew": input_slew_rise,
+                            "load": output_load_rise,
+                            "arc_sense": arc_sense,
+                        }
+                    # print(f"Warning: Duplicate arc key found: {key_rise}. Overwriting previous entry.")
+                else:
+                    python_arc_map[key_rise] = {
+                        "delay": delay_for_output_rise,
+                        "slew": input_slew_rise,
+                        "load": output_load_rise,
+                        "arc_sense": arc_sense,
+                    }
 
-                # --- 情况二: 报告中对应 INPUT "Fall" 的行 ---
-                delay_for_input_fall = (
-                    py_cell_arc_fr_delays[inst_arc_idx]
+                # --- 情况二: 报告中对应 output "Fall" 的行 ---
+                delay_for_output_fall = (
+                    py_cell_arc_rf_delays[inst_arc_idx]
                     if is_inverting
                     else (
                         py_cell_arc_ff_delays[inst_arc_idx]
                         if not is_unate
                         else max(
-                            py_cell_arc_fr_delays[inst_arc_idx],
                             py_cell_arc_ff_delays[inst_arc_idx],
+                            py_cell_arc_rf_delays[inst_arc_idx],
                         )
                     )
                 )
@@ -983,17 +990,24 @@ class PlaceObj(nn.Module):
                     if is_inverting
                     else py_pin_f_slew[in_pin_id]
                 )
-                output_load_fall = (
-                    py_pin_r_load[out_pin_id]
-                    if is_inverting
-                    else py_pin_f_load[out_pin_id]
-                )
-                python_arc_map[key_fall] = {
-                    "delay": delay_for_input_fall,
-                    "slew": input_slew_fall,
-                    "load": output_load_fall,
-                    "arc_sense": arc_sense,
-                }
+                output_load_fall = py_pin_f_load[out_pin_id]
+                if python_arc_map.get(key_fall) is not None:
+                    tmp= python_arc_map[key_fall]
+                    if tmp['delay'] < delay_for_output_fall:
+                        python_arc_map[key_fall] = {
+                            "delay": delay_for_output_fall,
+                            "slew": input_slew_fall,
+                            "load": output_load_fall,
+                            "arc_sense": arc_sense,
+                        }
+                    # print(f"Warning: Duplicate arc key found: {key_fall}. Overwriting previous entry.")
+                else:
+                    python_arc_map[key_fall] = {
+                        "delay": delay_for_output_fall,
+                        "slew": input_slew_fall,
+                        "load": output_load_fall,
+                        "arc_sense": arc_sense,
+                    }
 
         # 4c. 构建用于排序和报告的中间列表 (不变)
         report_data = []

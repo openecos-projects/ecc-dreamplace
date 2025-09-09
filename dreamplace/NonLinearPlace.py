@@ -1245,8 +1245,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             
             length = (torch.abs(new_x[flat_pin_from] - new_x[flat_pin_to])
                     + torch.abs(new_y[flat_pin_from] - new_y[flat_pin_to])) / params.scale_factor  / placedb.dbu
-            
-            with open("flute_length.txt", "w") as f:
+            flute_length_path = "%s/%s_flute_length.txt" % (
+                params.result_dir, params.design_name())
+            with open(flute_length_path, "w") as f:
                 f.write("net_name, flute_length (um), cap (pF)\n")
                 for net_id in range(placedb.num_nets):
                     start = self.data_collections.net_flat_topo_sort_start[net_id]

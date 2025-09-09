@@ -461,7 +461,7 @@ class PlaceObj(nn.Module):
             self.tns = tns
             self.ws = ws
             self.ts = ts
-            # print(f"Timing slack: {slack}")
+            # logging.info(f"Timing slack: {slack}")
             result = torch.add(result, slack)
 
         return result
@@ -517,7 +517,7 @@ class PlaceObj(nn.Module):
         # ==============================================================================
         # --- 步骤 2: 初始化iEDA并使用正确的线电容为其构建RC树 ---
         # ==============================================================================
-        print("正在初始化iEDA STA引擎...")
+        logging.info("正在初始化iEDA STA引擎...")
         ieda_sta = IEDASta(self.placedb.data_manager.dir_workspace)
         num_pins = len(self.placedb.pin_names)
         self.id2net_name_map = {v: k for k, v in self.placedb.net_name2id_map.items()}
@@ -537,7 +537,7 @@ class PlaceObj(nn.Module):
             (u, v): r for u, v, r in zip(flat_pin_from, flat_pin_to, edge_resistance)
         }
 
-        print("开始为iEDA构建所有网络的RC树...")
+        logging.info("开始为iEDA构建所有网络的RC树...")
         for net_id, net_name in self.id2net_name_map.items():
             # (RC树构建循环逻辑保持不变，确保传递的是 node_wire_caps)
             # ... 此处省略您已验证通过的RC树构建循环代码 ...
@@ -609,12 +609,12 @@ class PlaceObj(nn.Module):
                 edge_resistances_net,
                 net_nodes_global_indices,
             )
-        print("所有网络的RC树构建完成。")
+        logging.info("所有网络的RC树构建完成。")
 
         # ==============================================================================
         # --- 步骤 3: 调用iEDA执行分析并获取所有调试信息 ---
         # ==============================================================================
-        print("调用iEDA执行时序分析并获取详细数据...")
+        logging.info("调用iEDA执行时序分析并获取详细数据...")
         at_late_cpp, at_early_cpp, rt_late_cpp, rt_early_cpp = [], [], [], []
         pin_net_delay_cpp, cell_arc_delays_cpp, net_timing_details_cpp = [], [], []
 
@@ -628,7 +628,7 @@ class PlaceObj(nn.Module):
             cell_arc_delays_cpp,
             net_timing_details_cpp,
         )
-        print(
+        logging.info(
             f"成功获取iEDA数据: {len(cell_arc_delays_cpp)}条CellArc, {len(net_timing_details_cpp)}条NetPin记录。"
         )
         return (
@@ -656,8 +656,9 @@ class PlaceObj(nn.Module):
         # # ======================================================================
         num_pins = len(self.placedb.pin_names)
         # 定义报告文件名（CSV）
-        report_filename = "timing_pin_all_report.csv"
-        print(f"\n正在生成详细时序对比报告，结果将写入CSV文件: {report_filename}")
+        report_filename = "%s/%s_timing_pin_all_report.csv" % (
+                self.params.result_dir, self.params.design_name())
+        logging.info(f"\n正在生成详细时序对比报告，结果将写入CSV文件: {report_filename}")
 
         # 在函数内部导入所需模块
         import math
@@ -858,7 +859,7 @@ class PlaceObj(nn.Module):
                 writer.writerow(row)
 
         # 在写入完成后，向控制台打印一条确认信息
-        print(f"详细的对比报告已成功写入CSV文件: {report_filename}")
+        logging.info(f"详细的对比报告已成功写入CSV文件: {report_filename}")
 
     def write_arc_all(
         self, cell_arc_delays_cpp
@@ -867,7 +868,7 @@ class PlaceObj(nn.Module):
         # ==============================================================================
         # --- 步骤 4: 对齐Cell Arc Delay (新增Arc Sense列)，并写入CSV文件 ---
         # ==============================================================================
-        print("\n--- Cell Arc Delay 详细对比 (按差异绝对值降序排序) ---")
+        logging.info("\n--- Cell Arc Delay 详细对比 (按差异绝对值降序排序) ---")
         import math
         import numpy as np
         import csv
@@ -887,7 +888,7 @@ class PlaceObj(nn.Module):
                 tmp = ieda_arc_map[key_t]
                 if tmp['delay_ns'] < arc['delay_ns']:
                     ieda_arc_map[key_t] = arc
-                # print(f"Warning: Duplicate arc key found: {key_t}. Overwriting previous entry.")
+                # logging.info(f"Warning: Duplicate arc key found: {key_t}. Overwriting previous entry.")
             else:
                 ieda_arc_map[key_t] = arc
             
@@ -969,7 +970,7 @@ class PlaceObj(nn.Module):
                             "load": output_load_rise,
                             "arc_sense": arc_sense,
                         }
-                    # print(f"Warning: Duplicate arc key found: {key_rise}. Overwriting previous entry.")
+                    # logging.info(f"Warning: Duplicate arc key found: {key_rise}. Overwriting previous entry.")
                 else:
                     python_arc_map[key_rise] = {
                         "delay": delay_for_output_rise,
@@ -1008,7 +1009,7 @@ class PlaceObj(nn.Module):
                             "load": output_load_fall,
                             "arc_sense": arc_sense,
                         }
-                    # print(f"Warning: Duplicate arc key found: {key_fall}. Overwriting previous entry.")
+                    # logging.info(f"Warning: Duplicate arc key found: {key_fall}. Overwriting previous entry.")
                 else:
                     python_arc_map[key_fall] = {
                         "delay": delay_for_output_fall,
@@ -1037,7 +1038,8 @@ class PlaceObj(nn.Module):
         report_data.sort(key=lambda item: abs(item["delay_diff"]), reverse=True)
 
         # 4e. 将 Arc 对比写入 CSV
-        csv_filename = "cell_arc_delay_report.csv"
+        csv_filename = "%s/%s_cell_arc_delay_report.csv" % (
+                self.params.result_dir, self.params.design_name())
         csv_header = [
             "Instance",
             "Arc",
@@ -1081,7 +1083,7 @@ class PlaceObj(nn.Module):
 
                 writer.writerow(row)
 
-        print(f"Cell arc 对比已写入CSV文件: {csv_filename}")
+        logging.info(f"Cell arc 对比已写入CSV文件: {csv_filename}")
 
     def show_slack_compare(self, at_late_cpp, rt_late_cpp, wns, tns, ws, ts):
         # ==============================================================================
@@ -1089,7 +1091,7 @@ class PlaceObj(nn.Module):
         # ==============================================================================
         # (这部分计算WNS/TNS的逻辑保持不变)
         num_pins = len(self.placedb.pin_names)
-        print("\n--- 全局指标对比 (WNS/TNS) ---")
+        logging.info("\n--- 全局指标对比 (WNS/TNS) ---")
         at_late_py = torch.max(
             self.op_collections.timing_propagation_op.pin_rAAT,
             self.op_collections.timing_propagation_op.pin_fAAT,
@@ -1122,17 +1124,17 @@ class PlaceObj(nn.Module):
             wns_cpp_calc = 0.0
             tns_cpp_calc = 0.0
 
-        print(
+        logging.info(
             f"WNS (Python Calculated): {wns / 1000:<15.4f} | WNS (iEDA): {wns_cpp_calc:<15.4f}"
         )
-        print(
+        logging.info(
             f"TNS (Python Calculated): {tns / 1000:<15.4f} | TNS (iEDA): {tns_cpp_calc:<15.4f}"
         )
-        print("-" * 60)
-        print(f"flow 输出的 WNS (orig wns): {wns.item():.4f}")
-        print(f"flow 输出的 TNS (orig tns): {tns.item():.4f}")
-        print(f"flow 输出的 WS (orig ws): {ws.item():.4f}")
-        # print(f"flow 输出的 TS (orig ts): {ts.item():.4f}")
+        logging.info("-" * 60)
+        logging.info(f"flow 输出的 WNS (orig wns): {wns.item():.4f}")
+        logging.info(f"flow 输出的 TNS (orig tns): {tns.item():.4f}")
+        logging.info(f"flow 输出的 WS (orig ws): {ws.item():.4f}")
+        # logging.info(f"flow 输出的 TS (orig ts): {ts.item():.4f}")
 
     def write_first_level_pin_timing_log(self, net_timing_details_cpp):
         """
@@ -1145,8 +1147,9 @@ class PlaceObj(nn.Module):
         # ==============================================================================
         # --- 步骤 1: 定义文件名并准备数据 ---
         # ==============================================================================
-        report_filename = "timing_first_level_pins_report.csv"
-        print(f"\n--- [专属报告] 正在生成第一层传播引脚的详细报告 -> {report_filename}", flush=True)
+        report_filename = "%s/%s_timing_first_level_pins_report.csv" % (
+                self.params.result_dir, self.params.design_name())
+        logging.info(f"\n--- [专属报告] 正在生成第一层传播引脚的详细报告 -> {report_filename}")
 
         # 1a. 找出所有“第一层传播”的引脚及其驱动源
         start_pin_ids = self.data_collections.start_points.cpu().numpy()
@@ -1263,7 +1266,7 @@ class PlaceObj(nn.Module):
                     ]
                     writer.writerow(sink_pin_row)
 
-        print(f"第一层传播引脚的详细报告已成功写入: {report_filename}", flush=True)
+        logging.info(f"第一层传播引脚的详细报告已成功写入: {report_filename}")
 
     def timing_obj(self, pos):
         """
@@ -1306,9 +1309,9 @@ class PlaceObj(nn.Module):
         wns, tns, ws, ts = self.op_collections.timing_propagation_op(delays, impulses, loads)
 
         # if self.invoke_timing_count % 280 == 0:
-        #     print(f"\n--- [Timing Debug] 第 {self.invoke_timing_count} 次调用 timing_obj ---")
-
-        #     print(f"当前 WNS: {wns.item():.4f}, TNS: {tns.item():.4f}, WS: {ws.item():.4f}, TS: {ts.item():.4f}")
+        #     self.check_log(wns, tns, ws, ts)
+        #     logging.info(f"\n--- [Timing Debug] 第 {self.invoke_timing_count} 次调用 timing_obj ---")
+        #     logging.info(f"当前 WNS: {wns.item():.4f}, TNS: {tns.item():.4f}, WS: {ws.item():.4f}, TS: {ts:.4f}")
         self.invoke_timing_count += 1
         return wns, tns, ws, ts
 
@@ -1346,7 +1349,7 @@ class PlaceObj(nn.Module):
         # ==============================================================================
         # --- 额外调试步骤: 输出特定引脚所在网络的完整信息 ---
         # ==============================================================================
-        print("\n--- [特定网络拓扑] 'DFF_659/Q_reg:Q' 所在网络的详细信息 ---")
+        logging.info("\n--- [特定网络拓扑] 'DFF_659/Q_reg:Q' 所在网络的详细信息 ---")
 
         # ★★★ 您可以在这里修改想追踪的目标引脚名称 ★★★
         target_pin_full_name = "U4339:ZN"
@@ -1377,12 +1380,12 @@ class PlaceObj(nn.Module):
 
             if target_net_id is not None:
                 target_net_name = self.id2net_name_map[target_net_id]
-                print(
+                logging.info(
                     f"引脚 '{target_pin_full_name}' (ID: {target_pin_id}) 位于网络 '{target_net_name}' (ID: {target_net_id})。"
                 )
-                print("该网络包含以下所有引脚：")
-                print(f"{'Pin ID':<15} | {'Pin Name'}")
-                print("-" * 60)
+                logging.info("该网络包含以下所有引脚：")
+                logging.info(f"{'Pin ID':<15} | {'Pin Name'}")
+                logging.info("-" * 60)
 
                 # b. 根据net_id获取该网络的所有引脚
                 start_idx = self.data_collections.flat_net2pin_start_map[target_net_id]
@@ -1399,11 +1402,11 @@ class PlaceObj(nn.Module):
                     pin_name = self.pin_names[pin_id].decode("utf-8")
                     # 如果是目标引脚，特殊标记出来
                     marker = "★" if pin_id == target_pin_id else " "
-                    print(f"{marker} {pin_id:<13} | {pin_name}")
+                    logging.info(f"{marker} {pin_id:<13} | {pin_name}")
             else:
-                print(f"错误：在网络映射中未找到引脚 '{target_pin_full_name}'。")
+                logging.info(f"错误：在网络映射中未找到引脚 '{target_pin_full_name}'。")
         else:
-            print(f"错误：在设计中未找到名为 '{target_pin_full_name}' 的引脚。")
+            logging.info(f"错误：在设计中未找到名为 '{target_pin_full_name}' 的引脚。")
 
     def obj_and_grad_fn_old(self, pos_w, pos_g=None, admm_multiplier=None):
         """

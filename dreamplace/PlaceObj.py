@@ -703,21 +703,35 @@ class PlaceObj(nn.Module):
         py_pin_f_slew = op_timing.pin_ftran.clone().detach().cpu().numpy()
 
         # 新增: 获取Python端的AT和RT数据
-        py_at_late = (
-            torch.max(op_timing.pin_rAAT, op_timing.pin_fAAT)
+        py_r_aat_late = (
+            op_timing.pin_rAAT
             .clone()
             .detach()
             .cpu()
             .numpy()
         )
-        py_rt_late = (
-            torch.min(op_timing.pin_rRAT, op_timing.pin_fRAT)
+        py_f_aat_late = (
+            op_timing.pin_fAAT
             .clone()
             .detach()
             .cpu()
             .numpy()
         )
-
+        py_r_rat_late = (
+            op_timing.pin_rRAT
+            .clone()
+            .detach()
+            .cpu()
+            .numpy()
+        )
+        py_f_rat_late = (
+            op_timing.pin_fRAT
+            .clone()
+            .detach()
+            .cpu()
+            .numpy()
+        )
+        
         python_pin_map = {}
         pin_names = self.placedb.pin_names
 
@@ -734,8 +748,8 @@ class PlaceObj(nn.Module):
                 "impulse": py_pin_r_impulse[pin_id],
                 "slew": py_pin_r_slew[pin_id],
                 # 新增AT/RT
-                "at": py_at_late[pin_id],
-                "rt": py_rt_late[pin_id],
+                "at": py_r_aat_late[pin_id],
+                "rt": py_r_rat_late[pin_id],
             }
 
             key_fall = (full_pin_name, "Max", "Fall")
@@ -747,8 +761,8 @@ class PlaceObj(nn.Module):
                 "impulse": py_pin_f_impulse[pin_id],
                 "slew": py_pin_f_slew[pin_id],
                 # 新增AT/RT
-                "at": py_at_late[pin_id],
-                "rt": py_rt_late[pin_id],
+                "at": py_f_aat_late[pin_id],
+                "rt": py_f_rat_late[pin_id],
             }
 
         # 4c. 构建用于排序和报告的中间列表
@@ -771,8 +785,12 @@ class PlaceObj(nn.Module):
                 continue
 
             # 从iEDA的列表中获取AT/RT
-            ieda_at_val = at_late_cpp[pin_id]
-            ieda_rt_val = rt_late_cpp[pin_id]
+            if key[2] == "Rise":
+                ieda_at_val = at_late_cpp[pin_id][0]
+                ieda_rt_val = rt_late_cpp[pin_id][0]
+            else:  # Fall                
+                ieda_at_val = at_late_cpp[pin_id][1]
+                ieda_rt_val = rt_late_cpp[pin_id][1]
 
             # 计算用于排序的差异值 (使用 RT 差异)
             diff = abs(py_data["rt"] - ieda_rt_val * 1000)
@@ -799,20 +817,23 @@ class PlaceObj(nn.Module):
             "iEDA AT (ps)",
             "Py RT (ps)",
             "iEDA RT (ps)",
+            "Py Slack(ps)",
+            "iEDA Slack(ps)",
             "Py Slew (ps)",
-            "iEDA Slew (ns)",
+            "iEDA Slew (ps)",
             "Py Delay (ps)",
-            "iEDA Delay (ns)",
-            "Py Load (fF)",
-            "iEDA Load (fF)",
+            "iEDA Delay (ps)",
+            "Py Load (pF)",
+            "iEDA Load (pF)",
             "Py LDelay (ps)",
-            "iEDA LDelay (ns)",
+            "iEDA LDelay (ps)",
             "Py Beta",
             "iEDA Beta",
             "Py Impulse",
             "iEDA Impulse",
         ]
 
+                
         with open(report_filename, "w", newline="", encoding="utf-8") as csvfile:
             writer = csv.writer(csvfile)
             writer.writerow(csv_header)
@@ -842,8 +863,10 @@ class PlaceObj(nn.Module):
                     f"{item.get('ieda_at', float('nan')):.6f}",
                     f"{py_data.get('rt', float('nan')):.6f}",
                     f"{item.get('ieda_rt', float('nan')):.6f}",
+                    f"{py_data.get('rt', float('nan')) - py_data.get('at', float('nan')):.6f}",
+                    f"{item.get('ieda_rt', float('nan')) - item.get('ieda_at', float('nan')):.6f}",
                     f"{py_data.get('slew', float('nan')):.6f}",
-                    f"{ieda_slew_val:.6f}",
+                    f"{1000 * ieda_slew_val:.6f}",
                     f"{py_data.get('delay', float('nan')):.6f}",
                     f"{ieda_delay_val:.6f}",
                     f"{py_data.get('load', float('nan')):.6f}",
@@ -1050,8 +1073,8 @@ class PlaceObj(nn.Module):
             "Diff (ps)",
             "Py Slew (ps)",
             "iEDA Slew (ps)",
-            "Py Load (fF)",
-            "iEDA Load (fF)",
+            "Py Load (pF)",
+            "iEDA Load (pF)",
         ]
 
         with open(csv_filename, "w", newline="", encoding="utf-8") as csvfile:
@@ -1092,31 +1115,32 @@ class PlaceObj(nn.Module):
         # (这部分计算WNS/TNS的逻辑保持不变)
         num_pins = len(self.placedb.pin_names)
         logging.info("\n--- 全局指标对比 (WNS/TNS) ---")
-        at_late_py = torch.max(
-            self.op_collections.timing_propagation_op.pin_rAAT,
-            self.op_collections.timing_propagation_op.pin_fAAT,
-        )
-        rt_late_py = torch.min(
-            self.op_collections.timing_propagation_op.pin_rRAT,
-            self.op_collections.timing_propagation_op.pin_fRAT,
-        )
-        setup_slack_py = rt_late_py - at_late_py
-        setup_slack_py_pins_only = setup_slack_py[:num_pins]
+        t_dtype = self.op_collections.timing_propagation_op.pin_rAAT.dtype
+        t_device = self.op_collections.timing_propagation_op.pin_rAAT.device
+        # at_late_py = torch.max(
+        #     self.op_collections.timing_propagation_op.pin_fAAT,
+        # )
+        # rt_late_py = torch.min(
+        #     self.op_collections.timing_propagation_op.pin_rRAT,
+        #     self.op_collections.timing_propagation_op.pin_fRAT,
+        # )
+        # setup_slack_py = rt_late_py - at_late_py
+        # setup_slack_py_pins_only = setup_slack_py[:num_pins]
 
         at_late_cpp_tensor = torch.tensor(
-            at_late_cpp, dtype=setup_slack_py.dtype, device=setup_slack_py.device
+            at_late_cpp, dtype=t_dtype, device=t_device
         )
         rt_late_cpp_tensor = torch.tensor(
-            rt_late_cpp, dtype=setup_slack_py.dtype, device=setup_slack_py.device
+            rt_late_cpp, dtype=t_dtype, device=t_device
         )
-        setup_slack_cpp = rt_late_cpp_tensor - at_late_cpp_tensor
+        setup_slack_cpp = torch.min(rt_late_cpp_tensor[:,0] - at_late_cpp_tensor[:,0], rt_late_cpp_tensor[:,1] - at_late_cpp_tensor[:,1])
 
-        wns_py_calc = torch.min(torch.clamp(setup_slack_py_pins_only, max=0)).item()
-        tns_py_calc = torch.sum(torch.clamp(setup_slack_py_pins_only, max=0)).item()
+        # wns_py_calc = torch.min(torch.clamp(setup_slack_py_pins_only, max=0)).item()
+        # tns_py_calc = torch.sum(torch.clamp(setup_slack_py_pins_only, max=0)).item()
 
-        valid_setup_mask = torch.isfinite(setup_slack_cpp)
-        setup_slack_cpp_valid = setup_slack_cpp[self.data_collections.end_points]
-
+        slack_endpoints = setup_slack_cpp[self.data_collections.end_points]
+        valid_setup_mask = torch.isfinite(slack_endpoints)
+        setup_slack_cpp_valid = slack_endpoints[valid_setup_mask]
         if setup_slack_cpp_valid.numel() > 0:
             wns_cpp_calc = torch.min(setup_slack_cpp_valid).item()
             tns_cpp_calc = torch.sum(setup_slack_cpp_valid.clamp(max=0)).item()

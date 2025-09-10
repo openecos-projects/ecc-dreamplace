@@ -323,11 +323,12 @@ class RCTiming(nn.Module):
         """
 
         @param pin2node_map 引脚到节点的映射
-        @param pin_caps 每个引脚的电容值
+        @param pin_caps 每个引脚的电容值 pF
         @param driver_pin_indices 每个网络的驱动引脚索引
-        @param r_unit 单位长度电阻值
-        @param c_unit 单位长度电容值
+        @param r_unit 单位长度电阻值 ohm / um
+        @param c_unit 单位长度电容值 pF / um
         @param ignore_net_degree 忽略网络的度数阈值
+        @param output : delays (ps)
         """
         super(RCTiming, self).__init__()
 

@@ -502,7 +502,7 @@ class TimingPropagation(nn.Module):
                 delay_rr = self.r_delay_entry(lib_cell_idxs[sub_mask_rr], pin_r_slew_in[sub_mask_rr], pin_r_load_out[sub_mask_rr], lib_arc_idxs[sub_mask_rr])
                 tran_rr = self.r_tran_entry(lib_cell_idxs[sub_mask_rr], pin_r_slew_in[sub_mask_rr], pin_r_load_out[sub_mask_rr], lib_arc_idxs[sub_mask_rr])
                 cell_arc_rr_delays[scatter_indices[sub_mask_rr]] = delay_rr
-                r_aat_updates[sub_mask_rr] = pin_rAAT[arc_in_pins[sub_mask_rr]] + delay_rr
+                r_aat_updates[sub_mask_rr] = 0 + delay_rr
                 r_trans[sub_mask_rr] = tran_rr
 
             # Path 2: Fall->Fall (triggered by falling or both edge)
@@ -511,7 +511,7 @@ class TimingPropagation(nn.Module):
                 delay_ff = self.f_delay_entry(lib_cell_idxs[sub_mask_ff], pin_f_slew_in[sub_mask_ff], pin_f_load_out[sub_mask_ff], lib_arc_idxs[sub_mask_ff])
                 tran_ff = self.f_tran_entry(lib_cell_idxs[sub_mask_ff], pin_f_slew_in[sub_mask_ff], pin_f_load_out[sub_mask_ff], lib_arc_idxs[sub_mask_ff])
                 cell_arc_ff_delays[scatter_indices[sub_mask_ff]] = delay_ff
-                f_aat_updates[sub_mask_ff] = pin_fAAT[arc_in_pins[sub_mask_ff]] + delay_ff
+                f_aat_updates[sub_mask_ff] = 0 + delay_ff
                 f_trans[sub_mask_ff] = tran_ff
 
         # B. Negative Unate (clk->QN)
@@ -524,7 +524,7 @@ class TimingPropagation(nn.Module):
                 delay_rf = self.f_delay_entry(lib_cell_idxs[sub_mask_rf], pin_r_slew_in[sub_mask_rf], pin_f_load_out[sub_mask_rf], lib_arc_idxs[sub_mask_rf])
                 tran_rf = self.f_tran_entry(lib_cell_idxs[sub_mask_rf], pin_r_slew_in[sub_mask_rf], pin_f_load_out[sub_mask_rf], lib_arc_idxs[sub_mask_rf])
                 cell_arc_rf_delays[scatter_indices[sub_mask_rf]] = delay_rf
-                f_aat_updates[sub_mask_rf] = pin_rAAT[arc_in_pins[sub_mask_rf]] + delay_rf
+                f_aat_updates[sub_mask_rf] = 0 + delay_rf
                 f_trans[sub_mask_rf] = tran_rf
 
             # Path 2: Fall->Rise (triggered by falling or both edge)
@@ -533,7 +533,7 @@ class TimingPropagation(nn.Module):
                 delay_fr = self.r_delay_entry(lib_cell_idxs[sub_mask_fr], pin_f_slew_in[sub_mask_fr], pin_r_load_out[sub_mask_fr], lib_arc_idxs[sub_mask_fr])
                 tran_fr = self.r_tran_entry(lib_cell_idxs[sub_mask_fr], pin_f_slew_in[sub_mask_fr], pin_r_load_out[sub_mask_fr], lib_arc_idxs[sub_mask_fr])
                 cell_arc_fr_delays[scatter_indices[sub_mask_fr]] = delay_fr
-                r_aat_updates[sub_mask_fr] = pin_fAAT[arc_in_pins[sub_mask_fr]] + delay_fr
+                r_aat_updates[sub_mask_fr] = 0 + delay_fr
                 r_trans[sub_mask_fr] = tran_fr
 
         # C. Non-Unate
@@ -552,8 +552,8 @@ class TimingPropagation(nn.Module):
                 delay_rf = self.f_delay_entry(lib_cell_idxs[sub_mask_re], pin_r_slew_in[sub_mask_re], pin_f_load_out[sub_mask_re], lib_arc_idxs[sub_mask_re])
                 cell_arc_rr_delays[scatter_indices[sub_mask_re]] = delay_rr
                 cell_arc_rf_delays[scatter_indices[sub_mask_re]] = delay_rf
-                aat_rr_re[sub_mask_re] = pin_rAAT[arc_in_pins[sub_mask_re]] + delay_rr
-                aat_rf_re[sub_mask_re] = pin_rAAT[arc_in_pins[sub_mask_re]] + delay_rf
+                aat_rr_re[sub_mask_re] = 0 + delay_rr
+                aat_rf_re[sub_mask_re] = 0+ delay_rf
                 tran_rr_re[sub_mask_re] = self.r_tran_entry(lib_cell_idxs[sub_mask_re], pin_r_slew_in[sub_mask_re], pin_r_load_out[sub_mask_re], lib_arc_idxs[sub_mask_re])
                 tran_rf_re[sub_mask_re] = self.f_tran_entry(lib_cell_idxs[sub_mask_re], pin_r_slew_in[sub_mask_re], pin_f_load_out[sub_mask_re], lib_arc_idxs[sub_mask_re])
 
@@ -568,8 +568,8 @@ class TimingPropagation(nn.Module):
                 delay_ff = self.f_delay_entry(lib_cell_idxs[sub_mask_fe], pin_f_slew_in[sub_mask_fe], pin_f_load_out[sub_mask_fe], lib_arc_idxs[sub_mask_fe])
                 cell_arc_fr_delays[scatter_indices[sub_mask_fe]] = delay_fr
                 cell_arc_ff_delays[scatter_indices[sub_mask_fe]] = delay_ff
-                aat_fr_fe[sub_mask_fe] = pin_fAAT[arc_in_pins[sub_mask_fe]] + delay_fr
-                aat_ff_fe[sub_mask_fe] = pin_fAAT[arc_in_pins[sub_mask_fe]] + delay_ff
+                aat_fr_fe[sub_mask_fe] = 0 + delay_fr
+                aat_ff_fe[sub_mask_fe] = 0 + delay_ff
                 tran_fr_fe[sub_mask_fe] = self.r_tran_entry(lib_cell_idxs[sub_mask_fe], pin_f_slew_in[sub_mask_fe], pin_r_load_out[sub_mask_fe], lib_arc_idxs[sub_mask_fe])
                 tran_ff_fe[sub_mask_fe] = self.f_tran_entry(lib_cell_idxs[sub_mask_fe], pin_f_slew_in[sub_mask_fe], pin_f_load_out[sub_mask_fe], lib_arc_idxs[sub_mask_fe])
 

@@ -197,7 +197,6 @@ class MacroPlaceDB(object):
         self.r_trans_flat_luts_cap_table = None
         self.r_trans_flat_luts_dim = None
 
-
     def scale_pl(self, scale_factor):
         """
         @brief scale placement solution only
@@ -1070,7 +1069,7 @@ class MacroPlaceDB(object):
             #     pydb.cells_by_reverse_level, dtype=np.int32)
             self.net2driver_pin_map = np.array(
                 pydb.net2driver_pin_map, dtype=np.int32)
-            
+
             self.dbu = float(pydb.dbu)
             self.inrdelays = np.array(pydb.inrdelays, dtype=self.dtype)
             self.infdelays = np.array(pydb.infdelays, dtype=self.dtype)
@@ -1105,7 +1104,6 @@ class MacroPlaceDB(object):
                 pydb.f_delay_flat_luts_cap_table, dtype=self.dtype, pad_value=np.inf)
             self.f_delay_flat_luts_dim = np.array(
                 pydb.f_delay_flat_luts_dim, dtype=np.int32)
-            
 
             self.r_delay_flat_luts_values = self.pad_sequences(
                 pydb.r_delay_flat_luts_values, dtype=self.dtype)
@@ -1357,7 +1355,7 @@ row height = %g, site width = %g
             num_bins_y = math.floor(num_bins)
             params.num_bins_x = num_bins_x
             params.num_bins_y = num_bins_y
-            
+
         else:    
             num_bins_x = params.num_bins_x
             num_bins_y = params.num_bins_y
@@ -1816,7 +1814,7 @@ row height = %g, site width = %g
         )
 
         # add halo around macros
-        if params.macro_halo_x >= 0 and params.macro_halo_y >= 0:
+        if params.macro_halo_x > 0 and params.macro_halo_y >= 0:
             # increase macro sizes
             self.node_size_x[self.movable_macro_idx] += 2 * params.macro_halo_x
             self.node_size_y[self.movable_macro_idx] += 2 * params.macro_halo_y
@@ -1837,7 +1835,7 @@ row height = %g, site width = %g
             # self.fixed_macro_pins = np.isin(self.pin2node_map, self.fixed_macro_idx)
             # self.pin_offset_x[self.fixed_macro_pins] += params.macro_halo_x
             # self.pin_offset_y[self.fixed_macro_pins] += params.macro_halo_y
-        
+
         # add padding around all_cells
         if params.cell_padding_x >= 0:
             # increase macro sizes
@@ -1859,7 +1857,7 @@ row height = %g, site width = %g
                 self.pin2node_map, movable_cell_tensor)
             self.pin_offset_x[movable_cell_pins] += params.cell_padding_x
             # self.pin_offset_y += params.cell_padding_y
-        
+
         if params.macro_pin_halo_x >= 0:
             self.node_size_x[self.movable_macro_idx] += self.is_pin_lower_x * \
                 params.macro_pin_halo_x + self.is_pin_upper_x * params.macro_pin_halo_x
@@ -1871,10 +1869,16 @@ row height = %g, site width = %g
             self.node_y[self.movable_macro_idx] -= self.is_pin_lower_y * \
                 params.macro_pin_halo_y
 
-            self.pin_offset_x[self.movable_macro_pins] += self.is_pin_lower_x[self.pin2node_map[self.movable_macro_pins]
-                                                                              ] * params.macro_pin_halo_x
-            self.pin_offset_y[self.movable_macro_pins] += self.is_pin_lower_y[self.pin2node_map[self.movable_macro_pins]
-                                                                              ] * params.macro_pin_halo_y
+            macro_pin_list = self.pin2node_map[self.movable_macro_pins]
+            move_macro_idx_list = np.where(
+                macro_pin_list == self.movable_macro_idx[:, None]
+            )
+            self.pin_offset_x[self.movable_macro_pins] += (
+                self.is_pin_lower_x[move_macro_idx_list[0]] * params.macro_pin_halo_x
+            )
+            self.pin_offset_y[self.movable_macro_pins] += (
+                self.is_pin_lower_y[move_macro_idx_list[0]] * params.macro_pin_halo_y
+            )
 
     def write(self, params, filename):
         """

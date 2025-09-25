@@ -46,6 +46,7 @@ import dreamplace.ops.rudy.rudy as rudy
 import dreamplace.ops.rudy.rudy_macros as rudy_macros
 import dreamplace.ops.pin_utilization.pin_utilization as pin_utilization
 import dreamplace.ops.nctugr_binary.nctugr_binary as nctugr_binary
+import dreamplace.ops.irt_egr.irt_egr as eGR
 import dreamplace.ops.adjust_node_area.adjust_node_area as adjust_node_area
 import dreamplace.ops.macro_overlap.macro_overlap as macro_overlap
 import dreamplace.ops.macro_refinement.macro_refinement as macro_refinement
@@ -351,6 +352,10 @@ class PlaceObj(nn.Module):
             )
             self.op_collections.nctugr_congestion_map_op = (
                 self.build_nctugr_congestion_map(params, placedb, self.data_collections)
+            )
+            self.op_collections.irt_egr_congestion_map_op = (
+                self.build_irt_egr_congestion_map(
+                    params, placedb, self.data_collections)
             )
             # adjust instance area with congestion map
             self.op_collections.adjust_node_area_op = self.build_adjust_node_area(
@@ -2381,6 +2386,17 @@ class PlaceObj(nn.Module):
             params=params,
             placedb=placedb,
         )
+    
+    def build_irt_egr_congestion_map(self, params, placedb, data_collections):
+        """
+        @brief call iRT egr for congestion estimation
+        """
+        # path = "%s/%s" % (params.result_dir, params.design_name())
+        return eGR.IRT_eGR(
+            params=params,
+            placedb=placedb,
+        )
+        
 
     def build_adjust_node_area(self, params, placedb, data_collections):
         """

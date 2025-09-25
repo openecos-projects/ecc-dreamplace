@@ -284,8 +284,13 @@ class MacroPlaceDB(object):
         if self.pydb is None:
             ieda_dm = IEDAIO(self.data_manager.dir_workspace)
             self.get_dmInst_ptr = ieda_dm.get_dmInst_ptr()
-            self.pydb = ieda_dm.pydb(self.get_dmInst_ptr, params.with_sta)
-            # self.pin_names = ieda_dm.ieda.get_all_pin_names_from_db()
+            self.pydb = ieda_dm.pydb(
+                self.get_dmInst_ptr,
+                params.route_num_bins_x,
+                params.route_num_bins_y,
+                params.routability_opt_flag,
+                params.with_sta,
+            )
 
     def init_db(self, params):
         self.setup_rawdb(params)
@@ -1045,7 +1050,9 @@ class MacroPlaceDB(object):
         for i in range(len(self.net2pin_map)):
             self.net2pin_map[i] = np.array(self.net2pin_map[i], dtype=np.int32)
         self.net2pin_map = np.array(self.net2pin_map, dtype=object)
-
+        
+        self.dbu = float(pydb.dbu)
+        
         if params.with_sta:
             self.start_points = np.array(pydb.start_points, dtype=np.int32)
             self.end_points = np.array(pydb.end_points, dtype=np.int32)
@@ -1070,7 +1077,7 @@ class MacroPlaceDB(object):
             self.net2driver_pin_map = np.array(
                 pydb.net2driver_pin_map, dtype=np.int32)
 
-            self.dbu = float(pydb.dbu)
+
             self.inrdelays = np.array(pydb.inrdelays, dtype=self.dtype)
             self.infdelays = np.array(pydb.infdelays, dtype=self.dtype)
             self.inrtrans = np.array(pydb.inrtrans, dtype=self.dtype)

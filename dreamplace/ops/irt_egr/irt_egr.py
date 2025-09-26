@@ -12,6 +12,7 @@ import torch
 from torch.autograd import Function
 from torch import nn
 import pdb
+import numpy as np
 
 import dreamplace.ops.place_io.place_io as place_io
 
@@ -54,24 +55,21 @@ class IRT_eGR(object):
 
         # update raw database
         self.placedb.write_placement_back(node_x, node_y)
-        congestion_map_egr = self.placedb.pydb.getCongestionMap()
-        congestion_map = torch.zeros(
-            (
-                self.placedb.num_routing_grids_x,
-                self.placedb.num_routing_grids_y,
-                self.placedb.num_routing_layers,
-            ),
-            dtype=pos.dtype,
-        )
+        overflow_map_py = self.placedb.pydb.getCongestionMap("sum")
+        overflow_map_np = np.array(overflow_map_py, dtype=np.float32)
+        overflow_map = torch.from_numpy(overflow_map_np).to(pos.device)
+        # congestion_map = torch.zeros(
+        #     (
+        #         self.placedb.num_routing_grids_x,
+        #         self.placedb.num_routing_grids_y,
+        #         self.placedb.num_routing_layers,
+        #     ),
+        #     dtype=pos.dtype,
+        # )
 
-        if self.routing_capacities.device != pos.device:
-            self.routing_capacities = self.routing_capacities.to(pos.device)
-        overflow_map = (
-            congestion_map.to(pos.device) / (self.routing_capacities + 1e-6) + 1
-        )
-        # horizontal_overflow_map = overflow_map[:, :, 0:self.placedb.num_routing_layers:2].mean(dim=2)
-        # vertical_overflow_map = overflow_map[:, :, 1:self.placedb.num_routing_layers:2].mean(dim=2)
-        # ret = torch.max(horizontal_overflow_map, vertical_overflow_map)
-        ret = overflow_map.max(dim=2)[0]
+        # overflow_map = (
+        #     overflow_map + 1
+        # )
+        
 
-        return ret
+        return overflow_map

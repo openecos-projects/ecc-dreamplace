@@ -58,6 +58,7 @@ class IRT_eGR(object):
         utilization_map_py = self.placedb.pydb.getCongestionMap("sum")
         utilization_map_np = np.array(utilization_map_py, dtype=np.float32)
         utilization_map = torch.from_numpy(utilization_map_np).to(pos.device).T
+        utilization_map = utilization_map.contiguous()
         # congestion_map = torch.zeros(
         #     (
         #         self.placedb.num_routing_grids_x,

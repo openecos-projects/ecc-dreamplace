@@ -72,4 +72,4 @@ class IRT_eGR(object):
         # )
         
 
-        return overflow_map
+        return overflow_map.T

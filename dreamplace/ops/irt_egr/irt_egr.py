@@ -55,9 +55,9 @@ class IRT_eGR(object):
 
         # update raw database
         self.placedb.write_placement_back(node_x, node_y)
-        overflow_map_py = self.placedb.pydb.getCongestionMap("sum")
-        overflow_map_np = np.array(overflow_map_py, dtype=np.float32)
-        overflow_map = torch.from_numpy(overflow_map_np).to(pos.device)
+        utilization_map_py = self.placedb.pydb.getCongestionMap("sum")
+        utilization_map_np = np.array(utilization_map_py, dtype=np.float32)
+        utilization_map = torch.from_numpy(utilization_map_np).to(pos.device).T
         # congestion_map = torch.zeros(
         #     (
         #         self.placedb.num_routing_grids_x,
@@ -67,9 +67,9 @@ class IRT_eGR(object):
         #     dtype=pos.dtype,
         # )
 
-        # overflow_map = (
-        #     overflow_map + 1
+        # utilization_map = (
+        #     utilization_map + 1
         # )
         
 
-        return overflow_map.T + 1
+        return utilization_map

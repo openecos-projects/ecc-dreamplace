@@ -14,7 +14,8 @@ except:
     pass
 
 logger = logging.getLogger(__name__)
-
+import matplotlib.pyplot as plt
+plt.rcParams['text.usetex'] = False
 
 class ComputeNodeAreaFromRouteMap(nn.Module):
     def __init__(self, xl, yl, xh, yh, num_movable_nodes, num_bins_x,
@@ -203,6 +204,58 @@ class AdjustNodeArea(nn.Module):
                 area_increment = F.relu(pin_opt_area - old_movable_area)
             area_increment_sum = area_increment.sum()
 
+            # plot
+            # 将area_increment大于0的标准单元在图中打印出来，并根据数值给予亮度。 
+            
+            # try:
+            #     import matplotlib.patches as patches
+            #     # 找到面积增加的单元
+            #     inflated_indices = torch.where(area_increment > 0)[0]
+            #     if inflated_indices.numel() > 0:
+            #         # 获取这些单元的位置、大小和面积增加量
+            #         inflated_pos_x = pos.data[:self.num_movable_nodes][inflated_indices].cpu().numpy()
+            #         num_nodes = pos.numel() // 2
+            #         inflated_pos_y = pos.data[num_nodes:num_nodes + self.num_movable_nodes][inflated_indices].cpu().numpy()
+            #         inflated_size_x = old_node_size_x_movable[inflated_indices].cpu().numpy()
+            #         inflated_size_y = old_node_size_y_movable[inflated_indices].cpu().numpy()
+            #         inflated_values = area_increment[inflated_indices].cpu().numpy()
+
+            #         # 创建图像
+            #         fig, ax = plt.subplots(figsize=(10, 10))
+            #         ax.set_xlim(self.xl, self.xh)
+            #         ax.set_ylim(self.yl, self.yh)
+            #         ax.set_aspect('equal', adjustable='box')
+
+            #         # 归一化颜色
+            #         norm = plt.Normalize(vmin=inflated_values.min(), vmax=inflated_values.max())
+            #         cmap = plt.get_cmap('viridis')
+
+            #         # 绘制每个被放大单元的矩形
+            #         for i in range(len(inflated_indices)):
+            #             rect = patches.Rectangle(
+            #                 (inflated_pos_x[i], inflated_pos_y[i]),
+            #                 inflated_size_x[i],
+            #                 inflated_size_y[i],
+            #                 linewidth=0,
+            #                 edgecolor='none',
+            #                 facecolor=cmap(norm(inflated_values[i]))
+            #             )
+            #             ax.add_patch(rect)
+                    
+            #         # 添加颜色条
+            #         sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+            #         sm.set_array([])
+            #         fig.colorbar(sm, ax=ax, orientation='vertical', label='Area Increment')
+
+            #         plt.title('Inflated Movable Nodes Visualization')
+            #         plt.xlabel('X coordinate')
+            #         plt.ylabel('Y coordinate')
+            #         plt.savefig("inflated_nodes.png", dpi=300)
+            #         plt.close(fig)
+            # except Exception as e:
+            #     logger.error(f"Failed to plot inflated nodes: {e}")
+            ### end plot
+            
             # check whether the total area is larger than the max area requirement
             # If yes, scale the extra area to meet the requirement
             # We assume the total base area is no greater than the max area requirement
@@ -239,6 +292,9 @@ class AdjustNodeArea(nn.Module):
                     old_movable_area).sum() / old_movable_area_sum
                 adjust_route_area_flag = route_area_increment_ratio.data.item(
                 ) > self.route_area_adjust_stop_ratio
+                
+                # route_opt_area
+                
                 logger.info(
                     "route_area_increment_ratio = %g, route_area_adjust_stop_ratio = %g"
                     % (route_area_increment_ratio,
@@ -268,6 +324,7 @@ class AdjustNodeArea(nn.Module):
             logger.info(
                 "inflation ratio for movable nodes: avg/max %g/%g" %
                 (movable_nodes_ratio.mean(), movable_nodes_ratio.max()))
+            
             movable_nodes_ratio.sqrt_()
             # convert positions to centers
             pos.data[:self.num_movable_nodes] += node_size_x_movable * 0.5

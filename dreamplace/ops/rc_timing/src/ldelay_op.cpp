@@ -13,7 +13,8 @@ void ldelayForwardLauncher(
     const int32_t *
         topo_sort_ptr, // Assumed parent-first order, use backward for bottom-up
     const int32_t *topo_sort_start_ptr, int32_t num_nodes, int32_t num_nets,
-    scalar_t *ldelay_ptr // Output
+    scalar_t *ldelay_ptr, // Output
+    int num_threads
 );
 
 /**
@@ -96,7 +97,7 @@ at::Tensor ldelay_forward_cpp(at::Tensor cap_tensor, at::Tensor delay_tensor,
 
         ldelayForwardLauncher<scalar_t>(
             cap_ptr, delay_ptr, pin_start_ptr, pin_to_ptr, topo_sort_ptr,
-            topo_sort_start_ptr, num_nodes, num_nets, ldelay_ptr);
+            topo_sort_start_ptr, num_nodes, num_nets, ldelay_ptr, at::get_num_threads());
       });
 
   return ldelay_tensor;
@@ -110,9 +111,11 @@ void ldelayForwardLauncher(
     const int32_t
         *topo_sort_ptr, // Parent-first order, use backward for bottom-up
     const int32_t *topo_sort_start_ptr, int32_t num_nodes, int32_t num_nets,
-    scalar_t *ldelay_ptr // Output
+    scalar_t *ldelay_ptr, // Output
+    int num_threads
 ) {
   // Iterate through each net
+#pragma omp parallel for num_threads(num_threads)
   for (int32_t net_idx = 0; net_idx < num_nets; ++net_idx) {
     int32_t start_topo_idx = topo_sort_start_ptr[net_idx];
     int32_t end_topo_idx = topo_sort_start_ptr[net_idx + 1];
@@ -164,7 +167,8 @@ void ldelayBackwardLauncher(
     scalar_t *accum_grad_ldelay_ptr, // Intermediate buffer (In/Out)
     scalar_t *grad_input_cap_ptr,    // Output: dF/dCap
     scalar_t
-        *grad_input_delay_ptr // Output: dF/dDelay (contribution from this op)
+        *grad_input_delay_ptr, // Output: dF/dDelay (contribution from this op)
+    int num_threads
 );
 
 /**
@@ -260,7 +264,8 @@ ldelay_backward_cpp(at::Tensor grad_output_ldelay,
             pin_to_ptr, topo_sort_ptr, topo_sort_start_ptr, num_nodes, num_nets,
             accum_grad_ldelay_ptr, // In/Out buffer
             grad_input_cap_ptr,    // Out
-            grad_input_delay_ptr   // Out
+            grad_input_delay_ptr,   // Out
+            at::get_num_threads()
         );
       });
 
@@ -284,11 +289,13 @@ void ldelayBackwardLauncher(
     scalar_t *accum_grad_ldelay_ptr, // In: cloned dF/dLDelay, Out: accumulated
                                      // dF/dLDelay
     scalar_t *grad_input_cap_ptr,    // Out: dF/dCap
-    scalar_t *grad_input_delay_ptr // Out: dF/dDelay (contribution from this op)
+    scalar_t *grad_input_delay_ptr, // Out: dF/dDelay (contribution from this op)
+    int num_threads
 ) {
   // --- Step 1: Accumulate dF/dLDelay top-down ---
   // accum_grad_ldelay_ptr is pre-initialized with grad_output_ldelay values.
   // This propagation is identical to the Load backward pass's accumulation.
+#pragma omp parallel for num_threads(num_threads)
   for (int32_t net_idx = 0; net_idx < num_nets; ++net_idx) {
     int32_t start_topo_idx = topo_sort_start_ptr[net_idx];
     int32_t end_topo_idx = topo_sort_start_ptr[net_idx + 1];
@@ -323,6 +330,7 @@ void ldelayBackwardLauncher(
   // --- Step 2: Calculate gradients dF/dCap and dF/dDelay ---
   // This step uses the *final* accumulated gradients `accum_grad_ldelay_ptr`.
   // Iterate over all nodes (this part is embarrassingly parallel).
+#pragma omp parallel for num_threads(num_threads)
   for (int32_t u = 0; u < num_nodes; ++u) {
     // Get the final accumulated gradient for node u
     scalar_t accumulated_grad_u = accum_grad_ldelay_ptr[u];

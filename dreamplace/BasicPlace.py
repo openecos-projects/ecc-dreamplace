@@ -46,10 +46,10 @@ import dreamplace.ops.pin_pos.pin_pos as pin_pos
 import dreamplace.ops.global_swap.global_swap as global_swap
 import dreamplace.ops.k_reorder.k_reorder as k_reorder
 import dreamplace.ops.independent_set_matching.independent_set_matching as independent_set_matching
-import dreamplace.ops.pin_weight_sum.pin_weight_sum as pws
-import dreamplace.ops.timing.timing as timingimport
+# import dreamplace.ops.pin_weight_sum.pin_weight_sum as pws
+# import dreamplace.ops.timing.timing as timingimport
 import dreamplace.ops.steiner_topo.steiner_topo as steiner_topo
-from dreamplace.ops.timing_propagation.timing_propagation import ARCS_INFO
+from dreamplace.ops.timing_propagation.timing_propagation import ARCS_INFO, LUTS_INFO
 import pdb
 
 
@@ -306,55 +306,52 @@ class PlaceDataCollection(object):
                 #     placedb.cells_by_reverse_level).to(device)
                 self.start_points = torch.from_numpy(
                     placedb.start_points).to(device)
-                self.end_points = torch.from_numpy(
-                    placedb.end_points).to(device)
+                self.end_points = torch.from_numpy(placedb.end_points).to(device)
+                self.clock_pins = torch.from_numpy(placedb.clock_pins).to(device)
+                self.FF_ids = torch.from_numpy(placedb.FF_ids).to(device)
+                self.clk_pin_rtran = torch.from_numpy(placedb.clk_pin_rtran).to(device)
+                self.clk_pin_ftran = torch.from_numpy(placedb.clk_pin_ftran).to(device)
+                self.clk_pin_names = placedb.clk_pin_names
                 self.net_flat_arcs_start = torch.from_numpy(
                     placedb.net_flat_arcs_start).to(device)
                 self.net_flat_arcs = torch.from_numpy(
                     placedb.net_flat_arcs).to(device)
-                self.cell_flat_arcs_start = torch.from_numpy(
-                    placedb.cell_flat_arcs_start).to(device)
-                self.cell_flat_arcs = torch.from_numpy(
-                    placedb.cell_flat_arcs).to(device)
+                self.inst_flat_arcs_start = torch.from_numpy(
+                    placedb.inst_flat_arcs_start).to(device)
+                self.inst_flat_arcs = torch.from_numpy(
+                    placedb.inst_flat_arcs).to(device)
+                self.endpoints_constraint_arcs = torch.from_numpy(
+                    placedb.endpoints_constraint_arcs).to(device)
                 self.net2driver_pin_map = torch.from_numpy(
                     placedb.net2driver_pin_map).to(device)
-                self.arcs_info = ARCS_INFO()
+                # self.arcs_info = ARCS_INFO()
 
-                self.arcs_info.f_delay_luts.flat_luts_trans_table = torch.from_numpy(
-                    placedb.f_delay_flat_luts_trans_table).to(device)
-                self.arcs_info.f_delay_luts.flat_luts_cap_table = torch.from_numpy(
-                    placedb.f_delay_flat_luts_cap_table).to(device)
-                self.arcs_info.f_delay_luts.flat_luts_dim = torch.from_numpy(
-                    placedb.f_delay_flat_luts_dim).to(device)
-                self.arcs_info.f_delay_luts.flat_luts_values = torch.from_numpy(
-                    placedb.f_delay_flat_luts_values).to(device)
+                # Initialize LUTS_INFO objects from placedb and construct ARCS_INFO
+                f_delay_values = torch.from_numpy(placedb.f_delay_flat_luts_values).to(device)
+                f_delay_trans = torch.from_numpy(placedb.f_delay_flat_luts_trans_table).to(device)
+                f_delay_cap = torch.from_numpy(placedb.f_delay_flat_luts_cap_table).to(device)
+                f_delay_dim = torch.from_numpy(placedb.f_delay_flat_luts_dim).to(device)
+                f_delay_luts = LUTS_INFO(f_delay_values, f_delay_trans, f_delay_cap, f_delay_dim)
 
-                self.arcs_info.r_delay_luts.flat_luts_values = torch.from_numpy(
-                    placedb.r_delay_flat_luts_values).to(device)
-                self.arcs_info.r_delay_luts.flat_luts_trans_table = torch.from_numpy(
-                    placedb.r_delay_flat_luts_trans_table).to(device)
-                self.arcs_info.r_delay_luts.flat_luts_cap_table = torch.from_numpy(
-                    placedb.r_delay_flat_luts_cap_table).to(device)
-                self.arcs_info.r_delay_luts.flat_luts_dim = torch.from_numpy(
-                    placedb.r_delay_flat_luts_dim).to(device)
+                r_delay_values = torch.from_numpy(placedb.r_delay_flat_luts_values).to(device)
+                r_delay_trans = torch.from_numpy(placedb.r_delay_flat_luts_trans_table).to(device)
+                r_delay_cap = torch.from_numpy(placedb.r_delay_flat_luts_cap_table).to(device)
+                r_delay_dim = torch.from_numpy(placedb.r_delay_flat_luts_dim).to(device)
+                r_delay_luts = LUTS_INFO(r_delay_values, r_delay_trans, r_delay_cap, r_delay_dim)
 
-                self.arcs_info.f_trans_luts.flat_luts_values = torch.from_numpy(
-                    placedb.f_trans_flat_luts_values).to(device)
-                self.arcs_info.f_trans_luts.flat_luts_trans_table = torch.from_numpy(
-                    placedb.f_trans_flat_luts_trans_table).to(device)
-                self.arcs_info.f_trans_luts.flat_luts_cap_table = torch.from_numpy(
-                    placedb.f_trans_flat_luts_cap_table).to(device)
-                self.arcs_info.f_trans_luts.flat_luts_dim = torch.from_numpy(
-                    placedb.f_trans_flat_luts_dim).to(device)
+                f_trans_values = torch.from_numpy(placedb.f_trans_flat_luts_values).to(device)
+                f_trans_trans = torch.from_numpy(placedb.f_trans_flat_luts_trans_table).to(device)
+                f_trans_cap = torch.from_numpy(placedb.f_trans_flat_luts_cap_table).to(device)
+                f_trans_dim = torch.from_numpy(placedb.f_trans_flat_luts_dim).to(device)
+                f_trans_luts = LUTS_INFO(f_trans_values, f_trans_trans, f_trans_cap, f_trans_dim)
 
-                self.arcs_info.r_trans_luts.flat_luts_values = torch.from_numpy(
-                    placedb.r_trans_flat_luts_values).to(device)
-                self.arcs_info.r_trans_luts.flat_luts_trans_table = torch.from_numpy(
-                    placedb.r_trans_flat_luts_trans_table).to(device)
-                self.arcs_info.r_trans_luts.flat_luts_cap_table = torch.from_numpy(
-                    placedb.r_trans_flat_luts_cap_table).to(device)
-                self.arcs_info.r_trans_luts.flat_luts_dim = torch.from_numpy(
-                    placedb.r_trans_flat_luts_dim).to(device)
+                r_trans_values = torch.from_numpy(placedb.r_trans_flat_luts_values).to(device)
+                r_trans_trans = torch.from_numpy(placedb.r_trans_flat_luts_trans_table).to(device)
+                r_trans_cap = torch.from_numpy(placedb.r_trans_flat_luts_cap_table).to(device)
+                r_trans_dim = torch.from_numpy(placedb.r_trans_flat_luts_dim).to(device)
+                r_trans_luts = LUTS_INFO(r_trans_values, r_trans_trans, r_trans_cap, r_trans_dim)
+
+                self.arcs_info = ARCS_INFO(f_delay_luts, r_delay_luts, f_trans_luts, r_trans_luts)
 
                 self.main_id_2_cell_id_start = torch.from_numpy(
                     placedb.main_id_2_cell_id_start).to(device)
@@ -372,10 +369,15 @@ class PlaceDataCollection(object):
                     placedb.pin_2_libpin_offset).to(device)
                 self.flat_lib_pin_cap = torch.from_numpy(
                     placedb.flat_lib_pin_cap).to(device)
+                self.flat_lib_pin_rcap = torch.from_numpy(
+                    placedb.flat_lib_pin_rcap).to(device)
+                self.flat_lib_pin_fcap = torch.from_numpy(
+                    placedb.flat_lib_pin_fcap).to(device)
                 self.flat_lib_pin_cap_limit = torch.from_numpy(
                     placedb.flat_lib_pin_cap_limit).to(device)
                 self.flat_lib_pin_slew_limit = torch.from_numpy(
                     placedb.flat_lib_pin_slew_limit).to(device)
+
 
                 self.net_flat_topo_sort = None
                 self.net_flat_topo_sort_start = None
@@ -459,6 +461,7 @@ class PlaceOpCollection(object):
         self.route_utilization_map_op = None
         self.pin_utilization_map_op = None
         self.nctugr_congestion_map_op = None
+        self.irt_egr_congestion_map_op = None
         self.adjust_node_area_op = None
         self.macro_overlap_op = None
         self.update_macro_overlap_weight_op = None
@@ -692,11 +695,11 @@ class BasicPlace(nn.Module):
             self.op_collections.pin_pos_op,
             self.device,
         )
-        self.op_collections.pws_op = self.build_pws(
-            placedb, self.data_collections)
         # rectilinear minimum steiner tree wirelength from flute
         # can only be called once
         if params.timing_opt_flag:
+            self.op_collections.pws_op = self.build_pws(
+                placedb, self.data_collections)
             self.op_collections.timing_op = self.build_timing_op(
                 params, placedb, timer)
 
@@ -894,12 +897,12 @@ class BasicPlace(nn.Module):
         # wirelength cost
         POWVFILE = os.path.abspath(
             os.path.join(
-                os.path.dirname(__file__), "../POWV9.dat"
+                os.path.dirname(__file__), "../thirdparty/flute/lut.ICCAD2015/POWV9.dat"
             )
         )
         POSTFILE = os.path.abspath(
             os.path.join(
-                os.path.dirname(__file__), "../POST9.dat"
+                os.path.dirname(__file__), "../thirdparty/flute/lut.ICCAD2015/POST9.dat"
             )
         )
         logging.info("POWVFILE = %s" % (POWVFILE))

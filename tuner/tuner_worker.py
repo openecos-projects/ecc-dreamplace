@@ -180,6 +180,7 @@ class AutoDMPWorker(Worker):
                 cs.seed(seed)
             return cs
 
+        print("ERROR can't read the configspace space file, using default config")
         # otherwise, setup default config space
         cs = CS.ConfigurationSpace(seed)
 

@@ -17,3 +17,5 @@ install
 bin
 include
 unittest
+.cache
+*_unittest

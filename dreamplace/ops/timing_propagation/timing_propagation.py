@@ -17,7 +17,7 @@ import logging
 from torch.func import vmap
 import unittest
 from dataclasses import dataclass, field
-
+# torch._dynamo.config.suppress_errors = True
 # Mock Timing Arc representation (can be a simple dict or class)
 
 
@@ -34,14 +34,33 @@ len(flat_luts_values_start) == len(flat_arcs)
 '''
 
 
-@dataclass
 class LUTS_INFO:
-    # Provide default values or use field(default_factory=...)
-    flat_luts_values: torch.Tensor = None
-    flat_luts_trans_table: torch.Tensor = None
-    flat_luts_cap_table: torch.Tensor = None
-    flat_luts_dim: torch.Tensor = None
+    """
+    一个数据类，用于持有和预计算一个批次的 LUTs 所需的信息。
+    此类封装了为特定批次创建掩码的逻辑。
+    """
+    def __init__(self,
+                 flat_luts_values: torch.Tensor,
+                 flat_luts_trans_table: torch.Tensor,
+                 flat_luts_cap_table: torch.Tensor,
+                 flat_luts_dim: torch.Tensor):
+        
+        # --- 1. 存储批次数据 ---
+        self.flat_luts_values = flat_luts_values
+        self.flat_luts_trans_table = flat_luts_trans_table
+        self.flat_luts_cap_table = flat_luts_cap_table
+        self.flat_luts_dim = flat_luts_dim
+        
+        # --- 2. 计算实际维度 ---
+        self.trans_dims_actual = flat_luts_dim[:, 0].long()
+        self.cap_dims_actual = flat_luts_dim[:, 1].long()
 
+        # --- 3. 预计算不同 LUT 类型的布尔掩码 ---
+        self.valid_arc_mask = (self.trans_dims_actual > 0) & (self.cap_dims_actual > 0)
+        self.is_scalar = (self.trans_dims_actual <= 1) & (self.cap_dims_actual <= 1)
+        self.is_trans_1d = (self.trans_dims_actual > 1) & (self.cap_dims_actual <= 1)
+        self.is_cap_1d = (self.trans_dims_actual <= 1) & (self.cap_dims_actual > 1)
+        self.is_2d = (self.trans_dims_actual > 1) & (self.cap_dims_actual > 1)
 
 '''
 each arc has only one f_delay_lut/r_delay_lut
@@ -72,7 +91,7 @@ flat_luts_dim
 '''
 
 '''
-cell_flat_arcs: [inpin, outpin, lib_cell_idx, lib_cell_arc_idx, arc_type]
+inst_flat_arcs: [inpin, outpin, lib_cell_idx, lib_cell_arc_idx, timing_sense]
 arc_type: 0 for neg, 1 for postive
 
 net_flat_arcs: [inpin, outpin]
@@ -91,15 +110,23 @@ class TimingPropagation(nn.Module):
                  pin_net,
                  start_points,
                  end_points,
+                 clock_pins,
+                 FF_ids,
+                 clk_pin_rtran,
+                 clk_pin_ftran,
                  net_flat_arcs_start,
                  net_flat_arcs,
+                 net2driver_pin_map,
                  arcs_info: ARCS_INFO,
-                 cell_flat_arcs_start,
-                 cell_flat_arcs,
+                 inst_flat_arcs_start,
+                 inst_flat_arcs,
+                 endpoints_constraint_arcs,
                  flat_cells_by_level,
                  flat_cells_by_level_start,
                  flat_cells_by_reverse_level,
-                 flat_cells_by_reverse_level_start):
+                 flat_cells_by_reverse_level_start,
+                 endpoints_rRAT,
+                 endpoints_fRAT):
         super(TimingPropagation, self).__init__()
 
         self.num_pins = pin_net.shape[0]
@@ -111,10 +138,16 @@ class TimingPropagation(nn.Module):
         self.pin_net = pin_net
         self.start_points = start_points
         self.end_points = end_points
+        self.clock_pins = clock_pins
+        self.FF_ids = FF_ids
+        self.clk_pin_rtran = clk_pin_rtran
+        self.clk_pin_ftran = clk_pin_ftran
         self.net_flat_arcs_start = net_flat_arcs_start
         self.net_flat_arcs = net_flat_arcs
-        self.cell_flat_arcs_start = cell_flat_arcs_start
-        self.cell_flat_arcs = cell_flat_arcs
+        self.net2driver_pin_map = net2driver_pin_map
+        self.inst_flat_arcs_start = inst_flat_arcs_start
+        self.inst_flat_arcs = inst_flat_arcs
+        self.endpoints_constraint_arcs = endpoints_constraint_arcs
         self.flat_cells_by_level = flat_cells_by_level
         self.flat_cells_by_level_start = flat_cells_by_level_start
         self.flat_cells_by_reverse_level = flat_cells_by_reverse_level
@@ -123,275 +156,626 @@ class TimingPropagation(nn.Module):
         self.device = inrdelays.device
         self.dtype = inrdelays.dtype  # Use dtype from inputs
 
-    def lut_entry_vectorized(self,
-                             # Batched inputs
-                             # [B] - For potential future use
-                             lib_cell_idxs,
-                             input_trans,   # [B]
-                             output_caps,   # [B]
-                             # [B] - LongTensor indices for the LUTs
-                             arc_idxs,
-                             # Padded LUT Tensors (Constant for the call)
-                             flat_luts_values,      # [N, MaxT, MaxC]
-                             flat_luts_trans_table,  # [N, MaxT]
-                             flat_luts_cap_table,   # [N, MaxC]
-                             flat_luts_dim):        # [N, 2] - Actual dims [trans_dim, cap_dim]
+        self.endpoints_rRAT = endpoints_rRAT
+        self.endpoints_fRAT = endpoints_fRAT
+
+        self.pin_rAAT = None
+        self.pin_fAAT = None
+        self.pin_rRAT = None
+        self.pin_fRAT = None
+        self.pin_rtran = None
+        self.pin_ftran = None
+        self.pin_net_cap = None
+        self.cell_arc_r_delays = None
+        self.cell_arc_f_delays = None
+
+    # @staticmethod
+    def _lut_entry_1d_vectorized(self, x,           # [B] - Input values
+                                 x_table,     # [B, MaxDim] - Table axes
+                                 y_table,     # [B, MaxDim] - Table values
+                                 actual_dims  # [B] - Actual table dimensions
+                                ):
         """
-        Performs bilinear interpolation for a batch of arcs using padded LUT tensors.
-        Uses vectorized tensor operations instead of vmap.
+        Performs vectorized 1D linear interpolation for a full batch.
+        (Handles one dimension, e.g., transition or capacitance).
+        """
+        device = x.device
+        dtype = x.dtype
+        batch_size = x.shape[0]
+
+        # Find neighboring indices using searchsorted on the padded table
+        x_b = x.unsqueeze(1)  # [B, 1]
+        idx_padded = torch.searchsorted(x_table, x_b, right=True).squeeze(1) # [B]
+
+        # Clamp indices to the actual valid range for each item
+        max_idx_actual = (actual_dims - 1).clamp(min=0) # [B]
+        idx_high = idx_padded.clamp(min=1).clamp(max=max_idx_actual)
+        idx_low = (idx_high - 1).clamp(min=0)
+
+        # Gather boundary points (x0, x1, y0, y1)
+        batch_indices = torch.arange(batch_size, device=device)
+        x0 = x_table[batch_indices, idx_low]
+        x1 = x_table[batch_indices, idx_high]
+        y0 = y_table[batch_indices, idx_low]
+        y1 = y_table[batch_indices, idx_high]
+
+        # Perform linear interpolation
+        interval = x1 - x0
+        denom_epsilon = torch.tensor(1e-12, device=device, dtype=dtype)
+        is_degenerate = torch.abs(interval) < denom_epsilon
+
+        x_clamped = x.clamp(min=x0, max=x1)
+        safe_interval = torch.where(is_degenerate, denom_epsilon, interval)
+        factor = ((x_clamped - x0) / safe_interval).clamp(min=0.0).clamp(max=1.0)
+
+        interp_val = torch.lerp(y0, y1, factor)
+        final_val = torch.where(is_degenerate, y0, interp_val)
+        return final_val
+
+    # @staticmethod
+    # @torch.compile
+    def _lut_entry_2d_vectorized(self, input_trans,
+                                    output_caps,
+                                    trans_tables_batch,
+                                    cap_tables_batch,
+                                    lut_values_batch,
+                                    trans_dims_actual,
+                                    cap_dims_actual
+                                    ):
+        """
+        Performs vectorized 2D interpolation with LINEAR EXTRAPOLATION for a full batch.
         """
         device = input_trans.device
         dtype = input_trans.dtype
-        batch_size = arc_idxs.shape[0]
-
-        # --- 1. Gather data for the batch of arcs ---
-        # Ensure arc_idxs are valid before gathering
-        assert arc_idxs.min() >= 0, "Negative arc_idx detected"
-        assert arc_idxs.max(
-        ) < flat_luts_dim.shape[0], "arc_idx out of bounds for flat_luts_dim"
-        # Add similar checks for other flat tensors if necessary
-
-        lut_dims_batch = flat_luts_dim[arc_idxs]             # [B, 2]
-        trans_tables_batch = flat_luts_trans_table[arc_idxs]  # [B, MaxT]
-        cap_tables_batch = flat_luts_cap_table[arc_idxs]     # [B, MaxC]
-        lut_values_batch = flat_luts_values[arc_idxs]        # [B, MaxT, MaxC]
-
-        # --- 2. Get actual dimensions and create masks ---
-        # [B] - Actual T dimension for each arc
-        trans_dims_actual = lut_dims_batch[:, 0].long()
-        # [B] - Actual C dimension for each arc
-        cap_dims_actual = lut_dims_batch[:, 1].long()
-
-        # Mask for valid arcs (dimension > 0)
-        valid_arc_mask = (trans_dims_actual > 0) & (cap_dims_actual > 0)  # [B]
-        if not torch.any(valid_arc_mask):
-            # Return all zeros if no valid arcs
-            return torch.zeros(batch_size, device=device, dtype=dtype)
-
-        # --- 3. Find Neighboring Indices (Vectorized Searchsorted on Padded) ---
-        # Unsqueeze inputs for broadcasting comparison with tables
-        input_trans_b = input_trans.unsqueeze(1)  # [B, 1]
-        output_caps_b = output_caps.unsqueeze(1)  # [B, 1]
-
-        # Perform searchsorted on the padded tables
-        # Note: This finds indices within the padded dimension length (MaxT or MaxC)
-        # We need to clamp based on actual dimensions later.
-        # Using left=True for lower bound index might simplify low/high index calculation later
-        # Let's stick to right=True and calculate low index as idx-1 for now.
-        trans_idx_padded = torch.searchsorted(
-            trans_tables_batch, input_trans_b, right=True).squeeze(-1)  # [B]
-        cap_idx_padded = torch.searchsorted(
-            cap_tables_batch, output_caps_b, right=True).squeeze(-1)     # [B]
-
-        # Calculate actual max indices (ensure non-negative)
-        max_trans_idx_actual = (trans_dims_actual - 1).clamp(min=0)  # [B]
-        max_cap_idx_actual = (cap_dims_actual - 1).clamp(min=0)     # [B]
-
-        # Clamp the indices found by searchsorted to the *actual* valid range [1, max_actual_idx]
-        # This ensures t1/c1 indices are within the real data bounds
-        trans_idx = trans_idx_padded.clamp(
-            min=1).clamp(max=max_trans_idx_actual)  # [B]
-        cap_idx = cap_idx_padded.clamp(
-            min=1).clamp(max=max_cap_idx_actual)         # [B]
-
-        # Calculate low indices [0, max_actual_idx - 1]
-        trans_idx_low = (trans_idx - 1).clamp(min=0)  # [B]
-        cap_idx_low = (cap_idx - 1).clamp(min=0)     # [B]
-
-        # --- 4. Gather Boundary Values (t0, t1, c0, c1) ---
-        # Use gather or advanced indexing with batch indices
-        batch_indices = torch.arange(batch_size, device=device)  # [B]
-        t0 = trans_tables_batch[batch_indices, trans_idx_low]  # [B]
-        t1 = trans_tables_batch[batch_indices, trans_idx]     # [B]
-        c0 = cap_tables_batch[batch_indices, cap_idx_low]     # [B]
-        c1 = cap_tables_batch[batch_indices, cap_idx]         # [B]
-
-        # --- 5. Calculate Flattened Indices for lut_values ---
-        # num_cols is the *actual* cap dimension for each arc
-        num_cols_batch = cap_dims_actual  # [B]
-        idx00 = trans_idx_low * num_cols_batch + cap_idx_low  # [B]
-        idx01 = trans_idx_low * num_cols_batch + cap_idx     # [B]
-        idx10 = trans_idx * num_cols_batch + cap_idx_low     # [B]
-        idx11 = trans_idx * num_cols_batch + cap_idx         # [B]
-
-        # --- 6. Gather Corner Values (v00, v01, v10, v11) ---
-        # Reshape the batch of 2D LUT values to be flat for 1D indexing
-        # TODO:
-        # B, MaxT, MaxC = lut_values_batch.shape
-        lut_values_batch_flat = lut_values_batch
-
-        # Check bounds before gathering (indices should be < actual_T * actual_C)
-        # This check is complex with varying dimensions. Trusting the index calculation for now.
-        # A robust implementation might involve masking indices that fall outside the true area.
-
-        # Gather using batch_indices and the calculated 1D indices
-        v00 = lut_values_batch_flat[batch_indices, idx00]  # [B]
-        v01 = lut_values_batch_flat[batch_indices, idx01]  # [B]
-        v10 = lut_values_batch_flat[batch_indices, idx10]  # [B]
-        v11 = lut_values_batch_flat[batch_indices, idx11]  # [B]
-
-        # --- 7. Perform Interpolation (Vectorized) ---
-        t_interval = t1 - t0  # [B]
-        c_interval = c1 - c0  # [B]
+        batch_size = input_trans.shape[0]
         denom_epsilon = torch.tensor(1e-12, device=device, dtype=dtype)
 
-        is_t_degenerate = torch.abs(t_interval) < denom_epsilon  # [B]
-        is_c_degenerate = torch.abs(c_interval) < denom_epsilon  # [B]
+        # === 修改点 1: 确定每个输入点所在的区域 (低区外插, 内部插值, 高区外插) ===
+        # 获取每个LUT的边界
+        # 注意: .gather() 用于处理每个batch item的实际维度可能不同的情况
+        trans_min = trans_tables_batch[:, 0]
+        trans_max = trans_tables_batch.gather(1, (trans_dims_actual - 1).clamp(min=0).unsqueeze(1)).squeeze(1)
+        cap_min = cap_tables_batch[:, 0]
+        cap_max = cap_tables_batch.gather(1, (cap_dims_actual - 1).clamp(min=0).unsqueeze(1)).squeeze(1)
 
-        input_trans_clamped = input_trans.clamp(min=t0, max=t1)  # [B]
-        output_caps_clamped = output_caps.clamp(min=c0, max=c1)  # [B]
+        # 判断是否需要外插
+        is_trans_low_extrap = input_trans < trans_min
+        is_trans_high_extrap = input_trans > trans_max
+        is_cap_low_extrap = output_caps < cap_min
+        is_cap_high_extrap = output_caps > cap_max
 
-        wa = (t1 - input_trans_clamped) * (c1 - output_caps_clamped)  # [B]
-        wb = (t1 - input_trans_clamped) * (output_caps_clamped - c0)  # [B]
-        wc = (input_trans_clamped - t0) * (c1 - output_caps_clamped)  # [B]
-        wd = (input_trans_clamped - t0) * (output_caps_clamped - c0)  # [B]
+        # 找到用于插值的索引 (即使在外插区域，也先按常规方法找，后续会修正)
+        trans_idx_padded = torch.searchsorted(trans_tables_batch, input_trans.unsqueeze(1), right=True).squeeze(1)
+        cap_idx_padded = torch.searchsorted(cap_tables_batch, output_caps.unsqueeze(1), right=True).squeeze(1)
 
-        t_interval_safe = torch.where(
-            is_t_degenerate, denom_epsilon, t_interval)  # [B]
-        c_interval_safe = torch.where(
-            is_c_degenerate, denom_epsilon, c_interval)  # [B]
-        safe_denominator = t_interval_safe * c_interval_safe  # [B]
+        max_trans_idx_actual = (trans_dims_actual - 1).clamp(min=0)
+        max_cap_idx_actual = (cap_dims_actual - 1).clamp(min=0)
 
-        # Use torch.lerp for linear interpolation parts
-        lerp_c_factor = ((output_caps_clamped - c0) / c_interval_safe.clamp(
-            min=denom_epsilon)).clamp(0.0, 1.0)  # Clamp factor to [0, 1]
-        lerp_t_factor = ((input_trans_clamped - t0) / t_interval_safe.clamp(
-            min=denom_epsilon)).clamp(0.0, 1.0)  # Clamp factor to [0, 1]
-        val_t_degenerate = torch.lerp(v00, v01, lerp_c_factor)  # [B]
-        val_c_degenerate = torch.lerp(v00, v10, lerp_t_factor)  # [B]
+        # === 修改点 2: 根据区域动态选择用于计算的索引 ===
+        # 对于高区外插，我们使用最后两个点 (N-1, N-2) 来定义斜率，所以高位索引是 max_idx
+        # 对于低区外插，我们使用前两个点 (0, 1) 来定义斜率，所以高位索引是 1
+        trans_idx_high = trans_idx_padded.clamp(min=1).clamp(max=max_trans_idx_actual)
+        trans_idx_high = torch.where(is_trans_low_extrap, 1, trans_idx_high)
+        trans_idx_low = (trans_idx_high - 1).clamp(min=0)
 
-        # Bilinear calculation (avoid division by zero)
-        # Initialize bilinear_val with a fallback (e.g., v00)
-        bilinear_val = torch.full_like(wa, float('nan'))  # Initialize with NaN
-        # Mask where division is safe
-        valid_denom_mask = torch.abs(safe_denominator) >= denom_epsilon
-        bilinear_val[valid_denom_mask] = (v00 * wa + v01 * wb + v10 * wc + v11 * wd)[
-            valid_denom_mask] / safe_denominator[valid_denom_mask]
-        # Handle cases where denominator was zero but shouldn't have been (fallback)
-        bilinear_val = torch.where(torch.isfinite(
-            bilinear_val), bilinear_val, v00)  # Replace NaN with v00
+        cap_idx_high = cap_idx_padded.clamp(min=1).clamp( max=max_cap_idx_actual)
+        cap_idx_high = torch.where(is_cap_low_extrap, 1, cap_idx_high)
+        cap_idx_low = (cap_idx_high - 1).clamp(min=0)
 
-        # Combine results using torch.where
-        final_value = torch.where(
+        # Gather Boundary Coordinates (t0, t1, c0, c1)
+        # 这部分代码无需修改，因为它会根据上面计算出的索引自动选择正确的参考点
+        batch_indices = torch.arange(batch_size, device=device)
+        t0 = trans_tables_batch[batch_indices, trans_idx_low]
+        t1 = trans_tables_batch[batch_indices, trans_idx_high]
+        c0 = cap_tables_batch[batch_indices, cap_idx_low]
+        c1 = cap_tables_batch[batch_indices, cap_idx_high]
+
+        # Gather Corner Values (v00, v01, v10, v11)
+        # 这部分代码也无需修改
+        stride = cap_dims_actual
+        idx00 = trans_idx_low * stride + cap_idx_low
+        idx01 = trans_idx_low * stride + cap_idx_high
+        idx10 = trans_idx_high * stride + cap_idx_low
+        idx11 = trans_idx_high * stride + cap_idx_high
+
+        # 使用 gather 避免高级索引可能带来的性能问题，保持与原代码结构类似
+        corner_indices = torch.stack([idx00, idx01, idx10, idx11], dim=1)
+        corner_values = lut_values_batch.gather(1, corner_indices)
+        v00, v01, v10, v11 = corner_values[:, 0], corner_values[:, 1], corner_values[:, 2], corner_values[:, 3]
+
+        # === 修改点 3: 使用原始输入值进行计算，不再clamp ===
+        # Perform Bilinear Interpolation / Extrapolation
+        t_interval = t1 - t0
+        c_interval = c1 - c0
+        is_t_degenerate = torch.abs(t_interval) < denom_epsilon
+        is_c_degenerate = torch.abs(c_interval) < denom_epsilon
+
+        # 使用安全的间隔值避免除以零
+        t_interval_safe = torch.where(is_t_degenerate, denom_epsilon, t_interval)
+        c_interval_safe = torch.where(is_c_degenerate, denom_epsilon, c_interval)
+        safe_denominator = t_interval_safe * c_interval_safe
+
+        # 关键：这里使用原始的 input_trans 和 output_caps，而不是被 clamp 后的值
+        # 这使得当输入超出 [t0, t1] 或 [c0, c1] 范围时，公式自动执行线性外插
+        wa = (t1 - input_trans) * (c1 - output_caps)
+        wb = (t1 - input_trans) * (output_caps - c0)
+        wc = (input_trans - t0) * (c1 - output_caps)
+        wd = (input_trans - t0) * (output_caps - c0)
+
+        bilinear_val = (v00 * wa + v01 * wb + v10 * wc + v11 * wd) / safe_denominator
+
+        # Handle degenerate cases using linear interpolation (lerp)
+        # 这部分逻辑保持不变，用于处理参考点重合的特殊情况
+        # 注意：这里的 lerp_factor 可能会超出 [0, 1]，这正是外插所需要的
+        lerp_c_factor = (output_caps - c0) / c_interval_safe
+        lerp_t_factor = (input_trans - t0) / t_interval_safe
+        val_t_degenerate = torch.lerp(v00, v01, lerp_c_factor)
+        val_c_degenerate = torch.lerp(v00, v10, lerp_t_factor)
+
+        # Combine results based on which dimensions are degenerate
+        return torch.where(
             is_t_degenerate & is_c_degenerate, v00,
             torch.where(is_t_degenerate, val_t_degenerate,
                         torch.where(is_c_degenerate, val_c_degenerate, bilinear_val))
         )
 
-        # --- 8. Apply Mask and Handle Non-finite ---
-        # Ensure results for invalid arcs (dim <= 0) are zero
-        # Also handle any NaNs produced during calculation
-        final_value = torch.where(valid_arc_mask & torch.isfinite(
-            final_value), final_value, torch.tensor(0.0, device=device, dtype=dtype))
+    def lut_entry_vectorized(self,
+                             lib_cell_idxs,
+                             input_trans,
+                             output_caps,
+                             arc_idxs,
+                             luts_info: LUTS_INFO
+                             ):
+        """
+        执行 LUT 插值的顶层函数。
+        此版本通过掩码将数据分批，然后分别处理。
+        注意：此方法在逻辑上更清晰，但在GPU上可能因数据重组和同步而比
+              完全向量化的版本慢。
+        """
+        device = input_trans.device
+        dtype = input_trans.dtype
+        batch_size = arc_idxs.shape[0]
 
-        return final_value
+        # --- 1. 获取当前批次对应的掩码和维度 ---
+        is_scalar_batch = luts_info.is_scalar[arc_idxs]
+        is_trans_1d_batch = luts_info.is_trans_1d[arc_idxs]
+        is_cap_1d_batch = luts_info.is_cap_1d[arc_idxs]
+        is_2d_batch = luts_info.is_2d[arc_idxs]
+        valid_arc_mask_batch = luts_info.valid_arc_mask[arc_idxs]
+
+        final_value = torch.zeros(batch_size, device=device, dtype=dtype)
+
+        # --- 2. 分批处理不同情况 ---
+
+        # 情况：2D LUT (双线性插值)
+        idx_2d = is_2d_batch.nonzero().squeeze(-1)
+        if idx_2d.numel() > 0:
+            idx_2d_batch = arc_idxs[idx_2d]
+            val_2d = self._lut_entry_2d_vectorized(
+                input_trans=input_trans[idx_2d],
+                output_caps=output_caps[idx_2d],
+                trans_tables_batch=luts_info.flat_luts_trans_table[idx_2d_batch],
+                cap_tables_batch=luts_info.flat_luts_cap_table[idx_2d_batch],
+                lut_values_batch=luts_info.flat_luts_values[idx_2d_batch],
+                trans_dims_actual=luts_info.trans_dims_actual[idx_2d_batch],
+                cap_dims_actual=luts_info.cap_dims_actual[idx_2d_batch]
+            )
+            final_value[idx_2d] = val_2d
+
+        # 情况：依赖于 input_trans 的 1D LUT
+        idx_trans_1d = is_trans_1d_batch.nonzero().squeeze(-1)
+        if idx_trans_1d.numel() > 0:
+            val_1d_t = self._lut_entry_1d_vectorized(
+                x=input_trans[idx_trans_1d],
+                x_table=luts_info.flat_luts_trans_table[arc_idxs[idx_trans_1d]],
+                y_table=luts_info.flat_luts_values[arc_idxs[idx_trans_1d]],
+                actual_dims=luts_info.trans_dims_actual[arc_idxs[idx_trans_1d]]
+            )
+            final_value[idx_trans_1d] = val_1d_t
+
+        # 情况：依赖于 output_caps 的 1D LUT
+        idx_cap_1d = is_cap_1d_batch.nonzero().squeeze(-1)
+        if idx_cap_1d.numel() > 0:
+            val_1d_c = self._lut_entry_1d_vectorized(
+                x=output_caps[idx_cap_1d],
+                x_table=luts_info.flat_luts_cap_table[arc_idxs[idx_cap_1d]],
+                y_table=luts_info.flat_luts_values[arc_idxs[idx_cap_1d]],
+                actual_dims=luts_info.cap_dims_actual[arc_idxs[idx_cap_1d]]
+            )
+            final_value[idx_cap_1d] = val_1d_c
+
+        # 情况：标量 LUT (0D)
+        idx_scalar = is_scalar_batch.nonzero().squeeze(-1)
+        if idx_scalar.numel() > 0:
+            # 对于标量，值就是 LUT values 表的第一个元素
+            final_value[idx_scalar] = luts_info.flat_luts_values[arc_idxs[idx_scalar], 0]
+
+        # --- 3. 应用最终掩码处理有效性和非有限值 ---
+        return torch.where(
+            valid_arc_mask_batch & torch.isfinite(final_value),
+            final_value,
+            torch.tensor(0.0, device=device, dtype=dtype)
+        )
+
+    def r_setup_entry(self, lib_cell_idxs, clk_pin_rtrans, data_pin_trans, lib_arc_idxs):
+        luts = self.arcs_info.r_delay_luts
+        return self.lut_entry_vectorized(
+            lib_cell_idxs, clk_pin_rtrans, data_pin_trans, lib_arc_idxs, luts
+        )
+
+    def f_setup_entry(self, lib_cell_idxs, clk_pin_rtrans, data_pin_trans, lib_arc_idxs):
+        luts = self.arcs_info.f_delay_luts
+        return self.lut_entry_vectorized(
+            lib_cell_idxs, clk_pin_rtrans, data_pin_trans, lib_arc_idxs, luts
+        )
 
     # --- Vectorized LUT Entry Functions (Updated to call vectorized lut_entry) ---
     # These now directly call the vectorized function, no vmap needed here.
     def r_delay_entry(self, lib_cell_idxs, pin_rtrans, pin_net_caps, lib_arc_idxs):
         luts = self.arcs_info.r_delay_luts
         return self.lut_entry_vectorized(
-            lib_cell_idxs, pin_rtrans, pin_net_caps, lib_arc_idxs,
-            luts.flat_luts_values, luts.flat_luts_trans_table,
-            luts.flat_luts_cap_table, luts.flat_luts_dim
+            lib_cell_idxs, pin_rtrans, pin_net_caps, lib_arc_idxs, luts
         )
 
     def f_delay_entry(self, lib_cell_idxs, pin_ftrans, pin_net_caps, lib_arc_idxs):
         luts = self.arcs_info.f_delay_luts
         return self.lut_entry_vectorized(
-            lib_cell_idxs, pin_ftrans, pin_net_caps, lib_arc_idxs,
-            luts.flat_luts_values, luts.flat_luts_trans_table,
-            luts.flat_luts_cap_table, luts.flat_luts_dim
+            lib_cell_idxs, pin_ftrans, pin_net_caps, lib_arc_idxs, luts
         )
 
     def r_tran_entry(self, lib_cell_idxs, pin_rtrans, pin_net_caps, lib_arc_idxs):
         luts = self.arcs_info.r_trans_luts
         return self.lut_entry_vectorized(
-            lib_cell_idxs, pin_rtrans, pin_net_caps, lib_arc_idxs,
-            luts.flat_luts_values, luts.flat_luts_trans_table,
-            luts.flat_luts_cap_table, luts.flat_luts_dim
+            lib_cell_idxs, pin_rtrans, pin_net_caps, lib_arc_idxs, luts
         )
 
     def f_tran_entry(self, lib_cell_idxs, pin_ftrans, pin_net_caps, lib_arc_idxs):
         luts = self.arcs_info.f_trans_luts
         return self.lut_entry_vectorized(
-            lib_cell_idxs, pin_ftrans, pin_net_caps, lib_arc_idxs,
-            luts.flat_luts_values, luts.flat_luts_trans_table,
-            luts.flat_luts_cap_table, luts.flat_luts_dim
+            lib_cell_idxs, pin_ftrans, pin_net_caps, lib_arc_idxs, luts
         )
 
-    def calculate_cell_aat_level(self, level_cells, pin_rAAT, pin_fAAT, pin_ftran, pin_rtran, pin_net_delay, pin_net_impulse, pin_net_cap, cell_arc_f_delays, cell_arc_r_delays):
+    def calculate_clk2q_aat(self,
+                        pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
+                        pin_net_cap_rise, pin_net_cap_fall,
+                        cell_arc_rr_delays, cell_arc_fr_delays,
+                        cell_arc_rf_delays, cell_arc_ff_delays):
         device = pin_rAAT.device
 
-        # Get outpin and inpin ranges for all cells
-        cell_arcs_start = self.cell_flat_arcs_start[level_cells]
-        cell_arcs_end = self.cell_flat_arcs_start[level_cells + 1]
-
-        # Compute number of outpins and inpins per cell
+        # --- 数据准备部分 (与您的风格完全一致) ---
+        level_cells = self.FF_ids
+        cell_arcs_start = self.inst_flat_arcs_start[level_cells]
+        cell_arcs_end = self.inst_flat_arcs_start[level_cells + 1]
         num_arcs = cell_arcs_end - cell_arcs_start
 
-        # Generate all outpin indices
         max_arcs = num_arcs.max().item()
+        if max_arcs == 0:
+            # 返回空的 net_in_pins 和原始张量
+            return (torch.tensor([], device=device, dtype=torch.long),
+                    pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
+                    cell_arc_rr_delays, cell_arc_fr_delays,
+                    cell_arc_rf_delays, cell_arc_ff_delays)
+
         arcs_indices = torch.arange(max_arcs, device=device).unsqueeze(0)
         arcs_mask = arcs_indices < num_arcs.unsqueeze(1)
         arcs_global_indices = arcs_indices + cell_arcs_start.unsqueeze(1)
-        level_cell_arcs = self.cell_flat_arcs[arcs_global_indices[arcs_mask]]
+        level_inst_arcs = self.inst_flat_arcs[arcs_global_indices[arcs_mask]]
+        scatter_indices = arcs_global_indices[arcs_mask]
 
-        arc_in_pins = level_cell_arcs[:, 0]
-        arc_out_pins = level_cell_arcs[:, 1]
+        arc_in_pins = level_inst_arcs[:, 0]
+        arc_out_pins = level_inst_arcs[:, 1]
+        lib_cell_idxs = level_inst_arcs[:, 2]
+        lib_arc_idxs = level_inst_arcs[:, 3]
+        timing_senses = level_inst_arcs[:, 4]
+        timing_types = level_inst_arcs[:, 5]
 
-        r_delays = self.r_delay_entry(
-            level_cell_arcs[:, 2],
-            pin_rtran[arc_in_pins],
-            pin_net_cap[arc_out_pins],
-            level_cell_arcs[:, 3]
+        pin_r_slew_in = pin_rtran[arc_in_pins]
+        pin_f_slew_in = pin_ftran[arc_in_pins]
+        pin_r_load_out = pin_net_cap_rise[arc_out_pins]
+        pin_f_load_out = pin_net_cap_fall[arc_out_pins]
+
+        # --- 初始化更新张量 (与您的风格一致) ---
+        num_level_arcs = level_inst_arcs.shape[0]
+        r_trans = torch.zeros(num_level_arcs, device=device, dtype=self.dtype)
+        f_trans = torch.zeros(num_level_arcs, device=device, dtype=self.dtype)
+        r_aat_updates = torch.full((num_level_arcs,), -torch.inf, device=device, dtype=self.dtype)
+        f_aat_updates = torch.full((num_level_arcs,), -torch.inf, device=device, dtype=self.dtype)
+
+        # --- 创建 Unate 和 TimingType 的掩码 ---
+        is_pos_unate = (timing_senses == 1)
+        is_neg_unate = (timing_senses == -1)
+        is_non_unate = ~(is_pos_unate | is_neg_unate)
+
+        is_rising_edge = (timing_types == 1)
+        is_falling_edge = (timing_types == -1)
+        is_both_edge = (timing_types == 0)
+
+        # --- 按 Unate 类型分块计算 ---
+
+        # A. Positive Unate (clk->Q)
+        if torch.any(is_pos_unate):
+            mask = is_pos_unate
+            
+            # Path 1: Rise->Rise (triggered by rising or both edge)
+            sub_mask_rr = mask & (is_rising_edge | is_both_edge)
+            if torch.any(sub_mask_rr):
+                delay_rr = self.r_delay_entry(lib_cell_idxs[sub_mask_rr], pin_r_slew_in[sub_mask_rr], pin_r_load_out[sub_mask_rr], lib_arc_idxs[sub_mask_rr])
+                tran_rr = self.r_tran_entry(lib_cell_idxs[sub_mask_rr], pin_r_slew_in[sub_mask_rr], pin_r_load_out[sub_mask_rr], lib_arc_idxs[sub_mask_rr])
+                cell_arc_rr_delays[scatter_indices[sub_mask_rr]] = delay_rr
+                r_aat_updates[sub_mask_rr] = 0 + delay_rr
+                r_trans[sub_mask_rr] = tran_rr
+
+            # Path 2: Fall->Fall (triggered by falling or both edge)
+            sub_mask_ff = mask & (is_falling_edge | is_both_edge)
+            if torch.any(sub_mask_ff):
+                delay_ff = self.f_delay_entry(lib_cell_idxs[sub_mask_ff], pin_f_slew_in[sub_mask_ff], pin_f_load_out[sub_mask_ff], lib_arc_idxs[sub_mask_ff])
+                tran_ff = self.f_tran_entry(lib_cell_idxs[sub_mask_ff], pin_f_slew_in[sub_mask_ff], pin_f_load_out[sub_mask_ff], lib_arc_idxs[sub_mask_ff])
+                cell_arc_ff_delays[scatter_indices[sub_mask_ff]] = delay_ff
+                f_aat_updates[sub_mask_ff] = 0 + delay_ff
+                f_trans[sub_mask_ff] = tran_ff
+
+        # B. Negative Unate (clk->QN)
+        if torch.any(is_neg_unate):
+            mask = is_neg_unate
+            
+            # Path 1: Rise->Fall (triggered by rising or both edge)
+            sub_mask_rf = mask & (is_rising_edge | is_both_edge)
+            if torch.any(sub_mask_rf):
+                delay_rf = self.f_delay_entry(lib_cell_idxs[sub_mask_rf], pin_r_slew_in[sub_mask_rf], pin_f_load_out[sub_mask_rf], lib_arc_idxs[sub_mask_rf])
+                tran_rf = self.f_tran_entry(lib_cell_idxs[sub_mask_rf], pin_r_slew_in[sub_mask_rf], pin_f_load_out[sub_mask_rf], lib_arc_idxs[sub_mask_rf])
+                cell_arc_rf_delays[scatter_indices[sub_mask_rf]] = delay_rf
+                f_aat_updates[sub_mask_rf] = 0 + delay_rf
+                f_trans[sub_mask_rf] = tran_rf
+
+            # Path 2: Fall->Rise (triggered by falling or both edge)
+            sub_mask_fr = mask & (is_falling_edge | is_both_edge)
+            if torch.any(sub_mask_fr):
+                delay_fr = self.r_delay_entry(lib_cell_idxs[sub_mask_fr], pin_f_slew_in[sub_mask_fr], pin_r_load_out[sub_mask_fr], lib_arc_idxs[sub_mask_fr])
+                tran_fr = self.r_tran_entry(lib_cell_idxs[sub_mask_fr], pin_f_slew_in[sub_mask_fr], pin_r_load_out[sub_mask_fr], lib_arc_idxs[sub_mask_fr])
+                cell_arc_fr_delays[scatter_indices[sub_mask_fr]] = delay_fr
+                r_aat_updates[sub_mask_fr] = 0 + delay_fr
+                r_trans[sub_mask_fr] = tran_fr
+
+        # C. Non-Unate
+        if torch.any(is_non_unate):
+            mask = is_non_unate
+            
+            # --- 计算所有可能的 AAT 和 Tran 更新值 ---
+            # 1. 由 Rising Edge Clock 触发
+            aat_rr_re = torch.full_like(r_trans, -torch.inf)
+            aat_rf_re = torch.full_like(r_trans, -torch.inf)
+            tran_rr_re = torch.zeros_like(r_trans)
+            tran_rf_re = torch.zeros_like(r_trans)
+            sub_mask_re = mask & (is_rising_edge | is_both_edge)
+            if torch.any(sub_mask_re):
+                delay_rr = self.r_delay_entry(lib_cell_idxs[sub_mask_re], pin_r_slew_in[sub_mask_re], pin_r_load_out[sub_mask_re], lib_arc_idxs[sub_mask_re])
+                delay_rf = self.f_delay_entry(lib_cell_idxs[sub_mask_re], pin_r_slew_in[sub_mask_re], pin_f_load_out[sub_mask_re], lib_arc_idxs[sub_mask_re])
+                cell_arc_rr_delays[scatter_indices[sub_mask_re]] = delay_rr
+                cell_arc_rf_delays[scatter_indices[sub_mask_re]] = delay_rf
+                aat_rr_re[sub_mask_re] = 0 + delay_rr
+                aat_rf_re[sub_mask_re] = 0+ delay_rf
+                tran_rr_re[sub_mask_re] = self.r_tran_entry(lib_cell_idxs[sub_mask_re], pin_r_slew_in[sub_mask_re], pin_r_load_out[sub_mask_re], lib_arc_idxs[sub_mask_re])
+                tran_rf_re[sub_mask_re] = self.f_tran_entry(lib_cell_idxs[sub_mask_re], pin_r_slew_in[sub_mask_re], pin_f_load_out[sub_mask_re], lib_arc_idxs[sub_mask_re])
+
+            # 2. 由 Falling Edge Clock 触发
+            aat_fr_fe = torch.full_like(r_trans, -torch.inf)
+            aat_ff_fe = torch.full_like(r_trans, -torch.inf)
+            tran_fr_fe = torch.zeros_like(r_trans)
+            tran_ff_fe = torch.zeros_like(r_trans)
+            sub_mask_fe = mask & (is_falling_edge | is_both_edge)
+            if torch.any(sub_mask_fe):
+                delay_fr = self.r_delay_entry(lib_cell_idxs[sub_mask_fe], pin_f_slew_in[sub_mask_fe], pin_r_load_out[sub_mask_fe], lib_arc_idxs[sub_mask_fe])
+                delay_ff = self.f_delay_entry(lib_cell_idxs[sub_mask_fe], pin_f_slew_in[sub_mask_fe], pin_f_load_out[sub_mask_fe], lib_arc_idxs[sub_mask_fe])
+                cell_arc_fr_delays[scatter_indices[sub_mask_fe]] = delay_fr
+                cell_arc_ff_delays[scatter_indices[sub_mask_fe]] = delay_ff
+                aat_fr_fe[sub_mask_fe] = 0 + delay_fr
+                aat_ff_fe[sub_mask_fe] = 0 + delay_ff
+                tran_fr_fe[sub_mask_fe] = self.r_tran_entry(lib_cell_idxs[sub_mask_fe], pin_f_slew_in[sub_mask_fe], pin_r_load_out[sub_mask_fe], lib_arc_idxs[sub_mask_fe])
+                tran_ff_fe[sub_mask_fe] = self.f_tran_entry(lib_cell_idxs[sub_mask_fe], pin_f_slew_in[sub_mask_fe], pin_f_load_out[sub_mask_fe], lib_arc_idxs[sub_mask_fe])
+
+            # --- 合并 Non-Unate 结果 ---
+            # Rise AAT 更新: worst of (r->r from rising_clk, f->r from falling_clk)
+            r_aat_updates[mask] = torch.maximum(aat_rr_re[mask], aat_fr_fe[mask])
+            # Fall AAT 更新: worst of (r->f from rising_clk, f->f from falling_clk)
+            f_aat_updates[mask] = torch.maximum(aat_rf_re[mask], aat_ff_fe[mask])
+            # Rise Tran 更新
+            r_trans[mask] = torch.maximum(tran_rr_re[mask], tran_fr_fe[mask])
+            # Fall Tran 更新
+            f_trans[mask] = torch.maximum(tran_rf_re[mask], tran_ff_fe[mask])
+
+        # --- 4. 聚合更新 (与您的风格一致) ---
+        pin_rAAT = torch.scatter_reduce(pin_rAAT, 0, arc_out_pins.long(), r_aat_updates, reduce="amax", include_self=True)
+        pin_fAAT = torch.scatter_reduce(pin_fAAT, 0, arc_out_pins.long(), f_aat_updates, reduce="amax", include_self=True)
+        pin_rtran = torch.scatter_reduce(pin_rtran, 0, arc_out_pins.long(), r_trans, reduce="amax", include_self=True)
+        pin_ftran = torch.scatter_reduce(pin_ftran, 0, arc_out_pins.long(), f_trans, reduce="amax", include_self=True)
+
+        net_in_pins = torch.unique(self.pin_net[arc_out_pins])
+        return (net_in_pins, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
+                cell_arc_rr_delays, cell_arc_fr_delays,
+                cell_arc_rf_delays, cell_arc_ff_delays)
+        
+    # @torch.compile
+    def calculate_cell_aat_level(self, level_cells,
+                                pin_rAAT, pin_fAAT,
+                                pin_rtran, pin_ftran,
+                                pin_net_cap_rise, pin_net_cap_fall,
+                                cell_arc_rr_delays, cell_arc_fr_delays, 
+                                cell_arc_rf_delays, cell_arc_ff_delays):
+        """
+        Optimized version of the AAT calculation function.
+        It groups arcs by their 'unate' property (timing sense) to avoid
+        redundant delay and transition calculations.
+        """
+        start_time = time.time()
+        device = pin_rAAT.device
+
+        # Get outpin and inpin ranges for all cells
+        cell_arcs_start = self.inst_flat_arcs_start[level_cells]
+        cell_arcs_end = self.inst_flat_arcs_start[level_cells + 1]
+
+        # Compute number of arcs per cell
+        num_arcs = cell_arcs_end - cell_arcs_start
+
+        # Generate all arc indices for the current level
+        max_arcs = num_arcs.max().item()
+        if max_arcs == 0:
+            return (
+                torch.tensor([], device=device, dtype=torch.long),
+                pin_rAAT,
+                pin_fAAT,
+                pin_rtran,
+                pin_ftran,
+                cell_arc_rr_delays,
+                cell_arc_fr_delays,
+                cell_arc_rf_delays,
+                cell_arc_ff_delays,
+            )
+
+        arcs_indices = torch.arange(max_arcs, device=device).unsqueeze(0)
+        arcs_mask = arcs_indices < num_arcs.unsqueeze(1)
+        arcs_global_indices = arcs_indices + cell_arcs_start.unsqueeze(1)
+        level_inst_arcs = self.inst_flat_arcs[arcs_global_indices[arcs_mask]]
+        scatter_indices = arcs_global_indices[arcs_mask]
+
+        arc_in_pins = level_inst_arcs[:, 0]
+        arc_out_pins = level_inst_arcs[:, 1]
+        lib_cell_idxs = level_inst_arcs[:, 2]
+        lib_arc_idxs = level_inst_arcs[:, 3]
+        timing_senses = level_inst_arcs[:, 4]
+
+        if torch.logical_and(arc_out_pins == 2485, arc_in_pins == 3200).any():
+            logging.warning(f"flat arc index is: {torch.where(torch.logical_and(arc_out_pins == 2485, arc_in_pins == 3200))}")
+
+        # 1. 准备输入条件 (Prepare inputs)
+        pin_r_slew_in = pin_rtran[arc_in_pins]
+        pin_f_slew_in = pin_ftran[arc_in_pins]
+        pin_r_load_out = pin_net_cap_rise[arc_out_pins]
+        pin_f_load_out = pin_net_cap_fall[arc_out_pins]
+
+        # 2. 根据 Unate 类型进行分组 (Group arcs by unate type)
+        is_pos_unate = (timing_senses == 1)
+        is_neg_unate = (timing_senses == -1)
+        is_non_unate = ~ (is_pos_unate | is_neg_unate)
+
+        num_level_arcs = level_inst_arcs.shape[0]
+
+        r_trans = torch.zeros(num_level_arcs, device=device, dtype=self.dtype)
+        f_trans = torch.zeros(num_level_arcs, device=device, dtype=self.dtype)
+        # 初始化 AAT 更新张量
+        r_aat_updates = torch.full_like(r_trans, -float('inf'), device=device, dtype=self.dtype)
+        f_aat_updates = torch.full_like(r_trans, -float('inf'), device=device, dtype=self.dtype)
+        # --- 3. 按需计算每种 Unate 类型的 Delay 和 Tran ---
+        delay_rr_updates = torch.full_like(r_trans, -float('inf'), device=device, dtype=self.dtype)
+        delay_rf_updates = torch.full_like(r_trans, -float('inf'), device=device, dtype=self.dtype)
+        delay_fr_updates = torch.full_like(r_trans, -float('inf'), device=device, dtype=self.dtype)
+        delay_ff_updates = torch.full_like(r_trans, -float('inf'), device=device, dtype=self.dtype)
+        
+        # A. Positive Unate (r->r, f->f)
+        if torch.any(is_pos_unate):
+            mask = is_pos_unate
+            # Rise -> Rise
+            delay_rr = self.r_delay_entry(lib_cell_idxs[mask], pin_r_slew_in[mask], pin_r_load_out[mask], lib_arc_idxs[mask])
+            tran_rr = self.r_tran_entry(lib_cell_idxs[mask], pin_r_slew_in[mask], pin_r_load_out[mask], lib_arc_idxs[mask])
+            # Fall -> Fall
+            delay_ff = self.f_delay_entry(lib_cell_idxs[mask], pin_f_slew_in[mask], pin_f_load_out[mask], lib_arc_idxs[mask])
+            tran_ff = self.f_tran_entry(lib_cell_idxs[mask], pin_f_slew_in[mask], pin_f_load_out[mask], lib_arc_idxs[mask])
+
+            delay_rr_updates[mask] = delay_rr
+            delay_ff_updates[mask] = delay_ff
+            r_trans[mask] = tran_rr
+            f_trans[mask] = tran_ff
+            r_aat_updates[mask] = pin_rAAT[arc_in_pins[mask]] + delay_rr
+            f_aat_updates[mask] = pin_fAAT[arc_in_pins[mask]] + delay_ff
+
+        # B. Negative Unate (f->r, r->f)
+        if torch.any(is_neg_unate):
+            mask = is_neg_unate
+            # Fall -> Rise
+            delay_fr = self.r_delay_entry(lib_cell_idxs[mask], pin_f_slew_in[mask], pin_r_load_out[mask], lib_arc_idxs[mask])
+            tran_fr = self.r_tran_entry(lib_cell_idxs[mask], pin_f_slew_in[mask], pin_r_load_out[mask], lib_arc_idxs[mask])
+            # Rise -> Fall
+            delay_rf = self.f_delay_entry(lib_cell_idxs[mask], pin_r_slew_in[mask], pin_f_load_out[mask], lib_arc_idxs[mask])
+            tran_rf = self.f_tran_entry(lib_cell_idxs[mask], pin_r_slew_in[mask], pin_f_load_out[mask], lib_arc_idxs[mask])
+
+            delay_fr_updates[mask] = delay_fr
+            delay_rf_updates[mask] = delay_rf
+            r_trans[mask] = tran_fr
+            f_trans[mask] = tran_rf
+            r_aat_updates[mask] = pin_fAAT[arc_in_pins[mask]] + delay_fr # <-- 使用 pin_fAAT
+            f_aat_updates[mask] = pin_rAAT[arc_in_pins[mask]] + delay_rf # <-- 使用 pin_rAAT
+
+        # C. Non-Unate (worst of all applicable cases)
+        if torch.any(is_non_unate):
+            mask = is_non_unate
+            # Rise output calculation (worst of r->r and f->r)
+            delay_rr_non = self.r_delay_entry(lib_cell_idxs[mask], pin_r_slew_in[mask], pin_r_load_out[mask], lib_arc_idxs[mask])
+            delay_fr_non = self.r_delay_entry(lib_cell_idxs[mask], pin_f_slew_in[mask], pin_r_load_out[mask], lib_arc_idxs[mask])
+            tran_rr_non = self.r_tran_entry(lib_cell_idxs[mask], pin_r_slew_in[mask], pin_r_load_out[mask], lib_arc_idxs[mask])
+            tran_fr_non = self.r_tran_entry(lib_cell_idxs[mask], pin_f_slew_in[mask], pin_r_load_out[mask], lib_arc_idxs[mask])
+            delay_fr_updates[mask] = delay_fr_non
+            delay_rr_updates[mask]  = delay_rr_non
+
+            # unate_r_delays = torch.maximum(delay_rr_non, delay_fr_non)
+            r_trans[mask] = torch.maximum(tran_rr_non, tran_fr_non)
+
+            aat_rr = pin_rAAT[arc_in_pins[mask]] + delay_rr_non
+            aat_fr = pin_fAAT[arc_in_pins[mask]] + delay_fr_non
+            r_aat_updates[mask] = torch.maximum(aat_rr, aat_fr)
+
+            # Fall output calculation (worst of f->f and r->f)
+            delay_ff_non = self.f_delay_entry(lib_cell_idxs[mask], pin_f_slew_in[mask], pin_f_load_out[mask], lib_arc_idxs[mask])
+            delay_rf_non = self.f_delay_entry(lib_cell_idxs[mask], pin_r_slew_in[mask], pin_f_load_out[mask], lib_arc_idxs[mask])
+            tran_ff_non = self.f_tran_entry(lib_cell_idxs[mask], pin_f_slew_in[mask], pin_f_load_out[mask], lib_arc_idxs[mask])
+            tran_rf_non = self.f_tran_entry(lib_cell_idxs[mask], pin_r_slew_in[mask], pin_f_load_out[mask], lib_arc_idxs[mask])
+
+            f_trans[mask] = torch.maximum(tran_ff_non, tran_rf_non)
+
+            delay_ff_updates[mask] = delay_ff_non
+            delay_rf_updates[mask] = delay_rf_non
+
+            aat_ff = pin_fAAT[arc_in_pins[mask]] + delay_ff_non
+            aat_rf = pin_rAAT[arc_in_pins[mask]] + delay_rf_non
+            f_aat_updates[mask] = torch.maximum(aat_ff, aat_rf)
+
+        # --- 4. 存储和更新 (Store and Update) ---
+        # The logic from here remains the same, as r_delays, f_delays, etc. are now fully populated.
+
+        # cell_arc_r_delays.scatter_(0, scatter_indices.long(), r_delays)
+        # cell_arc_f_delays.scatter_(0, scatter_indices.long(), f_delays)
+
+        pin_rAAT = torch.scatter_reduce(pin_rAAT, 0, arc_out_pins.long(), r_aat_updates, reduce="amax", include_self=True)
+        pin_fAAT = torch.scatter_reduce(pin_fAAT, 0, arc_out_pins.long(), f_aat_updates, reduce="amax", include_self=True)
+        pin_rtran = torch.scatter_reduce(pin_rtran, 0, arc_out_pins.long(), r_trans, reduce="amax", include_self=True)
+        pin_ftran = torch.scatter_reduce(pin_ftran, 0, arc_out_pins.long(), f_trans, reduce="amax", include_self=True)
+        
+        cell_arc_rr_delays = torch.scatter_reduce(cell_arc_rr_delays, 0, scatter_indices.long(), delay_rr_updates, reduce="amax", include_self=True)
+        cell_arc_fr_delays = torch.scatter_reduce(cell_arc_fr_delays, 0, scatter_indices.long(), delay_fr_updates, reduce="amax", include_self=True)
+        cell_arc_rf_delays = torch.scatter_reduce(cell_arc_rf_delays, 0, scatter_indices.long(), delay_rf_updates, reduce="amax", include_self=True)
+        cell_arc_ff_delays = torch.scatter_reduce(cell_arc_ff_delays, 0, scatter_indices.long(), delay_ff_updates, reduce="amax", include_self=True)
+
+        net_in_pins = torch.unique(self.pin_net[arc_out_pins])
+        logging.debug(f"Cell AAT Level Time: {time.time() - start_time:.4f}s")
+        return (
+            net_in_pins,
+            pin_rAAT,
+            pin_fAAT,
+            pin_rtran,
+            pin_ftran,
+            cell_arc_rr_delays,
+            cell_arc_fr_delays,
+            cell_arc_rf_delays,
+            cell_arc_ff_delays,
         )
 
-        f_delays = self.f_delay_entry(
-            level_cell_arcs[:, 2],
-            pin_ftran[arc_in_pins],
-            pin_net_cap[arc_out_pins],
-            level_cell_arcs[:, 3]
-        )
-
-        r_trans = self.r_tran_entry(
-            level_cell_arcs[:, 2],
-            pin_rtran[arc_in_pins],
-            pin_net_cap[arc_out_pins],
-            level_cell_arcs[:, 3]
-        )
-
-        f_trans = self.f_tran_entry(
-            level_cell_arcs[:, 2],
-            pin_ftran[arc_in_pins],
-            pin_net_cap[arc_out_pins],
-            level_cell_arcs[:, 3]
-        )
-
-        cell_arc_f_delays[level_cell_arcs[:, 2]] = f_delays
-        cell_arc_r_delays[level_cell_arcs[:, 2]] = r_delays
-
-        r_aat_updates = pin_rAAT[arc_in_pins] + r_delays
-        f_aat_updates = pin_fAAT[arc_in_pins] + f_delays
-
-        pin_rAAT[arc_out_pins] = torch.max(
-            pin_rAAT[arc_out_pins], r_aat_updates)
-        pin_fAAT[arc_out_pins] = torch.max(
-            pin_fAAT[arc_out_pins], f_aat_updates)
-
-        pin_rtran[arc_out_pins] = torch.max(
-            pin_rtran[arc_out_pins], r_trans)
-        pin_ftran[arc_out_pins] = torch.max(
-            pin_ftran[arc_out_pins], f_trans)
-
-        net_in_pins = torch.unique(
-            self.pin_net[arc_out_pins])
-        return net_in_pins
-
-    def calculate_net_aat_level(self, curnets, pin_rAAT, pin_fAAT, pin_ftran, pin_rtran, pin_net_delay, pin_net_impulse, pin_net_cap):
+    def calculate_net_aat_level(self, curnets, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
+                                pin_net_delay_rise, pin_net_delay_fall,
+                                pin_net_impulse_rise, pin_net_impulse_fall):
+        start_time = time.time()
         net_arcs_starts = self.net_flat_arcs_start[curnets]
         net_arcs_ends = self.net_flat_arcs_start[curnets + 1]
         num_net_fopins = net_arcs_ends - net_arcs_starts
+        if num_net_fopins.numel() == 0:
+            return pin_rAAT, pin_fAAT, pin_rtran, pin_ftran
 
         max_net_fopins = num_net_fopins.max().item()
         net_arcs_indices = torch.arange(
@@ -403,136 +787,329 @@ class TimingPropagation(nn.Module):
 
         arc_fopins = net_arcs_level[:, 1]
         arc_fipins = net_arcs_level[:, 0]
-        wire_delays = pin_net_delay[arc_fopins]
-        impulse = pin_net_impulse[arc_fopins]
 
-        pin_rAAT[arc_fopins] = torch.max(
-            pin_rAAT[arc_fopins], pin_rAAT[arc_fipins] + wire_delays)
-        pin_fAAT[arc_fopins] = torch.max(
-            pin_fAAT[arc_fopins], pin_fAAT[arc_fipins] + wire_delays)
+        wire_delays_rise = pin_net_delay_rise[arc_fopins]
+        wire_delays_fall = pin_net_delay_fall[arc_fopins]
+        impulse_rise = pin_net_impulse_rise[arc_fopins]
+        impulse_fall = pin_net_impulse_fall[arc_fopins]
 
-        pin_rtran[arc_fopins] = torch.max(pin_rtran[arc_fopins], torch.sqrt(
-            pin_rtran[arc_fipins]**2 + impulse**2))
-        pin_ftran[arc_fopins] = torch.max(pin_ftran[arc_fopins], torch.sqrt(
-            pin_ftran[arc_fipins]**2 + impulse**2))
+        r_aat_updates = pin_rAAT[arc_fipins] + wire_delays_rise
+        f_aat_updates = pin_fAAT[arc_fipins] + wire_delays_fall
+        r_tran_updates = torch.sqrt(pin_rtran[arc_fipins]**2 + impulse_rise)
+        f_tran_updates = torch.sqrt(pin_ftran[arc_fipins]**2 + impulse_fall)
 
-    def calculate_cell_rat_level(self, level_cells, pin_rRAT, pin_fRAT, pin_net_delay, pin_net_impulse, pin_net_cap, cell_arc_f_delays, cell_arc_r_delays):
+        pin_rAAT = torch.scatter_reduce(pin_rAAT, 0, arc_fopins.long(
+        ), r_aat_updates, reduce="amax", include_self=True)
+        pin_fAAT = torch.scatter_reduce(pin_fAAT, 0, arc_fopins.long(
+        ), f_aat_updates, reduce="amax", include_self=True)
+        pin_rtran = torch.scatter_reduce(pin_rtran, 0, arc_fopins.long(
+        ), r_tran_updates, reduce="amax", include_self=True)
+        pin_ftran = torch.scatter_reduce(pin_ftran, 0, arc_fopins.long(
+        ), f_tran_updates, reduce="amax", include_self=True)
+        logging.debug(f"Net AAT Level Time: {time.time() - start_time:.4f}s")
+        return pin_rAAT, pin_fAAT, pin_rtran, pin_ftran
+
+    # @torch.compile
+    def calculate_cell_rat_level(
+        self,
+        level_cells,
+        pin_rRAT,
+        pin_fRAT,
+        cell_arc_rr_delays,
+        cell_arc_fr_delays,
+        cell_arc_rf_delays,
+        cell_arc_ff_delays,
+    ):
+        start_time = time.time()
         device = pin_rRAT.device
-        num_cells = len(level_cells)
 
-        cell_arcs_start = self.cell_flat_arcs_start[level_cells]
-        cell_arcs_end = self.cell_flat_arcs_start[level_cells + 1]
+        # --- 1. 获取当前层级的所有时序弧信息 (与AAT函数中相同) ---
+        cell_arcs_start = self.inst_flat_arcs_start[level_cells]
+        cell_arcs_end = self.inst_flat_arcs_start[level_cells + 1]
 
         num_arcs = cell_arcs_end - cell_arcs_start
 
         max_arcs = num_arcs.max().item()
+        if max_arcs == 0:
+            return torch.tensor([], device=device, dtype=torch.long), pin_rRAT, pin_fRAT
+
         arcs_indices = torch.arange(max_arcs, device=device).unsqueeze(0)
         arcs_mask = arcs_indices < num_arcs.unsqueeze(1)
         arcs_global_indices = arcs_indices + cell_arcs_start.unsqueeze(1)
-        level_cell_arcs = self.cell_flat_arcs[arcs_global_indices[arcs_mask]]
+        level_inst_arcs = self.inst_flat_arcs[arcs_global_indices[arcs_mask]]
 
-        arc_in_pins = level_cell_arcs[:, 0]
-        arc_out_pins = level_cell_arcs[:, 1]
+        arc_in_pins = level_inst_arcs[:, 0]
+        arc_out_pins = level_inst_arcs[:, 1]
+        timing_senses = level_inst_arcs[:, 4]
 
-        f_delays = cell_arc_f_delays[level_cell_arcs[:, 2]]
-        r_delays = cell_arc_r_delays[level_cell_arcs[:, 2]]
+        # --- 2. 获取预先计算好的延迟 ---
+        scatter_indices = arcs_global_indices[arcs_mask]
+        rr_delays = cell_arc_rr_delays[scatter_indices]
+        ff_delays = cell_arc_ff_delays[scatter_indices]
+        rf_delays = cell_arc_rf_delays[scatter_indices]
+        fr_delays = cell_arc_fr_delays[scatter_indices]
 
-        r_rat_updates = pin_rRAT[arc_out_pins] - r_delays
-        f_rat_updates = pin_fRAT[arc_out_pins] - f_delays
+        # --- 3. 根据 Unate 类型计算 RAT 更新值 ---
 
-        pin_rRAT[arc_in_pins] = torch.min(
-            pin_rRAT[arc_in_pins], r_rat_updates)
-        pin_fRAT[arc_in_pins] = torch.min(
-            pin_fRAT[arc_in_pins], f_rat_updates)
+        # 初始化RAT更新张量为一个极大值，因为我们要取最小值
+        r_rat_updates = torch.full_like(scatter_indices, float('inf'), device=self.device, dtype=self.dtype)
+        f_rat_updates = torch.full_like(scatter_indices, float('inf'), device=self.device, dtype=self.dtype)
 
-        curnets = torch.unique(self.pin_net[arc_in_pins])
-        return curnets
+        # 根据Unate类型进行分组
+        is_pos_unate = (timing_senses == 1)
+        is_neg_unate = (timing_senses == -1)
 
-    def calculate_net_rat_level(self, curnets, pin_rRAT, pin_fRAT, pin_net_delay, pin_net_impulse, pin_net_cap):
-        net_arcs_starts = self.net_flat_arcs_start[curnets]
-        net_arcs_ends = self.net_flat_arcs_start[curnets + 1]
-        num_net_fopins = net_arcs_ends - net_arcs_starts
+        # A. Positive Unate (r_out -> r_in, f_out -> f_in)
+        if torch.any(is_pos_unate):
+            mask = is_pos_unate
+            # r_delays[mask] 对应 delay_rr
+            r_rat_updates[mask] = pin_rRAT[arc_out_pins[mask]] - rr_delays[mask]
+            # f_delays[mask] 对应 delay_ff
+            f_rat_updates[mask] = pin_fRAT[arc_out_pins[mask]] - ff_delays[mask]
 
-        max_net_fopins = num_net_fopins.max().item()
-        net_arcs_indices = torch.arange(
-            max_net_fopins, device=pin_rRAT.device).unsqueeze(0)
-        net_arcs_mask = net_arcs_indices < num_net_fopins.unsqueeze(1)
-        net_arcs_global_indices = net_arcs_indices + \
-            net_arcs_starts.unsqueeze(1)
-        net_arcs_level = self.net_flat_arcs[net_arcs_global_indices[net_arcs_mask]]
+        # B. Negative Unate (r_out -> f_in, f_out -> r_in)
+        if torch.any(is_neg_unate):
+            mask = is_neg_unate
+            # 要计算输入端的 rise RAT (r_rat_updates)，需要看输出端的 fall RAT
+            # 对应的延迟是 rise-to-fall，在前向计算时存在 f_delays 中
+            r_rat_updates[mask] = pin_fRAT[arc_out_pins[mask]] - rf_delays[mask]
 
-        arc_fopins = net_arcs_level[:, 1]
-        arc_fipins = net_arcs_level[:, 0]
-        wire_delays = pin_net_delay[arc_fopins]
+            # 要计算输入端的 fall RAT (f_rat_updates)，需要看输出端的 rise RAT
+            # 对应的延迟是 fall-to-rise，在前向计算时存在 r_delays 中
+            f_rat_updates[mask] = pin_rRAT[arc_out_pins[mask]] - fr_delays[mask]
 
-        pin_rRAT[arc_fipins] = torch.min(
-            pin_rRAT[arc_fipins], pin_rRAT[arc_fopins] - wire_delays)
-        pin_fRAT[arc_fipins] = torch.min(
-            pin_fRAT[arc_fipins], pin_fRAT[arc_fopins] - wire_delays)
+        # C. Non-Unate (需要同时满足所有情况)
+        # 对于RAT，一个输入引脚的要求是最坏（早）的。
+        # 一个输入引脚的 rise RAT，需要满足它所驱动的所有弧（r->r, r->f）的要求
+        # scatter_reduce 的 amin 操作会自动处理 Non-Unate 的聚合，所以我们只需为每条弧计算
+        is_non_unate = ~(is_pos_unate | is_neg_unate)
+        if torch.any(is_non_unate):
+            mask = is_non_unate
+            # r_in -> r_out 弧的要求
 
-    def forward(self, pin_net_delay, pin_net_impulse, pin_net_cap):
-        device = pin_net_delay.device
-        dtype = pin_net_delay.dtype  # Use dtype from inputs
+            r_rat_updates[mask] = torch.minimum(
+                pin_rRAT[arc_out_pins[mask]] - rr_delays[mask],
+                pin_fRAT[arc_out_pins[mask]] - rf_delays[mask],
+            )  # r_delays for non-unate is max(delay_rr, delay_fr)
+            # r_in -> f_out 弧的要求
+            f_rat_updates[mask] = torch.minimum(
+                pin_rRAT[arc_out_pins[mask]] - fr_delays[mask],
+                pin_fRAT[arc_out_pins[mask]] - ff_delays[mask],
+            )  # f_delays for non-unate is max(delay_ff, delay_rf)
+
+        # --- 4. 聚合更新 ---
+        pin_rRAT = torch.scatter_reduce(pin_rRAT, 0, arc_in_pins.long(), r_rat_updates, reduce="amin", include_self=True)
+        pin_fRAT = torch.scatter_reduce(pin_fRAT, 0, arc_in_pins.long(), f_rat_updates, reduce="amin", include_self=True)
+
+        cur_endpoints = torch.unique(arc_in_pins)
+        logging.debug(f"Cell RAT Level Time: {time.time() - start_time:.4f}s")
+        return cur_endpoints, pin_rRAT, pin_fRAT
+
+    def calculate_net_rat_level(self, cur_endpoint, pin_rRAT, pin_fRAT, pin_net_delay_rise, pin_net_delay_fall):
+
+        curnets = self.pin_net[cur_endpoint]
+
+        arc_fipins = self.net2driver_pin_map[curnets]
+        wire_delays_rise = pin_net_delay_rise[cur_endpoint]
+        wire_delays_fall = pin_net_delay_fall[cur_endpoint]
+        assert pin_rRAT[cur_endpoint].max(
+            ) <= 1e8, "Negative r_rat_updates detected"
+        r_rat_updates = pin_rRAT[cur_endpoint] - wire_delays_rise
+        f_rat_updates = pin_fRAT[cur_endpoint] - wire_delays_fall
+        # assert r_rat_updates.max() < 5e4, "r_rat_updates exceed expected range"
+        # assert f_rat_updates.max() < 5e4, "f_rat_updates exceed expected range"
+
+        pin_rRAT = torch.scatter_reduce(pin_rRAT, 0, arc_fipins.long(
+        ), r_rat_updates, reduce="amin", include_self=True)
+        pin_fRAT = torch.scatter_reduce(pin_fRAT, 0, arc_fipins.long(
+        ), f_rat_updates, reduce="amin", include_self=True)
+        assert pin_rRAT[arc_fipins].max(
+            ) <= 1e8, "Negative r_rat_updates detected after scatter_reduce"
+        return pin_rRAT, pin_fRAT
+
+    def calculate_setup_rat(self, pin_rRAT, pin_fRAT, clk_pin_rtran, clk_pin_ftran, pin_rtran, pin_ftran):
+
+        arc_in_pins = self.endpoints_constraint_arcs[:, 0]
+        arc_out_pins = self.endpoints_constraint_arcs[:, 1]
+        lib_cell_idxs = self.endpoints_constraint_arcs[:, 2]
+        lib_arc_idxs = self.endpoints_constraint_arcs[:, 3]
+        timing_senses = self.endpoints_constraint_arcs[:, 4]
+
+        pin_clk_rtran_in = clk_pin_rtran[arc_in_pins]
+        pin_clk_ftran_in = clk_pin_ftran[arc_in_pins]
+        pin_data_rtran_in = pin_rtran[arc_out_pins]
+        pin_data_ftran_in = pin_ftran[arc_out_pins]
+
+        # if (arc_out_pins == 4720 ).any():
+        #     logging.info(torch.where(arc_out_pins == 4720))
+        #     logging.warning(f"lib_arc_idxs: {lib_arc_idxs}")
+
+        # R->R
+        rr_setup_time = self.r_setup_entry(lib_cell_idxs, pin_clk_rtran_in,
+                                           pin_data_rtran_in, lib_arc_idxs)
+        ff_setup_time = self.f_setup_entry(lib_cell_idxs, pin_clk_ftran_in,
+                                           pin_data_ftran_in, lib_arc_idxs)
+
+        fr_setup_time = self.r_setup_entry(lib_cell_idxs, pin_clk_ftran_in,
+                                           pin_data_rtran_in, lib_arc_idxs)
+        rf_setup_time = self.f_setup_entry(lib_cell_idxs, pin_clk_rtran_in,
+                                           pin_data_ftran_in, lib_arc_idxs)
+
+        is_pos_unate = (timing_senses == 1)
+        is_neg_unate = (timing_senses == -1)
+
+        # --- 计算最终的上升输出延时 (r_delays) ---
+        # Positive unate : r->r / f->f
+        # Negative unate : f->r / r->f
+        # Non-unate : worst of r->r, f->r, f->f, r->f
+        r_delays_non_unate = torch.maximum(rr_setup_time, fr_setup_time)
+        f_delays_non_unate = torch.maximum(ff_setup_time, rf_setup_time)
+        r_setup_time = torch.where(is_pos_unate, rr_setup_time,
+                                   torch.where(is_neg_unate, fr_setup_time, r_delays_non_unate))
+        f_setup_time = torch.where(is_pos_unate, ff_setup_time,
+                                   torch.where(is_neg_unate, rf_setup_time, f_delays_non_unate))
+
+        # assert pin_rRAT[arc_out_pins].min(
+        # ) >= 0, "Negative r_rat_updates detected"
+
+        pin_rRAT[arc_out_pins] = pin_rRAT[arc_out_pins] - r_setup_time
+        pin_fRAT[arc_out_pins] = pin_fRAT[arc_out_pins] - f_setup_time
+
+        return pin_rRAT, pin_fRAT
+
+    def forward(self, pin_net_delays, pin_net_impulses, pin_net_caps):
+        start_time = time.time()
+        pin_net_delay_rise = pin_net_delays['rise'].clone()
+        pin_net_delay_fall = pin_net_delays['fall'].clone()
+        pin_net_impulse_rise = pin_net_impulses['rise'].clone()
+        pin_net_impulse_fall = pin_net_impulses['fall'].clone()
+        pin_net_cap_rise = pin_net_caps['rise'].clone()
+        pin_net_cap_fall = pin_net_caps['fall'].clone()
+
+        device = pin_net_delay_rise.device
+        dtype = pin_net_delay_rise.dtype
 
         # --- Initialization ---
-        pin_rAAT = torch.zeros(self.num_pins, device=device, dtype=dtype)
-        pin_fAAT = torch.zeros(self.num_pins, device=device, dtype=dtype)
+        inf_val = torch.tensor(2e8, device=self.device, dtype=self.dtype)
+        pin_rAAT = torch.full((self.num_pins,), -inf_val, device=device, dtype=dtype)
+        pin_fAAT = torch.full((self.num_pins,), -inf_val, device=device, dtype=dtype)
         pin_rtran = torch.zeros(self.num_pins, device=device, dtype=dtype)
         pin_ftran = torch.zeros(self.num_pins, device=device, dtype=dtype)
-
-        inf_val = torch.tensor(float('inf'), device=device, dtype=dtype)
         pin_rRAT = torch.full((self.num_pins,), inf_val,
-                              device=device, dtype=dtype)
+                              device=self.device, dtype=self.dtype)
         pin_fRAT = torch.full((self.num_pins,), inf_val,
-                              device=device, dtype=dtype)
+                              device=self.device, dtype=self.dtype)
+        pin_rRAT[self.end_points] = torch.tensor(
+            self.endpoints_rRAT, device=self.device, dtype=self.dtype)
+        pin_fRAT[self.end_points] = torch.tensor(
+            self.endpoints_fRAT, device=self.device, dtype=self.dtype)
 
-        num_arcs_total = torch.max(self.cell_flat_arcs[:, 2]).item(
-        ) + 1 if self.cell_flat_arcs.numel() > 0 else 1
-        cell_arc_f_delays = torch.zeros(
+        num_arcs_total = self.inst_flat_arcs[:, 3].shape[0] + \
+            1 if self.inst_flat_arcs.numel() > 0 else 1
+        cell_arc_rr_delays = torch.zeros(
             num_arcs_total, device=device, dtype=dtype)
-        cell_arc_r_delays = torch.zeros(
+        cell_arc_fr_delays = torch.zeros(
+            num_arcs_total, device=device, dtype=dtype)
+        cell_arc_rf_delays = torch.zeros(
+            num_arcs_total, device=device, dtype=dtype)
+        cell_arc_ff_delays = torch.zeros(
             num_arcs_total, device=device, dtype=dtype)
 
         pin_rAAT[self.start_points] = self.inrdelays
         pin_fAAT[self.start_points] = self.infdelays
         pin_rtran[self.start_points] = self.inrtrans
         pin_ftran[self.start_points] = self.inftrans
-        with torch.no_grad():
-            pin_net_cap[self.end_points] = self.outcaps
+        # pin_net_cap = pin_net_cap.clone()  # Clone to avoid modifying the original tensor
+        # pin_net_cap[self.end_points] = pin_net_cap[self.end_points] + self.outcaps
+
+        cur_nets, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran, cell_arc_rr_delays, cell_arc_fr_delays, cell_arc_rf_delays, cell_arc_ff_delays = self.calculate_clk2q_aat(
+            pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
+            pin_net_cap_rise, pin_net_cap_fall,
+            cell_arc_rr_delays, cell_arc_fr_delays, cell_arc_rf_delays, cell_arc_ff_delays 
+        )
 
         pi_nets = torch.unique(self.pin_net[self.start_points])
-        self.calculate_net_aat_level(pi_nets, pin_rAAT, pin_fAAT, pin_ftran, pin_rtran, pin_net_delay, pin_net_impulse, pin_net_cap
-                                     )
+        pin_rAAT, pin_fAAT, pin_rtran, pin_ftran = self.calculate_net_aat_level(
+            pi_nets, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
+            pin_net_delay_rise, pin_net_delay_fall,
+            pin_net_impulse_rise, pin_net_impulse_fall
+        )
 
         for level in range(len(self.flat_cells_by_level_start) - 1):
             start = self.flat_cells_by_level_start[level]
             end = self.flat_cells_by_level_start[level + 1]
             level_cells = self.flat_cells_by_level[start: end]
-            cur_nets = self.calculate_cell_aat_level(
-                level_cells, pin_rAAT, pin_fAAT, pin_ftran, pin_rtran, pin_net_delay, pin_net_impulse, pin_net_cap, cell_arc_f_delays, cell_arc_r_delays
+            (
+                cur_nets,
+                pin_rAAT,
+                pin_fAAT,
+                pin_rtran,
+                pin_ftran,
+                cell_arc_rr_delays,
+                cell_arc_fr_delays,
+                cell_arc_rf_delays,
+                cell_arc_ff_delays,
+            ) = self.calculate_cell_aat_level(
+                level_cells,
+                pin_rAAT,
+                pin_fAAT,
+                pin_rtran,
+                pin_ftran,
+                pin_net_cap_rise,
+                pin_net_cap_fall,
+                cell_arc_rr_delays,
+                cell_arc_fr_delays,
+                cell_arc_rf_delays,
+                cell_arc_ff_delays,
             )
-            self.calculate_net_aat_level(
-                cur_nets, pin_rAAT, pin_fAAT, pin_ftran, pin_rtran, pin_net_delay, pin_net_impulse, pin_net_cap
+            pin_rAAT, pin_fAAT, pin_rtran, pin_ftran = self.calculate_net_aat_level(
+                cur_nets, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
+                pin_net_delay_rise, pin_net_delay_fall,
+                pin_net_impulse_rise, pin_net_impulse_fall
             )
+        # --- Calculate RAT Levels ---
 
-        po_nets = torch.unique(self.pin_net[self.end_points])
-        self.calculate_net_rat_level(po_nets, pin_rRAT, pin_fRAT, pin_net_delay, pin_net_impulse, pin_net_cap
-                                     )
+        pin_rRAT, pin_fRAT = self.calculate_setup_rat(
+            pin_rRAT, pin_fRAT, self.clk_pin_rtran, self.clk_pin_ftran, pin_rtran, pin_ftran)
+
+        pin_rRAT, pin_fRAT = self.calculate_net_rat_level(
+            self.end_points, pin_rRAT, pin_fRAT, pin_net_delay_rise, pin_net_delay_fall
+        )
 
         for level in range(len(self.flat_cells_by_reverse_level_start) - 1):
-            start = self.flat_cells_by_level_start[level]
-            end = self.flat_cells_by_level_start[level + 1]
-            level_cells = self.flat_cells_by_level[start: end]
-            cur_nets = self.calculate_cell_rat_level(
-                level_cells, pin_rRAT, pin_fRAT, pin_net_delay, pin_net_impulse, pin_net_cap, cell_arc_f_delays, cell_arc_r_delays
+            start = self.flat_cells_by_reverse_level_start[level]
+            end = self.flat_cells_by_reverse_level_start[level + 1]
+            level_cells = self.flat_cells_by_reverse_level[start: end]
+            cur_endpoints, pin_rRAT, pin_fRAT = self.calculate_cell_rat_level(
+                level_cells, pin_rRAT, pin_fRAT, cell_arc_rr_delays, cell_arc_fr_delays, 
+                cell_arc_rf_delays, cell_arc_ff_delays 
             )
-            self.calculate_net_rat_level(
-                cur_nets, pin_rRAT, pin_fRAT, pin_net_delay, pin_net_impulse, pin_net_cap
+            pin_rRAT, pin_fRAT = self.calculate_net_rat_level(
+                cur_endpoints, pin_rRAT, pin_fRAT, pin_net_delay_rise, pin_net_delay_fall
             )
+        rslack = pin_rRAT - pin_rAAT
+        fslack = pin_fRAT - pin_fAAT
+        slack = torch.min(rslack, fslack)
+        RAT_THRESHOLD = 8e7 
+        # valid_mask = (pin_rRAT < RAT_THRESHOLD) & (pin_fRAT < RAT_THRESHOLD)
+        # all_valid_slacks = slack[valid_mask]
+        endpoints_slack = slack[self.end_points]
+        # neg_slack = torch.clamp(all_valid_slacks, max=0)
+        neg_endpoint_slack = torch.clamp(endpoints_slack, max=0)
+        ws = torch.min(endpoints_slack)
+        ts = 0
+        wns = torch.min(neg_endpoint_slack)
+        tns = torch.sum(neg_endpoint_slack)
 
-        slack = torch.min(pin_rRAT - pin_rAAT, pin_fRAT - pin_fAAT)
-        neg_slack = torch.clamp(slack, max=0)
-        wns = torch.min(neg_slack)
-        tns = torch.sum(neg_slack)
-
-        return wns, tns
+        self.pin_rAAT, self.pin_fAAT, self.pin_rRAT, self.pin_fRAT = (
+            t.clone().detach() for t in [pin_rAAT, pin_fAAT, pin_rRAT, pin_fRAT])
+        self.pin_rtran, self.pin_ftran = (
+            t.clone().detach() for t in [pin_rtran, pin_ftran])
+        self.pin_net_cap_rise, self.pin_net_cap_fall = (
+            t.clone().detach() for t in [pin_net_cap_rise, pin_net_cap_fall])
+        
+        self.cell_arc_rr_delays, self.cell_arc_fr_delays, self.cell_arc_rf_delays, self.cell_arc_ff_delays  = (
+            t.clone().detach() for t in [cell_arc_rr_delays, cell_arc_fr_delays, cell_arc_rf_delays, cell_arc_ff_delays ])
+        logging.info(f"WNS: {wns:.4f}, TNS: {tns:.4f}")
+        logging.info(f"Total Timing propagation Time: {time.time() - start_time:.4f}s")
+        return wns, tns, ws, ts

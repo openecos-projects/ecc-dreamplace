@@ -15,6 +15,7 @@
 #include <queue>
 #include <utility>
 #include <vector>
+#include <filesystem>
 
 DREAMPLACE_BEGIN_NAMESPACE
 
@@ -26,8 +27,6 @@ struct NetResult {
   std::vector<int> vtx_relate_x;
   std::vector<int> vtx_relate_y;
   std::vector<int> vtx_fa;
-  std::vector<int> flat_vtx_to;
-  std::vector<int> flat_vtx_to_start;
   std::vector<int> net_flat_topo_idx;
   std::vector<int> local2global_idx;
 };
@@ -35,8 +34,8 @@ struct NetResult {
 template <typename T>
 int computeSteinerTreeLauncher(
     T *x, T *y, int *flat_netpin, int *netpin_start, int num_nets, int num_pins,
-    int ignore_net_degree, int *wl, std::vector<int> &newx,
-    std::vector<int> &newy, std::vector<int> &vtx_relate_x,
+    int ignore_net_degree, int *wl, std::vector<T> &newx,
+    std::vector<T> &newy, std::vector<int> &vtx_relate_x,
     std::vector<int> &vtx_relate_y, int *netsteiner_start,
     std::vector<int> &vtx_fa, std::vector<int> &flat_vtx_to,
     std::vector<int> &flat_vtx_from, std::vector<int> &net_flat_topo_idx,
@@ -45,8 +44,11 @@ int computeSteinerTreeLauncher(
   static bool is_lut_loaded = false;
   if (!is_lut_loaded) {
     is_lut_loaded = true;
-    flute::readLUT("thirdparty/flute/lut.ICCAD2015/POWV9.dat",
-                   "thirdparty/flute/lut.ICCAD2015/POST9.dat");
+    std::filesystem::path source_dir = std::filesystem::path(__FILE__).parent_path();
+    std::filesystem::path project_root = source_dir.parent_path().parent_path().parent_path().parent_path();
+    std::string powv9_path = (project_root / "thirdparty/flute/lut.ICCAD2015/POWV9.dat").string();
+    std::string post9_path = (project_root / "thirdparty/flute/lut.ICCAD2015/POST9.dat").string();
+    flute::readLUT(powv9_path.c_str(), post9_path.c_str());
   }
 
   constexpr int scale = 1000;
@@ -90,11 +92,9 @@ int computeSteinerTreeLauncher(
     };
 
     if (num_valid_pins == 1) {
-
       // --- net with only one unique pin location ---
       wl[netid] = 0;
       net_result[netid].vtx_fa.resize(degree);
-      net_result[netid].flat_vtx_to_start.resize(degree + 1);
       net_result[netid].net_flat_topo_idx.resize(degree);
       net_result[netid].vtx_relate_x.resize(degree);
       net_result[netid].vtx_relate_y.resize(degree);
@@ -109,7 +109,6 @@ int computeSteinerTreeLauncher(
         }
       }
     } else {
-
       // --- nets with >= 2 unique pin locations ---
       flute::Tree ftree =
           flute::flute(num_valid_pins, vx.data(), vy.data(), ACCURACY);
@@ -142,7 +141,6 @@ int computeSteinerTreeLauncher(
       net_result[netid].vtx_relate_x.resize(total_vertex_local);
       net_result[netid].vtx_relate_y.resize(total_vertex_local);
       net_result[netid].vtx_fa.resize(total_vertex_local);
-      net_result[netid].flat_vtx_to_start.resize(total_vertex_local + 1);
       net_result[netid].net_flat_topo_idx.resize(total_vertex_local);
 
       // store adjacency for Steiner diagonal connections
@@ -225,7 +223,8 @@ int computeSteinerTreeLauncher(
           std::cout << "Position (" << pos.x() << ", " << pos.y()
                     << ") has local indices: ";
           for (const auto &idx : indices) {
-            std::cout << idx << " ";
+            std::cout << idx << "(" << net_result[netid].local2global_idx[idx]
+                      << ") ";
           }
           std::cout << std::endl;
         }
@@ -241,7 +240,8 @@ int computeSteinerTreeLauncher(
       int root = 0;
       int topo_ptr = 0;
       visit[root] = true;
-      net_result[netid].net_flat_topo_idx[root] = topo_ptr++;
+      net_result[netid].vtx_fa[root] = -1; // root has no parent
+      net_result[netid].net_flat_topo_idx[topo_ptr++] = root;
       std::queue<int> q;
       q.push(root);
       while (!q.empty()) {
@@ -254,38 +254,27 @@ int computeSteinerTreeLauncher(
           }
           visit[v] = true;
           q.push(v);
-          net_result[netid].net_flat_topo_idx[v] = topo_ptr++;
+          net_result[netid].net_flat_topo_idx[topo_ptr++] = v;
           net_result[netid].vtx_fa[v] = u;
         }
-      }
-      net_result[netid].flat_vtx_to_start[0] = 0;
-      for (int local_idx = 0; local_idx < vtx_degree; ++local_idx) {
-        int num_son = 0;
-        for (auto v : edge[local_idx]) {
-          if (v == -1)
-            continue;
-          ++num_son;
-          net_result[netid].flat_vtx_to.push_back(v);
-        }
-        net_result[netid].flat_vtx_to_start[local_idx + 1] =
-            net_result[netid].flat_vtx_to_start[local_idx] + num_son;
       }
     };
     topo_sort(netid);
   }
 
   // --- merge net results ---
-  newx.resize(num_pins + total_steiner);
-  newy.resize(num_pins + total_steiner);
-  vtx_relate_x.resize(num_pins + total_steiner);
-  vtx_relate_y.resize(num_pins + total_steiner);
-  vtx_fa.resize(num_pins + total_steiner);
-  flat_vtx_from.resize(num_pins + total_steiner);
-  flat_vtx_to.resize(num_pins + total_steiner);
-  flat_vtx_to_start.resize(num_pins + total_steiner + 1);
-  net_flat_topo_idx.resize(num_pins + total_steiner);
+  int total_vtx = num_pins + total_steiner;
+  std::vector<std::vector<int>> global_adj(total_vtx);
+  newx.resize(total_vtx);
+  newy.resize(total_vtx);
+  vtx_relate_x.resize(total_vtx);
+  vtx_relate_y.resize(total_vtx);
+  vtx_fa.resize(total_vtx);
+  net_flat_topo_idx.resize(total_vtx);
+  net_flat_topo_idx_start[0] = 0;
   netsteiner_start[0] = num_pins;
-  for (int netid = 0, prefix_steiner = 0; netid < num_nets; ++netid) {
+  
+  for (int netid = 0; netid < num_nets; ++netid) {
     int degree = netpin_start[netid + 1] - netpin_start[netid];
     int degree_steiner = net_result[netid].num_steiner;
 
@@ -295,48 +284,42 @@ int computeSteinerTreeLauncher(
 
     auto local2global = [&degree, &net_result, &netid,
                          &netsteiner_start](int idx) {
-      if (idx < degree) {
+      if (idx == -1) {
+        return idx; // -1 for root
+      } else if (idx < degree) {
         return net_result[netid].local2global_idx[idx];
       } else {
         return netsteiner_start[netid] + idx - degree;
       }
     };
-    auto merge_result = [&net_result, &newx, &newy, &vtx_relate_x,
-                         &vtx_relate_y, &vtx_fa, &flat_vtx_to,
-                         &flat_vtx_to_start, &net_flat_topo_idx, &netpin_start,
-                         &prefix_steiner, &degree, &netsteiner_start,
-                         &local2global](int netid, int from, int to) {
-      newx[to] = net_result[netid].newx[from];
-      newy[to] = net_result[netid].newy[from];
-      vtx_relate_x[to] = local2global(net_result[netid].vtx_relate_x[from]);
-      vtx_relate_y[to] = local2global(net_result[netid].vtx_relate_y[from]);
-      vtx_fa[to] = local2global(net_result[netid].vtx_fa[from]);
-      flat_vtx_to_start[to] = net_result[netid].flat_vtx_to_start[from];
-      for (int i = net_result[netid].flat_vtx_to_start[from];
-           i < net_result[netid].flat_vtx_to_start[from + 1]; ++i) {
-        int prefix_vertices = netpin_start[netid];
-        flat_vtx_to[prefix_vertices + i] =
-            local2global(net_result[netid].flat_vtx_to[i]);
+    for (int local_id = 0; local_id < degree + degree_steiner; ++local_id) {
+      int global_idx = local2global(local_id);
+      newx[global_idx] = net_result[netid].newx[local_id] / scale;
+      newy[global_idx] = net_result[netid].newy[local_id] / scale;
+      vtx_fa[global_idx] = local2global(net_result[netid].vtx_fa[local_id]);
+      vtx_relate_x[global_idx] = local2global(net_result[netid].vtx_relate_x[local_id]);
+      vtx_relate_y[global_idx] = local2global(net_result[netid].vtx_relate_y[local_id]);
+      net_flat_topo_idx[net_flat_topo_idx_start[netid] + local_id] = 
+          local2global(net_result[netid].net_flat_topo_idx[local_id]);
+      if (vtx_fa[global_idx] != -1) {
+        global_adj[vtx_fa[global_idx]].push_back(global_idx);
       }
-      net_flat_topo_idx[to] = net_result[netid].net_flat_topo_idx[from];
-    };
-    for (int pin = 0; pin < degree; ++pin) {
-      int global_idx = net_result[netid].local2global_idx[pin];
-      merge_result(netid, pin, global_idx);
-    }
-    for (int steiner = 0; steiner < degree_steiner; ++steiner) {
-      int global_idx = num_pins + prefix_steiner + steiner;
-      merge_result(netid, degree + steiner, global_idx);
-    }
-    prefix_steiner += degree_steiner;
-    for (int i = 0; i < net_result[netid].newx.size(); ++i) {
-      int begin_idx = net_result[netid].flat_vtx_to_start[i];
-      int end_idx = net_result[netid].flat_vtx_to_start[i + 1];
-      int from_vtx = local2global(i);
-      std::fill(flat_vtx_from.begin() + begin_idx,
-                flat_vtx_from.begin() + end_idx, from_vtx);
     }
   }
+  
+  flat_vtx_to.reserve(total_vtx);
+  flat_vtx_from.reserve(total_vtx);
+  flat_vtx_to_start.resize(total_vtx + 1);
+  flat_vtx_to_start[0] = 0;
+
+  for (int i = 0; i < total_vtx; ++i) {
+      for (int neighbor : global_adj[i]) {
+          flat_vtx_to.push_back(neighbor);
+          flat_vtx_from.push_back(i);
+      }
+      flat_vtx_to_start[i + 1] = flat_vtx_to.size();
+  }
+  
   // DEBUG
   std::cout << "build tree done" << std::endl;
   return 0;
@@ -347,18 +330,14 @@ int computeSteinerPosLauncher(const T *pin_pos_x, const T *pin_pos_y,
                               const std::vector<int> &vtx_relate_x,
                               const std::vector<int> &vtx_relate_y,
                               const int num_vertices,
-                              std::vector<int> &updated_newx,
-                              std::vector<int> &updated_newy) {
-  constexpr int scale = 1000;
+                              std::vector<T> &updated_newx, std::vector<T> &updated_newy) {
   updated_newx.resize(num_vertices);
   updated_newy.resize(num_vertices);
 
 #pragma omp parallel for
   for (int vtx_id = 0; vtx_id < num_vertices; ++vtx_id) {
-    updated_newx[vtx_id] =
-        static_cast<int>(pin_pos_x[vtx_relate_x[vtx_id]] * scale);
-    updated_newy[vtx_id] =
-        static_cast<int>(pin_pos_y[vtx_relate_y[vtx_id]] * scale);
+    updated_newx[vtx_id] = pin_pos_x[vtx_relate_x[vtx_id]];
+    updated_newy[vtx_id] = pin_pos_y[vtx_relate_y[vtx_id]];
   }
   return 0;
 }
@@ -376,6 +355,11 @@ int computeSteinerTopoGradLauncher(T *grad_vertices_x, T *grad_vertices_y,
   return 0;
 }
 
+template <typename T>
+at::Tensor convertVecToTens(const std::vector<T>& vec, const at::TensorOptions& options) {
+    return at::from_blob(const_cast<T*>(vec.data()), {static_cast<long>(vec.size())}, options).clone();
+}
+
 std::vector<at::Tensor> build_tree(at::Tensor pos, at::Tensor flat_netpin,
                                    at::Tensor netpin_start,
                                    int ignore_net_degree) {
@@ -389,79 +373,64 @@ std::vector<at::Tensor> build_tree(at::Tensor pos, at::Tensor flat_netpin,
 
   const int num_nets = netpin_start.numel() - 1;
   const int num_pins = pos.numel() / 2;
-  std::vector<int> newx_vec;
-  std::vector<int> newy_vec;
   std::vector<int> vtx_relate_x_vec;
   std::vector<int> vtx_relate_y_vec;
-  std::vector<int>(flat_netpin.numel());
   std::vector<int> vtx_fa_vec;
   std::vector<int> flat_vtx_to_vec;
   std::vector<int> flat_vtx_from_vec;
   std::vector<int> net_flat_topo_idx_vec;
   std::vector<int> flat_vtx_to_start_vec;
 
-  auto options_int = torch::dtype(torch::kInt32).device(torch::kCPU);
+  auto options_float = pos.options();
+  auto options_int = flat_netpin.options();
+
   auto net_vertex_start = at::zeros({num_nets + 1}, options_int);
   auto wl = at::zeros({num_nets + 1}, options_int);
   auto net_steiner_start = at::zeros({num_nets + 1}, options_int);
   auto net_flat_topo_idx_start_tensor = at::zeros({num_nets + 1}, options_int);
-
+  std::vector<at::Tensor> result;
+  
   DREAMPLACE_DISPATCH_FLOATING_TYPES(pos, "computeSteinerTreeLauncher", [&] {
+    std::vector<scalar_t> newx_vec;
+    std::vector<scalar_t> newy_vec;
+
     computeSteinerTreeLauncher<scalar_t>(
         DREAMPLACE_TENSOR_DATA_PTR(pos, scalar_t),
         DREAMPLACE_TENSOR_DATA_PTR(pos, scalar_t) + num_pins,
         DREAMPLACE_TENSOR_DATA_PTR(flat_netpin, int),
         DREAMPLACE_TENSOR_DATA_PTR(netpin_start, int), num_nets, num_pins,
-        ignore_net_degree, DREAMPLACE_TENSOR_DATA_PTR(wl, int), newx_vec,
-        newy_vec, vtx_relate_x_vec, vtx_relate_y_vec,
+        ignore_net_degree, DREAMPLACE_TENSOR_DATA_PTR(wl, int), 
+        newx_vec, newy_vec, vtx_relate_x_vec, vtx_relate_y_vec,
         DREAMPLACE_TENSOR_DATA_PTR(net_steiner_start, int), vtx_fa_vec,
         flat_vtx_to_vec, flat_vtx_from_vec, net_flat_topo_idx_vec,
         flat_vtx_to_start_vec,
         DREAMPLACE_TENSOR_DATA_PTR(net_flat_topo_idx_start_tensor, int));
+
+    auto newx                     = convertVecToTens(newx_vec, options_float);
+    auto newy                     = convertVecToTens(newy_vec, options_float);
+    auto vtx_relate_x             = convertVecToTens(vtx_relate_x_vec, options_int);
+    auto vtx_relate_y             = convertVecToTens(vtx_relate_y_vec, options_int);
+    auto vtx_fa                   = convertVecToTens(vtx_fa_vec, options_int);
+    auto flat_vtx_to              = convertVecToTens(flat_vtx_to_vec, options_int);
+    auto flat_vtx_from            = convertVecToTens(flat_vtx_from_vec, options_int);
+    auto net_flat_topo_idx        = convertVecToTens(net_flat_topo_idx_vec, options_int);
+    auto flat_vtx_to_start_tensor = convertVecToTens(flat_vtx_to_start_vec, options_int);
+
+    result = {newx,
+              newy,
+              vtx_relate_x,
+              vtx_relate_y,
+              net_vertex_start,
+              net_steiner_start,
+              vtx_fa,
+              flat_vtx_to,
+              flat_vtx_from,
+              flat_vtx_to_start_tensor,
+              net_flat_topo_idx,
+              net_flat_topo_idx_start_tensor};
   });
 
-  int num_vertices = newx_vec.size();
-  int num_flat_vtx_to = flat_vtx_to_vec.size();
-  int num_flat_topo_sort = net_flat_topo_idx_vec.size();
-
-  auto newx =
-      at::from_blob(newx_vec.data(), {num_vertices}, options_int).clone();
-  auto newy =
-      at::from_blob(newy_vec.data(), {num_vertices}, options_int).clone();
-  auto vtx_relate_x =
-      at::from_blob(vtx_relate_x_vec.data(), {num_vertices}, options_int)
-          .clone();
-  auto vtx_relate_y =
-      at::from_blob(vtx_relate_y_vec.data(), {num_vertices}, options_int)
-          .clone();
-  auto vtx_fa =
-      at::from_blob(vtx_fa_vec.data(), {num_vertices}, options_int).clone();
-  auto flat_vtx_to =
-      at::from_blob(flat_vtx_to_vec.data(), {num_flat_vtx_to}, options_int)
-          .clone();
-  auto flat_vtx_from =
-      at::from_blob(flat_vtx_from_vec.data(), {num_flat_vtx_to}, options_int)
-          .clone();
-  auto net_flat_topo_idx = at::from_blob(net_flat_topo_idx_vec.data(),
-                                         {num_flat_topo_sort}, options_int)
-                               .clone();
-  auto flat_vtx_to_start_tensor =
-      at::from_blob(flat_vtx_to_start_vec.data(),
-                    {(long)flat_vtx_to_start_vec.size()}, options_int)
-          .clone();
-
-  return {newx,
-          newy,
-          vtx_relate_x,
-          vtx_relate_y,
-          net_vertex_start,
-          net_steiner_start,
-          vtx_fa,
-          flat_vtx_to,
-          flat_vtx_from,
-          flat_vtx_to_start_tensor,
-          net_flat_topo_idx,
-          net_flat_topo_idx_start_tensor};
+  return result;
 }
 
 std::vector<at::Tensor> steiner_topo_forward(at::Tensor pin_pos,
@@ -477,38 +446,34 @@ std::vector<at::Tensor> steiner_topo_forward(at::Tensor pin_pos,
   CHECK_CONTIGUOUS(cached_vtx_relate_y);
 
   const int num_pins = pin_pos.numel() / 2;
+  auto options_float = pin_pos.options();
 
-  std::vector<int> updated_newx_vec;
-  std::vector<int> updated_newy_vec;
-
-  std::vector<int> vtx_relate_x_vec(
-      DREAMPLACE_TENSOR_DATA_PTR(cached_vtx_relate_x, int),
-      DREAMPLACE_TENSOR_DATA_PTR(cached_vtx_relate_x, int) + num_vertices);
-  std::vector<int> vtx_relate_y_vec(
-      DREAMPLACE_TENSOR_DATA_PTR(cached_vtx_relate_y, int),
-      DREAMPLACE_TENSOR_DATA_PTR(cached_vtx_relate_y, int) + num_vertices);
+  std::vector<at::Tensor> result;
 
   DREAMPLACE_DISPATCH_FLOATING_TYPES(pin_pos, "computeSteinerPosLauncher", [&] {
+    std::vector<int> vtx_relate_x_vec(
+      DREAMPLACE_TENSOR_DATA_PTR(cached_vtx_relate_x, int),
+      DREAMPLACE_TENSOR_DATA_PTR(cached_vtx_relate_x, int) + num_vertices);
+    std::vector<int> vtx_relate_y_vec(
+      DREAMPLACE_TENSOR_DATA_PTR(cached_vtx_relate_y, int),
+      DREAMPLACE_TENSOR_DATA_PTR(cached_vtx_relate_y, int) + num_vertices);
+    std::vector<scalar_t> updated_newx_vec;
+    std::vector<scalar_t> updated_newy_vec;
+
     computeSteinerPosLauncher<scalar_t>(
         DREAMPLACE_TENSOR_DATA_PTR(pin_pos, scalar_t),
         DREAMPLACE_TENSOR_DATA_PTR(pin_pos, scalar_t) + num_pins,
-        vtx_relate_x_vec, vtx_relate_y_vec, num_vertices, updated_newx_vec,
+        vtx_relate_x_vec, vtx_relate_y_vec, num_vertices, 
+        updated_newx_vec,
         updated_newy_vec);
+
+    auto updated_newx = convertVecToTens(updated_newx_vec, options_float);
+    auto updated_newy = convertVecToTens(updated_newy_vec, options_float);
+
+    result = {updated_newx, updated_newy};
   });
 
-  auto options_int = torch::dtype(torch::kInt32).device(torch::kCPU);
-  auto updated_newx =
-      torch::from_blob(updated_newx_vec.data(),
-                       {static_cast<long>(updated_newx_vec.size())},
-                       options_int)
-          .clone();
-  auto updated_newy =
-      torch::from_blob(updated_newy_vec.data(),
-                       {static_cast<long>(updated_newy_vec.size())},
-                       options_int)
-          .clone();
-
-  return {updated_newx, updated_newy};
+  return result;
 }
 
 at::Tensor steiner_topo_backward(at::Tensor grad_newx, at::Tensor grad_newy,
@@ -516,10 +481,8 @@ at::Tensor steiner_topo_backward(at::Tensor grad_newx, at::Tensor grad_newy,
                                  at::Tensor vtx_relate_y) {
 
   CHECK_FLAT_CPU(grad_newx);
-  CHECK_EVEN(grad_newx);
   CHECK_CONTIGUOUS(grad_newx);
   CHECK_FLAT_CPU(grad_newy);
-  CHECK_EVEN(grad_newy);
   CHECK_CONTIGUOUS(grad_newy);
   CHECK_FLAT_CPU(pos);
   CHECK_EVEN(pos);
@@ -540,7 +503,7 @@ at::Tensor steiner_topo_backward(at::Tensor grad_newx, at::Tensor grad_newy,
             DREAMPLACE_TENSOR_DATA_PTR(grad_newx, scalar_t),
             DREAMPLACE_TENSOR_DATA_PTR(grad_newy, scalar_t),
             DREAMPLACE_TENSOR_DATA_PTR(vtx_relate_x, int),
-            DREAMPLACE_TENSOR_DATA_PTR(vtx_relate_x, int), num_vertices,
+            DREAMPLACE_TENSOR_DATA_PTR(vtx_relate_y, int), num_vertices,
             DREAMPLACE_TENSOR_DATA_PTR(grad_pin, scalar_t),
             DREAMPLACE_TENSOR_DATA_PTR(grad_pin, scalar_t) + num_pins);
       });

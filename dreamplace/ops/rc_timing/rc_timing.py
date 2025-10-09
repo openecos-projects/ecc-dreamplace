@@ -15,6 +15,8 @@ from torch.autograd import Function
 
 import dreamplace.ops.rc_timing.rc_timing_cpp as rc_timing_cpp
 import dreamplace.configure as configure
+import time
+import logging
 
 # ==========================
 # Load Operator
@@ -315,21 +317,34 @@ flat_pin_from: 展开的from形式，最后会形如 [1,1,1,2,2,3,...]
 class RCTiming(nn.Module):
     def __init__(self,
                  r_unit=1.0,
-                 c_unit=1.0):
+                 c_unit=1.0, 
+                 scale_factor=1.0, 
+                 dbu=1.0):
         """
 
         @param pin2node_map 引脚到节点的映射
-        @param pin_caps 每个引脚的电容值
+        @param pin_caps 每个引脚的电容值 pF
         @param driver_pin_indices 每个网络的驱动引脚索引
-        @param r_unit 单位长度电阻值
-        @param c_unit 单位长度电容值
+        @param r_unit 单位长度电阻值 ohm / um
+        @param c_unit 单位长度电容值 pF / um
         @param ignore_net_degree 忽略网络的度数阈值
+        @param output : delays (ps)
         """
         super(RCTiming, self).__init__()
 
         # 设置RC参数
+        self.flat_pin_to_res = None
+        self.net_cap = None
+        self.delays = None
+        self.edge_resistance = None
+        self.loads = None
+        self.ldelays = None
+        self.betas = None
+        self.impulses = None
         self.r_unit = r_unit
         self.c_unit = c_unit
+        self.scale_factor = scale_factor
+        self.dbu = dbu
 
     def forward(self, new_x, new_y,
                 net_flat_topo_sort,
@@ -338,37 +353,146 @@ class RCTiming(nn.Module):
                 flat_pin_to_start,
                 flat_pin_to,
                 flat_pin_from,
-                pin_caps_base, length_scale):
+                pin_caps_base, 
+                pin_rcaps_base, 
+                pin_fcaps_base):
+        start_time = time.time()
+        # # the length is um
+        length = (torch.abs(new_x[flat_pin_from] - new_x[flat_pin_to])
+                    + torch.abs(new_y[flat_pin_from] - new_y[flat_pin_to])) / self.scale_factor / self.dbu
+        
+        logging.info(f"RC timing length : {length.sum().item():.4f} um")
+        cap = length * self.c_unit
+        net_caps = torch.zeros_like(new_x, dtype=pin_caps_base.dtype)
+        net_caps = torch.scatter_add(net_caps, 0, flat_pin_from.long(), cap / 2)
+        net_caps = torch.scatter_add(net_caps, 0, flat_pin_to.long(),   cap / 2)
 
-        length = torch.abs(
-            new_x[flat_pin_from] - new_x[flat_pin_to]) + torch.abs(
-            new_y[flat_pin_from] - new_y[flat_pin_to])
-        flat_pin_to_res = length * self.r_unit / length_scale
-        cap = length * self.c_unit / length_scale
-        pin_caps = torch.zeros_like(new_x, dtype=pin_caps_base.dtype)
-        pin_caps[:pin_caps_base.size(0)] = pin_caps_base
-        pin_caps[flat_pin_from] += cap / 2
-        pin_caps[flat_pin_to] += cap / 2
+        edge_resistance  = length * self.r_unit
+        flat_pin_to_res = torch.zeros_like(new_x, dtype=edge_resistance.dtype)
+        flat_pin_to_res = torch.scatter(flat_pin_to_res, 0, flat_pin_to.long(), edge_resistance)
 
-        load = LoadOpFunction.apply(
-            cap, flat_pin_to_start, flat_pin_to,
-            net_flat_topo_sort, net_flat_topo_sort_start)
-        delay = DelayOpFunction.apply(
-            flat_pin_to_res, load, pin_fa,
-            net_flat_topo_sort, net_flat_topo_sort_start)
-        ldelay = LDelayOpFunction.apply(
-            pin_caps, delay, flat_pin_to_start, flat_pin_to,
-            net_flat_topo_sort, net_flat_topo_sort_start)
-        beta = BetaOpFunction.apply(
-            flat_pin_to_res, ldelay, pin_fa,
-            net_flat_topo_sort, net_flat_topo_sort_start)
+        modes = ['generic', 'rise', 'fall']
+        base_caps_map = {
+            'generic': pin_caps_base,
+            'rise': pin_rcaps_base,
+            'fall': pin_fcaps_base
+        }
+        pin_caps, loads, delays, ldelays, betas, impulses = {}, {}, {}, {}, {}, {}
+        for mode in modes:
+            base_cap = base_caps_map[mode]
+            num_base = base_cap.size(0)
+            num_total = new_x.size(0)
 
-        inner_term = 2 * beta - delay * delay
-        # Clamp to avoid sqrt of negative numbers due to potential floating point noise
-        inner_term_stable = torch.clamp(inner_term, min=1e-12)
-        impulse = torch.sqrt(inner_term_stable)
+            if num_base < num_total:
+                padding = torch.zeros(
+                    num_total - num_base,
+                    dtype=base_cap.dtype,
+                    device=base_cap.device
+                )
+                caps_padded = torch.cat([base_cap, padding], dim=0)
+            else:
+                caps_padded = base_cap[:num_total]
 
-        return load, delay, impulse
+            pin_caps[mode] = caps_padded + net_caps
+
+            # 后续所有计算都依赖于 autograd.Function 或标准的 torch 操作，它们是 autograd 友好的
+            loads[mode] = LoadOpFunction.apply(
+                pin_caps[mode], flat_pin_to_start, flat_pin_to,
+                net_flat_topo_sort, net_flat_topo_sort_start)
+
+            delays[mode] = DelayOpFunction.apply(
+                flat_pin_to_res, loads[mode], pin_fa,
+                net_flat_topo_sort, net_flat_topo_sort_start)
+
+            ldelays[mode] = LDelayOpFunction.apply(
+                pin_caps[mode], delays[mode], flat_pin_to_start, flat_pin_to,
+                net_flat_topo_sort, net_flat_topo_sort_start)
+
+            betas[mode] = BetaOpFunction.apply(
+                flat_pin_to_res, ldelays[mode], pin_fa,
+                net_flat_topo_sort, net_flat_topo_sort_start)
+
+            # 计算 impulse
+            inner_term = 2 * betas[mode] - delays[mode] ** 2
+            assert torch.all(inner_term >= 0), \
+                f"Negative inner term detected in {mode} mode: {inner_term[inner_term < 0]}"
+            impulses[mode] = inner_term
+
+        load, rload, fload = loads['generic'], loads['rise'], loads['fall']
+        delay, rdelay, fdelay = delays['generic'], delays['rise'], delays['fall']
+        impulse, rimpulse, fimpulse = impulses['generic'], impulses['rise'], impulses['fall']
+        # pin_caps = torch.zeros_like(new_x, dtype=pin_caps_base.dtype)
+        # pin_caps[:pin_caps_base.size(0)] = pin_caps_base
+        # pin_caps = pin_caps + net_caps
+        # pin_rcaps = torch.zeros_like(new_x, dtype=pin_caps_base.dtype)
+        # pin_rcaps[:pin_rcaps_base.size(0)] = pin_rcaps_base
+        # pin_rcaps = pin_rcaps + net_caps
+        # pin_fcaps = torch.zeros_like(new_x, dtype=pin_caps_base.dtype)
+        # pin_fcaps[:pin_fcaps_base.size(0)] = pin_fcaps_base
+        # pin_fcaps = pin_fcaps + net_caps
+
+
+        # load = LoadOpFunction.apply(
+        #     pin_caps, flat_pin_to_start, flat_pin_to,
+        #     net_flat_topo_sort, net_flat_topo_sort_start)
+        # rload = LoadOpFunction.apply(
+        #     pin_rcaps, flat_pin_to_start, flat_pin_to,
+        #     net_flat_topo_sort, net_flat_topo_sort_start)
+        # fload = LoadOpFunction.apply(
+        #     pin_fcaps, flat_pin_to_start, flat_pin_to,
+        #     net_flat_topo_sort, net_flat_topo_sort_start)
+        
+        # delay = DelayOpFunction.apply(
+        #     flat_pin_to_res, load, pin_fa,
+        #     net_flat_topo_sort, net_flat_topo_sort_start)
+        # rdelay = DelayOpFunction.apply(
+        #     flat_pin_to_res, rload, pin_fa,
+        #     net_flat_topo_sort, net_flat_topo_sort_start)
+        # fdelay = DelayOpFunction.apply(
+        #     flat_pin_to_res, fload, pin_fa,
+        #     net_flat_topo_sort, net_flat_topo_sort_start)
+        
+        # ldelay = LDelayOpFunction.apply(
+        #     pin_caps, delay, flat_pin_to_start, flat_pin_to,
+        #     net_flat_topo_sort, net_flat_topo_sort_start)
+        # rldelay = LDelayOpFunction.apply(
+        #     pin_rcaps, rdelay, flat_pin_to_start, flat_pin_to,
+        #     net_flat_topo_sort, net_flat_topo_sort_start)
+        # fldelay = LDelayOpFunction.apply(
+        #     pin_fcaps, fdelay, flat_pin_to_start, flat_pin_to,
+        #     net_flat_topo_sort, net_flat_topo_sort_start)
+        
+        # beta = BetaOpFunction.apply(
+        #     flat_pin_to_res, ldelay, pin_fa,
+        #     net_flat_topo_sort, net_flat_topo_sort_start)
+        # rbeta = BetaOpFunction.apply(
+        #     flat_pin_to_res, rldelay, pin_fa,
+        #     net_flat_topo_sort, net_flat_topo_sort_start)
+        # fbeta = BetaOpFunction.apply(
+        #     flat_pin_to_res, fldelay, pin_fa,
+        #     net_flat_topo_sort, net_flat_topo_sort_start)
+
+        # inner_term = 2 * beta - delay * delay
+        # rinner_term = 2 * rbeta - rdelay * rdelay
+        # finner_term = 2 * fbeta - fdelay * fdelay
+        # # Clamp to avoid sqrt of negative numbers due to potential floating point noise
+        # inner_term_stable = torch.clamp(inner_term, min=1e-12)
+        # rinner_term_stable = torch.clamp(rinner_term, min=1e-12)
+        # finner_term_stable = torch.clamp(finner_term, min=1e-12)
+        # impulse = torch.sqrt(inner_term_stable)
+        # rimpulse = torch.sqrt(rinner_term_stable)
+        # fimpulse = torch.sqrt(finner_term_stable)
+
+        self.flat_pin_to_res = flat_pin_to_res.clone().detach()
+        self.net_cap = net_caps.clone().detach()
+        self.edge_resistance = edge_resistance.clone().detach()
+        self.delays = delays
+        self.loads = loads
+        self.ldelays = ldelays
+        self.betas = betas
+        self.impulses = impulses
+        logging.info(f"Total RC timing Time: {time.time() - start_time:.4f}s")
+        return pin_caps, loads, delays, ldelays, betas, impulses
 
     @property
     def output_names(self):

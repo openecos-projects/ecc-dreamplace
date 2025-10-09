@@ -1,16 +1,17 @@
+#include "rc_timing.hh"
 #include "utility/src/torch.h"
 #include "utility/src/utils.h"
+#include <cassert>
 #include <pybind11/detail/common.h>
 #include <queue>
 #include <torch/torch.h>
-#include "rc_timing.hh"
 
 template <typename scalar_t>
 void loadForwardLauncher( // Renamed
     const int32_t *pin_start_ptr, const int32_t *pin_to_ptr,
     const int32_t *topo_sort_ptr, const int32_t *topo_sort_start_ptr,
-    int32_t num_nodes, int32_t num_nets,
-    scalar_t *load_ptr // Input/Output pointer (initialized with cap)
+    int32_t num_nodes, int32_t num_nets, scalar_t *load_ptr,
+    int num_threads // Input/Output pointer (initialized with cap)
 );
 
 // --- Main Function using clone for initialization ---
@@ -58,8 +59,8 @@ at::Tensor load_forward_cpp(at::Tensor cap_tensor, at::Tensor pin_start_tensor,
         // initialized via clone.
         loadForwardLauncher<scalar_t>( // Note:  launcher name
             pin_start_ptr, pin_to_ptr, topo_sort_ptr, topo_sort_start_ptr,
-            num_nodes, num_nets,
-            load_ptr // Output (initialized with cap)
+            num_nodes, num_nets, load_ptr,
+            at::get_num_threads() // Output (initialized with cap)
         );
       });
 
@@ -70,10 +71,11 @@ template <typename scalar_t>
 void loadForwardLauncher( // Renamed
     const int32_t *pin_start_ptr, const int32_t *pin_to_ptr,
     const int32_t *topo_sort_ptr, const int32_t *topo_sort_start_ptr,
-    int32_t num_nodes, int32_t num_nets,
-    scalar_t *load_ptr // Input/Output pointer (initialized with cap)
+    int32_t num_nodes, int32_t num_nets, scalar_t *load_ptr,
+    int num_threads // Input/Output pointer (initialized with cap)
 ) {
   // Iterate through each net
+#pragma omp parallel for num_threads(num_threads)
   for (int32_t net_idx = 0; net_idx < num_nets; ++net_idx) {
     int32_t start_topo_idx = topo_sort_start_ptr[net_idx];
     int32_t end_topo_idx = topo_sort_start_ptr[net_idx + 1];
@@ -81,21 +83,20 @@ void loadForwardLauncher( // Renamed
     // Iterate nodes in REVERSE topological order (bottom-up)
     for (int32_t i = end_topo_idx - 1; i >= start_topo_idx; --i) {
       int32_t u = topo_sort_ptr[i];
-      if (u < 0 || u >= num_nodes) {
-        continue;
-      }
+      assert(u >= 0 && u < num_nodes);
 
       // Load(u) is already initialized with Cap(u).
       // Just add children's loads.
       int32_t edge_start_idx = pin_start_ptr[u];
       int32_t edge_end_idx = pin_start_ptr[u + 1];
-
+      if (i == end_topo_idx - 1) {
+        // This is a leaf node, no children to add.
+        assert(edge_start_idx == edge_end_idx);
+      }
       for (int32_t edge_idx = edge_start_idx; edge_idx < edge_end_idx;
            ++edge_idx) {
         int32_t v = pin_to_ptr[edge_idx];
-        if (v < 0 || v >= num_nodes) {
-          continue;
-        }
+        assert(v >= 0 && v < num_nodes);
 
         // Add the fully computed Load(v) to Load(u)
         load_ptr[u] += load_ptr[v];
@@ -106,12 +107,13 @@ void loadForwardLauncher( // Renamed
 
 // Forward declaration
 template <typename scalar_t>
-void loadBackwardLauncher(
-    const int32_t *pin_start_ptr, const int32_t *pin_to_ptr,
-    const int32_t *topo_sort_ptr, const int32_t *topo_sort_start_ptr,
-    int32_t num_nodes, int32_t num_nets,
-    scalar_t *grad_input_cap_ptr // Input is grad_output, Output is grad_cap
-                                 // (accumulated)
+void loadBackwardLauncher(const int32_t *pin_start_ptr,
+                          const int32_t *pin_to_ptr,
+                          const int32_t *topo_sort_ptr,
+                          const int32_t *topo_sort_start_ptr, int32_t num_nodes,
+                          int32_t num_nets, scalar_t *grad_input_cap_ptr,
+                          int num_threads // Input is grad_output, Output is
+                                          // grad_cap (accumulated)
 );
 
 /**
@@ -198,10 +200,10 @@ at::Tensor load_backward_cpp(at::Tensor grad_output,
         scalar_t *grad_input_cap_ptr = grad_input_cap.data_ptr<scalar_t>();
 
         // Call the launcher implementation
-        loadBackwardLauncher<scalar_t>(
-            pin_start_ptr, pin_to_ptr, topo_sort_ptr, topo_sort_start_ptr,
-            num_nodes, num_nets,
-            grad_input_cap_ptr // Input/Output accumulator
+        loadBackwardLauncher<scalar_t>(pin_start_ptr, pin_to_ptr, topo_sort_ptr,
+                                       topo_sort_start_ptr, num_nodes, num_nets,
+                                       grad_input_cap_ptr, at::get_num_threads()
+                                       // Input/Output accumulator
         );
       });
 
@@ -210,14 +212,16 @@ at::Tensor load_backward_cpp(at::Tensor grad_output,
 
 // --- Launcher Implementation ---
 template <typename scalar_t>
-void loadBackwardLauncher(
-    const int32_t *pin_start_ptr, const int32_t *pin_to_ptr,
-    const int32_t *topo_sort_ptr, const int32_t *topo_sort_start_ptr,
-    int32_t num_nodes, int32_t num_nets,
-    scalar_t *grad_input_cap_ptr // Input: Initialized with dF/dLoad. Output:
-                                 // Accumulated dF/dCap.
+void loadBackwardLauncher(const int32_t *pin_start_ptr,
+                          const int32_t *pin_to_ptr,
+                          const int32_t *topo_sort_ptr,
+                          const int32_t *topo_sort_start_ptr, int32_t num_nodes,
+                          int32_t num_nets, scalar_t *grad_input_cap_ptr,
+                          int num_threads // Input: Initialized with dF/dLoad.
+                                          // Output: Accumulated dF/dCap.
 ) {
   // Iterate through each net defined by the topological sort segments
+#pragma omp parallel for num_threads(num_threads)
   for (int32_t net_idx = 0; net_idx < num_nets; ++net_idx) {
     int32_t start_topo_idx = topo_sort_start_ptr[net_idx];
     int32_t end_topo_idx = topo_sort_start_ptr[net_idx + 1];
@@ -228,10 +232,11 @@ void loadBackwardLauncher(
     for (int32_t i = start_topo_idx; i < end_topo_idx; ++i) {
       int32_t u = topo_sort_ptr[i]; // Get the parent node index u
 
-      // Basic bounds check
-      if (u < 0 || u >= num_nodes) {
-        continue;
-      }
+      assert(u >= 0 && u < num_nodes);
+      // // Basic bounds check
+      // if (u < 0 || u >= num_nodes) {
+      //   continue;
+      // }
 
       // Get the accumulated gradient at parent u
       scalar_t parent_grad = grad_input_cap_ptr[u];
@@ -250,11 +255,11 @@ void loadBackwardLauncher(
            ++edge_idx) {
         int32_t v = pin_to_ptr[edge_idx]; // Get child node index v
 
-        // Basic bounds check
-        if (v < 0 || v >= num_nodes) {
-          continue;
-        }
-
+        // // Basic bounds check
+        // if (v < 0 || v >= num_nodes) {
+        //   continue;
+        // }
+        assert(v >= 0 && v < num_nodes);
         // Propagate gradient: AccumGrad(v) += AccumGrad(u)
         // grad_input_cap_ptr[v] represents AccumGrad(v)
         grad_input_cap_ptr[v] += parent_grad;
@@ -265,4 +270,3 @@ void loadBackwardLauncher(
   // After the loops complete, grad_input_cap_ptr contains the final dF/dCap
   // values.
 }
-

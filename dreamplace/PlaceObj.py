@@ -46,12 +46,14 @@ import dreamplace.ops.rudy.rudy as rudy
 import dreamplace.ops.rudy.rudy_macros as rudy_macros
 import dreamplace.ops.pin_utilization.pin_utilization as pin_utilization
 import dreamplace.ops.nctugr_binary.nctugr_binary as nctugr_binary
+import dreamplace.ops.irt_egr.irt_egr as eGR
 import dreamplace.ops.adjust_node_area.adjust_node_area as adjust_node_area
 import dreamplace.ops.macro_overlap.macro_overlap as macro_overlap
 import dreamplace.ops.macro_refinement.macro_refinement as macro_refinement
 from dreamplace.ops.timing_propagation.timing_propagation import TimingPropagation
 from dreamplace.ops.rc_timing.rc_timing import RCTiming
 from dreamplace.BasicPlace import PlaceDataCollection
+from tools.iEDA.module.sta import IEDASta
 
 
 class PreconditionOp:
@@ -79,7 +81,7 @@ class PreconditionOp:
                 dtype=torch.long,
             )
             for i in range(len(placedb.regions) + 1):
-                filler_beg, filler_end = self.placedb.filler_start_map[i: i + 2]
+                filler_beg, filler_end = self.placedb.filler_start_map[i : i + 2]
                 self.filler2fence_region_map[filler_beg:filler_end] = i
 
     def set_overflow(self, overflow):
@@ -96,37 +98,45 @@ class PreconditionOp:
         with torch.no_grad():
             # The preconditioning step in python is time-consuming, as in each gradient
             # pass, the total net weight should be re-calculated.
-            sum_pin_weights_in_nodes = self.op_collections.pws_op(
-                self.data_collections.net_weights)
+            # sum_pin_weights_in_nodes = self.op_collections.pws_op(
+            #     self.data_collections.net_weights
+            # )
             if density_weight.size(0) == 1:
-                precond = (sum_pin_weights_in_nodes
-                           + self.alpha * density_weight * self.data_collections.node_areas
-                           )
+                precond = (
+                    # sum_pin_weights_in_nodes
+                    0 + self.alpha * density_weight * self.data_collections.node_areas
+                )
             else:
                 # only precondition the non fence region
                 node_areas = self.data_collections.node_areas.clone()
 
-                mask = self.data_collections.node2fence_region_map[: self.placedb.num_movable_nodes] >= len(
-                    self.placedb.regions
-                )
+                mask = self.data_collections.node2fence_region_map[
+                    : self.placedb.num_movable_nodes
+                ] >= len(self.placedb.regions)
                 node_areas[: self.placedb.num_movable_nodes].masked_scatter_(
-                    mask, node_areas[: self.placedb.num_movable_nodes][mask] *
-                    density_weight[-1]
+                    mask,
+                    node_areas[: self.placedb.num_movable_nodes][mask]
+                    * density_weight[-1],
                 )
                 filler_beg, filler_end = self.placedb.filler_start_map[-2:]
                 node_areas[
                     self.placedb.num_nodes
                     - self.placedb.num_filler_nodes
-                    + filler_beg: self.placedb.num_nodes
+                    + filler_beg : self.placedb.num_nodes
                     - self.placedb.num_filler_nodes
                     + filler_end
                 ] *= density_weight[-1]
                 precond = sum_pin_weights_in_nodes + self.alpha * node_areas
 
             precond.clamp_(min=1.0)
-            grad[0: self.placedb.num_nodes].div_(precond)
-            grad[self.placedb.num_nodes: self.placedb.num_nodes *
-                 2].div_(precond)
+            grad[self.placedb.num_movable_nodes : self.placedb.num_physical_nodes] = 0
+            grad[
+                self.placedb.num_nodes
+                + self.placedb.num_movable_nodes : self.placedb.num_nodes
+                + self.placedb.num_physical_nodes
+            ] = 0
+            grad[0 : self.placedb.num_nodes].div_(precond)
+            grad[self.placedb.num_nodes : self.placedb.num_nodes * 2].div_(precond)
             # grad = grad.view(2, -1)
             # grad[0, self.placedb.num_movable_nodes:self.placedb.num_nodes] = 0
             # grad[1, self.placedb.num_movable_nodes:self.placedb.num_nodes] = 0
@@ -137,26 +147,33 @@ class PreconditionOp:
                 update_mask = ~update_mask
                 movable_mask = update_mask[self.movablenode2fence_region_map_clamp]
                 filler_mask = update_mask[self.filler2fence_region_map]
-                grad[0, : self.placedb.num_movable_nodes].masked_fill_(
-                    movable_mask, 0)
-                grad[1, : self.placedb.num_movable_nodes].masked_fill_(
-                    movable_mask, 0)
-                grad[0, self.placedb.num_nodes -
-                     self.placedb.num_filler_nodes:].masked_fill_(filler_mask, 0)
-                grad[1, self.placedb.num_nodes -
-                     self.placedb.num_filler_nodes:].masked_fill_(filler_mask, 0)
+                grad[0, : self.placedb.num_movable_nodes].masked_fill_(movable_mask, 0)
+                grad[1, : self.placedb.num_movable_nodes].masked_fill_(movable_mask, 0)
+                grad[
+                    0, self.placedb.num_nodes - self.placedb.num_filler_nodes :
+                ].masked_fill_(filler_mask, 0)
+                grad[
+                    1, self.placedb.num_nodes - self.placedb.num_filler_nodes :
+                ].masked_fill_(filler_mask, 0)
                 grad = grad.view(-1)
             if fix_nodes_mask is not None:
                 grad = grad.view(2, -1)
-                grad[0, :self.placedb.num_movable_nodes].masked_fill_(
-                    fix_nodes_mask[:self.placedb.num_movable_nodes], 0)
-                grad[1, :self.placedb.num_movable_nodes].masked_fill_(
-                    fix_nodes_mask[:self.placedb.num_movable_nodes], 0)
+                grad[0, : self.placedb.num_movable_nodes].masked_fill_(
+                    fix_nodes_mask[: self.placedb.num_movable_nodes], 0
+                )
+                grad[1, : self.placedb.num_movable_nodes].masked_fill_(
+                    fix_nodes_mask[: self.placedb.num_movable_nodes], 0
+                )
                 grad = grad.view(-1)
             self.iteration += 1
 
             # only work in benchmarks without fence region, assume overflow has been updated
-            if len(self.placedb.regions) > 0 and self.overflows and self.overflows[-1].max() < 0.3 and self.alpha < 1024:
+            if (
+                len(self.placedb.regions) > 0
+                and self.overflows
+                and self.overflows[-1].max() < 0.3
+                and self.alpha < 1024
+            ):
                 if (self.iteration % 20) == 0:
                     self.alpha *= 2
                     logging.info(
@@ -209,7 +226,9 @@ class PlaceObj(nn.Module):
 
         # timing diff
         self.use_timing_obj = False
-
+        self.invoke_timing_count = 0
+        self.timing_wns_coeff = 0.01
+        self.timing_tns_coeff = 0.0001
         # fence region
         # update mask controls whether stop gradient/updating, 1 represents allow grad/update
         self.update_mask = None
@@ -245,8 +264,7 @@ class PlaceObj(nn.Module):
         # Note: even for multi-electric fields, they use the same gamma
         num_bins_x = placedb.num_bins_x
         num_bins_y = placedb.num_bins_y
-        name = "Global placement: %dx%d bins by default" % (
-            num_bins_x, num_bins_y)
+        name = "Global placement: %dx%d bins by default" % (num_bins_x, num_bins_y)
         logging.info(name)
         self.num_bins_x = num_bins_x
         self.num_bins_y = num_bins_y
@@ -295,12 +313,14 @@ class PlaceObj(nn.Module):
             name=name,
         )
         if params.with_sta:
-            self.op_collections.timing_propagation_op = self.build_timing_propagation_op(params,
-                                                                                         placedb,
-                                                                                         self.data_collections)
-            self.op_collections.elmore_delay_op = self.build_elmore_delay_op(params,
-                                                                             placedb,
-                                                                             self.data_collections,)
+            self.op_collections.timing_propagation_op = (
+                self.build_timing_propagation_op(params, placedb, self.data_collections)
+            )
+            self.op_collections.elmore_delay_op = self.build_elmore_delay_op(
+                params,
+                placedb,
+                self.data_collections,
+            )
 
         # build multiple density op for multi-electric field
         if len(self.placedb.regions) > 0:
@@ -320,20 +340,21 @@ class PlaceObj(nn.Module):
         )
         if params.get_congestion_map:
             self.op_collections.get_congestion_map_op = (
-                self.build_route_utilization_map(
-                    params, placedb, self.data_collections)
+                self.build_route_utilization_map(params, placedb, self.data_collections)
             )
         if params.routability_opt_flag:
             # compute congestion map, RISA/RUDY congestion map
             self.op_collections.route_utilization_map_op = (
-                self.build_route_utilization_map(
-                    params, placedb, self.data_collections)
+                self.build_route_utilization_map(params, placedb, self.data_collections)
             )
             self.op_collections.pin_utilization_map_op = self.build_pin_utilization_map(
                 params, placedb, self.data_collections
             )
             self.op_collections.nctugr_congestion_map_op = (
-                self.build_nctugr_congestion_map(
+                self.build_nctugr_congestion_map(params, placedb, self.data_collections)
+            )
+            self.op_collections.irt_egr_congestion_map_op = (
+                self.build_irt_egr_congestion_map(
                     params, placedb, self.data_collections)
             )
             # adjust instance area with congestion map
@@ -376,10 +397,10 @@ class PlaceObj(nn.Module):
                 self.build_update_macro_overlap_weight(params, placedb)
             )
 
-        # refine macro orientations
-        self.op_collections.macro_refinement_op = self.build_macro_refinement(
-            params, placedb, self.data_collections, self.op_collections.hpwl_op
-        )
+        # # refine macro orientations
+        # self.op_collections.macro_refinement_op = self.build_macro_refinement(
+        #     params, placedb, self.data_collections, self.op_collections.hpwl_op
+        # )
 
     def obj_fn(self, pos):
         """
@@ -390,8 +411,7 @@ class PlaceObj(nn.Module):
         """
         self.wirelength = self.op_collections.wirelength_op(pos)
         if len(self.placedb.regions) > 0:
-            self.density = self.op_collections.fence_region_density_merged_op(
-                pos)
+            self.density = self.op_collections.fence_region_density_merged_op(pos)
         else:
             self.density = self.op_collections.density_op(pos)
 
@@ -400,16 +420,14 @@ class PlaceObj(nn.Module):
             self.init_density = self.density.data.clone()
             # density weight subgradient preconditioner
             self.density_weight_grad_precond = self.init_density.masked_scatter(
-                self.init_density > 0, 1 /
-                self.init_density[self.init_density > 0]
+                self.init_density > 0, 1 / self.init_density[self.init_density > 0]
             )
             self.quad_penalty_coeff = (
                 self.density_quad_coeff / 2 * self.density_weight_grad_precond
             )
         if self.quad_penalty:
             # quadratic density penalty
-            self.density = self.density * \
-                (1 + self.quad_penalty_coeff * self.density)
+            self.density = self.density * (1 + self.quad_penalty_coeff * self.density)
         if len(self.placedb.regions) > 0:
             result = self.wirelength + self.density_weight.dot(self.density)
         else:
@@ -425,7 +443,30 @@ class PlaceObj(nn.Module):
                 result, self.macro_overlap, alpha=self.macro_overlap_weight.item()
             )
         if self.use_timing_obj:
-            slack = self.timing_obj(pos)
+            # log_dir = './log'
+            # os.makedirs(log_dir, exist_ok=True)
+            # with torch.profiler.profile(
+            #     activities=[
+            #         torch.profiler.ProfilerActivity.CPU,  # 追踪 CPU 上的操作
+            #         # torch.profiler.ProfilerActivity.CUDA, # 追踪 GPU 上的操作 (如果可用)
+            #     ],
+            #     schedule=torch.profiler.schedule(wait=0, warmup=0, active=1, repeat=1),
+            #     on_trace_ready=torch.profiler.tensorboard_trace_handler(log_dir),
+            #     record_shapes=True,  # 关闭形状记录以减少文件大小
+            #     profile_memory=True, # 关闭内存分析以减少文件大小
+            #     with_stack=True
+            # ) as prof:
+            #     wns, tns, ws, ts = self.timing_obj(pos)
+            #     prof.step()  # 标记一个新的分析步骤
+            #     exit(0)
+
+            wns, tns, ws, ts = self.timing_obj(pos)
+            slack = - (self.timing_wns_coeff * wns + self.timing_tns_coeff * tns)
+            self.wns = wns
+            self.tns = tns
+            self.ws = ws
+            self.ts = ts
+            # logging.info(f"Timing slack: {slack}")
             result = torch.add(result, slack)
 
         return result
@@ -433,52 +474,971 @@ class PlaceObj(nn.Module):
     def pin_2_libpin_ids(self, inst_size: torch.tensor, data_collections):
         nodes_id = data_collections.pin2node_map
         pins_main_id = data_collections.inst_main_id[nodes_id]
-        pins_cell_id = data_collections.main_id_2_cell_id_start[pins_main_id] + \
-            inst_size[nodes_id].long()
-        libpin_ids = data_collections.cell_id_2_libpin_id_start[pins_cell_id] + \
-            data_collections.pin_2_libpin_offset
-        return libpin_ids
+        inst_pins_mask = pins_main_id >= 0
+
+        pins_cell_id = (
+            data_collections.main_id_2_cell_id_start[pins_main_id[inst_pins_mask]]
+            + inst_size[nodes_id[inst_pins_mask]].long()
+        )
+        libpin_ids = (
+            data_collections.cell_id_2_libpin_id_start[pins_cell_id]
+            + data_collections.pin_2_libpin_offset[inst_pins_mask]
+        )
+        return inst_pins_mask, libpin_ids
 
     def pin_caps_op(self, inst_size, data_collections):
-        self.pin2libpin_flat_ids = self.pin_2_libpin_ids(
-            inst_size, data_collections)
-        pin_cap_base = data_collections.flat_lib_pin_cap[self.pin2libpin_flat_ids]
+        self.pin2libpin_flat_ids = torch.zeros(
+            data_collections.pin2node_map.size()[0],
+            dtype=data_collections.cell_id_2_libpin_id_start.dtype,
+            device=data_collections.cell_id_2_libpin_id_start.device,
+        )  # 初始化为-1
+        pin_cap_base = torch.zeros(data_collections.pin2node_map.size()[0])
+        pin_rcap_base = torch.zeros(data_collections.pin2node_map.size()[0])
+        pin_fcap_base = torch.zeros(data_collections.pin2node_map.size()[0])
+        self.inst_pins_mask, inst_pin2libpin_flat_ids = self.pin_2_libpin_ids(
+            inst_size, data_collections
+        )
+        inst_pin_cap_base = data_collections.flat_lib_pin_cap[inst_pin2libpin_flat_ids]
+        inst_pin_rcap_base = data_collections.flat_lib_pin_rcap[
+            inst_pin2libpin_flat_ids
+        ]
+        inst_pin_fcap_base = data_collections.flat_lib_pin_fcap[
+            inst_pin2libpin_flat_ids
+        ]
+        # TODO: cap limit
+        self.pin2libpin_flat_ids[self.inst_pins_mask] = inst_pin2libpin_flat_ids
+        pin_cap_base[self.inst_pins_mask] = inst_pin_cap_base
+        pin_rcap_base[self.inst_pins_mask] = inst_pin_rcap_base
+        pin_fcap_base[self.inst_pins_mask] = inst_pin_fcap_base
 
-        return pin_cap_base
+        # fill in the pin capacitance for non-pin nodes
+        non_inst_pins_mask = ~self.inst_pins_mask
+        pin_cap_base[data_collections.end_points] += data_collections.outcaps
+        pin_rcap_base[data_collections.end_points] += data_collections.outcaps
+        pin_fcap_base[data_collections.end_points] += data_collections.outcaps
+        return pin_cap_base, pin_rcap_base, pin_fcap_base
+
+    def build_ieda_rct(self):
+        # ==============================================================================
+        # --- 步骤 2: 初始化iEDA并使用正确的线电容为其构建RC树 ---
+        # ==============================================================================
+        logging.info("正在初始化iEDA STA引擎...")
+        ieda_sta = IEDASta(self.placedb.data_manager.dir_workspace)
+        num_pins = len(self.placedb.pin_names)
+        self.id2net_name_map = {v: k for k, v in self.placedb.net_name2id_map.items()}
+
+        pin_fa = self.data_collections.pin_fa.clone().detach().cpu().numpy()
+        flat_pin_from = (
+            self.data_collections.flat_pin_from.clone().detach().cpu().numpy()
+        )
+        flat_pin_to = self.data_collections.flat_pin_to.clone().detach().cpu().numpy()
+
+        # 关键：使用纯粹的线电容 node_wire_caps_np 来构建iEDA的RC树
+        node_wire_caps_np = self.op_collections.elmore_delay_op.net_cap.cpu().numpy()
+        edge_resistance = (
+            self.op_collections.elmore_delay_op.edge_resistance.cpu().numpy()
+        )
+        edge_to_res_map = {
+            (u, v): r for u, v, r in zip(flat_pin_from, flat_pin_to, edge_resistance)
+        }
+
+        logging.info("开始为iEDA构建所有网络的RC树...")
+        for net_id, net_name in self.id2net_name_map.items():
+            # (RC树构建循环逻辑保持不变，确保传递的是 node_wire_caps)
+            # ... 此处省略您已验证通过的RC树构建循环代码 ...
+            net_pins_start = self.data_collections.flat_net2pin_start_map[net_id]
+            net_pins_end = self.data_collections.flat_net2pin_start_map[net_id + 1]
+            seed_pins = (
+                self.data_collections.flat_net2pin_map[net_pins_start:net_pins_end]
+                .cpu()
+                .numpy()
+            )
+            if len(seed_pins) < 2:
+                continue
+            net_nodes_set = set()
+            queue = [seed_pins[0]]
+            visited_in_queue = {seed_pins[0]}
+            head = 0
+            while head < len(queue):
+                current_node_idx = queue[head]
+                head += 1
+                net_nodes_set.add(current_node_idx)
+                children_start = self.data_collections.flat_pin_to_start[
+                    current_node_idx
+                ]
+                children_end = self.data_collections.flat_pin_to_start[
+                    current_node_idx + 1
+                ]
+                for child_idx_tensor in self.data_collections.flat_pin_to[
+                    children_start:children_end
+                ]:
+                    child_idx = child_idx_tensor.item()
+                    if child_idx not in visited_in_queue:
+                        queue.append(child_idx)
+                        visited_in_queue.add(child_idx)
+            net_nodes_global_indices = list(net_nodes_set)
+            global_to_local_idx_map = {
+                global_idx: i for i, global_idx in enumerate(net_nodes_global_indices)
+            }
+            true_driver_global_idx = self.data_collections.flat_net2pin_map[
+                net_pins_start
+            ].item()
+            node_sta_names, node_is_pin, steiner_indices = [], [], []
+            parent_indices, node_wire_caps, edge_resistances_net = [], [], []
+            for global_idx in net_nodes_global_indices:
+                if global_idx < num_pins:
+                    node_is_pin.append(True)
+                    node_sta_names.append(self.placedb.pin_names[global_idx])
+                    steiner_indices.append(-1)
+                else:
+                    node_is_pin.append(False)
+                    node_sta_names.append(f"S_{net_name}_{global_idx}")
+                    steiner_indices.append(global_idx - num_pins)
+                if global_idx == true_driver_global_idx:
+                    parent_indices.append(-1)
+                    edge_resistances_net.append(0.0)
+                else:
+                    parent_idx = pin_fa[global_idx]
+                    parent_indices.append(global_to_local_idx_map.get(parent_idx, -1))
+                    edge_resistances_net.append(
+                        edge_to_res_map.get((parent_idx, global_idx), 0.0)
+                    )
+                node_wire_caps.append(node_wire_caps_np[global_idx])
+            ieda_sta.build_rc_tree_from_flat_data(
+                net_name,
+                node_sta_names,
+                node_is_pin,
+                steiner_indices,
+                parent_indices,
+                node_wire_caps,
+                edge_resistances_net,
+                net_nodes_global_indices,
+            )
+        logging.info("所有网络的RC树构建完成。")
+
+        # ==============================================================================
+        # --- 步骤 3: 调用iEDA执行分析并获取所有调试信息 ---
+        # ==============================================================================
+        logging.info("调用iEDA执行时序分析并获取详细数据...")
+        at_late_cpp, at_early_cpp, rt_late_cpp, rt_early_cpp = [], [], [], []
+        pin_net_delay_cpp, cell_arc_delays_cpp, net_timing_details_cpp = [], [], []
+
+        ieda_sta.update_and_get_all_pin_timings(
+            self.placedb.pin_names,
+            at_late_cpp,
+            at_early_cpp,
+            rt_late_cpp,
+            rt_early_cpp,
+            pin_net_delay_cpp,
+            cell_arc_delays_cpp,
+            net_timing_details_cpp,
+        )
+        logging.info(
+            f"成功获取iEDA数据: {len(cell_arc_delays_cpp)}条CellArc, {len(net_timing_details_cpp)}条NetPin记录。"
+        )
+        return (
+            at_late_cpp,
+            at_early_cpp,
+            rt_late_cpp,
+            rt_early_cpp,
+            pin_net_delay_cpp,
+            cell_arc_delays_cpp,
+            net_timing_details_cpp,
+        )
+
+    def write_timing_pin_all(
+        self,
+        at_late_cpp,
+        at_early_cpp,
+        rt_late_cpp,
+        rt_early_cpp,
+        pin_net_delay_cpp,
+        cell_arc_delays_cpp,
+        net_timing_details_cpp,
+    ):
+        # # ======================================================================
+        # # --- 步骤 4: 生成所有Pin的详细时序参数对比报告并写入CSV文件 ---
+        # # ======================================================================
+        num_pins = len(self.placedb.pin_names)
+        # 定义报告文件名（CSV）
+        report_filename = "%s/%s_timing_pin_all_report.csv" % (
+                self.params.result_dir, self.params.design_name())
+        logging.info(f"\n正在生成详细时序对比报告，结果将写入CSV文件: {report_filename}")
+
+        # 在函数内部导入所需模块
+        import math
+        import csv
+
+        # 4a. 预处理iEDA返回的Net Pin数据，过滤掉 slew_ns 为 nan 的条目
+        net_timing_details_cpp_filtered = [
+            info
+            for info in net_timing_details_cpp
+            if not math.isnan(info.get("slew_ns", float("nan")))
+        ]
+
+        # 使用过滤后的干净数据来创建 ieda_pin_map
+        ieda_pin_map = {
+            (info["pin_name"], info["mode"], info["transition"]): info
+            for info in net_timing_details_cpp_filtered
+        }
+
+        # 4b. 预处理Python端计算的所有Pin的数据
+        op_elmore = self.op_collections.elmore_delay_op
+        py_pin_r_load = op_elmore.loads["rise"].clone().detach().cpu().numpy()
+        py_pin_f_load = op_elmore.loads["fall"].clone().detach().cpu().numpy()
+        py_pin_r_delay = op_elmore.delays["rise"].clone().detach().cpu().numpy()
+        py_pin_f_delay = op_elmore.delays["fall"].clone().detach().cpu().numpy()
+        py_pin_r_ldelay = (
+            op_elmore.ldelays["rise"].clone().detach().cpu().numpy()
+        )
+        py_pin_f_ldelay = (
+            op_elmore.ldelays["fall"].clone().detach().cpu().numpy()
+        )
+        py_pin_r_beta = op_elmore.betas["rise"].clone().detach().cpu().numpy()
+        py_pin_f_beta = op_elmore.betas["fall"].clone().detach().cpu().numpy()
+        py_pin_r_impulse = (
+            op_elmore.impulses["rise"].clone().detach().cpu().numpy()
+        )
+        py_pin_f_impulse = (
+            op_elmore.impulses["fall"].clone().detach().cpu().numpy()
+        )
+
+        op_timing = self.op_collections.timing_propagation_op
+        py_pin_r_slew = op_timing.pin_rtran.clone().detach().cpu().numpy()
+        py_pin_f_slew = op_timing.pin_ftran.clone().detach().cpu().numpy()
+
+        # 新增: 获取Python端的AT和RT数据
+        py_r_aat_late = (
+            op_timing.pin_rAAT
+            .clone()
+            .detach()
+            .cpu()
+            .numpy()
+        )
+        py_f_aat_late = (
+            op_timing.pin_fAAT
+            .clone()
+            .detach()
+            .cpu()
+            .numpy()
+        )
+        py_r_rat_late = (
+            op_timing.pin_rRAT
+            .clone()
+            .detach()
+            .cpu()
+            .numpy()
+        )
+        py_f_rat_late = (
+            op_timing.pin_fRAT
+            .clone()
+            .detach()
+            .cpu()
+            .numpy()
+        )
+        
+        python_pin_map = {}
+        pin_names = self.placedb.pin_names
+
+        for pin_id in range(num_pins):
+            full_pin_name = pin_names[pin_id].decode("utf-8")
+
+            # 为Rise和Fall transition分别创建数据条目
+            key_rise = (full_pin_name, "Max", "Rise")
+            python_pin_map[key_rise] = {
+                "load": py_pin_r_load[pin_id],
+                "delay": py_pin_r_delay[pin_id],
+                "ldelay": py_pin_r_ldelay[pin_id],
+                "beta": py_pin_r_beta[pin_id],
+                "impulse": py_pin_r_impulse[pin_id],
+                "slew": py_pin_r_slew[pin_id],
+                # 新增AT/RT
+                "at": py_r_aat_late[pin_id],
+                "rt": py_r_rat_late[pin_id],
+            }
+
+            key_fall = (full_pin_name, "Max", "Fall")
+            python_pin_map[key_fall] = {
+                "load": py_pin_f_load[pin_id],
+                "delay": py_pin_f_delay[pin_id],
+                "ldelay": py_pin_f_ldelay[pin_id],
+                "beta": py_pin_f_beta[pin_id],
+                "impulse": py_pin_f_impulse[pin_id],
+                "slew": py_pin_f_slew[pin_id],
+                # 新增AT/RT
+                "at": py_f_aat_late[pin_id],
+                "rt": py_f_rat_late[pin_id],
+            }
+
+        # 4c. 构建用于排序和报告的中间列表
+        report_data = []
+        common_keys = set(python_pin_map.keys()).intersection(
+            set(ieda_pin_map.keys())
+        )
+
+        # 新增: 创建一个从pin name到id的反向映射，以便查找AT/RT
+        pin_name_to_id_map = {pin_names[i].decode("utf-8"): i for i in range(num_pins)}
+
+        for key in common_keys:
+            pin_name, _, _ = key
+            py_data = python_pin_map[key]
+            ieda_data = ieda_pin_map[key]
+
+            # 获取pin_id，如果找不到则跳过 (更稳健)
+            pin_id = pin_name_to_id_map.get(pin_name)
+            if pin_id is None:
+                continue
+
+            # 从iEDA的列表中获取AT/RT
+            if key[2] == "Rise":
+                ieda_at_val = at_late_cpp[pin_id][0]
+                ieda_rt_val = rt_late_cpp[pin_id][0]
+            else:  # Fall                
+                ieda_at_val = at_late_cpp[pin_id][1]
+                ieda_rt_val = rt_late_cpp[pin_id][1]
+
+            # 计算用于排序的差异值 (使用 RT 差异)
+            diff = abs(py_data["rt"] - ieda_rt_val * 1000)
+            report_data.append(
+                {
+                    "key": key,
+                    "py_data": py_data,
+                    "ieda_data": ieda_data,
+                    "ieda_at": ieda_at_val * 1000,
+                    "ieda_rt": ieda_rt_val * 1000,
+                    "sort_diff": diff,
+                }
+            )
+
+        # 4d. 按 Slew 差异进行降序排序
+        report_data.sort(key=lambda item: item["sort_diff"], reverse=True)
+
+        # 4e. 将报告写入CSV文件
+        csv_header = [
+            "Pin Name",
+            "Mode",
+            "Trans",
+            "Py AT (ps)",
+            "iEDA AT (ps)",
+            "Py RT (ps)",
+            "iEDA RT (ps)",
+            "Py Slack(ps)",
+            "iEDA Slack(ps)",
+            "Py Slew (ps)",
+            "iEDA Slew (ps)",
+            "Py Delay (ps)",
+            "iEDA Delay (ps)",
+            "Py Load (pF)",
+            "iEDA Load (pF)",
+            "Py LDelay (ps)",
+            "iEDA LDelay (ps)",
+            "Py Beta",
+            "iEDA Beta",
+            "Py Impulse",
+            "iEDA Impulse",
+        ]
+
+                
+        with open(report_filename, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(csv_header)
+
+            for item in report_data:
+                pin_name, mode, trans = item["key"]
+                py_data = item["py_data"]
+                ieda_data = item["ieda_data"]
+
+                # safe extraction and unit handling
+                ieda_slew_val = ieda_data.get("slew_ns", float("nan"))
+                ieda_delay_val = ieda_data.get("delay", float("nan"))
+                ieda_load_val = ieda_data.get("load", float("nan"))
+                ieda_ldelay_val = ieda_data.get("ldelay", float("nan"))
+                ieda_beta_val = ieda_data.get("beta", float("nan"))
+                ieda_impulse_val = (
+                    ieda_data.get("impulse", 0.0)
+                    if ieda_data.get("impulse", 0.0) >= 0
+                    else 0.0
+                )
+
+                row = [
+                    pin_name,
+                    mode,
+                    trans,
+                    f"{py_data.get('at', float('nan')):.6f}",
+                    f"{item.get('ieda_at', float('nan')):.6f}",
+                    f"{py_data.get('rt', float('nan')):.6f}",
+                    f"{item.get('ieda_rt', float('nan')):.6f}",
+                    f"{py_data.get('rt', float('nan')) - py_data.get('at', float('nan')):.6f}",
+                    f"{item.get('ieda_rt', float('nan')) - item.get('ieda_at', float('nan')):.6f}",
+                    f"{py_data.get('slew', float('nan')):.6f}",
+                    f"{1000 * ieda_slew_val:.6f}",
+                    f"{py_data.get('delay', float('nan')):.6f}",
+                    f"{ieda_delay_val:.6f}",
+                    f"{py_data.get('load', float('nan')):.6f}",
+                    f"{ieda_load_val:.6f}",
+                    f"{py_data.get('ldelay', float('nan')):.6f}",
+                    f"{ieda_ldelay_val:.6f}",
+                    f"{py_data.get('beta', float('nan')):.6f}",
+                    f"{ieda_beta_val:.6f}",
+                    f"{py_data.get('impulse', float('nan')):.6f}",
+                    f"{ieda_impulse_val:.6f}",
+                ]
+
+                writer.writerow(row)
+
+        # 在写入完成后，向控制台打印一条确认信息
+        logging.info(f"详细的对比报告已成功写入CSV文件: {report_filename}")
+
+    def write_arc_all(
+        self, cell_arc_delays_cpp
+    ):
+
+        # ==============================================================================
+        # --- 步骤 4: 对齐Cell Arc Delay (新增Arc Sense列)，并写入CSV文件 ---
+        # ==============================================================================
+        logging.info("\n--- Cell Arc Delay 详细对比 (按差异绝对值降序排序) ---")
+        import math
+        import numpy as np
+        import csv
+
+        # 4a. 预处理iEDA返回的Cell Arc数据 (不变)
+        ieda_arc_map = {
+        }
+        for arc in cell_arc_delays_cpp:
+            key_t = (
+                arc["inst_name"],
+                arc["from_pin"],
+                arc["to_pin"],
+                arc["transition"],
+                arc["arc_sense"],
+            )
+            if ieda_arc_map.get(key_t) is not None:
+                tmp = ieda_arc_map[key_t]
+                if tmp['delay_ns'] < arc['delay_ns']:
+                    ieda_arc_map[key_t] = arc
+                # logging.info(f"Warning: Duplicate arc key found: {key_t}. Overwriting previous entry.")
+            else:
+                ieda_arc_map[key_t] = arc
+            
+
+        # 4b. 预处理Python端计算的Cell Arc数据 (逻辑修正版)
+        op_timing = self.op_collections.timing_propagation_op
+        op_elmore = self.op_collections.elmore_delay_op
+
+        py_cell_arc_rr_delays = (
+            op_timing.cell_arc_rr_delays.cpu().numpy()
+        )  # Delay for OUTPUT Rise
+        py_cell_arc_ff_delays = (
+            op_timing.cell_arc_ff_delays.cpu().numpy()
+        )  # Delay for OUTPUT Fall
+
+        py_cell_arc_rf_delays = (
+            op_timing.cell_arc_rf_delays.cpu().numpy()
+        )  # Delay for OUTPUT Rise
+        py_cell_arc_fr_delays = (
+            op_timing.cell_arc_fr_delays.cpu().numpy()
+        )  # Delay for OUTPUT Fall
+
+        py_pin_r_slew = op_timing.pin_rtran.cpu().numpy()
+        py_pin_f_slew = op_timing.pin_ftran.cpu().numpy()
+        py_pin_r_load = op_elmore.loads["rise"].clone().detach().cpu().numpy()
+        py_pin_f_load = op_elmore.loads["fall"].clone().detach().cpu().numpy()
+
+        python_arc_map = {}
+        id2cell_name_map = {v: k for k, v in self.placedb.node_name2id_map.items()}
+        pin_names = self.placedb.pin_names
+
+        cell_arcs = self.data_collections.inst_flat_arcs.cpu().numpy()
+        cell_arcs_start = self.data_collections.inst_flat_arcs_start.cpu().numpy()
+
+        for cell_id, cell_name in id2cell_name_map.items():
+            start_index = cell_arcs_start[cell_id]
+            end_index = cell_arcs_start[cell_id + 1]
+            if start_index == end_index:
+                continue
+
+            for inst_arc_idx in range(start_index, end_index):
+                arc_info = cell_arcs[inst_arc_idx]
+
+                in_pin_id, out_pin_id, _, _, arc_sense, _ = arc_info # there shouldnt be fall if timingtype is rise
+
+                from_pin_name = pin_names[in_pin_id].decode("utf-8")
+                to_pin_name = pin_names[out_pin_id].decode("utf-8")
+
+                is_inverting = arc_sense == -1  # negative_unate
+                is_unate = arc_sense == 0      # non_unate
+
+                # --- 情况一: 报告中对应 output "Rise" 的行 ---
+                delay_for_output_rise = (
+                    py_cell_arc_fr_delays[inst_arc_idx]
+                    if is_inverting
+                    else (
+                        py_cell_arc_rr_delays[inst_arc_idx]
+                        if not is_unate
+                        else max(
+                            py_cell_arc_rr_delays[inst_arc_idx],
+                            py_cell_arc_fr_delays[inst_arc_idx],
+                        )
+                    )
+                )
+
+                key_rise = (cell_name, from_pin_name, to_pin_name, "Rise", arc_sense)
+                input_slew_rise = (
+                    py_pin_f_slew[in_pin_id]
+                    if is_inverting
+                    else py_pin_r_slew[in_pin_id]
+                )
+                output_load_rise = py_pin_r_load[out_pin_id]
+                if python_arc_map.get(key_rise) is not None:
+                    tmp = python_arc_map[key_rise]
+                    if tmp['delay'] < delay_for_output_rise:
+                        python_arc_map[key_rise] = {
+                            "delay": delay_for_output_rise,
+                            "slew": input_slew_rise,
+                            "load": output_load_rise,
+                            "arc_sense": arc_sense,
+                        }
+                    # logging.info(f"Warning: Duplicate arc key found: {key_rise}. Overwriting previous entry.")
+                else:
+                    python_arc_map[key_rise] = {
+                        "delay": delay_for_output_rise,
+                        "slew": input_slew_rise,
+                        "load": output_load_rise,
+                        "arc_sense": arc_sense,
+                    }
+
+                # --- 情况二: 报告中对应 output "Fall" 的行 ---
+                delay_for_output_fall = (
+                    py_cell_arc_rf_delays[inst_arc_idx]
+                    if is_inverting
+                    else (
+                        py_cell_arc_ff_delays[inst_arc_idx]
+                        if not is_unate
+                        else max(
+                            py_cell_arc_ff_delays[inst_arc_idx],
+                            py_cell_arc_rf_delays[inst_arc_idx],
+                        )
+                    )
+                )
+                
+                key_fall = (cell_name, from_pin_name, to_pin_name, "Fall", arc_sense)
+                input_slew_fall = (
+                    py_pin_r_slew[in_pin_id]
+                    if is_inverting
+                    else py_pin_f_slew[in_pin_id]
+                )
+                output_load_fall = py_pin_f_load[out_pin_id]
+                if python_arc_map.get(key_fall) is not None:
+                    tmp= python_arc_map[key_fall]
+                    if tmp['delay'] < delay_for_output_fall:
+                        python_arc_map[key_fall] = {
+                            "delay": delay_for_output_fall,
+                            "slew": input_slew_fall,
+                            "load": output_load_fall,
+                            "arc_sense": arc_sense,
+                        }
+                    # logging.info(f"Warning: Duplicate arc key found: {key_fall}. Overwriting previous entry.")
+                else:
+                    python_arc_map[key_fall] = {
+                        "delay": delay_for_output_fall,
+                        "slew": input_slew_fall,
+                        "load": output_load_fall,
+                        "arc_sense": arc_sense,
+                    }
+
+        # 4c. 构建用于排序和报告的中间列表 (不变)
+        report_data = []
+        common_keys = set(python_arc_map.keys()).intersection(set(ieda_arc_map.keys()))
+
+        for key in common_keys:
+            py_data = python_arc_map[key]
+            ieda_data = ieda_arc_map[key]
+            delay_diff = py_data["delay"] - ieda_data["delay_ns"] * 1000
+            report_item = {
+                "key": key,
+                "py_data": py_data,
+                "ieda_data": ieda_data,
+                "delay_diff": delay_diff,
+            }
+            report_data.append(report_item)
+
+        # 4d. 按需排序 (当前为按Delay差异)
+        report_data.sort(key=lambda item: abs(item["delay_diff"]), reverse=True)
+
+        # 4e. 将 Arc 对比写入 CSV
+        csv_filename = "%s/%s_cell_arc_delay_report.csv" % (
+                self.params.result_dir, self.params.design_name())
+        csv_header = [
+            "Instance",
+            "Arc",
+            "Trans",
+            "Sense",
+            "Py Delay (ps)",
+            "iEDA Delay (ps)",
+            "Diff (ps)",
+            "Py Slew (ps)",
+            "iEDA Slew (ps)",
+            "Py Load (pF)",
+            "iEDA Load (pF)",
+        ]
+
+        with open(csv_filename, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(csv_header)
+
+            for item in report_data:
+                inst, from_p, to_p, trans, arc_sense = item["key"]
+                py_data = item["py_data"]
+                ieda_data = item["ieda_data"]
+
+                ieda_delay_ps = ieda_data.get("delay_ns", float("nan")) * 1000
+                ieda_in_slew_ps = ieda_data.get("in_slew_ns", float("nan")) * 1000
+                ieda_load = ieda_data.get("load_cap", float("nan"))
+
+                row = [
+                    inst,
+                    f"{from_p}->{to_p}",
+                    trans,
+                    arc_sense,
+                    f"{py_data['delay']:.6f}",
+                    f"{ieda_delay_ps:.6f}",
+                    f"{item['delay_diff']:+.6f}",
+                    f"{py_data['slew']:.6f}",
+                    f"{ieda_in_slew_ps:.6f}",
+                    f"{py_data['load']:.6f}",
+                    f"{ieda_load:.6f}",
+                ]
+
+                writer.writerow(row)
+
+        logging.info(f"Cell arc 对比已写入CSV文件: {csv_filename}")
+
+    def show_slack_compare(self, at_late_cpp, rt_late_cpp, wns, tns, ws, ts):
+        # ==============================================================================
+        # --- 步骤 6: 计算并返回最终的目标函数值 ---
+        # ==============================================================================
+        # (这部分计算WNS/TNS的逻辑保持不变)
+        num_pins = len(self.placedb.pin_names)
+        logging.info("\n--- 全局指标对比 (WNS/TNS) ---")
+        t_dtype = self.op_collections.timing_propagation_op.pin_rAAT.dtype
+        t_device = self.op_collections.timing_propagation_op.pin_rAAT.device
+        # at_late_py = torch.max(
+        #     self.op_collections.timing_propagation_op.pin_fAAT,
+        # )
+        # rt_late_py = torch.min(
+        #     self.op_collections.timing_propagation_op.pin_rRAT,
+        #     self.op_collections.timing_propagation_op.pin_fRAT,
+        # )
+        # setup_slack_py = rt_late_py - at_late_py
+        # setup_slack_py_pins_only = setup_slack_py[:num_pins]
+
+        at_late_cpp_tensor = torch.tensor(
+            at_late_cpp, dtype=t_dtype, device=t_device
+        )
+        rt_late_cpp_tensor = torch.tensor(
+            rt_late_cpp, dtype=t_dtype, device=t_device
+        )
+        setup_slack_cpp = torch.min(rt_late_cpp_tensor[:,0] - at_late_cpp_tensor[:,0], rt_late_cpp_tensor[:,1] - at_late_cpp_tensor[:,1])
+
+        # wns_py_calc = torch.min(torch.clamp(setup_slack_py_pins_only, max=0)).item()
+        # tns_py_calc = torch.sum(torch.clamp(setup_slack_py_pins_only, max=0)).item()
+
+        slack_endpoints = setup_slack_cpp[self.data_collections.end_points]
+        valid_setup_mask = torch.isfinite(slack_endpoints)
+        setup_slack_cpp_valid = slack_endpoints[valid_setup_mask]
+        if setup_slack_cpp_valid.numel() > 0:
+            wns_cpp_calc = torch.min(setup_slack_cpp_valid).item()
+            tns_cpp_calc = torch.sum(setup_slack_cpp_valid.clamp(max=0)).item()
+        else:
+            wns_cpp_calc = 0.0
+            tns_cpp_calc = 0.0
+
+        logging.info(
+            f"WNS (Python Calculated): {wns / 1000:<15.4f} | WNS (iEDA): {wns_cpp_calc:<15.4f}"
+        )
+        logging.info(
+            f"TNS (Python Calculated): {tns / 1000:<15.4f} | TNS (iEDA): {tns_cpp_calc:<15.4f}"
+        )
+        logging.info("-" * 60)
+        logging.info(f"flow 输出的 WNS (orig wns): {wns.item():.4f}")
+        logging.info(f"flow 输出的 TNS (orig tns): {tns.item():.4f}")
+        logging.info(f"flow 输出的 WS (orig ws): {ws.item():.4f}")
+        # logging.info(f"flow 输出的 TS (orig ts): {ts.item():.4f}")
+
+    def write_first_level_pin_timing_log(self, net_timing_details_cpp):
+        """
+        @brief [修改后] 识别第一层传播引脚，并将详细的Slew/Impulse时序对比报告
+            (精度为9位小数) 写入到一个名为 "timing_first_level_pins_report.csv" 的文件中。
+        @param net_timing_details_cpp: 从 C++/iEDA 获取的包含 net pin 时序细节的列表。
+        """
+        import math
+        import csv
+        # ==============================================================================
+        # --- 步骤 1: 定义文件名并准备数据 ---
+        # ==============================================================================
+        report_filename = "%s/%s_timing_first_level_pins_report.csv" % (
+                self.params.result_dir, self.params.design_name())
+        logging.info(f"\n--- [专属报告] 正在生成第一层传播引脚的详细报告 -> {report_filename}")
+
+        # 1a. 找出所有“第一层传播”的引脚及其驱动源
+        start_pin_ids = self.data_collections.start_points.cpu().numpy()
+
+        pin_id_to_net_id_map = {}
+        for net_id in range(len(self.data_collections.flat_net2pin_start_map) - 1):
+            start_idx = self.data_collections.flat_net2pin_start_map[net_id]
+            end_idx = self.data_collections.flat_net2pin_start_map[net_id + 1]
+            for pin_id_tensor in self.data_collections.flat_net2pin_map[start_idx:end_idx]:
+                pin_id_to_net_id_map[pin_id_tensor.item()] = net_id
+
+        start_pin_to_sinks_map = {}
+        for start_pin_id in start_pin_ids:
+            net_id = pin_id_to_net_id_map.get(start_pin_id)
+            if net_id is not None:
+                sinks = []
+                start_idx = self.data_collections.flat_net2pin_start_map[net_id]
+                end_idx = self.data_collections.flat_net2pin_start_map[net_id + 1]
+                for pin_id_tensor in self.data_collections.flat_net2pin_map[start_idx:end_idx]:
+                    pin_id = pin_id_tensor.item()
+                    if pin_id != start_pin_id:
+                        sinks.append(pin_id)
+                if sinks:
+                    start_pin_to_sinks_map[start_pin_id] = sinks
+
+        # 1b. 预处理Python和iEDA的数据
+        op_timing = self.op_collections.timing_propagation_op
+        op_elmore = self.op_collections.elmore_delay_op
+
+        py_pin_r_impulse = op_elmore.impulses['rise'].clone().detach().cpu().numpy()
+        py_pin_f_impulse = op_elmore.impulses['fall'].clone().detach().cpu().numpy()
+        py_pin_r_slew = op_timing.pin_rtran.clone().detach().cpu().numpy()
+        py_pin_f_slew = op_timing.pin_ftran.clone().detach().cpu().numpy()
+
+        ieda_pin_map = {
+            (info['pin_name'], info['mode'], info['transition']): info
+            for info in net_timing_details_cpp
+        }
+        pin_names = self.placedb.pin_names
+
+        # ==============================================================================
+        # --- 步骤 2: 将报告写入CSV文件 ---
+        # ==============================================================================
+        csv_header = [
+            "Group", "Pin Type", "Pin Name",
+            "Py Rise Slew (ps)", "iEDA Rise Slew (ns)",
+            "Py Fall Slew (ps)", "iEDA Fall Slew (ns)",
+            "Py Rise Impulse", "iEDA Rise Impulse",
+            "Py Fall Impulse", "iEDA Fall Impulse"
+        ]
+
+        with open(report_filename, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(csv_header)
+
+            # 按 start_pin_id 排序，确保报告顺序一致
+            for start_pin_id, sink_pin_ids in sorted(start_pin_to_sinks_map.items()):
+                # --- 处理 Start Pin ---
+                start_pin_name = pin_names[start_pin_id].decode('utf-8')
+                py_r_slew_start = py_pin_r_slew[start_pin_id]
+                py_f_slew_start = py_pin_f_slew[start_pin_id]
+                py_r_impulse_start = py_pin_r_impulse[start_pin_id]
+                py_f_impulse_start = py_pin_f_impulse[start_pin_id]
+
+                key_rise_start = (start_pin_name, "Max", "Rise")
+                key_fall_start = (start_pin_name, "Max", "Fall")
+                ieda_data_rise = ieda_pin_map.get(key_rise_start, {})
+                ieda_data_fall = ieda_pin_map.get(key_fall_start, {})
+
+                ieda_r_slew_start = ieda_data_rise.get('slew_ns', float('nan'))
+                ieda_f_slew_start = ieda_data_fall.get('slew_ns', float('nan'))
+
+                ieda_r_impulse_sq = ieda_data_rise.get('impulse', -1.0)
+                ieda_r_impulse_start = math.sqrt(ieda_r_impulse_sq) if ieda_r_impulse_sq >= 0 else float('nan')
+                ieda_f_impulse_sq = ieda_data_fall.get('impulse', -1.0)
+                ieda_f_impulse_start = math.sqrt(ieda_f_impulse_sq) if ieda_f_impulse_sq >= 0 else float('nan')
+
+                start_pin_row = [
+                    start_pin_name, "Start Pin", start_pin_name,
+                    f"{py_r_slew_start:.9f}", f"{ieda_r_slew_start:.9f}",
+                    f"{py_f_slew_start:.9f}", f"{ieda_f_slew_start:.9f}",
+                    f"{py_r_impulse_start:.9f}", f"{ieda_r_impulse_start:.9f}",
+                    f"{py_f_impulse_start:.9f}", f"{ieda_f_impulse_start:.9f}"
+                ]
+                writer.writerow(start_pin_row)
+
+                # --- 处理该 Start Pin 驱动的所有 Sink Pin ---
+                for sink_pin_id in sorted(sink_pin_ids):
+                    sink_pin_name = pin_names[sink_pin_id].decode('utf-8')
+                    py_r_slew_sink = py_pin_r_slew[sink_pin_id]
+                    py_f_slew_sink = py_pin_f_slew[sink_pin_id]
+                    py_r_impulse_sink = py_pin_r_impulse[sink_pin_id]
+                    py_f_impulse_sink = py_pin_f_impulse[sink_pin_id]
+
+                    key_rise_sink = (sink_pin_name, "Max", "Rise")
+                    key_fall_sink = (sink_pin_name, "Max", "Fall")
+                    ieda_data_rise_sink = ieda_pin_map.get(key_rise_sink, {})
+                    ieda_data_fall_sink = ieda_pin_map.get(key_fall_sink, {})
+
+                    ieda_r_slew_sink = ieda_data_rise_sink.get('slew_ns', float('nan'))
+                    ieda_f_slew_sink = ieda_data_fall_sink.get('slew_ns', float('nan'))
+
+                    ieda_r_impulse_sq_sink = ieda_data_rise_sink.get('impulse', -1.0)
+                    ieda_r_impulse_sink = math.sqrt(ieda_r_impulse_sq_sink) if ieda_r_impulse_sq_sink >= 0 else float('nan')
+                    ieda_f_impulse_sq_sink = ieda_data_fall_sink.get('impulse', -1.0)
+                    ieda_f_impulse_sink = math.sqrt(ieda_f_impulse_sq_sink) if ieda_f_impulse_sq_sink >= 0 else float('nan')
+
+                    sink_pin_row = [
+                        start_pin_name, "Sink Pin", sink_pin_name,
+                        f"{py_r_slew_sink:.9f}", f"{ieda_r_slew_sink:.9f}",
+                        f"{py_f_slew_sink:.9f}", f"{ieda_f_slew_sink:.9f}",
+                        f"{py_r_impulse_sink:.9f}", f"{ieda_r_impulse_sink:.9f}",
+                        f"{py_f_impulse_sink:.9f}", f"{ieda_f_impulse_sink:.9f}"
+                    ]
+                    writer.writerow(sink_pin_row)
+
+        logging.info(f"第一层传播引脚的详细报告已成功写入: {report_filename}")
 
     def timing_obj(self, pos):
         """
-        @brief Compute objective.
-            wirelength + density_weight * density penalty + macro_overlap_weight * macro overlap penalty
+        @brief Compute objective and perform detailed timing analysis for debugging.
         @param pos locations of cells
         @return objective value
         """
+        # ==============================================================================
+        # --- 步骤 1: Python端计算，获取所有时序参数 ---
+        # ==============================================================================
+        import math
+        import numpy as np
 
         new_x, new_y = self.op_collections.steiner_topo_op(
-            self.op_collections.pin_pos_op(pos))
-
-        pin_caps_base = self.pin_caps_op(
-            self.data_collections.inst_size, self.data_collections)  # TODO: FIXME WHEN SIZING
-        # ELMORE DELAY
-        pin_net_cap, pin_net_delay, pin_net_impulse = self.op_collections.elmore_delay_op(
-            new_x, new_y, self.data_collections.net_flat_topo_sort,
-            self.data_collections.net_flat_topo_sort_start,
-            self.data_collections.pin_fa,
-            self.data_collections.flat_pin_to_start,
-            self.data_collections.flat_pin_to,
-            self.data_collections.flat_pin_from,
-            pin_caps_base,
-            self.params.scale_factor
+            self.op_collections.pin_pos_op(pos)
         )
 
-        ##
-        wns, tns = self.op_collections.timing_propagation_op(
-            pin_net_delay, pin_net_impulse, pin_net_cap)
+        pin_caps_base, pin_rcaps_base, pin_fcaps_base = self.pin_caps_op(
+            self.data_collections.inst_size, self.data_collections
+        )
 
-        # Index 0: WNS (1D Float Tensor)
+        # Elmore Delay算子
+        pin_caps, loads, delays, ldelays, betas, impulses = (
+            self.op_collections.elmore_delay_op(
+                new_x,
+                new_y,
+                self.data_collections.net_flat_topo_sort,
+                self.data_collections.net_flat_topo_sort_start,
+                self.data_collections.pin_fa,
+                self.data_collections.flat_pin_to_start,
+                self.data_collections.flat_pin_to,
+                self.data_collections.flat_pin_from,
+                pin_caps_base,
+                pin_rcaps_base,
+                pin_fcaps_base,
+            )
+        )
 
-        alpha = 0.2
-        return tns + alpha * wns
+        # 时序传播算子 (为获取WNS/TNS和完整的slew/load值，仍然需要运行)
+        wns, tns, ws, ts = self.op_collections.timing_propagation_op(delays, impulses, loads)
+
+        # if self.invoke_timing_count % 280 == 0:
+        #     self.check_log(wns, tns, ws, ts)
+        #     logging.info(f"\n--- [Timing Debug] 第 {self.invoke_timing_count} 次调用 timing_obj ---")
+        #     logging.info(f"当前 WNS: {wns.item():.4f}, TNS: {tns.item():.4f}, WS: {ws.item():.4f}, TS: {ts:.4f}")
+        self.invoke_timing_count += 1
+        return wns, tns, ws, ts
+
+    def check_log(self, wns, tns, ws, ts):
+        # ==============================================================================
+        # --- 步骤 2: 初始化iEDA并使用正确的线电容为其构建RC树 ---
+        # ==============================================================================
+
+        (
+            at_late_cpp,
+            at_early_cpp,
+            rt_late_cpp,
+            rt_early_cpp,
+            pin_net_delay_cpp,
+            cell_arc_delays_cpp,
+            net_timing_details_cpp,
+        ) = self.build_ieda_rct()
+
+        self.write_timing_pin_all(
+            at_late_cpp,
+            at_early_cpp,
+            rt_late_cpp,
+            rt_early_cpp,
+            pin_net_delay_cpp,
+            cell_arc_delays_cpp,
+            net_timing_details_cpp,
+        )
+
+        self.write_arc_all(cell_arc_delays_cpp)
+        self.show_slack_compare(at_late_cpp, rt_late_cpp, wns, tns, ws, ts)
+
+        # DEBUG
+        self.write_first_level_pin_timing_log(net_timing_details_cpp)
+        # DEBUG
+        # ==============================================================================
+        # --- 额外调试步骤: 输出特定引脚所在网络的完整信息 ---
+        # ==============================================================================
+        logging.info("\n--- [特定网络拓扑] 'DFF_659/Q_reg:Q' 所在网络的详细信息 ---")
+
+        # ★★★ 您可以在这里修改想追踪的目标引脚名称 ★★★
+        target_pin_full_name = "U4339:ZN"
+        endpoints_str = self.placedb.pin_names[self.placedb.end_points] # .cpu().numpy().tolist()
+        logging.info(f"设计中的所有端点引脚共有 {len(endpoints_str)} 个，包括：")
+        for ep in endpoints_str:
+            logging.info(f" - {ep.decode('utf-8')}")
+        self.debug_target_pin_net_info(target_pin_full_name)
+
+    def debug_target_pin_net_info(self, target_pin_full_name):
+
+        # 注意：请确保这个名字与 self.placedb.pin_names 中的某个条目完全匹配
+        # 1. 准备必要的映射关系
+        self.pin_names = self.placedb.pin_names
+        self.name_to_id_map = {
+            name.decode("utf-8"): i for i, name in enumerate(self.pin_names)
+        }
+        # 2. 查找目标引脚及其所在的Net
+        if target_pin_full_name in self.name_to_id_map:
+            target_pin_id = self.name_to_id_map[target_pin_full_name]
+
+            # a. 构建 pin_id -> net_id 的反向映射 (如果尚未构建)
+            pin_id_to_net_id_map = {}
+            for net_id, net_name in self.id2net_name_map.items():
+                start = self.data_collections.flat_net2pin_start_map[net_id]
+                end = self.data_collections.flat_net2pin_start_map[net_id + 1]
+                for pin_id_tensor in self.data_collections.flat_net2pin_map[start:end]:
+                    pin_id_to_net_id_map[pin_id_tensor.item()] = net_id
+
+            target_net_id = pin_id_to_net_id_map.get(target_pin_id)
+
+            if target_net_id is not None:
+                target_net_name = self.id2net_name_map[target_net_id]
+                logging.info(
+                    f"引脚 '{target_pin_full_name}' (ID: {target_pin_id}) 位于网络 '{target_net_name}' (ID: {target_net_id})。"
+                )
+                logging.info("该网络包含以下所有引脚：")
+                logging.info(f"{'Pin ID':<15} | {'Pin Name'}")
+                logging.info("-" * 60)
+
+                # b. 根据net_id获取该网络的所有引脚
+                start_idx = self.data_collections.flat_net2pin_start_map[target_net_id]
+                end_idx = self.data_collections.flat_net2pin_start_map[
+                    target_net_id + 1
+                ]
+                all_pin_ids_in_net = self.data_collections.flat_net2pin_map[
+                    start_idx:end_idx
+                ]
+
+                # c. 遍历并打印所有引脚信息
+                for pin_id_tensor in all_pin_ids_in_net:
+                    pin_id = pin_id_tensor.item()
+                    pin_name = self.pin_names[pin_id].decode("utf-8")
+                    # 如果是目标引脚，特殊标记出来
+                    marker = "★" if pin_id == target_pin_id else " "
+                    logging.info(f"{marker} {pin_id:<13} | {pin_name}")
+            else:
+                logging.info(f"错误：在网络映射中未找到引脚 '{target_pin_full_name}'。")
+        else:
+            logging.info(f"错误：在设计中未找到名为 '{target_pin_full_name}' 的引脚。")
 
     def obj_and_grad_fn_old(self, pos_w, pos_g=None, admm_multiplier=None):
         """
@@ -511,55 +1471,43 @@ class PlaceObj(nn.Module):
                 ).data.item()
 
             if self.quad_penalty:
-                inner_density = self.op_collections.inner_fence_region_density_op(
-                    pos_w)
+                inner_density = self.op_collections.inner_fence_region_density_op(pos_w)
                 inner_density = (
                     inner_density
-                    + self.density_quad_coeff
-                    / 2
-                    / self.init_density
-                    * inner_density**2
+                    + self.density_quad_coeff / 2 / self.init_density * inner_density**2
                 )
             else:
-                inner_density = self.op_collections.inner_fence_region_density_op(
-                    pos_w)
+                inner_density = self.op_collections.inner_fence_region_density_op(pos_w)
 
             inner_density.backward()
             inner_density_grad = pos_w.grad.data.clone()
             mask = self.data_collections.node2fence_region_map > 1e3
             inner_density_grad[:num_movable_nodes].masked_fill_(mask, 0)
-            inner_density_grad[num_nodes: num_nodes + num_movable_nodes].masked_fill_(
+            inner_density_grad[num_nodes : num_nodes + num_movable_nodes].masked_fill_(
                 mask, 0
             )
-            inner_density_grad[num_nodes -
-                               num_filler_nodes: num_nodes].mul_(0.5)
+            inner_density_grad[num_nodes - num_filler_nodes : num_nodes].mul_(0.5)
             inner_density_grad[-num_filler_nodes:].mul_(0.5)
             if pos_w.grad is not None:
                 pos_w.grad.zero_()
 
             if self.quad_penalty:
-                outer_density = self.op_collections.outer_fence_region_density_op(
-                    pos_w)
+                outer_density = self.op_collections.outer_fence_region_density_op(pos_w)
                 outer_density = (
                     outer_density
-                    + self.density_quad_coeff
-                    / 2
-                    / self.init_density
-                    * outer_density**2
+                    + self.density_quad_coeff / 2 / self.init_density * outer_density**2
                 )
             else:
-                outer_density = self.op_collections.outer_fence_region_density_op(
-                    pos_w)
+                outer_density = self.op_collections.outer_fence_region_density_op(pos_w)
 
             outer_density.backward()
             outer_density_grad = pos_w.grad.data.clone()
             mask = self.data_collections.node2fence_region_map < 1e3
             outer_density_grad[:num_movable_nodes].masked_fill_(mask, 0)
-            outer_density_grad[num_nodes: num_nodes + num_movable_nodes].masked_fill_(
+            outer_density_grad[num_nodes : num_nodes + num_movable_nodes].masked_fill_(
                 mask, 0
             )
-            outer_density_grad[num_nodes -
-                               num_filler_nodes: num_nodes].mul_(0.5)
+            outer_density_grad[num_nodes - num_filler_nodes : num_nodes].mul_(0.5)
             outer_density_grad[-num_filler_nodes:].mul_(0.5)
 
             if self.quad_penalty:
@@ -571,14 +1519,12 @@ class PlaceObj(nn.Module):
             else:
                 obj = (
                     wl.data.item()
-                    + self.density_weight *
-                    self.op_collections.density_op(pos_w.data)
+                    + self.density_weight * self.op_collections.density_op(pos_w.data)
                 )
 
             pos_w.grad.data.copy_(
                 wl_grad
-                + self.density_weight *
-                (inner_density_grad + outer_density_grad)
+                + self.density_weight * (inner_density_grad + outer_density_grad)
             )
 
         self.op_collections.precondition_op(pos_w.grad, self.density_weight, 0)
@@ -598,11 +1544,10 @@ class PlaceObj(nn.Module):
         obj = self.obj_fn(pos)
 
         obj.backward()
-
+        assert torch.isnan(pos.grad).any() == False, "Gradient contains NaN"
         self.op_collections.precondition_op(
             pos.grad, self.density_weight, self.update_mask, self.fix_nodes_mask
         )
-
         return obj, pos.grad
 
     def forward(self):
@@ -658,8 +1603,12 @@ class PlaceObj(nn.Module):
                     x1 = x - t * df(x)
                 return t, x1
 
-            def f(x): return self.obj_and_grad_fn(x)[0]
-            def df(x): return self.obj_and_grad_fn(x)[1]
+            def f(x):
+                return self.obj_and_grad_fn(x)[0]
+
+            def df(x):
+                return self.obj_and_grad_fn(x)[1]
+
             _, x_k_1 = backtrack_line_search(f, df, x_k, 0.3, 0.8)
             _, g_k_1 = self.obj_and_grad_fn(x_k_1)
 
@@ -735,15 +1684,16 @@ class PlaceObj(nn.Module):
 
         return build_wirelength_op, build_update_gamma_op
 
-    def build_elmore_delay_op(
-            self, params, placedb, data_collections):
+    def build_elmore_delay_op(self, params, placedb, data_collections):
         rc_timing = RCTiming(
             r_unit=placedb.r_unit,
-            c_unit=placedb.c_unit)
+            c_unit=placedb.c_unit,
+            scale_factor=params.scale_factor,
+            dbu=placedb.dbu,
+        )
         return rc_timing
 
-    def build_timing_propagation_op(
-            self, params, placedb, data_collections):
+    def build_timing_propagation_op(self, params, placedb, data_collections):
 
         return TimingPropagation(
             data_collections.inrdelays,
@@ -754,15 +1704,24 @@ class PlaceObj(nn.Module):
             data_collections.pin2net_map,
             data_collections.start_points,
             data_collections.end_points,
+            data_collections.clock_pins,
+            data_collections.FF_ids,
+            data_collections.clk_pin_rtran,
+            data_collections.clk_pin_ftran,
             data_collections.net_flat_arcs_start,
             data_collections.net_flat_arcs,
+            data_collections.net2driver_pin_map,
             data_collections.arcs_info,
-            data_collections.cell_flat_arcs_start,
-            data_collections.cell_flat_arcs,
+            data_collections.inst_flat_arcs_start,
+            data_collections.inst_flat_arcs,
+            data_collections.endpoints_constraint_arcs,
             data_collections.flat_cells_by_level,
             data_collections.flat_cells_by_level_start,
             data_collections.flat_cells_by_reverse_level,
-            data_collections.flat_cells_by_reverse_level_start)
+            data_collections.flat_cells_by_reverse_level_start,
+            placedb.endpoints_rRAT,
+            placedb.endpoints_fRAT,
+        )
 
     def build_density_overflow(
         self, params, placedb, data_collections, num_bins_x, num_bins_y
@@ -779,10 +1738,8 @@ class PlaceObj(nn.Module):
         return density_overflow.DensityOverflow(
             data_collections.node_size_x,
             data_collections.node_size_y,
-            bin_center_x=data_collections.bin_center_x_padded(
-                placedb, 0, num_bins_x),
-            bin_center_y=data_collections.bin_center_y_padded(
-                placedb, 0, num_bins_y),
+            bin_center_x=data_collections.bin_center_x_padded(placedb, 0, num_bins_x),
+            bin_center_y=data_collections.bin_center_y_padded(placedb, 0, num_bins_y),
             target_density=data_collections.target_density,
             xl=placedb.xl,
             yl=placedb.yl,
@@ -812,10 +1769,8 @@ class PlaceObj(nn.Module):
         return electric_overflow.ElectricOverflow(
             node_size_x=data_collections.node_size_x,
             node_size_y=data_collections.node_size_y,
-            bin_center_x=data_collections.bin_center_x_padded(
-                placedb, 0, num_bins_x),
-            bin_center_y=data_collections.bin_center_y_padded(
-                placedb, 0, num_bins_y),
+            bin_center_x=data_collections.bin_center_x_padded(placedb, 0, num_bins_x),
+            bin_center_y=data_collections.bin_center_y_padded(placedb, 0, num_bins_y),
             target_density=data_collections.target_density,
             xl=placedb.xl,
             yl=placedb.yl,
@@ -1025,14 +1980,14 @@ class PlaceObj(nn.Module):
 
         max_num_bins_x = np.ceil(
             (
-                np.amax(placedb.node_size_x[0: placedb.num_movable_nodes])
+                np.amax(placedb.node_size_x[0 : placedb.num_movable_nodes])
                 + 2 * bin_size_x
             )
             / bin_size_x
         )
         max_num_bins_y = np.ceil(
             (
-                np.amax(placedb.node_size_y[0: placedb.num_movable_nodes])
+                np.amax(placedb.node_size_y[0 : placedb.num_movable_nodes])
                 + 2 * bin_size_y
             )
             / bin_size_y
@@ -1052,13 +2007,11 @@ class PlaceObj(nn.Module):
         )
         if num_bins_x < max_num_bins:
             logging.warning(
-                "num_bins_x (%d) < max_num_bins (%d)" % (
-                    num_bins_x, max_num_bins)
+                "num_bins_x (%d) < max_num_bins (%d)" % (num_bins_x, max_num_bins)
             )
         if num_bins_y < max_num_bins:
             logging.warning(
-                "num_bins_y (%d) < max_num_bins (%d)" % (
-                    num_bins_y, max_num_bins)
+                "num_bins_y (%d) < max_num_bins (%d)" % (num_bins_y, max_num_bins)
             )
         # for fence region, the target density is different from different regions
         target_density = (
@@ -1069,10 +2022,8 @@ class PlaceObj(nn.Module):
         return electric_potential.ElectricPotential(
             node_size_x=data_collections.node_size_x,
             node_size_y=data_collections.node_size_y,
-            bin_center_x=data_collections.bin_center_x_padded(
-                placedb, 0, num_bins_x),
-            bin_center_y=data_collections.bin_center_y_padded(
-                placedb, 0, num_bins_y),
+            bin_center_x=data_collections.bin_center_x_padded(placedb, 0, num_bins_x),
+            bin_center_y=data_collections.bin_center_y_padded(placedb, 0, num_bins_y),
             target_density=target_density,
             xl=placedb.xl,
             yl=placedb.yl,
@@ -1100,8 +2051,7 @@ class PlaceObj(nn.Module):
         @param params parameters
         @param placedb placement database
         """
-        wirelength = self.op_collections.wirelength_op(
-            self.data_collections.pos[0])
+        wirelength = self.op_collections.wirelength_op(self.data_collections.pos[0])
         if self.data_collections.pos[0].grad is not None:
             self.data_collections.pos[0].grad.zero_()
         wirelength.backward()
@@ -1116,16 +2066,14 @@ class PlaceObj(nn.Module):
                 density_i = density_op(self.data_collections.pos[0])
                 density_list.append(density_i.data.clone())
                 density_i.backward()
-                density_grad_list.append(
-                    self.data_collections.pos[0].grad.data.clone())
+                density_grad_list.append(self.data_collections.pos[0].grad.data.clone())
                 self.data_collections.pos[0].grad.zero_()
 
             # record initial density
             self.init_density = torch.stack(density_list)
             # density weight subgradient preconditioner
             self.density_weight_grad_precond = self.init_density.masked_scatter(
-                self.init_density > 0, 1 /
-                self.init_density[self.init_density > 0]
+                self.init_density > 0, 1 / self.init_density[self.init_density > 0]
             )
             # compute u
             self.density_weight_u = self.init_density * self.density_weight_grad_precond
@@ -1160,8 +2108,7 @@ class PlaceObj(nn.Module):
             self.density_weight = self.density_weight_u * density_weight_s
 
         else:
-            density = self.op_collections.density_op(
-                self.data_collections.pos[0])
+            density = self.op_collections.density_op(self.data_collections.pos[0])
             # record initial density
             self.init_density = density.data.clone()
             density.backward()
@@ -1204,6 +2151,8 @@ class PlaceObj(nn.Module):
                         UPPER_PCOF, -delta_hpwl / ref_hpwl
                     ).clamp(min=LOWER_PCOF, max=UPPER_PCOF)
                 self.density_weight *= mu
+                self.timing_tns_coeff *= 1.01
+                self.timing_wns_coeff *= 1.01
 
         def update_density_weight_op_overflow(cur_metric, prev_metric, iteration):
             assert (
@@ -1251,6 +2200,8 @@ class PlaceObj(nn.Module):
                     + self.density_weight_step_size_inc_low
                 )
                 self.density_weight_step_size *= rate
+                self.timing_tns_coeff *= 1.01
+                self.timing_wns_coeff *= 1.01
 
         if not self.quad_penalty and algo == "overflow":
             logging.warn(
@@ -1312,18 +2263,20 @@ class PlaceObj(nn.Module):
                 # no noise to fixed cells
                 if self.fix_nodes_mask is not None:
                     noise = noise.view(2, -1)
-                    noise[0, :placedb.num_movable_nodes].masked_fill_(
-                        self.fix_nodes_mask[:placedb.num_movable_nodes], 0)
-                    noise[1, :placedb.num_movable_nodes].masked_fill_(
-                        self.fix_nodes_mask[:placedb.num_movable_nodes], 0)
+                    noise[0, : placedb.num_movable_nodes].masked_fill_(
+                        self.fix_nodes_mask[: placedb.num_movable_nodes], 0
+                    )
+                    noise[1, : placedb.num_movable_nodes].masked_fill_(
+                        self.fix_nodes_mask[: placedb.num_movable_nodes], 0
+                    )
                     noise = noise.view(-1)
                 noise[
-                    placedb.num_movable_nodes: placedb.num_nodes
+                    placedb.num_movable_nodes : placedb.num_nodes
                     - placedb.num_filler_nodes
                 ].zero_()
                 noise[
                     placedb.num_nodes
-                    + placedb.num_movable_nodes: 2 * placedb.num_nodes
+                    + placedb.num_movable_nodes : 2 * placedb.num_nodes
                     - placedb.num_filler_nodes
                 ].zero_()
                 return pos.add_(noise)
@@ -1359,11 +2312,10 @@ class PlaceObj(nn.Module):
             num_bins_y=placedb.num_routing_grids_y,
             unit_horizontal_capacity=placedb.unit_horizontal_capacity,
             unit_vertical_capacity=placedb.unit_vertical_capacity,
-            initial_horizontal_utilization_map=data_collections.
-            initial_horizontal_utilization_map,
-            initial_vertical_utilization_map=data_collections.
-            initial_vertical_utilization_map,
-            deterministic_flag=params.deterministic_flag)
+            initial_horizontal_utilization_map=data_collections.initial_horizontal_utilization_map,
+            initial_vertical_utilization_map=data_collections.initial_vertical_utilization_map,
+            deterministic_flag=params.deterministic_flag,
+        )
 
         # congestion_macros_op = rudy_macros.RudyWithMacros(
         #     netpin_start=data_collections.flat_net2pin_start_map,
@@ -1409,7 +2361,8 @@ class PlaceObj(nn.Module):
             num_bins_y=placedb.num_routing_grids_y,
             unit_pin_capacity=data_collections.unit_pin_capacity,
             pin_stretch_ratio=params.pin_stretch_ratio,
-            deterministic_flag=params.deterministic_flag)
+            deterministic_flag=params.deterministic_flag,
+        )
 
     def build_nctugr_congestion_map(self, params, placedb, data_collections):
         """
@@ -1433,19 +2386,33 @@ class PlaceObj(nn.Module):
             params=params,
             placedb=placedb,
         )
+    
+    def build_irt_egr_congestion_map(self, params, placedb, data_collections):
+        """
+        @brief call iRT egr for congestion estimation
+        """
+        # path = "%s/%s" % (params.result_dir, params.design_name())
+        return eGR.IRT_eGR(
+            params=params,
+            placedb=placedb,
+        )
+        
 
     def build_adjust_node_area(self, params, placedb, data_collections):
         """
         @brief adjust cell area according to routing congestion and pin utilization map
         """
         total_movable_area = (
-            data_collections.node_size_x[:placedb.num_movable_nodes] *
-            data_collections.node_size_y[:placedb.num_movable_nodes]).sum()
+            data_collections.node_size_x[: placedb.num_movable_nodes]
+            * data_collections.node_size_y[: placedb.num_movable_nodes]
+        ).sum()
         total_filler_area = (
-            data_collections.node_size_x[-placedb.num_filler_nodes:] *
-            data_collections.node_size_y[-placedb.num_filler_nodes:]).sum()
-        total_place_area = (total_movable_area + total_filler_area
-                            ) / data_collections.target_density
+            data_collections.node_size_x[-placedb.num_filler_nodes :]
+            * data_collections.node_size_y[-placedb.num_filler_nodes :]
+        ).sum()
+        total_place_area = (
+            total_movable_area + total_filler_area
+        ) / data_collections.target_density
         adjust_node_area_op = adjust_node_area.AdjustNodeArea(
             flat_node2pin_map=data_collections.flat_node2pin_map,
             flat_node2pin_start_map=data_collections.flat_node2pin_start_map,
@@ -1490,8 +2457,7 @@ class PlaceObj(nn.Module):
             type(fence_region_list) == list and len(fence_region_list) == 2
         ), "Unsupported fence region list"
         self.data_collections.node2fence_region_map = torch.from_numpy(
-            self.placedb.node2fence_region_map[:
-                                               self.placedb.num_movable_nodes]
+            self.placedb.node2fence_region_map[: self.placedb.num_movable_nodes]
         ).to(fence_region_list[0].device)
         self.op_collections.inner_fence_region_density_op = (
             self.build_electric_potential(

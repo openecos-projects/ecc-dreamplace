@@ -31,7 +31,7 @@ from hpbandster.optimizers import MOBOHB as MOBOHB
 opj = os.path.join
 
 # disable heavy logging from C++
-os.environ["DREAMPLACE_DISABLE_PRINT"] = "1"
+os.environ["DREAMPLACE_DISABLE_PRINT"] = "0"
 
 from tuner_worker import AutoDMPWorker
 from tuner_utils import parse_dictionary, parse_int_list, str2bool, dp_to_def
@@ -110,7 +110,9 @@ parser.add_argument(
     help="List of GPUs to use (e.g. 1,2,0-3)",
     default="-1",
 )
+parser.add_argument('--nameserver_port', type=int, default=None, help='Port of the Pyro4 nameserver')
 args = parser.parse_args()
+print(args)
 
 
 # Worker
@@ -138,6 +140,7 @@ if args.worker:
         density_ratio=args.density_ratio,
         default_config=args.run_args,
         multiobj=args.multiobj,
+        nameserver_port=args.nameserver_port,
     )
     w.run(background=False)
     exit(0)
@@ -152,7 +155,7 @@ os.makedirs(args.log_dir, exist_ok=True)
 result_logger = hpres.json_result_logger(directory=args.log_dir, overwrite=True)
 
 # Start a nameserver
-NS = hpns.NameServer(run_id=args.run_id, host="127.0.0.1", port=None)
+NS = hpns.NameServer(run_id=args.run_id, host="127.0.0.1", port=args.nameserver_port)
 NS.start()
 
 # Run an optimizer
@@ -172,6 +175,7 @@ if args.multiobj:
         max_budget=args.max_budget,
         num_samples=args.n_samples,
         result_logger=result_logger,
+        nameserver_port=args.nameserver_port,
     )
 else:
     bohb = BOHB(
@@ -182,6 +186,7 @@ else:
         max_budget=args.max_budget,
         num_samples=args.n_samples,
         result_logger=result_logger,
+        nameserver_port=args.nameserver_port,
     )
 res = bohb.run(n_iterations=args.n_iterations, min_n_workers=args.n_workers)
 
@@ -220,11 +225,11 @@ for _, row in candidates.iterrows():
     src_cfg, dest_cfg = opj(args.log_dir, cfg_id), opj(dest, cfg_id)
     shutil.copytree(src_cfg, dest_cfg, dirs_exist_ok=True)
     # generate DEF
-    def_file = opj(dp_dir, f"{netlist}.ref.def")
-    macro_file = opj(dp_dir, f"{netlist}.macros")
-    pl_file = opj(src_cfg, netlist, f"{netlist}.gp.pl")
-    new_def_file = opj(dest_cfg, f"{netlist}.AutoDMP.def")
-    dp_to_def(def_file, pl_file, macro_file, new_def_file)
+    # def_file = opj(dp_dir, f"{netlist}.ref.def")
+    # macro_file = opj(dp_dir, f"{netlist}.macros")
+    # pl_file = opj(src_cfg, netlist, f"{netlist}.gp.pl")
+    # new_def_file = opj(dest_cfg, f"{netlist}.AutoDMP.def")
+    # dp_to_def(def_file, pl_file, macro_file, new_def_file)
 
 # Plot Pareto curve
 plot_pareto(df, paretos, candidates, opj(dest, f"{netlist}.pareto.png"))

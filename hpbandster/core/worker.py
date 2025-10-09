@@ -2,7 +2,7 @@ import time
 import logging
 import pickle
 import os, socket
-
+import sys
 
 import traceback
 import threading
@@ -58,8 +58,9 @@ class Worker(object):
 		self.thread=None
 
 		if logger is None:
-			logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(message)s',  datefmt='%H:%M:%S')
+			logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s',  datefmt='%H:%M:%S')
 			self.logger = logging.getLogger(self.worker_id)
+			self.logger.setLevel(logging.INFO)
 		else:
 			self.logger = logger
 

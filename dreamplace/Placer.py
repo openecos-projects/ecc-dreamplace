@@ -48,9 +48,11 @@ import dreamplace.configure as configure
 from dreamplace.Params import Params
 from dreamplace.macroPlaceDB import MacroPlaceDB as PlaceDB
 import dreamplace.NonLinearPlace as NonLinearPlace
+
+# from data_manager.aimp_dm import AimpDataManager
 from tools.iEDA.module.sta import IEDASta
 from tools.iEDA.module.io import IEDAIO
-import dreamplace.Timer as Timer
+# import dreamplace.Timer as Timer
 
 
 
@@ -154,11 +156,11 @@ class PlacementEngine:
         timer = None
         if self.params.timing_opt_flag:
             tt = time.time()
-            timer = Timer.Timer()
-            timer(params, self.placedb)
+            # timer = Timer.Timer()
+            # timer(params, self.placedb)
             # This must be done to explicitly execute the parser builders.
             # The parsers in OpenTimer are all in lazy mode.
-            timer.update_timing()
+            # timer.update_timing()
             logging.info("reading timer takes %.2f seconds" %
                          (time.time() - tt))
 
@@ -389,8 +391,8 @@ if __name__ == "__main__":
     # exit()
     # init workspace
     # workspace_path = "/data/project_share/aimp_test/XSTop/workspace_XSTop"
-    workspace_path = "/home/zhaoxueyan/code/benchmark/workspace_case/KIANV/workspace"
-    # workspace_path = "/home/zhaoxueyan/code/benchmark/workspace_case/retrosoc_asic_flatten/workspace"
+    # workspace_path = "/home/xingchaoyu/KIANV_workspace/workspace"
+    workspace_path = "/nfs/share/home/zhaoxueyan/flow_110_commercial/KIANV_workspace/workspace"
     # init aimp
     data_manager = DataManager(workspace_path)
     params = Params.Params()
@@ -399,12 +401,12 @@ if __name__ == "__main__":
                      input_def=workspace.json_path.def_input_path)
     data_manager.set_ieda_io(ieda_io)
     ieda_io.read_def()
-    params.with_sta = False
+    # params.with_sta = False
     # init PlacementEngine
-    # json_file = '/home/zhaoxueyan/code/ai-mp/workspace_aimp/workspace_NutShell/aimp/log/run-0_0_0/parameters.json'
-    json_file = '/home/zhaoxueyan/code/ai-mp/AutoDMP/dreamplace/params2.json'
-    # json_file = '/home/zhaoxueyan/code/ai-eda/app/AutoDMP/test/XS_TOP_TSMC28_0208/mobohb_log/XS_TOP/run-1_0_0/parameters.json'
-    # json_file = '/home/zhaoxueyan/code/ai-mp/workspace_aimp/workspace_NutShell/aimp/log/run-0_0_8/parameters.json'
+    # json_file = '/home/xingchaoyu/code/ai-mp/workspace_aimp/workspace_NutShell/aimp/log/run-0_0_0/parameters.json'
+    json_file = '/home/xingchaoyu/code/ai-mp/AutoDMP/dreamplace/params2.json'
+    # json_file = '/home/xingchaoyu/code/ai-eda/app/AutoDMP/test/XS_TOP_TSMC28_0208/mobohb_log/XS_TOP/run-1_0_0/parameters.json'
+    # json_file = '/home/xingchaoyu/code/ai-mp/workspace_aimp/workspace_NutShell/aimp/log/run-0_0_8/parameters.json'
     with open(json_file, 'r') as f:
         params.fromJson(json.load(f))
     # params.base_design_name = data_manager.
@@ -414,7 +416,7 @@ if __name__ == "__main__":
     ppa = engine.run()
 
     ''' 
-    path = '/home/zhaoxueyan/code/ai-eda/'
+    path = '/home/xingchaoyu/code/ai-eda/'
     json_file = path + 'app/AutoDMP/test/ariane133_nangate45_51/mobohb_log/NV_ariane133_partition_c/run-0_0_0/parameters.json'
 
 

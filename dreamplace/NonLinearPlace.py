@@ -1254,33 +1254,33 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         + torch.abs(new_y[flat_pin_from] - new_y[flat_pin_to])) / params.scale_factor  / placedb.dbu
                 flute_length_path = "%s/%s_flute_length.txt" % (
                     params.result_dir, params.design_name())
-                with open(flute_length_path, "w") as f:
-                    f.write("net_name, flute_length (um), cap (pF)\n")
-                    for net_id in range(placedb.num_nets):
-                        start = self.data_collections.net_flat_topo_sort_start[net_id]
-                        end = self.data_collections.net_flat_topo_sort_start[net_id + 1]
-                        net_name = placedb.net_names[net_id]
-                        net_flat_pins_nodes = self.data_collections.net_flat_topo_sort[start:end]
-                        net_flat_pin_start = self.data_collections.flat_pin_to_start[net_flat_pins_nodes]
-                        net_flat_pin_end = self.data_collections.flat_pin_to_start[net_flat_pins_nodes + 1]
-                        net_length = 0
-                        for i in range(len(net_flat_pins_nodes)):
-                            pin_start = net_flat_pin_start[i]
-                            pin_end = net_flat_pin_end[i]
-                            net_length += length[pin_start:pin_end].sum().item()
-                        # net_length = length[start:end].sum().item()
-                        f.write(f"{net_name}, {net_length}, {placedb.c_unit * net_length}\n")
+                # with open(flute_length_path, "w") as f:
+                #     f.write("net_name, flute_length (um), cap (pF)\n")
+                #     for net_id in range(placedb.num_nets):
+                #         start = self.data_collections.net_flat_topo_sort_start[net_id]
+                #         end = self.data_collections.net_flat_topo_sort_start[net_id + 1]
+                #         net_name = placedb.net_names[net_id]
+                #         net_flat_pins_nodes = self.data_collections.net_flat_topo_sort[start:end]
+                #         net_flat_pin_start = self.data_collections.flat_pin_to_start[net_flat_pins_nodes]
+                #         net_flat_pin_end = self.data_collections.flat_pin_to_start[net_flat_pins_nodes + 1]
+                #         net_length = 0
+                #         for i in range(len(net_flat_pins_nodes)):
+                #             pin_start = net_flat_pin_start[i]
+                #             pin_end = net_flat_pin_end[i]
+                #             net_length += length[pin_start:pin_end].sum().item()
+                #         # net_length = length[start:end].sum().item()
+                #         f.write(f"{net_name}, {net_length}, {placedb.c_unit * net_length}\n")
 
                 wns, tns, ws, ts = model.timing_obj(self.pos[0])
                 model.check_log(wns, tns, ws, ts)
                 logging.info("rsmt computation takes %.3f seconds" %
                             (time.time() - tt))
-                logging.info("flute rsmt %.6E um" % rsmt_wl)
 
         # get HPWL
         with torch.no_grad():
             hpwl = self.op_collections.hpwl_op(self.pos[0])
             rsmt_wl = self.op_collections.rsmt_wl_op(self.pos[0]) / placedb.dbu
+            logging.info("flute rsmt %.6E um" % rsmt_wl)
             logging.info("unweighted hpwl %.6E" % hpwl)
 
         # save nets degree, RSMT, HPWL

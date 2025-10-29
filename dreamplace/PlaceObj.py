@@ -1383,10 +1383,10 @@ class PlaceObj(nn.Module):
         # ★★★ 您可以在这里修改想追踪的目标引脚名称 ★★★
         target_pin_full_name = "U4339:ZN"
         endpoints_str = self.placedb.pin_names[self.placedb.end_points] # .cpu().numpy().tolist()
-        logging.info(f"设计中的所有端点引脚共有 {len(endpoints_str)} 个，包括：")
-        for ep in endpoints_str:
-            logging.info(f" - {ep.decode('utf-8')}")
-        self.debug_target_pin_net_info(target_pin_full_name)
+        # logging.info(f"设计中的所有端点引脚共有 {len(endpoints_str)} 个，包括：")
+        # for ep in endpoints_str:
+        #     logging.info(f" - {ep.decode('utf-8')}")
+        # self.debug_target_pin_net_info(target_pin_full_name)
 
     def debug_target_pin_net_info(self, target_pin_full_name):
 

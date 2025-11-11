@@ -1450,11 +1450,17 @@ row height = %g, site width = %g
                 % (params.target_density, target_density)
             )
             params.target_density = target_density
+        utilization = self.total_movable_node_area / self.total_space_area
         content += "utilization = %g, target_density = %g\n" % (
             self.total_movable_node_area / self.total_space_area,
             params.target_density,
         )
 
+        if utilization > 0.99:
+            logging.error(
+                "utilization is larger than 1. Please change the core size."                
+            )
+            exit(1)
         # calculate fence region virtual macro
         if len(self.regions) > 0:
             virtual_macro_for_fence_region = [

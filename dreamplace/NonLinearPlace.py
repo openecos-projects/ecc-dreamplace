@@ -359,10 +359,13 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     if params.with_sta and (iteration % 10 == 0 and iteration >= 100):
                         t_steiner = time.time()
                         with torch.no_grad():
+                            pin_pos = self.op_collections.pin_pos_op(pos)
+                            if pin_pos.is_cuda:
+                                pin_pos = pin_pos.cpu()
                             self.data_collections.net_flat_topo_sort, self.data_collections.net_flat_topo_sort_start, \
                                 self.data_collections.pin_fa, self.data_collections.flat_pin_to, self.data_collections.flat_pin_to_start, \
                                 self.data_collections.flat_pin_from = self.op_collections.steiner_topo_op.rebuild_tree(
-                                    self.op_collections.pin_pos_op(pos))
+                                    pin_pos)
                             model.use_timing_obj = True
                         logging.info("Update steiner topo %.3f ms" %
                                      ((time.time() - t_steiner) * 1000))

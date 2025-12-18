@@ -665,7 +665,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             if adjust_route_area_flag:
                                 if params.adjust_nctugr_area_flag:
                                     route_utilization_map = model.op_collections.irt_egr_congestion_map_op(
-                                        pos)
+                                        pos, stage="egr3D", resolve_congestion="high")
                                 else:
                                     route_utilization_map = model.op_collections.route_utilization_map_op(
                                         pos)

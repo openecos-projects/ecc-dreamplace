@@ -24,10 +24,10 @@ class IRT_eGR(object):
         self.params = params
         self.placedb = placedb
 
-    def __call__(self, pos):
-        return self.forward(pos)
+    def __call__(self, pos, stage, resolve_congestion):
+        return self.forward(pos, stage, resolve_congestion)
 
-    def forward(self, pos):
+    def forward(self, pos, stage, resolve_congestion):
         if pos.is_cuda:
             pos_cpu = pos.cpu().data.numpy().copy()
         else:
@@ -55,7 +55,7 @@ class IRT_eGR(object):
 
         # update raw database
         self.placedb.write_placement_back(node_x, node_y)
-        utilization_map_py = self.placedb.pydb.getCongestionMap("sum")
+        utilization_map_py = self.placedb.pydb.getCongestionMap("sum", stage, resolve_congestion)
         utilization_map_np = np.array(utilization_map_py, dtype=np.float32)
         utilization_map = torch.from_numpy(utilization_map_np).to(pos.device).T
         utilization_map = utilization_map.contiguous()

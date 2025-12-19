@@ -163,13 +163,13 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     "hpwl": self.op_collections.hpwl_op,
                     "overflow": self.op_collections.density_overflow_op,
                 }
-                if params.routability_opt_flag:
-                    eval_ops.update(
-                        {
-                            "route_utilization": self.op_collections.route_utilization_map_op,
-                            "pin_utilization": self.op_collections.pin_utilization_map_op,
-                        }
-                    )
+                # if params.routability_opt_flag:
+                #     eval_ops.update(
+                #         {
+                #             "route_utilization": self.op_collections.route_utilization_map_op,
+                #             "pin_utilization": self.op_collections.pin_utilization_map_op,
+                #         }
+                #     )
                 if len(placedb.regions) > 0:
                     eval_ops.update(
                         {
@@ -738,7 +738,11 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 best_pos[0] = None
 
                                 break
-
+                            else:
+                                num_area_adjust += 1
+                                logging.info(
+                                    "no area adjustment needed, continue to next stage"
+                                )
                     # gradually reduce gamma to tradeoff smoothness and accuracy
                     if len(placedb.regions) > 0 and Llambda_metrics[-1][-1].goverflow is not None:
                         model.op_collections.update_gamma_op(

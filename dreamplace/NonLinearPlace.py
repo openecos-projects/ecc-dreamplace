@@ -676,9 +676,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                         path, num_area_adjust)
                                     os.system("mkdir -p %s" %
                                               (os.path.dirname(figname)))
+                                    route_utilization_map_copy = route_utilization_map.clone()
+                                    route_utilization_map_copy = route_utilization_map_copy - 1
+                                    route_utilization_map_copy.clamp_(min=0, max=4)
+                                    # route_utilization_map.data.clamp_(0, 4)
                                     plt.imsave(
-                                        figname, route_utilization_map.pow(
-                                            params.route_opt_adjust_exponent).data.cpu().numpy().T, origin="lower"
+                                        figname, route_utilization_map_copy.data.cpu().numpy().T, origin="lower"
                                     )
                                     logging.info(
                                         "plot route utilization map to %s" % (

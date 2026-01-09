@@ -26,11 +26,11 @@ class NCTUgr(object):
         self.param_setting_file = os.path.realpath(param_setting_file)
         self.tmp_pl_file = os.path.realpath(tmp_pl_file)
         self.tmp_output_file = os.path.realpath(tmp_output_file)
-        self.routing_capacities = (horizontal_routing_capacities +
-                                   vertical_routing_capacities).view([
-                                       1, 1,
-                                       len(horizontal_routing_capacities)
-                                   ])
+        # self.routing_capacities = (horizontal_routing_capacities +
+        #                            vertical_routing_capacities).view([
+        #                                1, 1,
+        #                                len(horizontal_routing_capacities)
+        #                            ])
         self.params = params
         self.placedb = placedb
         self.nctugr_dir = "%s/../../../thirdparty/NCTUgr.ICCAD2012" % (

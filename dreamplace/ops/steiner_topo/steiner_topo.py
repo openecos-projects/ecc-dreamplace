@@ -7,12 +7,15 @@
 import torch
 from torch import nn
 from torch.autograd import Function
+import logging
 
 import dreamplace.ops.steiner_topo.steiner_topo_cpp as steiner_topo_cpp
 import dreamplace.configure as configure
 # if configure.compile_configurations["CUDA_FOUND"] == "TRUE":
 #     import dreamplace.ops.steiner_topo.steiner_topo_cuda as steiner_topo_cuda
 #     import dreamplace.ops.steiner_topo.steiner_topo_cuda_segment as steiner_topo_cuda_segment
+
+logger = logging.getLogger(__name__)
 
 
 class SteinerTopoFunction(Function):
@@ -51,6 +54,14 @@ class SteinerTopoFunction(Function):
 
 
 class SteinerTopo(nn.Module):
+    
+    # L方向常量
+    H_FIRST = 0       # 先水平后垂直 (Horizontal First)
+    V_FIRST = 1       # 先垂直后水平 (Vertical First)
+    STRAIGHT = 2      # 直线（水平或垂直）
+    FAKE_STRAIGHT = 3 # 伪直线（在gcell下只有一条wire）
+    UNKNOWN = -1      # 未知
+    
     def __init__(self,
                  flat_net2pin_map,
                  flat_net2pin_start_map,
@@ -80,6 +91,10 @@ class SteinerTopo(nn.Module):
         self.num_vertices = None
 
         self.algorithm = algorithm
+        
+        # L方向相关
+        self.edge_l_directions = None  # 每条边的L方向
+        self.l_direction_resolver = None  # EGR L方向解析器
 
     def forward(self, pos):
 
@@ -139,6 +154,273 @@ class SteinerTopo(nn.Module):
         self.update_cache(new_outputs_tuple)
         return self.net_flat_topo_sort, self.net_flat_topo_sort_start, self.pin_fa, \
             self.flat_pin_to, self.flat_pin_to_start, self.flat_pin_from
+
+    def init_l_direction_resolver(self, placedb, params):
+        """
+        初始化L方向解析器
+        
+        Args:
+            placedb: DREAMPlace placement database
+            params: 参数对象
+        """
+        from dreamplace.ops.steiner_topo.egr_l_direction import EGRLDirectionResolver
+        self.l_direction_resolver = EGRLDirectionResolver(placedb, params)
+        logger.info("L direction resolver initialized")
+    
+    def resolve_l_directions_from_egr(self, guide_path):
+        """
+        从EGR guide文件解析每条边的L方向
+        
+        Args:
+            guide_path: route_planar.guide文件路径
+            
+        Returns:
+            torch.Tensor: shape=(num_edges,), 每条边的L方向
+                H_FIRST(0): 先水平后垂直
+                V_FIRST(1): 先垂直后水平
+                STRAIGHT(2): 直线
+                UNKNOWN(-1): 未知
+        """
+        if self.l_direction_resolver is None:
+            logger.error("L direction resolver not initialized, call init_l_direction_resolver first")
+            return None
+        
+        # 解析EGR guide
+        self.l_direction_resolver.parse_egr_guide(guide_path)
+        
+        # 解析L方向
+        self.edge_l_directions = self.l_direction_resolver.resolve_l_directions(self, guide_path)
+        
+        return self.edge_l_directions
+    
+    def get_edge_l_direction(self, edge_idx):
+        """
+        获取指定边的L方向
+        
+        Args:
+            edge_idx: 边索引（对应flat_pin_from/flat_pin_to的索引）
+            
+        Returns:
+            L方向: H_FIRST(0), V_FIRST(1), STRAIGHT(2), UNKNOWN(-1)
+        """
+        if self.edge_l_directions is None:
+            return self.UNKNOWN
+        if edge_idx < 0 or edge_idx >= len(self.edge_l_directions):
+            return self.UNKNOWN
+        return int(self.edge_l_directions[edge_idx])
+    
+    def get_net_edges_with_l_direction(self, net_id, placedb):
+        """
+        获取指定net的所有边及其L方向
+        
+        Args:
+            net_id: net索引
+            placedb: placement database
+            
+        Returns:
+            list of tuples: [(from_idx, to_idx, l_direction), ...]
+        """
+        if self.flat_pin_from is None or self.flat_pin_to is None:
+            return []
+        
+        flat_pin_from = self.flat_pin_from.cpu().numpy()
+        flat_pin_to = self.flat_pin_to.cpu().numpy()
+        net_steiner_start = self.net_steiner_start.cpu().numpy()
+        
+        num_pins = placedb.num_pins
+        pin2net = placedb.pin2net_map
+        if hasattr(pin2net, 'cpu'):
+            pin2net = pin2net.cpu().numpy()
+        
+        edges = []
+        for edge_idx in range(len(flat_pin_from)):
+            from_idx = flat_pin_from[edge_idx]
+            to_idx = flat_pin_to[edge_idx]
+            
+            if from_idx == -1 or to_idx == -1:
+                continue
+            
+            # 检查是否属于该net
+            edge_net_id = -1
+            if from_idx < num_pins:
+                edge_net_id = int(pin2net[from_idx])
+            else:
+                for nid in range(len(net_steiner_start) - 1):
+                    if net_steiner_start[nid] <= from_idx < net_steiner_start[nid + 1]:
+                        edge_net_id = nid
+                        break
+            
+            if edge_net_id == net_id:
+                l_dir = self.get_edge_l_direction(edge_idx)
+                edges.append((from_idx, to_idx, l_dir))
+        
+        return edges
+    
+    @staticmethod
+    def l_direction_name(direction):
+        """将L方向常量转换为可读名称"""
+        names = {
+            SteinerTopo.H_FIRST: "upper_L",
+            SteinerTopo.V_FIRST: "lower_L",
+            SteinerTopo.STRAIGHT: "straight",
+            SteinerTopo.UNKNOWN: "unknown"
+        }
+        return names.get(direction, "invalid")
+    
+    # ==================== EGR Steiner Builder ====================
+    
+    def init_egr_steiner_builder(self, placedb, params):
+        """
+        初始化EGR Steiner构建器
+        
+        Args:
+            placedb: DREAMPlace placement database
+            params: 参数对象
+        """
+        from dreamplace.ops.steiner_topo.egr_steiner_builder import EGRSteinerBuilder
+        self.egr_steiner_builder = EGRSteinerBuilder(placedb, params)
+        self.placedb = placedb
+        self.params = params
+        logger.info("EGR Steiner builder initialized")
+    
+    def rebuild_tree_from_egr(self, pos, guide_path, gcell_info_path=None):
+        """
+        使用EGR guide替代FLUTE构建Steiner树
+        
+        这会：
+        1. 从EGR解析拓扑结构和L方向
+        2. 用pin坐标计算Steiner点位置（保持可微性）
+        3. 记录所有Steiner点的详细信息
+        4. 生成边列表和L方向（用于绘图）
+        
+        Args:
+            pos: pin坐标tensor
+            guide_path: EGR route_planar.guide文件路径
+            gcell_info_path: gcell.info文件路径（可选，用于记录gcell中心）
+            
+        Returns:
+            dict with EGR建树结果
+        """
+        if not hasattr(self, 'egr_steiner_builder') or self.egr_steiner_builder is None:
+            logger.error("EGR Steiner builder not initialized, call init_egr_steiner_builder first")
+            return None
+        
+        # 使用EGR构建
+        result = self.egr_steiner_builder.build_all_nets(pos, guide_path, gcell_info_path)
+        
+        # 更新relate关系
+        self.pin_relate_x = result['pin_relate_x'].contiguous()
+        self.pin_relate_y = result['pin_relate_y'].contiguous()
+        self.net_steiner_start = result['net_steiner_start'].contiguous()
+        self.num_vertices = self.placedb.num_pins + result['num_steiner']
+        
+        # 保存Steiner点记录
+        self.egr_steiner_points = result['steiner_points']
+        
+        # 保存EGR边列表（用于绘图）
+        self.egr_flat_pin_from = result['flat_pin_from'].contiguous()
+        self.egr_flat_pin_to = result['flat_pin_to'].contiguous()
+        self.egr_edge_l_directions = result['edge_l_directions'].contiguous()
+        
+        logger.info(f"Built Steiner tree from EGR: {result['num_steiner']} Steiner points, "
+                   f"{len(self.egr_flat_pin_from)} edges")
+        
+        return result
+    
+    def update_steiner_hanan_coords(self, pos):
+        """
+        更新Steiner点的Hanan坐标（根据当前pin位置）
+        
+        在forward之后调用，记录Steiner点的实际坐标
+        """
+        if not hasattr(self, 'egr_steiner_points') or not self.egr_steiner_points:
+            return
+        
+        # 获取pin坐标
+        if pos.is_cuda:
+            pos_np = pos.cpu().numpy()
+        else:
+            pos_np = pos.numpy()
+        
+        num_nodes = self.placedb.num_nodes
+        pin_pos_x = pos_np[:num_nodes]  # 简化处理，实际需要pin_pos_op
+        pin_pos_y = pos_np[num_nodes:]
+        
+        # 更新每个Steiner点的Hanan坐标
+        for sp in self.egr_steiner_points:
+            if sp.relate_x_pin_id is not None and sp.relate_x_pin_id < len(pin_pos_x):
+                # 需要通过pin_pos_op计算，这里简化
+                pass
+            if sp.relate_y_pin_id is not None and sp.relate_y_pin_id < len(pin_pos_y):
+                pass
+    
+    def get_steiner_points(self):
+        """
+        获取所有Steiner点的记录
+        
+        Returns:
+            list of SteinerPointInfo
+        """
+        if hasattr(self, 'egr_steiner_points'):
+            return self.egr_steiner_points
+        return []
+    
+    def get_net_steiner_points(self, net_id):
+        """
+        获取指定net的Steiner点记录
+        
+        Args:
+            net_id: net ID
+            
+        Returns:
+            list of SteinerPointInfo
+        """
+        if hasattr(self, 'egr_steiner_builder') and self.egr_steiner_builder:
+            return self.egr_steiner_builder.net_steiner_points.get(net_id, [])
+        return []
+    
+    def export_steiner_points(self, output_path):
+        """
+        导出Steiner点信息到CSV
+        
+        Args:
+            output_path: 输出文件路径
+        """
+        if hasattr(self, 'egr_steiner_builder') and self.egr_steiner_builder:
+            self.egr_steiner_builder.export_steiner_points_csv(output_path)
+        else:
+            logger.warning("No EGR Steiner builder, cannot export")
+    
+    def print_steiner_info(self, net_name=None):
+        """
+        打印Steiner点信息
+        
+        Args:
+            net_name: 如果指定，只打印该net的信息；否则打印统计摘要
+        """
+        if not hasattr(self, 'egr_steiner_builder') or not self.egr_steiner_builder:
+            print("No EGR Steiner builder")
+            return
+        
+        if net_name:
+            self.egr_steiner_builder.print_net_steiner_info(net_name)
+        else:
+            steiner_pts = self.get_steiner_points()
+            print(f"\n=== Steiner Points Summary ===")
+            print(f"Total Steiner points: {len(steiner_pts)}")
+            
+            # 按net统计
+            net_counts = {}
+            for sp in steiner_pts:
+                net_counts[sp.net_name] = net_counts.get(sp.net_name, 0) + 1
+            
+            print(f"Nets with Steiner points: {len(net_counts)}")
+            
+            # 打印前10个net
+            sorted_nets = sorted(net_counts.items(), key=lambda x: -x[1])[:10]
+            print("Top 10 nets by Steiner point count:")
+            for net_name, count in sorted_nets:
+                print(f"  {net_name}: {count}")
 
 
 '''

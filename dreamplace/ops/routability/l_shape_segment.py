@@ -1,0 +1,431 @@
+##
+# @file   l_shape_segment.py
+# @brief  Build L-shape segments from Steiner tree edges with EGR L-direction
+#         Each L-shape edge is split into two segments (horizontal + vertical)
+#         This enables accurate density modeling for routing congestion
+#
+
+import torch
+import logging
+
+logger = logging.getLogger(__name__)
+
+# L方向常量 (与steiner_topo.py保持一致)
+H_FIRST = 0       # 先水平后垂直, 拐点在 (x2, y1)
+V_FIRST = 1       # 先垂直后水平, 拐点在 (x1, y2)
+STRAIGHT = 2      # 直线（水平或垂直）
+FAKE_STRAIGHT = 3 # 伪直线（在gcell下只有一条wire）
+UNKNOWN = -1      # 未知，默认使用H_FIRST
+
+
+class LShapeSegmentBuilder:
+    """
+    将Steiner树的边根据L方向拆分为segments
+    
+    核心思想：
+    - H_FIRST: p1 -> corner(p2.x, p1.y) -> p2 (先水平后垂直)
+    - V_FIRST: p1 -> corner(p1.x, p2.y) -> p2 (先垂直后水平)
+    - STRAIGHT: p1 -> p2 (直线)
+    
+    每个segment是一个矩形，用于后续密度计算
+    """
+    
+    def __init__(self, wire_width=0.0):
+        """
+        Args:
+            wire_width: 线宽，用于给segment增加宽度
+        """
+        self.wire_width = wire_width
+    
+    def build_segments(self, newx, newy, flat_from, flat_to, l_directions):
+        """
+        根据L方向将边拆分为segments
+        
+        Args:
+            newx: [num_vertices] 所有顶点的x坐标 (pins + Steiner points)
+            newy: [num_vertices] 所有顶点的y坐标
+            flat_from: [num_edges] 边的起点索引
+            flat_to: [num_edges] 边的终点索引
+            l_directions: [num_edges] 每条边的L方向 (H_FIRST/V_FIRST/STRAIGHT/UNKNOWN)
+            
+        Returns:
+            dict with:
+                segment_llx: [num_segments] segment左下角x
+                segment_lly: [num_segments] segment左下角y
+                segment_size_x: [num_segments] segment宽度
+                segment_size_y: [num_segments] segment高度
+                segment_edge_idx: [num_segments] 每个segment对应的原始边索引
+                segment_is_horizontal: [num_segments] 是否是水平segment
+        """
+        device = newx.device
+        dtype = newx.dtype
+        
+        num_edges = flat_from.numel()
+        
+        # 预分配（最多每条边拆分为2个segment）
+        max_segments = num_edges * 2
+        
+        segment_llx_list = []
+        segment_lly_list = []
+        segment_size_x_list = []
+        segment_size_y_list = []
+        segment_edge_idx_list = []
+        segment_is_horizontal_list = []
+        
+        # 获取numpy用于循环（但保持tensor用于梯度）
+        flat_from_np = flat_from.cpu().numpy() if flat_from.is_cuda else flat_from.numpy()
+        flat_to_np = flat_to.cpu().numpy() if flat_to.is_cuda else flat_to.numpy()
+        l_dir_np = l_directions.cpu().numpy() if l_directions.is_cuda else l_directions.numpy()
+        
+        half_width = self.wire_width / 2.0
+        
+        for edge_idx in range(num_edges):
+            from_idx = flat_from_np[edge_idx]
+            to_idx = flat_to_np[edge_idx]
+            
+            if from_idx < 0 or to_idx < 0:
+                continue
+            if from_idx >= len(newx) or to_idx >= len(newx):
+                continue
+            
+            # 获取端点坐标（保持tensor以保持梯度）
+            x1, y1 = newx[from_idx], newy[from_idx]
+            x2, y2 = newx[to_idx], newy[to_idx]
+            
+            l_dir = l_dir_np[edge_idx]
+            
+            # 判断是否是直线（水平或垂直）
+            is_horizontal_line = torch.abs(y1 - y2) < 1e-6
+            is_vertical_line = torch.abs(x1 - x2) < 1e-6
+            
+            if is_horizontal_line or is_vertical_line or l_dir == STRAIGHT:
+                # 直线段：创建一个segment
+                seg_llx, seg_lly, seg_sx, seg_sy, seg_is_h = self._create_segment(
+                    x1, y1, x2, y2, half_width
+                )
+                segment_llx_list.append(seg_llx)
+                segment_lly_list.append(seg_lly)
+                segment_size_x_list.append(seg_sx)
+                segment_size_y_list.append(seg_sy)
+                segment_edge_idx_list.append(edge_idx)
+                segment_is_horizontal_list.append(seg_is_h)
+            else:
+                # L形：根据方向确定拐点，拆分为两个segment
+                if l_dir == H_FIRST:
+                    # 先水平后垂直，拐点在 (x2, y1)
+                    corner_x, corner_y = x2, y1
+                elif l_dir == V_FIRST or l_dir == FAKE_STRAIGHT:
+                    # 先垂直后水平，拐点在 (x1, y2)
+                    # FAKE_STRAIGHT也当作V_FIRST处理
+                    corner_x, corner_y = x1, y2
+                else:
+                    # UNKNOWN: 默认使用H_FIRST
+                    corner_x, corner_y = x2, y1
+                
+                # Segment 1: p1 -> corner
+                seg1_llx, seg1_lly, seg1_sx, seg1_sy, seg1_is_h = self._create_segment(
+                    x1, y1, corner_x, corner_y, half_width
+                )
+                if seg1_sx > 1e-6 or seg1_sy > 1e-6:  # 过滤零尺寸segment
+                    segment_llx_list.append(seg1_llx)
+                    segment_lly_list.append(seg1_lly)
+                    segment_size_x_list.append(seg1_sx)
+                    segment_size_y_list.append(seg1_sy)
+                    segment_edge_idx_list.append(edge_idx)
+                    segment_is_horizontal_list.append(seg1_is_h)
+                
+                # Segment 2: corner -> p2
+                seg2_llx, seg2_lly, seg2_sx, seg2_sy, seg2_is_h = self._create_segment(
+                    corner_x, corner_y, x2, y2, half_width
+                )
+                if seg2_sx > 1e-6 or seg2_sy > 1e-6:  # 过滤零尺寸segment
+                    segment_llx_list.append(seg2_llx)
+                    segment_lly_list.append(seg2_lly)
+                    segment_size_x_list.append(seg2_sx)
+                    segment_size_y_list.append(seg2_sy)
+                    segment_edge_idx_list.append(edge_idx)
+                    segment_is_horizontal_list.append(seg2_is_h)
+        
+        # 转换为tensor
+        if len(segment_llx_list) == 0:
+            # 没有有效segment
+            empty = torch.tensor([], dtype=dtype, device=device)
+            return {
+                'segment_llx': empty,
+                'segment_lly': empty,
+                'segment_size_x': empty,
+                'segment_size_y': empty,
+                'segment_edge_idx': torch.tensor([], dtype=torch.long, device=device),
+                'segment_is_horizontal': torch.tensor([], dtype=torch.bool, device=device),
+                'num_segments': 0
+            }
+        
+        segment_llx = torch.stack(segment_llx_list)
+        segment_lly = torch.stack(segment_lly_list)
+        segment_size_x = torch.stack(segment_size_x_list)
+        segment_size_y = torch.stack(segment_size_y_list)
+        segment_edge_idx = torch.tensor(segment_edge_idx_list, dtype=torch.long, device=device)
+        segment_is_horizontal = torch.tensor(segment_is_horizontal_list, dtype=torch.bool, device=device)
+        
+        num_segments = len(segment_llx_list)
+        logger.info(f"Built {num_segments} segments from {num_edges} edges")
+        
+        return {
+            'segment_llx': segment_llx,
+            'segment_lly': segment_lly,
+            'segment_size_x': segment_size_x,
+            'segment_size_y': segment_size_y,
+            'segment_edge_idx': segment_edge_idx,
+            'segment_is_horizontal': segment_is_horizontal,
+            'num_segments': num_segments
+        }
+    
+    def _create_segment(self, x1, y1, x2, y2, half_width):
+        """
+        创建一个segment（矩形）
+        
+        Args:
+            x1, y1: 起点坐标
+            x2, y2: 终点坐标
+            half_width: 半线宽
+            
+        Returns:
+            llx, lly: 左下角坐标
+            size_x, size_y: 尺寸
+            is_horizontal: 是否是水平segment
+        """
+        min_x = torch.minimum(x1, x2)
+        max_x = torch.maximum(x1, x2)
+        min_y = torch.minimum(y1, y2)
+        max_y = torch.maximum(y1, y2)
+        
+        # 判断是水平还是垂直
+        dx = torch.abs(x2 - x1)
+        dy = torch.abs(y2 - y1)
+        is_horizontal = dx >= dy
+        
+        # 添加线宽
+        llx = min_x - half_width
+        lly = min_y - half_width
+        size_x = (max_x - min_x) + 2 * half_width
+        size_y = (max_y - min_y) + 2 * half_width
+        
+        # 确保最小尺寸
+        min_size = half_width * 2 if half_width > 0 else 1e-6
+        size_x = torch.maximum(size_x, torch.tensor(min_size, dtype=size_x.dtype, device=size_x.device))
+        size_y = torch.maximum(size_y, torch.tensor(min_size, dtype=size_y.dtype, device=size_y.device))
+        
+        return llx, lly, size_x, size_y, is_horizontal
+
+
+def build_l_shape_segments_vectorized(newx, newy, flat_from, flat_to, l_directions, wire_width=0.0):
+    """
+    向量化版本的L形segment构建（更快但需要更多内存）
+    
+    Args:
+        newx: [num_vertices] 所有顶点的x坐标
+        newy: [num_vertices] 所有顶点的y坐标
+        flat_from: [num_edges] 边的起点索引
+        flat_to: [num_edges] 边的终点索引
+        l_directions: [num_edges] 每条边的L方向
+        wire_width: 线宽
+        
+    Returns:
+        dict with segment information
+    """
+    device = newx.device
+    dtype = newx.dtype
+    
+    num_edges = flat_from.numel()
+    half_width = wire_width / 2.0
+    
+    # 过滤无效边
+    valid_mask = (flat_from >= 0) & (flat_to >= 0) & (flat_from < len(newx)) & (flat_to < len(newx))
+    valid_from = flat_from[valid_mask]
+    valid_to = flat_to[valid_mask]
+    valid_l_dir = l_directions[valid_mask]
+    valid_edge_idx = torch.arange(num_edges, device=device)[valid_mask]
+    
+    num_valid = valid_from.numel()
+    if num_valid == 0:
+        empty = torch.tensor([], dtype=dtype, device=device)
+        return {
+            'segment_llx': empty,
+            'segment_lly': empty,
+            'segment_size_x': empty,
+            'segment_size_y': empty,
+            'segment_edge_idx': torch.tensor([], dtype=torch.long, device=device),
+            'segment_is_horizontal': torch.tensor([], dtype=torch.bool, device=device),
+            'num_segments': 0
+        }
+    
+    # 获取端点坐标
+    x1 = newx[valid_from]
+    y1 = newy[valid_from]
+    x2 = newx[valid_to]
+    y2 = newy[valid_to]
+    
+    # 判断边的类型
+    is_horizontal_line = torch.abs(y1 - y2) < 1e-6
+    is_vertical_line = torch.abs(x1 - x2) < 1e-6
+    is_straight = is_horizontal_line | is_vertical_line | (valid_l_dir == STRAIGHT)
+    is_upper_l = (~is_straight) & ((valid_l_dir == H_FIRST) | (valid_l_dir == UNKNOWN))
+    is_lower_l = (~is_straight) & ((valid_l_dir == V_FIRST) | (valid_l_dir == FAKE_STRAIGHT))
+    
+    # 计算拐点坐标
+    # H_FIRST: corner = (x2, y1)
+    # V_FIRST: corner = (x1, y2)
+    corner_x = torch.where(is_upper_l, x2, torch.where(is_lower_l, x1, x1))
+    corner_y = torch.where(is_upper_l, y1, torch.where(is_lower_l, y2, y1))
+    
+    # ===== 构建所有segments =====
+    # 对于直线边：1个segment (p1 -> p2)
+    # 对于L形边：2个segments (p1 -> corner, corner -> p2)
+    
+    # Segment类型1: 直线边 或 L形边的第一段
+    seg1_x1 = x1
+    seg1_y1 = y1
+    seg1_x2 = torch.where(is_straight, x2, corner_x)
+    seg1_y2 = torch.where(is_straight, y2, corner_y)
+    
+    seg1_min_x = torch.minimum(seg1_x1, seg1_x2)
+    seg1_max_x = torch.maximum(seg1_x1, seg1_x2)
+    seg1_min_y = torch.minimum(seg1_y1, seg1_y2)
+    seg1_max_y = torch.maximum(seg1_y1, seg1_y2)
+    
+    seg1_llx = seg1_min_x - half_width
+    seg1_lly = seg1_min_y - half_width
+    seg1_size_x = (seg1_max_x - seg1_min_x) + 2 * half_width
+    seg1_size_y = (seg1_max_y - seg1_min_y) + 2 * half_width
+    seg1_is_h = torch.abs(seg1_x2 - seg1_x1) >= torch.abs(seg1_y2 - seg1_y1)
+    
+    # Segment类型2: L形边的第二段 (corner -> p2)
+    # 只对L形边有效
+    seg2_x1 = corner_x
+    seg2_y1 = corner_y
+    seg2_x2 = x2
+    seg2_y2 = y2
+    
+    seg2_min_x = torch.minimum(seg2_x1, seg2_x2)
+    seg2_max_x = torch.maximum(seg2_x1, seg2_x2)
+    seg2_min_y = torch.minimum(seg2_y1, seg2_y2)
+    seg2_max_y = torch.maximum(seg2_y1, seg2_y2)
+    
+    seg2_llx = seg2_min_x - half_width
+    seg2_lly = seg2_min_y - half_width
+    seg2_size_x = (seg2_max_x - seg2_min_x) + 2 * half_width
+    seg2_size_y = (seg2_max_y - seg2_min_y) + 2 * half_width
+    seg2_is_h = torch.abs(seg2_x2 - seg2_x1) >= torch.abs(seg2_y2 - seg2_y1)
+    
+    # 过滤有效segment2（只有L形边有第二段）
+    is_l_shape = is_upper_l | is_lower_l
+    seg2_valid = is_l_shape & (seg2_size_x > 1e-6) & (seg2_size_y > 1e-6)
+    
+    # 合并所有segments
+    # Segment 1 (所有边都有)
+    all_llx = [seg1_llx]
+    all_lly = [seg1_lly]
+    all_size_x = [seg1_size_x]
+    all_size_y = [seg1_size_y]
+    all_edge_idx = [valid_edge_idx]
+    all_is_h = [seg1_is_h]
+    
+    # Segment 2 (只有L形边)
+    if seg2_valid.any():
+        all_llx.append(seg2_llx[seg2_valid])
+        all_lly.append(seg2_lly[seg2_valid])
+        all_size_x.append(seg2_size_x[seg2_valid])
+        all_size_y.append(seg2_size_y[seg2_valid])
+        all_edge_idx.append(valid_edge_idx[seg2_valid])
+        all_is_h.append(seg2_is_h[seg2_valid])
+    
+    segment_llx = torch.cat(all_llx)
+    segment_lly = torch.cat(all_lly)
+    segment_size_x = torch.cat(all_size_x)
+    segment_size_y = torch.cat(all_size_y)
+    segment_edge_idx = torch.cat(all_edge_idx)
+    segment_is_horizontal = torch.cat(all_is_h)
+    
+    # 过滤零尺寸segment
+    min_size = max(half_width * 2, 1e-6)
+    valid_seg = (segment_size_x > min_size) | (segment_size_y > min_size)
+    
+    segment_llx = segment_llx[valid_seg]
+    segment_lly = segment_lly[valid_seg]
+    segment_size_x = segment_size_x[valid_seg]
+    segment_size_y = segment_size_y[valid_seg]
+    segment_edge_idx = segment_edge_idx[valid_seg]
+    segment_is_horizontal = segment_is_horizontal[valid_seg]
+    
+    num_segments = segment_llx.numel()
+    logger.info(f"Built {num_segments} segments from {num_edges} edges (vectorized)")
+    
+    return {
+        'segment_llx': segment_llx,
+        'segment_lly': segment_lly,
+        'segment_size_x': segment_size_x,
+        'segment_size_y': segment_size_y,
+        'segment_edge_idx': segment_edge_idx,
+        'segment_is_horizontal': segment_is_horizontal,
+        'num_segments': num_segments
+    }
+
+
+def build_segment_pos_tensor(segment_llx, segment_lly):
+    """
+    将segment坐标转换为pos tensor格式 (与BBoxElectricPotential兼容)
+    
+    Args:
+        segment_llx: [num_segments]
+        segment_lly: [num_segments]
+        
+    Returns:
+        pos: [num_segments * 2] 格式为 [llx1, llx2, ..., lly1, lly2, ...]
+    """
+    return torch.cat([segment_llx, segment_lly])
+
+
+class LShapeSegmentOp:
+    """
+    可微的L形segment操作
+    
+    使用方式：
+        op = LShapeSegmentOp(wire_width=100.0)
+        result = op(newx, newy, flat_from, flat_to, l_directions)
+        segment_pos = result['segment_pos']  # 用于密度计算
+    """
+    
+    def __init__(self, wire_width=0.0, use_vectorized=True):
+        self.wire_width = wire_width
+        self.use_vectorized = use_vectorized
+        self.builder = LShapeSegmentBuilder(wire_width)
+    
+    def __call__(self, newx, newy, flat_from, flat_to, l_directions):
+        """
+        构建L形segments
+        
+        Returns:
+            dict with:
+                segment_pos: [num_segments * 2] 位置tensor
+                segment_size_x: [num_segments]
+                segment_size_y: [num_segments]
+                ...
+        """
+        if self.use_vectorized:
+            result = build_l_shape_segments_vectorized(
+                newx, newy, flat_from, flat_to, l_directions, self.wire_width
+            )
+        else:
+            result = self.builder.build_segments(
+                newx, newy, flat_from, flat_to, l_directions
+            )
+        
+        # 添加pos tensor
+        if result['num_segments'] > 0:
+            result['segment_pos'] = build_segment_pos_tensor(
+                result['segment_llx'], result['segment_lly']
+            )
+        else:
+            result['segment_pos'] = torch.tensor([], dtype=newx.dtype, device=newx.device)
+        
+        return result

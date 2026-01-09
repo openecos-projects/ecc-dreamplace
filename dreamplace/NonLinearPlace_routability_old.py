@@ -9,7 +9,6 @@ import os
 import sys
 import time
 import pickle
-from typing import Any
 import numpy as np
 import logging
 import torch
@@ -36,273 +35,6 @@ class NonLinearPlace(BasicPlace.BasicPlace):
     @brief Nonlinear placement engine.
     It takes parameters and placement database and runs placement flow.
     """
-
-    def plot_steiner_and_guide(self, guide_path, steiner_topo_op, flat_pin_from, flat_pin_to, output_path, params, placedb, use_l_direction=True):
-        """
-        绘制Steiner树与EGR Route Guide的对比图
-        
-        Args:
-            use_l_direction: 是否使用解析的L方向信息绘制（默认True）
-        """
-        import matplotlib.pyplot as plt
-        from matplotlib.collections import LineCollection
-        import numpy as np
-        from dreamplace.ops.steiner_topo.steiner_topo import SteinerTopo
-
-        logging.info(f"Plotting Steiner tree and Route Guide to {output_path}")
-        
-        # 1. Read Route Guide
-        guide_wires = []
-        guide_length = 0.0
-        if os.path.exists(guide_path):
-            with open(guide_path, 'r') as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if not parts: continue
-                    if parts[0] == 'wire':
-                        try:
-                            # wire grid1_x grid1_y grid2_x grid2_y real1_x real1_y real2_x real2_y layer
-                            x1, y1, x2, y2 = float(parts[5]), float(parts[6]), float(parts[7]), float(parts[8])
-                            guide_wires.append([(x1, y1), (x2, y2)])
-                            guide_length += abs(x1 - x2) + abs(y1 - y2)
-                        except (ValueError, IndexError): pass
-        else:
-            logging.warning(f"Route guide file not found: {guide_path}")
-
-        # 2. Get Steiner Segments
-        newx = steiner_topo_op.newx.detach().cpu().numpy()
-        newy = steiner_topo_op.newy.detach().cpu().numpy()
-        
-        # Unscale coordinates
-        if hasattr(params, 'scale_factor') and hasattr(params, 'shift_factor'):
-            unscale_factor = 1.0 / params.scale_factor
-            newx = newx * unscale_factor + params.shift_factor[0]
-            newy = newy * unscale_factor + params.shift_factor[1]
-
-        newx /= placedb.dbu
-        newy /= placedb.dbu
-        
-        from_idx_raw = flat_pin_from.detach().cpu().numpy()
-        to_idx_raw = flat_pin_to.detach().cpu().numpy()
-        
-        # 获取L方向信息
-        has_l_directions = use_l_direction and steiner_topo_op.edge_l_directions is not None
-        if has_l_directions:
-            l_directions = steiner_topo_op.edge_l_directions.cpu().numpy()
-            logging.info("Using resolved L directions for plotting")
-        else:
-            l_directions = None
-            logging.info("Using default L direction (H_FIRST) for plotting")
-        
-        steiner_segments = []
-        steiner_length = 0.0
-        
-        # 统计L方向使用情况
-        l_stats = {'upper_L': 0, 'lower_L': 0, 'straight': 0, 'default': 0}
-
-        for edge_idx in range(len(from_idx_raw)):
-            idx1 = from_idx_raw[edge_idx]
-            idx2 = to_idx_raw[edge_idx]
-            
-            if idx1 == -1 or idx2 == -1:
-                continue
-            if idx1 >= len(newx) or idx2 >= len(newx):
-                continue
-                
-            p1 = (newx[idx1], newy[idx1])
-            p2 = (newx[idx2], newy[idx2])
-            
-            # Check if horizontal or vertical (straight line)
-            if abs(p1[0] - p2[0]) < 1e-5 or abs(p1[1] - p2[1]) < 1e-5:
-                steiner_segments.append([p1, p2])
-                l_stats['straight'] += 1
-            else:
-                # 需要画L形
-                if has_l_directions and edge_idx < len(l_directions):
-                    l_dir = l_directions[edge_idx]
-                else:
-                    l_dir = SteinerTopo.H_FIRST  # 默认使用上L
-                    l_stats['default'] += 1
-                
-                if l_dir == SteinerTopo.H_FIRST:
-                    # 上L: 先水平后垂直, 拐点在 (x2, y1)
-                    p_mid = (p2[0], p1[1])
-                    l_stats['upper_L'] += 1
-                elif l_dir == SteinerTopo.V_FIRST:
-                    # 下L: 先垂直后水平, 拐点在 (x1, y2)
-                    p_mid = (p1[0], p2[1])
-                    l_stats['lower_L'] += 1
-                else:
-                    # UNKNOWN或其他，默认使用上L
-                    p_mid = (p2[0], p1[1])
-                    l_stats['default'] += 1
-                
-                steiner_segments.append([p1, p_mid])
-                steiner_segments.append([p_mid, p2])
-
-            steiner_length += abs(p1[0] - p2[0]) + abs(p1[1] - p2[1])
-        
-        logging.info(f"L direction stats: upper_L={l_stats['upper_L']}, lower_L={l_stats['lower_L']}, "
-                    f"straight={l_stats['straight']}, default={l_stats['default']}")
-
-        # 3. Plot
-        fig, ax = plt.subplots(figsize=(12, 10))
-        
-        if guide_wires:
-            lc_guide = LineCollection(guide_wires, colors='blue', linewidths=0.5, label=f'Route Guide (L={guide_length:.2f})', alpha=0.5)
-            ax.add_collection(lc_guide)
-            
-        if steiner_segments:
-            lc_steiner = LineCollection(steiner_segments, colors='red', linewidths=0.5, label=f'Steiner Tree (L={steiner_length:.2f})', alpha=0.5)
-            ax.add_collection(lc_steiner)
-            
-        ax.autoscale()
-        ax.set_aspect('equal')
-        plt.legend(loc='upper right')
-        
-        l_info = "with EGR L-direction" if has_l_directions else "default L-direction"
-        plt.title(f"Route Guide vs Steiner Tree ({l_info})\nGuide Length: {guide_length:.2f}, Steiner Length: {steiner_length:.2f}")
-        plt.xlabel("X (microns)")
-        plt.ylabel("Y (microns)")
-        plt.savefig(output_path, dpi=300)
-        plt.close()
-        logging.info(f"Plot saved. Guide Length: {guide_length}, Steiner Length: {steiner_length}")
-
-    def plot_egr_steiner_and_guide(self, guide_path, steiner_topo_op, pin_pos, output_path, params, placedb):
-        """
-        绘制方案二：使用EGR构建的Steiner树与EGR Route Guide的对比图
-        
-        Args:
-            guide_path: EGR route guide文件路径
-            steiner_topo_op: SteinerTopo操作对象（包含EGR构建结果）
-            pin_pos: pin坐标tensor
-            output_path: 输出图片路径
-            params: 参数对象
-            placedb: placement database
-        """
-        import matplotlib.pyplot as plt
-        from matplotlib.collections import LineCollection
-        import numpy as np
-        from dreamplace.ops.steiner_topo.steiner_topo import SteinerTopo
-
-        logging.info(f"Plotting EGR-built Steiner tree and Route Guide to {output_path}")
-        
-        # 检查是否有EGR构建的边列表
-        if not hasattr(steiner_topo_op, 'egr_flat_pin_from') or steiner_topo_op.egr_flat_pin_from is None:
-            logging.error("No EGR-built edges found. Call rebuild_tree_from_egr first.")
-            return
-        
-        # 1. Read Route Guide
-        guide_wires = []
-        guide_length = 0.0
-        if os.path.exists(guide_path):
-            with open(guide_path, 'r') as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if not parts: continue
-                    if parts[0] == 'wire':
-                        try:
-                            x1, y1, x2, y2 = float(parts[5]), float(parts[6]), float(parts[7]), float(parts[8])
-                            guide_wires.append([(x1, y1), (x2, y2)])
-                            guide_length += abs(x1 - x2) + abs(y1 - y2)
-                        except (ValueError, IndexError): pass
-        else:
-            logging.warning(f"Route guide file not found: {guide_path}")
-
-        # 2. 计算顶点坐标（使用EGR的relate关系）
-        # 通过forward计算newx, newy
-        newx, newy = steiner_topo_op(pin_pos)
-        newx = newx.detach().cpu().numpy()
-        newy = newy.detach().cpu().numpy()
-        
-        # Unscale coordinates
-        if hasattr(params, 'scale_factor') and hasattr(params, 'shift_factor'):
-            unscale_factor = 1.0 / params.scale_factor
-            newx = newx * unscale_factor + params.shift_factor[0]
-            newy = newy * unscale_factor + params.shift_factor[1]
-
-        newx /= placedb.dbu
-        newy /= placedb.dbu
-        
-        # 3. 获取EGR构建的边列表
-        from_idx_raw = steiner_topo_op.egr_flat_pin_from.cpu().numpy()
-        to_idx_raw = steiner_topo_op.egr_flat_pin_to.cpu().numpy()
-        l_directions = steiner_topo_op.egr_edge_l_directions.cpu().numpy()
-        
-        logging.info(f"EGR edges: {len(from_idx_raw)}, L directions: {len(l_directions)}")
-        
-        steiner_segments = []
-        steiner_length = 0.0
-        
-        # 统计L方向使用情况
-        l_stats = {'upper_L': 0, 'lower_L': 0, 'straight': 0, 'unknown': 0}
-
-        for edge_idx in range(len(from_idx_raw)):
-            idx1 = from_idx_raw[edge_idx]
-            idx2 = to_idx_raw[edge_idx]
-            
-            if idx1 < 0 or idx2 < 0:
-                continue
-            if idx1 >= len(newx) or idx2 >= len(newx):
-                logging.warning(f"Edge {edge_idx}: index out of range ({idx1}, {idx2}) >= {len(newx)}")
-                continue
-                
-            p1 = (newx[idx1], newy[idx1])
-            p2 = (newx[idx2], newy[idx2])
-            
-            l_dir = l_directions[edge_idx] if edge_idx < len(l_directions) else -1
-            
-            # Check if horizontal or vertical (straight line)
-            if abs(p1[0] - p2[0]) < 1e-5 or abs(p1[1] - p2[1]) < 1e-5:
-                steiner_segments.append([p1, p2])
-                l_stats['straight'] += 1
-            else:
-                # 需要画L形
-                if l_dir == SteinerTopo.H_FIRST:
-                    # 上L: 先水平后垂直, 拐点在 (x2, y1)
-                    p_mid = (p2[0], p1[1])
-                    l_stats['upper_L'] += 1
-                elif l_dir == SteinerTopo.V_FIRST:
-                    # 下L: 先垂直后水平, 拐点在 (x1, y2)
-                    p_mid = (p1[0], p2[1])
-                    l_stats['lower_L'] += 1
-                else:
-                    # UNKNOWN或其他，默认使用上L
-                    p_mid = (p2[0], p1[1])
-                    l_stats['unknown'] += 1
-                
-                steiner_segments.append([p1, p_mid])
-                steiner_segments.append([p_mid, p2])
-
-            steiner_length += abs(p1[0] - p2[0]) + abs(p1[1] - p2[1])
-        
-        logging.info(f"EGR Steiner L direction stats: upper_L={l_stats['upper_L']}, lower_L={l_stats['lower_L']}, "
-                    f"straight={l_stats['straight']}, unknown={l_stats['unknown']}")
-
-        # 4. Plot
-        fig, ax = plt.subplots(figsize=(12, 10))
-        
-        if guide_wires:
-            lc_guide = LineCollection(guide_wires, colors='blue', linewidths=0.5, 
-                                      label=f'Route Guide (L={guide_length:.2f})', alpha=0.5)
-            ax.add_collection(lc_guide)
-            
-        if steiner_segments:
-            lc_steiner = LineCollection(steiner_segments, colors='green', linewidths=0.5, 
-                                        label=f'EGR Steiner Tree (L={steiner_length:.2f})', alpha=0.7)
-            ax.add_collection(lc_steiner)
-            
-        ax.autoscale()
-        ax.set_aspect('equal')
-        plt.legend(loc='upper right')
-        
-        plt.title(f"Route Guide vs EGR-built Steiner Tree\n"
-                 f"Guide Length: {guide_length:.2f}, EGR Steiner Length: {steiner_length:.2f}")
-        plt.xlabel("X (microns)")
-        plt.ylabel("Y (microns)")
-        plt.savefig(output_path, dpi=300)
-        plt.close()
-        logging.info(f"EGR Steiner plot saved. Guide Length: {guide_length}, EGR Steiner Length: {steiner_length}")
 
     def __init__(self, params, placedb, timer):
         """
@@ -627,329 +359,33 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     if params.with_sta and (iteration % 10 == 0 and iteration >= 100):
                         t_steiner = time.time()
                         with torch.no_grad():
-                            pin_pos = self.op_collections.pin_pos_op(pos)
-                            if pin_pos.is_cuda:
-                                pin_pos = pin_pos.cpu()
                             self.data_collections.net_flat_topo_sort, self.data_collections.net_flat_topo_sort_start, \
                                 self.data_collections.pin_fa, self.data_collections.flat_pin_to, self.data_collections.flat_pin_to_start, \
                                 self.data_collections.flat_pin_from = self.op_collections.steiner_topo_op.rebuild_tree(
-                                    pin_pos)
+                                    self.op_collections.pin_pos_op(pos))
                             model.use_timing_obj = True
                         logging.info("Update steiner topo %.3f ms" %
                                      ((time.time() - t_steiner) * 1000))
 
+                    enable_routability = False
+                    if (cur_metric.overflow[-1] < 0.2): 
+                        enable_routability = True
 
-                    if params.check_egr_steiner_flag and (iteration == 100):
-                        
+                    # if (iteration >= 400): 
+                    #     enable_routability = True
+
+                    # dirty update for routability_density_obj_flag
+                    if (params.routability_density_obj_flag) and (iteration % 1 == 0 and enable_routability):
                         t_steiner = time.time()
                         with torch.no_grad():
-                            pin_pos = self.op_collections.pin_pos_op(pos)
-                            if pin_pos.is_cuda:
-                                pin_pos = pin_pos.cpu()
                             self.data_collections.net_flat_topo_sort, self.data_collections.net_flat_topo_sort_start, \
                                 self.data_collections.pin_fa, self.data_collections.flat_pin_to, self.data_collections.flat_pin_to_start, \
                                 self.data_collections.flat_pin_from = self.op_collections.steiner_topo_op.rebuild_tree(
-                                    pin_pos)
+                                    self.op_collections.pin_pos_op(pos))
+                        model.use_routability_density_obj = True
+                        model.steiner_tree_rebuilt = True
                         logging.info("Update steiner topo %.3f ms" %
                                      ((time.time() - t_steiner) * 1000))
-                        
-                        model.op_collections.irt_egr_congestion_map_op(pos)
-                        
-                        # EGR guide路径
-                        guide_path = "/nfs/share/home/sxr/routability_benchmark/dataset_cx55/20251023/gcd/workspace/output/iEDA/data/rt/rt_temp_directory/early_router/route_planar.guide"
-                        gcell_info_path = "/nfs/share/home/sxr/routability_benchmark/dataset_cx55/20251023/gcd/workspace/output/iEDA/data/rt/rt_temp_directory/early_router/gcell.info"
-                        
-                        steiner_topo_op = self.op_collections.steiner_topo_op
-                        
-                        # ========== 方式1: 只解析L方向（使用FLUTE拓扑，EGR确定L方向）==========
-                        if steiner_topo_op.l_direction_resolver is None:
-                            steiner_topo_op.init_l_direction_resolver(placedb, params)
-                        
-                        l_directions = steiner_topo_op.resolve_l_directions_from_egr(guide_path)
-                        logging.info(f"Resolved L directions for {len(l_directions)} edges")
-                        
-                        # ========== 方式2: 使用EGR构建Steiner树（替代FLUTE）==========
-                        # # 初始化EGR Steiner构建器
-                        # if not hasattr(steiner_topo_op, 'egr_steiner_builder') or steiner_topo_op.egr_steiner_builder is None:
-                        #     steiner_topo_op.init_egr_steiner_builder(placedb, params)
-                        # 
-                        # # 使用EGR构建Steiner树（记录Steiner点信息）
-                        # t_egr_build = time.time()
-                        # egr_result = steiner_topo_op.rebuild_tree_from_egr(
-                        #     pin_pos, 
-                        #     guide_path, 
-                        #     gcell_info_path
-                        # )
-                        # logging.info(f"Built Steiner tree from EGR in {(time.time() - t_egr_build) * 1000:.3f} ms")
-                        # logging.info(f"Total Steiner points from EGR: {egr_result['num_steiner']}")
-                        # 
-                        # # 打印Steiner点统计信息
-                        # steiner_topo_op.print_steiner_info()
-                        # 
-                        # # 导出Steiner点到CSV（方便分析）
-                        # steiner_csv_path = os.path.join(params.result_dir, "steiner_points.csv")
-                        # steiner_topo_op.export_steiner_points(steiner_csv_path)
-                        # logging.info(f"Steiner points exported to {steiner_csv_path}")
-                        # 
-                        # # 打印特定net的详细信息（调试用）
-                        # # steiner_topo_op.print_steiner_info("net_name")
-                        # 
-                        # # 获取Steiner点列表进行自定义处理
-                        # steiner_pts = steiner_topo_op.get_steiner_points()
-                        # for sp in steiner_pts[:5]:  # 打印前5个
-                        #     logging.info(f"  Steiner Point: net={sp.net_name}, "
-                        #                 f"gcell=({sp.gcell_x},{sp.gcell_y}), "
-                        #                 f"gcell_center=({sp.gcell_center_x:.2f},{sp.gcell_center_y:.2f})um, "
-                        #                 f"relate_x={sp.relate_x_pin_name}, relate_y={sp.relate_y_pin_name}")
-                        # ================================================================
-
-                        # Plot Steiner and Guide
-                        output_plot_path = os.path.join(params.result_dir, "steiner_guide_comparison.png")
-                        self.plot_steiner_and_guide(guide_path, self.op_collections.steiner_topo_op, self.data_collections.flat_pin_from, self.data_collections.flat_pin_to, output_plot_path, params, placedb)
-
-                        # exit(0)
-
-                    # ========== L形Routability Density Objective ==========
-                    # 根据overflow条件启用L形routability
-                    if getattr(params, 'l_shape_routability_flag', False):
-                        enable_l_shape_routability = False
-                        
-                        # # 条件1: overflow足够小时启用
-                        # if cur_metric.overflow[-1] < getattr(params, 'l_shape_overflow_threshold', 0.2):
-                        #     enable_l_shape_routability = True
-                        
-                        # 条件2: 也可以根据iteration启用（可选）
-                        if iteration >= getattr(params, 'l_shape_start_iteration', 100):
-                            enable_l_shape_routability = True
-                        
-                        if enable_l_shape_routability and not model.use_l_shape_routability:
-                            # 首次启用L形routability
-                            t_l_shape_init = time.time()
-                            
-                            # Step 1: 更新Steiner树
-                            with torch.no_grad():
-                                pin_pos = self.op_collections.pin_pos_op(pos)
-                                if pin_pos.is_cuda:
-                                    pin_pos = pin_pos.cpu()
-                                self.data_collections.net_flat_topo_sort, self.data_collections.net_flat_topo_sort_start, \
-                                    self.data_collections.pin_fa, self.data_collections.flat_pin_to, self.data_collections.flat_pin_to_start, \
-                                    self.data_collections.flat_pin_from = self.op_collections.steiner_topo_op.rebuild_tree(pin_pos)
-                            
-                            # Step 2: 运行EGR获取路由信息
-                            model.op_collections.irt_egr_congestion_map_op(pos)
-                            
-                            # Step 3: 获取EGR guide路径（从params或默认路径）
-                            # params.result_dir: .../workspace/output/dreamplace
-                            # EGR guide路径: .../workspace/output/iEDA/data/rt/rt_temp_directory/early_router/route_planar.guide
-                            egr_guide_path = os.path.join(
-                                os.path.dirname(os.path.dirname(os.path.dirname(params.result_dir))), 
-                                "iEDA/data/rt/rt_temp_directory/early_router/route_planar.guide"
-                            )
-                            
-                            # Step 4: 解析EGR L方向
-                            steiner_topo_op = self.op_collections.steiner_topo_op
-                            if steiner_topo_op.l_direction_resolver is None:
-                                steiner_topo_op.init_l_direction_resolver(placedb, params)
-                            
-                            l_directions = steiner_topo_op.resolve_l_directions_from_egr(egr_guide_path)
-
-                            # # ========== Plot edges with L-shape by l_direction ==========
-                            # import matplotlib.pyplot as plt
-                            # import matplotlib.collections as mc
-                            
-                            # # 获取坐标和边信息
-                            # newx = steiner_topo_op.newx.cpu().numpy()
-                            # newy = steiner_topo_op.newy.cpu().numpy()
-                            # flat_pin_from = self.data_collections.flat_pin_from.cpu().numpy()
-                            # flat_pin_to = self.data_collections.flat_pin_to.cpu().numpy()
-                            # l_dirs = l_directions.cpu().numpy()
-                            
-                            # # 颜色映射: H_FIRST=0(红), V_FIRST=1(蓝), STRAIGHT=2(绿), FAKE_STRAIGHT=3(橙)
-                            # color_map = {
-                            #     0: 'red',      # H_FIRST: 先水平后垂直
-                            #     1: 'blue',     # V_FIRST: 先垂直后水平
-                            #     2: 'green',    # STRAIGHT: 直线
-                            #     3: 'orange'    # FAKE_STRAIGHT: 伪直线
-                            # }
-                            # label_map = {
-                            #     0: 'H_FIRST (H→V)',
-                            #     1: 'V_FIRST (V→H)',
-                            #     2: 'STRAIGHT',
-                            #     3: 'FAKE_STRAIGHT'
-                            # }
-                            
-                            # # 按l_direction分组收集线段
-                            # # L形边变成两段，直线保持一段
-                            # edges_by_dir = {0: [], 1: [], 2: [], 3: []}
-                            # edge_count_by_dir = {0: 0, 1: 0, 2: 0, 3: 0}
-                            
-                            # for i in range(len(l_dirs)):
-                            #     from_idx = flat_pin_from[i]
-                            #     to_idx = flat_pin_to[i]
-                            #     if from_idx == -1 or to_idx == -1:
-                            #         continue
-                            #     x1, y1 = newx[from_idx], newy[from_idx]
-                            #     x2, y2 = newx[to_idx], newy[to_idx]
-                            #     direction = int(l_dirs[i])
-                            #     if direction not in edges_by_dir:
-                            #         direction = 1  # 默认用V_FIRST
-                                
-                            #     edge_count_by_dir[direction] += 1
-                                
-                            #     # 根据方向生成路径
-                            #     if direction == 0:  # H_FIRST: 水平优先 (x1,y1) -> (x2,y1) -> (x2,y2)
-                            #         corner = (x2, y1)
-                            #         edges_by_dir[direction].append([(x1, y1), corner])
-                            #         edges_by_dir[direction].append([corner, (x2, y2)])
-                            #     elif direction == 2:  # STRAIGHT: 直线
-                            #         edges_by_dir[direction].append([(x1, y1), (x2, y2)])
-                            #     elif direction == 3:  # FAKE_STRAIGHT: 伪直线（画成直线）
-                            #         edges_by_dir[direction].append([(x1, y1), (x2, y2)])
-                            #     elif direction == 1:  # V_FIRST: 垂直优先 (x1,y1) -> (x1,y2) -> (x2,y2)
-                            #         # (x1,y1) -> (x1,y2) -> (x2,y2)
-                            #         corner = (x1, y2)
-                            #         edges_by_dir[direction].append([(x1, y1), corner])
-                            #         edges_by_dir[direction].append([corner, (x2, y2)])
-                            
-                            # # 绘图
-                            # fig, ax = plt.subplots(figsize=(12, 10))
-                            
-                            # for direction, edges in edges_by_dir.items():
-                            #     if len(edges) > 0:
-                            #         lc = mc.LineCollection(edges, colors=color_map[direction], 
-                            #                               linewidths=0.5, alpha=0.7,
-                            #                               label=f'{label_map[direction]} ({edge_count_by_dir[direction]})')
-                            #         ax.add_collection(lc)
-                            
-                            # ax.autoscale()
-                            # ax.set_aspect('equal')
-                            # ax.set_xlabel('X')
-                            # ax.set_ylabel('Y')
-                            # ax.set_title('Steiner Tree L-Shape Edges')
-                            # ax.legend(loc='upper right')
-                            
-                            # # 保存图片
-                            # plot_path = os.path.join(params.result_dir, 'l_direction_edges.png')
-                            # plt.savefig(plot_path, dpi=150, bbox_inches='tight')
-                            # plt.close()
-                            # logging.info(f"L-direction edge plot saved to {plot_path}")
-                            
-                            # exit(0)
-                            
-                            # Step 5: 初始化L形routability模块
-
-                            model.init_l_shape_routability(
-                                wire_width=1,
-                                num_bins_x=params.route_num_bins_x,
-                                num_bins_y=params.route_num_bins_y
-                            )
-                            
-                            logging.info(f"L-shape routability enabled at iteration {iteration}, "
-                                        f"overflow={cur_metric.overflow[-1]:.4f}, "
-                                        f"init time={((time.time() - t_l_shape_init) * 1000):.2f}ms")
-                            
-                            # 可视化L形密度图和segments
-                            if params.l_shape_plot_flag:
-                                try:
-                                    from dreamplace.ops.routability.l_shape_routability import (
-                                        plot_segment_density_map, plot_l_shape_segments
-                                    )
-                                    
-                                    # 获取密度图
-                                    density_map = model.get_l_shape_density_map(pos, use_l_direction=True)
-                                    if density_map is not None:
-                                        density_plot_path = os.path.join(
-                                            params.result_dir, f"l_shape_density_iter{iteration}.png"
-                                        )
-                                        plot_segment_density_map(
-                                            density_map, density_plot_path,
-                                            title=f"L-shape Density (iter={iteration})",
-                                            colormap="binary"
-                                        )
-                                        logging.info(f"L-shape density plot saved to {density_plot_path}")
-                                    
-                                    # 绘制L形segments（使用cached_segments中保存的原始数据，确保一致性）
-                                    if model.l_shape_routability_op is not None and \
-                                       model.l_shape_routability_op.cached_segments is not None:
-                                        segments_plot_path = os.path.join(
-                                            params.result_dir, f"l_shape_segments_iter{iteration}.png"
-                                        )
-                                        plot_l_shape_segments(
-                                            model.l_shape_routability_op.cached_segments,
-                                            output_path=segments_plot_path,
-                                            placedb=placedb, params=params
-                                        )
-                                        logging.info(f"L-shape segments plot saved to {segments_plot_path}")
-                                except Exception as e:
-                                    logging.warning(f"Failed to plot L-shape density/segments: {e}")
-                                
-                            # exit(0)
-                        # 定期更新Steiner树和L方向（每N次迭代）
-                        elif model.use_l_shape_routability and (iteration % getattr(params, 'l_shape_update_interval', 50) == 0):
-                            t_l_shape_update = time.time()
-                            
-                            with torch.no_grad():
-                                pin_pos = self.op_collections.pin_pos_op(pos)
-                                if pin_pos.is_cuda:
-                                    pin_pos = pin_pos.cpu()
-                                self.data_collections.net_flat_topo_sort, self.data_collections.net_flat_topo_sort_start, \
-                                    self.data_collections.pin_fa, self.data_collections.flat_pin_to, self.data_collections.flat_pin_to_start, \
-                                    self.data_collections.flat_pin_from = self.op_collections.steiner_topo_op.rebuild_tree(pin_pos)
-                            
-                            # 重新运行EGR
-                            model.op_collections.irt_egr_congestion_map_op(pos)
-                            
-                            # 更新L方向
-                            egr_default_path = os.path.join(
-                                os.path.dirname(os.path.dirname(os.path.dirname(params.result_dir))), 
-                                "iEDA/data/rt/rt_temp_directory/early_router/route_planar.guide"
-                            )
-                            egr_guide_path = getattr(params, 'egr_guide_path', egr_default_path)
-                            steiner_topo_op = self.op_collections.steiner_topo_op
-                            l_directions = steiner_topo_op.resolve_l_directions_from_egr(egr_guide_path)
-                            
-                            logging.debug(f"L-shape routability updated at iteration {iteration}, "
-                                         f"time={((time.time() - t_l_shape_update) * 1000):.2f}ms")
-                            
-                            # 定期可视化L形密度图和segments
-                            if params.l_shape_plot_flag:
-                                try:
-                                    from dreamplace.ops.routability.l_shape_routability import (
-                                        plot_segment_density_map, plot_l_shape_segments
-                                    )
-                                    
-                                    density_map = model.get_l_shape_density_map(pos, use_l_direction=True)
-                                    if density_map is not None:
-                                        density_plot_path = os.path.join(
-                                            params.result_dir, f"l_shape_density_iter{iteration}.png"
-                                        )
-                                        plot_segment_density_map(
-                                            density_map, density_plot_path,
-                                            title=f"L-shape Density (iter={iteration})"
-                                        )
-                                    
-                                    # 绘制L形segments
-                                    pin_pos = self.op_collections.pin_pos_op(pos)
-                                    pin_pos_cpu = pin_pos.cpu() if pin_pos.is_cuda else pin_pos
-                                    newx, newy = steiner_topo_op(pin_pos_cpu)
-                                    
-                                    if model.l_shape_routability_op is not None and \
-                                       model.l_shape_routability_op.cached_segments is not None:
-                                        segments_plot_path = os.path.join(
-                                            params.result_dir, f"l_shape_segments_iter{iteration}.png"
-                                        )
-                                        plot_l_shape_segments(
-                                            model.l_shape_routability_op.cached_segments,
-                                            newx, newy,
-                                            steiner_topo_op.flat_pin_from,
-                                            steiner_topo_op.flat_pin_to,
-                                            steiner_topo_op.edge_l_directions,
-                                            segments_plot_path,
-                                            placedb=placedb, params=params
-                                        )
-                                except Exception as e:
-                                    logging.warning(f"Failed to plot L-shape density/segments: {e}")
-                    # ======================================================
 
                     # plot placement
                     if params.plot_flag and (iteration % 30 == 0 or iteration == 999):
@@ -962,7 +398,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         pos_bk = pos.data.clone()
                         optimizer.step()
 
-                        for region_id, fence_region_update_flag in enumerate[Any](model.update_mask):
+                        for region_id, fence_region_update_flag in enumerate(model.update_mask):
                             if fence_region_update_flag == 0:
                                 # don't update cell location in that region
                                 mask = self.op_collections.fence_region_density_ops[region_id].pos_mask
@@ -1115,7 +551,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
                 if params.routability_opt_flag:
                     adjust_area_flag = True
-                    adjust_route_area_flag = params.adjust_nctugr_area_flag or params.adjust_rudy_area_flag
+                    adjust_route_area_flag = params.adjust_nctugr_area_flag or params.adjust_rudy_area_flag or params.adjust_ieda_area_flag
                     adjust_pin_area_flag = params.adjust_pin_area_flag
                     num_area_adjust = 0
 
@@ -1243,9 +679,15 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
                             route_utilization_map = None
                             pin_utilization_map = None
+                            # print(adjust_route_area_flag, " ", params.adjust_ieda_area_flag)
+                            # exit(0)
+
                             if adjust_route_area_flag:
                                 if params.adjust_nctugr_area_flag:
-                                    route_utilization_map = model.op_collections.irt_egr_congestion_map_op(
+                                    route_utilization_map = model.op_collections.nctugr_congestion_map_op(
+                                        pos)
+                                elif params.adjust_ieda_area_flag:
+                                    route_utilization_map = model.op_collections.ieda_congestion_map_op(
                                         pos)
                                 else:
                                     route_utilization_map = model.op_collections.route_utilization_map_op(
@@ -1258,12 +700,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     os.system("mkdir -p %s" %
                                               (os.path.dirname(figname)))
                                     plt.imsave(
-                                        figname, route_utilization_map.pow(
-                                            params.route_opt_adjust_exponent).data.cpu().numpy().T, origin="lower"
-                                    )
-                                    logging.info(
-                                        "plot route utilization map to %s" % (
-                                            figname)
+                                        figname, route_utilization_map.data.cpu().numpy().T, origin="lower"
                                     )
                                     logging.info(
                                         "plot route utilization map to %s" % (
@@ -1653,7 +1090,6 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 # self.data_collections.pin_offset_y -= params.cell_padding_y
 
                 self.pos[0][:placedb.num_movable_nodes] += params.cell_padding_x
-                params.cell_padding_x = 0
                 # self.pos[0][
                 #     placedb.num_nodes: placedb.num_nodes + placedb.num_movable_nodes
                 # ] += params.cell_padding_y
@@ -1721,6 +1157,19 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             cur_pos[placedb.num_nodes: placedb.num_nodes +
                     placedb.num_movable_nodes],
         )
+        
+        # # Routability evaluation after placement completion
+        # if params.enable_routability_evaluation:
+        #     try:
+        #         logging.info("Starting Routability evaluation after placement")
+        #         self._run_routability_evaluation_after_placement(
+        #             params, placedb)
+        #         logging.info("Routability evaluation completed successfully")
+        #     except Exception as e:
+        #         logging.warning(f"Routability evaluation failed: {e}")
+        
+        # logging.info(f"Node orientations after placement: {placedb.node_orient}")
+        # exit(0)
 
         # apply macro orientations solution
         if False:
@@ -1816,14 +1265,15 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         # reset net weights
         self.data_collections.net_weights.fill_(1.0)
 
-        # run RSMT
-        if params.with_sta:
+
+        if (params.with_sta): 
+            # run RSMT
             with torch.no_grad():
                 tt = time.time()
                 self.data_collections.net_flat_topo_sort, self.data_collections.net_flat_topo_sort_start, \
                     self.data_collections.pin_fa, self.data_collections.flat_pin_to, self.data_collections.flat_pin_to_start, \
                     self.data_collections.flat_pin_from = self.op_collections.steiner_topo_op.rebuild_tree(
-                        self.op_collections.pin_pos_op(self.pos[0]))
+                        self.op_collections.pin_pos_op(self.pos[0]).cpu())
                 new_x, new_y = self.op_collections.steiner_topo_op(
                     self.op_collections.pin_pos_op(self.pos[0])
                 )
@@ -1838,33 +1288,34 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         + torch.abs(new_y[flat_pin_from] - new_y[flat_pin_to])) / params.scale_factor  / placedb.dbu
                 flute_length_path = "%s/%s_flute_length.txt" % (
                     params.result_dir, params.design_name())
-                # with open(flute_length_path, "w") as f:
-                #     f.write("net_name, flute_length (um), cap (pF)\n")
-                #     for net_id in range(placedb.num_nets):
-                #         start = self.data_collections.net_flat_topo_sort_start[net_id]
-                #         end = self.data_collections.net_flat_topo_sort_start[net_id + 1]
-                #         net_name = placedb.net_names[net_id]
-                #         net_flat_pins_nodes = self.data_collections.net_flat_topo_sort[start:end]
-                #         net_flat_pin_start = self.data_collections.flat_pin_to_start[net_flat_pins_nodes]
-                #         net_flat_pin_end = self.data_collections.flat_pin_to_start[net_flat_pins_nodes + 1]
-                #         net_length = 0
-                #         for i in range(len(net_flat_pins_nodes)):
-                #             pin_start = net_flat_pin_start[i]
-                #             pin_end = net_flat_pin_end[i]
-                #             net_length += length[pin_start:pin_end].sum().item()
-                #         # net_length = length[start:end].sum().item()
-                #         f.write(f"{net_name}, {net_length}, {placedb.c_unit * net_length}\n")
+                with open(flute_length_path, "w") as f:
+                    f.write("net_name, flute_length (um), cap (pF)\n")
+                    for net_id in range(placedb.num_nets):
+                        start = self.data_collections.net_flat_topo_sort_start[net_id]
+                        end = self.data_collections.net_flat_topo_sort_start[net_id + 1]
+                        net_name = placedb.net_names[net_id]
+                        net_flat_pins_nodes = self.data_collections.net_flat_topo_sort[start:end]
+                        net_flat_pin_start = self.data_collections.flat_pin_to_start[net_flat_pins_nodes]
+                        net_flat_pin_end = self.data_collections.flat_pin_to_start[net_flat_pins_nodes + 1]
+                        net_length = 0
+                        for i in range(len(net_flat_pins_nodes)):
+                            pin_start = net_flat_pin_start[i]
+                            pin_end = net_flat_pin_end[i]
+                            net_length += length[pin_start:pin_end].sum().item()
+                        # net_length = length[start:end].sum().item()
+                        f.write(f"{net_name}, {net_length}, {placedb.c_unit * net_length}\n")
 
                 wns, tns, ws, ts = model.timing_obj(self.pos[0])
                 model.check_log(wns, tns, ws, ts)
+                rsmt_wl = self.op_collections.rsmt_wl_op(self.pos[0]) / placedb.dbu
                 logging.info("rsmt computation takes %.3f seconds" %
                             (time.time() - tt))
+                logging.info("flute rsmt %.6E um" % rsmt_wl)
 
         # get HPWL
         with torch.no_grad():
             hpwl = self.op_collections.hpwl_op(self.pos[0])
-            rsmt_wl = self.op_collections.rsmt_wl_op(self.pos[0]) / placedb.dbu
-            logging.info("flute rsmt %.6E um" % rsmt_wl)
+            rsmt_wl = 0
             logging.info("unweighted hpwl %.6E" % hpwl)
 
         # save nets degree, RSMT, HPWL
@@ -1891,3 +1342,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         #         pickle.dump(weights_dict, f)
 
         return float(rsmt_wl), float(hpwl), processed_metrics
+
+    def _run_routability_evaluation_after_placement(self, params, placedb):
+        """
+        @brief Run routability evaluation after placement completion
+        @param params parameters
+        @param placedb placement database
+        """
+
+        self.op_collections.openroad_gr(self.pos[0])

@@ -679,7 +679,7 @@ class BasicPlace(nn.Module):
         self.op_collections.pin_pos_op = self.build_pin_pos(
             params, placedb, self.data_collections, self.device
         )
-        if params.with_sta:
+        if params.with_sta or params.check_egr_steiner_flag or params.l_shape_routability_flag:
             self.op_collections.steiner_topo_op = self.build_steiner_topo(
                 params, placedb, self.data_collections, self.device)
 

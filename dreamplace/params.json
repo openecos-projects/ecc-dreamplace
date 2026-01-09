@@ -1,4 +1,12 @@
 {
+    "egr_stage": {
+        "description": "EGR stage: 2D or 3D",
+        "default": "2D"
+    },
+    "egr_resolve_congestion": {
+        "description": "EGR resolve congestion level",
+        "default": "off"
+    },
     "aux_input": {
         "description": "input .aux file",
         "default": "",

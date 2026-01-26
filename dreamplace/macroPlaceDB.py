@@ -959,7 +959,7 @@ class MacroPlaceDB(object):
         self.num_terminals = pydb.num_terminals
         self.num_terminal_NIs = pydb.num_terminal_NIs
         self.node_name2id_map = pydb.node_name2id_map
-        self.node_names = np.array(pydb.node_names, dtype=np.string_)
+        self.node_names = np.array(pydb.node_names, dtype=np.bytes_)
         # If the placer directly takes a global placement solution,
         # the cell positions may still be floating point numbers.
         # It is not good to use the place_io OP to round the positions.
@@ -967,18 +967,18 @@ class MacroPlaceDB(object):
 
         self.node_x = np.array(pydb.node_x, dtype=self.dtype)
         self.node_y = np.array(pydb.node_y, dtype=self.dtype)
-        self.node_orient = np.array(pydb.node_orient, dtype=np.string_)
+        self.node_orient = np.array(pydb.node_orient, dtype=np.bytes_)
         self.node_size_x = np.array(pydb.node_size_x, dtype=self.dtype)
         self.node_size_y = np.array(pydb.node_size_y, dtype=self.dtype)
         self.node2orig_node_map = np.array(
             pydb.node2orig_node_map, dtype=np.int32)
-        self.pin_direct = np.array(pydb.pin_direct, dtype=np.string_)
+        self.pin_direct = np.array(pydb.pin_direct, dtype=np.bytes_)
         # BUG all the pin offsets are -1
         self.pin_offset_x = np.array(pydb.pin_offset_x, dtype=self.dtype)
         self.pin_offset_y = np.array(pydb.pin_offset_y, dtype=self.dtype)
-        self.pin_names = np.array(pydb.pin_names, dtype=np.string_)
+        self.pin_names = np.array(pydb.pin_names, dtype=np.bytes_)
         self.net_name2id_map = pydb.net_name2id_map
-        self.net_names = np.array(pydb.net_names, dtype=np.string_)
+        self.net_names = np.array(pydb.net_names, dtype=np.bytes_)
         self.net2pin_map = pydb.net2pin_map
         self.flat_net2pin_map = np.array(pydb.flat_net2pin_map, dtype=np.int32)
         self.flat_net2pin_start_map = np.array(
@@ -1060,7 +1060,7 @@ class MacroPlaceDB(object):
             self.clk_pin_rtran = np.array(pydb.clk_pin_rtran, dtype=self.dtype)
             self.clk_pin_ftran = np.array(pydb.clk_pin_ftran, dtype=self.dtype)
             self.clk_pin_names = np.array(
-                pydb.clk_pin_names, dtype=np.string_)            
+                pydb.clk_pin_names, dtype=np.bytes_)            
             self.flat_cells_by_level = np.array(
                 pydb.flat_cells_by_level, dtype=np.int32)
             self.flat_cells_by_reverse_level = np.array(

@@ -239,6 +239,14 @@ def build_l_shape_segments_vectorized(newx, newy, flat_from, flat_to, l_directio
     num_edges = flat_from.numel()
     half_width = wire_width / 2.0
     
+    # 确保所有tensor在同一设备上
+    if flat_from.device != device:
+        flat_from = flat_from.to(device)
+    if flat_to.device != device:
+        flat_to = flat_to.to(device)
+    if l_directions.device != device:
+        l_directions = l_directions.to(device)
+    
     # 过滤无效边
     valid_mask = (flat_from >= 0) & (flat_to >= 0) & (flat_from < len(newx)) & (flat_to < len(newx))
     valid_from = flat_from[valid_mask]
@@ -393,12 +401,232 @@ class LShapeSegmentOp:
         op = LShapeSegmentOp(wire_width=100.0)
         result = op(newx, newy, flat_from, flat_to, l_directions)
         segment_pos = result['segment_pos']  # 用于密度计算
+        
+    优化：预计算拓扑结构，只在坐标更新时重新计算segment位置
     """
     
     def __init__(self, wire_width=0.0, use_vectorized=True):
         self.wire_width = wire_width
         self.use_vectorized = use_vectorized
         self.builder = LShapeSegmentBuilder(wire_width)
+        
+        # 缓存拓扑结构（不随pos变化）
+        self._cached_topology = None
+        # 缓存输入的hash，用于检测EGR更新
+        self._cached_input_hash = None
+    
+    def reset_cache(self):
+        """重置拓扑缓存，在EGR重新运行后调用"""
+        self._cached_topology = None
+        self._cached_input_hash = None
+        logger.info("LShapeSegmentOp cache reset")
+    
+    def _compute_input_hash(self, flat_from, flat_to, l_directions):
+        """计算输入的hash值，用于检测拓扑变化"""
+        # 使用边的部分数据来快速检测变化
+        # 检查：边数量 + 前/后几条边的内容 + l_directions的sum
+        num_edges = flat_from.numel()
+        if num_edges == 0:
+            return (0, 0, 0, 0)
+        
+        # 采样检查（避免对整个tensor计算hash）
+        sample_size = min(10, num_edges)
+        from_sample = flat_from[:sample_size].sum().item()
+        to_sample = flat_to[:sample_size].sum().item()
+        l_dir_sum = l_directions.sum().item()
+        
+        return (num_edges, from_sample, to_sample, l_dir_sum)
+    
+    def _compute_topology(self, flat_from, flat_to, l_directions, num_vertices, device):
+        """
+        预计算拓扑结构（只需要计算一次）
+        
+        Args:
+            flat_from, flat_to: 边的端点索引
+            l_directions: L方向
+            num_vertices: 顶点数量
+            device: 目标设备（应与newx/newy一致）
+        
+        Returns:
+            dict with precomputed topology info
+        """
+        num_edges = flat_from.numel()
+        half_width = self.wire_width / 2.0
+        
+        # 确保所有输入在同一设备上
+        if flat_from.device != device:
+            flat_from = flat_from.to(device)
+        if flat_to.device != device:
+            flat_to = flat_to.to(device)
+        if l_directions.device != device:
+            l_directions = l_directions.to(device)
+        
+        # 过滤无效边
+        valid_mask = (flat_from >= 0) & (flat_to >= 0) & (flat_from < num_vertices) & (flat_to < num_vertices)
+        valid_from = flat_from[valid_mask]
+        valid_to = flat_to[valid_mask]
+        valid_l_dir = l_directions[valid_mask]
+        valid_edge_idx = torch.arange(num_edges, device=device)[valid_mask]
+        
+        num_valid = valid_from.numel()
+        
+        if num_valid == 0:
+            return {
+                'valid': False,
+                'num_valid': 0
+            }
+        
+        # 判断边的类型（基于l_direction，不依赖坐标）
+        # 注意：is_horizontal_line 和 is_vertical_line 需要坐标，但我们可以延迟判断
+        # 这里只预计算 l_direction 相关的类型
+        is_h_first = (valid_l_dir == H_FIRST) | (valid_l_dir == UNKNOWN)
+        is_v_first = (valid_l_dir == V_FIRST) | (valid_l_dir == FAKE_STRAIGHT)
+        is_straight_by_dir = (valid_l_dir == STRAIGHT)
+        
+        return {
+            'valid': True,
+            'num_valid': num_valid,
+            'valid_from': valid_from,
+            'valid_to': valid_to,
+            'valid_edge_idx': valid_edge_idx,
+            'is_h_first': is_h_first,
+            'is_v_first': is_v_first,
+            'is_straight_by_dir': is_straight_by_dir,
+            'half_width': half_width,
+            'num_edges': num_edges
+        }
+    
+    def _compute_segments_fast(self, newx, newy, topo):
+        """
+        快速计算segment坐标（使用预计算的拓扑）
+        """
+        device = newx.device
+        dtype = newx.dtype
+        half_width = topo['half_width']
+        
+        if not topo['valid']:
+            empty = torch.tensor([], dtype=dtype, device=device)
+            return {
+                'segment_llx': empty,
+                'segment_lly': empty,
+                'segment_size_x': empty,
+                'segment_size_y': empty,
+                'segment_edge_idx': torch.tensor([], dtype=torch.long, device=device),
+                'segment_is_horizontal': torch.tensor([], dtype=torch.bool, device=device),
+                'num_segments': 0
+            }
+        
+        # 确保索引在同一设备上
+        valid_from = topo['valid_from']
+        valid_to = topo['valid_to']
+        valid_edge_idx = topo['valid_edge_idx']
+        is_h_first = topo['is_h_first']
+        is_v_first = topo['is_v_first']
+        is_straight_by_dir = topo['is_straight_by_dir']
+        
+        # 关键：将索引移到与newx相同的设备
+        if valid_from.device != device:
+            valid_from = valid_from.to(device)
+            valid_to = valid_to.to(device)
+            valid_edge_idx = valid_edge_idx.to(device)
+            is_h_first = is_h_first.to(device)
+            is_v_first = is_v_first.to(device)
+            is_straight_by_dir = is_straight_by_dir.to(device)
+        
+        # 获取端点坐标
+        x1 = newx[valid_from]
+        y1 = newy[valid_from]
+        x2 = newx[valid_to]
+        y2 = newy[valid_to]
+        
+        # 判断几何上的直线
+        is_horizontal_line = torch.abs(y1 - y2) < 1e-6
+        is_vertical_line = torch.abs(x1 - x2) < 1e-6
+        is_straight = is_horizontal_line | is_vertical_line | is_straight_by_dir
+        
+        is_upper_l = (~is_straight) & is_h_first
+        is_lower_l = (~is_straight) & is_v_first
+        
+        # 计算拐点坐标
+        corner_x = torch.where(is_upper_l, x2, torch.where(is_lower_l, x1, x1))
+        corner_y = torch.where(is_upper_l, y1, torch.where(is_lower_l, y2, y1))
+        
+        # Segment 1: 所有边都有 (p1 -> corner/p2)
+        seg1_x2 = torch.where(is_straight, x2, corner_x)
+        seg1_y2 = torch.where(is_straight, y2, corner_y)
+        
+        seg1_min_x = torch.minimum(x1, seg1_x2)
+        seg1_max_x = torch.maximum(x1, seg1_x2)
+        seg1_min_y = torch.minimum(y1, seg1_y2)
+        seg1_max_y = torch.maximum(y1, seg1_y2)
+        
+        seg1_llx = seg1_min_x - half_width
+        seg1_lly = seg1_min_y - half_width
+        seg1_size_x = (seg1_max_x - seg1_min_x) + 2 * half_width
+        seg1_size_y = (seg1_max_y - seg1_min_y) + 2 * half_width
+        seg1_is_h = torch.abs(seg1_x2 - x1) >= torch.abs(seg1_y2 - y1)
+        
+        # Segment 2: 只有L形边有 (corner -> p2)
+        is_l_shape = is_upper_l | is_lower_l
+        
+        seg2_min_x = torch.minimum(corner_x, x2)
+        seg2_max_x = torch.maximum(corner_x, x2)
+        seg2_min_y = torch.minimum(corner_y, y2)
+        seg2_max_y = torch.maximum(corner_y, y2)
+        
+        seg2_llx = seg2_min_x - half_width
+        seg2_lly = seg2_min_y - half_width
+        seg2_size_x = (seg2_max_x - seg2_min_x) + 2 * half_width
+        seg2_size_y = (seg2_max_y - seg2_min_y) + 2 * half_width
+        seg2_is_h = torch.abs(x2 - corner_x) >= torch.abs(y2 - corner_y)
+        
+        seg2_valid = is_l_shape & (seg2_size_x > 1e-6) & (seg2_size_y > 1e-6)
+        
+        # 合并所有segments
+        all_llx = [seg1_llx]
+        all_lly = [seg1_lly]
+        all_size_x = [seg1_size_x]
+        all_size_y = [seg1_size_y]
+        all_edge_idx = [valid_edge_idx]
+        all_is_h = [seg1_is_h]
+        
+        if seg2_valid.any():
+            all_llx.append(seg2_llx[seg2_valid])
+            all_lly.append(seg2_lly[seg2_valid])
+            all_size_x.append(seg2_size_x[seg2_valid])
+            all_size_y.append(seg2_size_y[seg2_valid])
+            all_edge_idx.append(valid_edge_idx[seg2_valid])
+            all_is_h.append(seg2_is_h[seg2_valid])
+        
+        segment_llx = torch.cat(all_llx)
+        segment_lly = torch.cat(all_lly)
+        segment_size_x = torch.cat(all_size_x)
+        segment_size_y = torch.cat(all_size_y)
+        segment_edge_idx = torch.cat(all_edge_idx)
+        segment_is_horizontal = torch.cat(all_is_h)
+        
+        # 过滤零尺寸segment
+        min_size = max(half_width * 2, 1e-6)
+        valid_seg = (segment_size_x > min_size) | (segment_size_y > min_size)
+        
+        segment_llx = segment_llx[valid_seg]
+        segment_lly = segment_lly[valid_seg]
+        segment_size_x = segment_size_x[valid_seg]
+        segment_size_y = segment_size_y[valid_seg]
+        segment_edge_idx = segment_edge_idx[valid_seg]
+        segment_is_horizontal = segment_is_horizontal[valid_seg]
+        
+        num_segments = segment_llx.numel()
+        
+        return {
+            'segment_llx': segment_llx,
+            'segment_lly': segment_lly,
+            'segment_size_x': segment_size_x,
+            'segment_size_y': segment_size_y,
+            'segment_edge_idx': segment_edge_idx,
+            'segment_is_horizontal': segment_is_horizontal,
+            'num_segments': num_segments
+        }
     
     def __call__(self, newx, newy, flat_from, flat_to, l_directions):
         """
@@ -411,14 +639,31 @@ class LShapeSegmentOp:
                 segment_size_y: [num_segments]
                 ...
         """
-        if self.use_vectorized:
-            result = build_l_shape_segments_vectorized(
-                newx, newy, flat_from, flat_to, l_directions, self.wire_width
+        device = newx.device
+        
+        # 计算输入hash，检测EGR是否重新运行
+        current_hash = self._compute_input_hash(flat_from, flat_to, l_directions)
+        
+        # 检查是否需要重新计算拓扑
+        need_recompute_topo = (
+            self._cached_topology is None or
+            self._cached_input_hash != current_hash
+        )
+        
+        if need_recompute_topo:
+            # 预计算拓扑（只需一次，或EGR更新后重新计算）
+            self._cached_topology = self._compute_topology(
+                flat_from, flat_to, l_directions, len(newx), device
             )
-        else:
-            result = self.builder.build_segments(
-                newx, newy, flat_from, flat_to, l_directions
-            )
+            self._cached_input_hash = current_hash
+            logger.info(f"Computed topology: {self._cached_topology['num_valid']} valid edges (hash={current_hash[0]})")
+        
+        # 快速计算segment坐标
+        result = self._compute_segments_fast(newx, newy, self._cached_topology)
+        
+        # 只在第一次打印详细日志
+        if need_recompute_topo and result['num_segments'] > 0:
+            logger.info(f"Built {result['num_segments']} segments from {flat_from.numel()} edges (vectorized)")
         
         # 添加pos tensor
         if result['num_segments'] > 0:

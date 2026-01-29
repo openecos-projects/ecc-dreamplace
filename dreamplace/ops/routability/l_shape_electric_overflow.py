@@ -24,6 +24,9 @@ class SegmentDensityMapFunction(Function):
     Compute density map for routing segments using C++/CUDA backends.
     
     Segments are treated as virtual cells with given positions and sizes.
+    
+    Note: This function computes the raw density map only. 
+    Supply-aware overflow computation should be done at a higher level.
     """
     @staticmethod
     def forward(
@@ -56,6 +59,7 @@ class SegmentDensityMapFunction(Function):
         Args:
             segment_pos: [num_segments * 2] positions (llx then lly)
             segment_size_x/y: [num_segments] segment sizes
+            target_density: can be scalar or 2D tensor (only scalar passed to C++)
             Others: similar to ElectricDensityMapFunction
             
         Returns:
@@ -63,6 +67,14 @@ class SegmentDensityMapFunction(Function):
         """
         num_movable_nodes = num_segments
         num_filler_nodes = 0
+        
+        # C++ backend expects scalar target_density
+        # If we have a 2D supply map, use 1.0 for raw density computation
+        # The supply-aware overflow is computed at a higher level
+        if isinstance(target_density, torch.Tensor) and target_density.dim() == 2:
+            cpp_target_density = 1.0
+        else:
+            cpp_target_density = float(target_density)
         
         if segment_pos.is_cuda:
             output = electric_potential_cuda.density_map(
@@ -72,7 +84,7 @@ class SegmentDensityMapFunction(Function):
                 offset_x, offset_y, ratio,
                 bin_center_x, bin_center_y,
                 initial_density_map,
-                target_density,
+                cpp_target_density,  # scalar
                 xl, yl, xh, yh,
                 bin_size_x, bin_size_y,
                 num_movable_nodes, num_filler_nodes,
@@ -91,7 +103,7 @@ class SegmentDensityMapFunction(Function):
                 offset_x, offset_y, ratio,
                 bin_center_x, bin_center_y,
                 initial_density_map,
-                target_density,
+                cpp_target_density,  # scalar
                 xl, yl, xh, yh,
                 bin_size_x, bin_size_y,
                 num_movable_nodes, num_filler_nodes,
@@ -104,9 +116,9 @@ class SegmentDensityMapFunction(Function):
         
         density_map = output.view([num_bins_x, num_bins_y])
         
-        # Set padding density
+        # Set padding density (use scalar for consistency)
         if padding > 0:
-            density_map.masked_fill_(padding_mask, target_density * bin_size_x * bin_size_y)
+            density_map.masked_fill_(padding_mask, cpp_target_density * bin_size_x * bin_size_y)
         
         return density_map
 
@@ -170,20 +182,20 @@ class LShapeElectricOverflow(nn.Module):
             self.num_bins_y, device=device, dtype=dtype
         ).mul_(self.bin_size_y).add_(self.yl + self.bin_size_y / 2)
         
-        # Padding mask
+        # Padding mask (使用bool类型以兼容新版PyTorch的masked_fill_)
         if self.padding > 0:
             self.padding_mask = torch.ones(
                 self.num_bins_x, self.num_bins_y,
-                dtype=torch.uint8, device=device
+                dtype=torch.bool, device=device
             )
             self.padding_mask[
                 self.padding:self.num_bins_x - self.padding,
                 self.padding:self.num_bins_y - self.padding
-            ].fill_(0)
+            ] = False
         else:
             self.padding_mask = torch.zeros(
                 self.num_bins_x, self.num_bins_y,
-                dtype=torch.uint8, device=device
+                dtype=torch.bool, device=device
             )
         
         # Initial density map (for fixed obstacles, if any)

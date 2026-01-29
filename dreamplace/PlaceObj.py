@@ -22,6 +22,7 @@
 import os
 import sys
 import time
+from matplotlib.pyplot import step
 import numpy as np
 import itertools
 import logging
@@ -54,6 +55,7 @@ from dreamplace.ops.timing_propagation.timing_propagation import TimingPropagati
 from dreamplace.ops.rc_timing.rc_timing import RCTiming
 from dreamplace.BasicPlace import PlaceDataCollection
 from tools.iEDA.module.sta import IEDASta
+from dreamplace.ops.routability.plot_map import plot_node_grad_directions
 
 
 class PreconditionOp:
@@ -406,14 +408,20 @@ class PlaceObj(nn.Module):
         # ========== L形Routability初始化 ==========
         self.use_l_shape_routability = False
         self.l_shape_routability_op = None
+        # 初始权重设为很小的值，后续会自适应调整
         self.l_shape_routability_weight = torch.tensor(
-            [getattr(params, 'l_shape_routability_weight', 0.0001)],
+            [getattr(params, 'l_shape_routability_weight', 1e-5)],
             dtype=self.data_collections.pos[0].dtype,
             device=self.data_collections.pos[0].device,
         )
+        # 目标：L-shape梯度范数占density梯度范数的比例
+        self.l_shape_grad_target_ratio = getattr(params, 'l_shape_grad_target_ratio', 0.2) 
+        # 权重调整的平滑因子 (0~1, 越小越平滑)
+        self.l_shape_weight_momentum = getattr(params, 'l_shape_weight_momentum', 0.1)
         # ==========================================
 
-    def init_l_shape_routability(self, wire_width, num_bins_x, num_bins_y):
+    def init_l_shape_routability(self, wire_width, num_bins_x, num_bins_y,
+                                 target_density=1.0, target_demand=None):
         """
         初始化L形routability模块
         应在steiner_topo_op有L方向信息后调用
@@ -421,6 +429,10 @@ class PlaceObj(nn.Module):
         Args:
             wire_width: segment线宽
             num_bins_x, num_bins_y: 密度计算的bin数量
+            target_density: 目标密度，可以是标量或2D张量(EGR supply map)
+            target_demand: 目标需求(2D张量, EGR net map)，用于标定L-shape密度与EGR单位
+                - 标量: 所有bin使用相同的target density
+                - 2D张量: 每个bin有不同的target density (来自EGR supply map)
         """
         from dreamplace.ops.routability.l_shape_routability import LShapeRoutabilityOp
         
@@ -433,10 +445,28 @@ class PlaceObj(nn.Module):
             params=self.params,
             wire_width=wire_width,
             num_bins_x=num_bins_x,
-            num_bins_y=num_bins_y
+            num_bins_y=num_bins_y,
+            target_density=target_density,
+            target_demand=target_demand
         )
         self.use_l_shape_routability = True
-        logging.info(f"L-shape routability initialized with weight {self.l_shape_routability_weight.item()}")
+        
+        if isinstance(target_density, torch.Tensor):
+            if isinstance(target_demand, torch.Tensor):
+                logging.info(f"L-shape routability initialized with EGR supply/net maps "
+                            f"(supply min={target_density.min():.1f}, max={target_density.max():.1f}; "
+                            f"demand min={target_demand.min():.1f}, max={target_demand.max():.1f}), "
+                            f"init_weight={self.l_shape_routability_weight.item():.2e}, "
+                            f"target_grad_ratio={self.l_shape_grad_target_ratio}")
+            else:
+                logging.info(f"L-shape routability initialized with EGR supply map "
+                            f"(min={target_density.min():.1f}, max={target_density.max():.1f}), "
+                            f"init_weight={self.l_shape_routability_weight.item():.2e}, "
+                            f"target_grad_ratio={self.l_shape_grad_target_ratio}")
+        else:
+            logging.info(f"L-shape routability initialized with uniform target_density={target_density}, "
+                        f"init_weight={self.l_shape_routability_weight.item():.2e}, "
+                        f"target_grad_ratio={self.l_shape_grad_target_ratio}")
     
     def l_shape_routability_obj(self, pos, use_l_direction=True):
         """
@@ -1607,7 +1637,7 @@ class PlaceObj(nn.Module):
         @param pos locations of cells
         @return objective value
         """
-        # self.check_gradient(pos)
+
         if pos.grad is not None:
             pos.grad.zero_()
         obj = self.obj_fn(pos)
@@ -1620,20 +1650,59 @@ class PlaceObj(nn.Module):
         
         # ========== L形Routability梯度 ==========
         if self.use_l_shape_routability and self.l_shape_routability_op is not None:
-            temp_grad = pos.grad.data.clone()
+            # 保存 wirelength + density 的梯度
+            base_grad = pos.grad.data.clone()
+            base_grad_norm = base_grad.norm(p=2)
+            
             pos.grad.zero_()
             
-            # 计算L形routability cost
+            # 计算L形routability cost 
             l_shape_cost = self.l_shape_routability_obj(pos, use_l_direction=True)
+            l_shape_cost.backward()
+            
+            # 获取原始 L-shape 梯度范数
+            l_shape_grad_raw = pos.grad.data.clone()
+            l_shape_grad_norm = l_shape_grad_raw.norm(p=2)
+            
+            # 自适应调整权重
+            # 目标: l_shape_grad_norm * weight ≈ target_ratio * base_grad_norm
+            if l_shape_grad_norm > 1e-10 and base_grad_norm > 1e-10:
+                target_weight = (self.l_shape_grad_target_ratio * base_grad_norm / l_shape_grad_norm).item()
+                
+                # 使用动量平滑更新权重
+                old_weight = self.l_shape_routability_weight.item()
+                # new_weight = (1 - self.l_shape_weight_momentum) * old_weight + \
+                #              self.l_shape_weight_momentum * target_weight
+
+                if not hasattr(self, '_l_shape_weight_initialized') or not self._l_shape_weight_initialized:
+                    new_weight = target_weight
+                    self._l_shape_weight_initialized = True
+                    logging.info(f"L-shape weight auto-initialized: {new_weight:.4e} "
+                                f"(base_grad={base_grad_norm:.4e}, l_shape_grad={l_shape_grad_norm:.4e})")
+                else:
+                    new_weight = (1 - self.l_shape_weight_momentum) * old_weight + \
+                                 self.l_shape_weight_momentum * target_weight
+                
+                # 限制权重范围，防止过大或过小
+                new_weight = max(1e-12, min(1, new_weight))
+                self.l_shape_routability_weight.data.fill_(new_weight)
+                
+                # 应用权重到梯度
+                pos.grad.data.mul_(new_weight)
+                
+                logging.debug(f"L-shape: cost={l_shape_cost.item():.4e}, "
+                             f"grad_norm={l_shape_grad_norm:.4e}, "
+                             f"base_grad_norm={base_grad_norm:.4e}, "
+                             f"weight={old_weight:.4e}->{new_weight:.4e}")
+            else:
+                # 梯度太小，直接用当前权重
+                pos.grad.data.mul_(self.l_shape_routability_weight.item())
+            
             l_shape_weighted = l_shape_cost * self.l_shape_routability_weight.item()
-            
-            l_shape_weighted.backward()
-            
             obj = obj + l_shape_weighted
-            pos.grad.data.add_(temp_grad)
+            pos.grad.data.add_(base_grad)
             
-            logging.debug(f"L-shape routability: cost={l_shape_cost.item():.4f}, "
-                         f"weighted={l_shape_weighted.item():.4f}")
+            # self.check_gradient(pos)
         # ==========================================
         
         return obj, pos.grad
@@ -1644,29 +1713,558 @@ class PlaceObj(nn.Module):
         """
         return self.obj_fn(self.data_collections.pos[0])
 
-    def check_gradient(self, pos):
+    def check_gradient(self, tpos):
         """
         @brief check gradient for debug
         @param pos locations of cells
         """
-        wirelength = self.op_collections.wirelength_op(pos)
 
+        pos = tpos.detach()
+        pos.requires_grad_(True)
+
+        # === 1. Wirelength梯度 ===
+        wirelength = self.op_collections.wirelength_op(pos)
         if pos.grad is not None:
             pos.grad.zero_()
         wirelength.backward()
         wirelength_grad = pos.grad.clone()
 
+        # === 2. Density梯度 ===
         pos.grad.zero_()
         density = self.density_weight * self.op_collections.density_op(pos)
         density.backward()
         density_grad = pos.grad.clone()
 
+        # plot_node_grad_directions(pos, density_grad, save_path="density_grad_directions.png")
+
+        # === 3. Routability梯度 (新增) ===
+        routability_grad = None
+        if self.use_l_shape_routability:
+            pos.grad.zero_()
+            routability_cost = self.l_shape_routability_obj(pos)
+            routability_weighted = routability_cost * self.l_shape_routability_weight.item()
+            routability_weighted.backward()
+            routability_grad = pos.grad.clone()
+
+            # plot_node_grad_directions(pos, -wirelength_grad, -density_grad, -routability_grad,
+            #                            title="Cell Move Directions",
+            #                             save_path="cell_move_directions.png")
+
+            num_nodes = self.placedb.num_nodes
+            num_movable_nodes = self.placedb.num_movable_nodes
+            
+            def get_movable_part(tensor):
+                x_part = tensor[:num_movable_nodes]
+                y_part = tensor[num_nodes : num_nodes + num_movable_nodes]
+                return torch.cat([x_part, y_part], dim=0)
+            
+            self.step = self.step + 1 if hasattr(self, 'step') else 0
+            plot_node_grad_directions(get_movable_part(pos), 
+                                      get_movable_part(-wirelength_grad), 
+                                      get_movable_part(-density_grad), 
+                                      get_movable_part(-routability_grad),
+                                       title="Movable Cell Move Directions",
+                                        save_path=f"cell_move_directions_movable_{self.step}.png")
+            plot_node_grad_directions(pos, - (wirelength_grad + density_grad + routability_grad),
+                                        title="Total Move Directions",
+                                        save_path=f"total_move_directions_{self.step}.png")
+            exit(0)
+
+        # === 4. 计算梯度范数 ===
         wirelength_grad_norm = wirelength_grad.norm(p=1)
         density_grad_norm = density_grad.norm(p=1)
 
-        logging.info("wirelength_grad norm = %.6E" % (wirelength_grad_norm))
-        logging.info("density_grad norm    = %.6E" % (density_grad_norm))
+        # === 5. 输出对比结果 ===
+        logging.info("=" * 60)
+        logging.info("GRADIENT ANALYSIS:")
+        
+        logging.info("wirelength_grad norm = %.6E" % wirelength_grad_norm)
+        logging.info("density_grad norm    = %.6E" % density_grad_norm)
+        if routability_grad is not None:
+            routability_grad_norm = routability_grad.norm(p=1)
+            logging.info("routability_grad norm = %.6E" % routability_grad_norm)
+
+            # adjust routability weight to let  routability grad norm be 0.001 ~ 0.1 of density grad norm
+            # if routability_grad_norm > 0 and density_grad_norm > 0:
+            #     ratio = routability_grad_norm /density_grad_norm
+            #     if ratio < 0.001:
+            #         new_weight = self.routability_weight.item() * 1.1
+            #         self.routability_weight.data.fill_(new_weight)
+            #         logging.info("Increase routability weight to %.6E" % new_weight)
+            #     elif ratio > 0.1:
+            #         new_weight = self.routability_weight.item() * 0.8
+            #         self.routability_weight.data.fill_(new_weight)
+            #         logging.info("Decrease routability weight to %.6E" % new_weight)
+            
+        
+        logging.info("=" * 60)
+
         pos.grad.zero_()
+
+    def check_l_shape_gradient_direction(self, tpos, step_sizes=[0.1, 1.0, 10.0]):
+        """
+        @brief 验证L-shape梯度方向是否能降低cost（比数值梯度检查更实用）
+        @param tpos: cell位置  
+        @param step_sizes: 测试的步长列表
+        @return: dict with results
+        """
+        if not self.use_l_shape_routability or self.l_shape_routability_op is None:
+            logging.warning("L-shape routability not enabled")
+            return None
+        
+        logging.info("=" * 60)
+        logging.info("L-SHAPE GRADIENT DIRECTION CHECK")
+        logging.info("=" * 60)
+        
+        pos = tpos.detach().clone()
+        pos.requires_grad_(True)
+        
+        # 计算当前cost和梯度
+        if pos.grad is not None:
+            pos.grad.zero_()
+        cost0 = self.l_shape_routability_obj(pos)
+        cost0.backward()
+        grad = pos.grad.clone()
+        
+        logging.info(f"Initial cost: {cost0.item():.6e}")
+        logging.info(f"Gradient norm: {grad.norm().item():.6e}")
+        
+        results = {'initial_cost': cost0.item(), 'step_results': []}
+        
+        for step in step_sizes:
+            # 沿负梯度方向移动
+            with torch.no_grad():
+                pos_new = pos - step * grad / grad.norm()
+                cost_new = self.l_shape_routability_obj(pos_new)
+            
+            improvement = cost0.item() - cost_new.item()
+            pct = improvement / cost0.item() * 100
+            
+            status = "✓ cost decreased" if improvement > 0 else "✗ cost increased"
+            logging.info(f"  Step={step:.1f}: cost={cost_new.item():.6e}, "
+                        f"change={improvement:+.6e} ({pct:+.2f}%) {status}")
+            
+            results['step_results'].append({
+                'step': step,
+                'new_cost': cost_new.item(),
+                'improvement': improvement,
+                'success': improvement > 0
+            })
+        
+        # 判断梯度是否有效
+        num_success = sum(1 for r in results['step_results'] if r['success'])
+        if num_success >= len(step_sizes) // 2 + 1:
+            logging.info("  ✓ Gradient direction is VALID (cost decreases along -grad)")
+            results['valid'] = True
+        else:
+            logging.warning("  ✗ Gradient direction may be INVALID")
+            results['valid'] = False
+        
+        logging.info("=" * 60)
+        return results
+
+    def diagnose_l_shape_gradient_issues(self, tpos):
+        """
+        @brief 诊断L-shape梯度可能的问题
+        检查：
+        1. pos是否在边界内
+        2. pin_pos是否在边界内  
+        3. 梯度方向是否把cell推向边界外
+        4. L-shape梯度与wirelength梯度的关系
+        """
+        if not self.use_l_shape_routability or self.l_shape_routability_op is None:
+            logging.warning("L-shape routability not enabled")
+            return
+        
+        logging.info("=" * 60)
+        logging.info("L-SHAPE GRADIENT ISSUES DIAGNOSIS")
+        logging.info("=" * 60)
+        
+        pos = tpos.detach().clone()
+        pos.requires_grad_(True)
+        
+        num_nodes = self.placedb.num_nodes
+        num_movable = self.placedb.num_movable_nodes
+        xl, yl = self.placedb.xl, self.placedb.yl
+        xh, yh = self.placedb.xh, self.placedb.yh
+        
+        # ========== 1. 检查pos是否在边界内 ==========
+        logging.info("\n[1] Cell position boundary check:")
+        pos_x = pos[:num_nodes].detach()
+        pos_y = pos[num_nodes:2*num_nodes].detach()
+        
+        out_left = (pos_x[:num_movable] < xl).sum().item()
+        out_right = (pos_x[:num_movable] > xh).sum().item()
+        out_bottom = (pos_y[:num_movable] < yl).sum().item()
+        out_top = (pos_y[:num_movable] > yh).sum().item()
+        
+        logging.info(f"  Chip boundary: x=[{xl}, {xh}], y=[{yl}, {yh}]")
+        logging.info(f"  Movable cells out of bounds: left={out_left}, right={out_right}, "
+                    f"bottom={out_bottom}, top={out_top}")
+        
+        if out_left + out_right + out_bottom + out_top > 0:
+            # 找出超出最多的cell
+            x_min = pos_x[:num_movable].min().item()
+            x_max = pos_x[:num_movable].max().item()
+            y_min = pos_y[:num_movable].min().item()
+            y_max = pos_y[:num_movable].max().item()
+            logging.warning(f"  ⚠ Cell range: x=[{x_min:.1f}, {x_max:.1f}], y=[{y_min:.1f}, {y_max:.1f}]")
+            logging.warning(f"  ⚠ Overflow: left={xl-x_min:.1f}, right={x_max-xh:.1f}, "
+                          f"bottom={yl-y_min:.1f}, top={y_max-yh:.1f}")
+        else:
+            logging.info("  ✓ All movable cells within bounds")
+        
+        # ========== 2. 检查pin_pos ==========
+        logging.info("\n[2] Pin position boundary check:")
+        pin_pos = self.op_collections.pin_pos_op(pos)
+        num_pins = pin_pos.numel() // 2
+        pin_x = pin_pos[:num_pins].detach()
+        pin_y = pin_pos[num_pins:].detach()
+        
+        pin_x_min = pin_x.min().item()
+        pin_x_max = pin_x.max().item()
+        pin_y_min = pin_y.min().item()
+        pin_y_max = pin_y.max().item()
+        
+        logging.info(f"  Pin range: x=[{pin_x_min:.1f}, {pin_x_max:.1f}], y=[{pin_y_min:.1f}, {pin_y_max:.1f}]")
+        
+        if pin_x_min < xl or pin_x_max > xh or pin_y_min < yl or pin_y_max > yh:
+            logging.warning(f"  ⚠ Pins out of bounds!")
+        else:
+            logging.info("  ✓ All pins within bounds")
+        
+        # ========== 3. 计算L-shape梯度并分析方向 ==========
+        logging.info("\n[3] L-shape gradient direction analysis:")
+        if pos.grad is not None:
+            pos.grad.zero_()
+        
+        l_shape_cost = self.l_shape_routability_obj(pos)
+        l_shape_cost.backward()
+        l_grad = pos.grad.clone()
+        
+        # 分析movable cells的梯度
+        grad_x = l_grad[:num_movable]
+        grad_y = l_grad[num_nodes:num_nodes+num_movable]
+        
+        # 统计梯度方向：正梯度意味着cost随位置增加而增加，所以优化应该往负方向走
+        # 如果cell在左边界，梯度为正，则会往左推（出界）
+        # 如果cell在右边界，梯度为负，则会往右推（出界）
+        
+        cells_near_left = pos_x[:num_movable] < (xl + (xh-xl)*0.1)
+        cells_near_right = pos_x[:num_movable] > (xh - (xh-xl)*0.1)
+        cells_near_bottom = pos_y[:num_movable] < (yl + (yh-yl)*0.1)
+        cells_near_top = pos_y[:num_movable] > (yh - (yh-yl)*0.1)
+        
+        # 检查边界附近的cell梯度方向
+        push_out_left = (cells_near_left & (grad_x > 0)).sum().item()  # 正梯度 -> 往左推
+        push_out_right = (cells_near_right & (grad_x < 0)).sum().item()  # 负梯度 -> 往右推
+        push_out_bottom = (cells_near_bottom & (grad_y > 0)).sum().item()
+        push_out_top = (cells_near_top & (grad_y < 0)).sum().item()
+        
+        total_boundary_cells = (cells_near_left | cells_near_right | cells_near_bottom | cells_near_top).sum().item()
+        total_push_out = push_out_left + push_out_right + push_out_bottom + push_out_top
+        
+        logging.info(f"  Cells near boundary: {total_boundary_cells}")
+        logging.info(f"  Cells being pushed outward: {total_push_out} "
+                    f"(left={push_out_left}, right={push_out_right}, "
+                    f"bottom={push_out_bottom}, top={push_out_top})")
+        
+        if total_push_out > total_boundary_cells * 0.3:
+            logging.warning(f"  ⚠ {total_push_out/total_boundary_cells*100:.1f}% of boundary cells "
+                          f"are being pushed outward!")
+        
+        # ========== 4. 比较L-shape梯度与wirelength梯度 ==========
+        logging.info("\n[4] L-shape vs Wirelength gradient comparison:")
+        pos.grad.zero_()
+        wirelength = self.op_collections.wirelength_op(pos)
+        wirelength.backward()
+        wl_grad = pos.grad.clone()
+        
+        # 计算夹角
+        l_grad_flat = l_grad[:2*num_movable].flatten()
+        wl_grad_flat = wl_grad[:2*num_movable].flatten()
+        
+        l_norm = l_grad_flat.norm()
+        wl_norm = wl_grad_flat.norm()
+        
+        if l_norm > 1e-10 and wl_norm > 1e-10:
+            cosine = (l_grad_flat @ wl_grad_flat) / (l_norm * wl_norm)
+            angle = torch.acos(cosine.clamp(-1, 1)) * 180 / 3.14159
+            logging.info(f"  L-shape grad norm: {l_norm.item():.4e}")
+            logging.info(f"  Wirelength grad norm: {wl_norm.item():.4e}")
+            logging.info(f"  Cosine similarity: {cosine.item():.4f}")
+            logging.info(f"  Angle between gradients: {angle.item():.1f}°")
+            
+            if cosine.item() < -0.5:
+                logging.warning("  ⚠ Gradients are nearly opposite! This may cause oscillation.")
+            elif cosine.item() < 0:
+                logging.info("  ⚠ Gradients have negative correlation (some conflict)")
+            else:
+                logging.info("  ✓ Gradients are compatible")
+        
+        logging.info("=" * 60)
+
+    def check_l_shape_gradient_numerical(self, tpos, num_check=100, eps=1e-3, 
+                                          check_movable_only=True, verbose=True):
+        """
+        @brief 数值验证L-shape routability梯度的正确性
+        注意：对于bin-based密度函数，数值梯度检查可能失败是正常的，
+        建议使用 check_l_shape_gradient_direction 来验证梯度方向。
+        @param tpos: cell位置
+        @param num_check: 检查的位置数量
+        @param eps: 有限差分步长
+        @param check_movable_only: 是否只检查movable cells
+        @param verbose: 是否输出详细信息
+        @return: dict with gradient check results
+        """
+        if not self.use_l_shape_routability or self.l_shape_routability_op is None:
+            logging.warning("L-shape routability not enabled, skip gradient check")
+            return None
+        
+        pos = tpos.detach().clone()
+        pos.requires_grad_(True)
+        
+        num_nodes = self.placedb.num_nodes
+        num_movable_nodes = self.placedb.num_movable_nodes
+        
+        # 确定要检查的索引
+        if check_movable_only:
+            # 只检查movable cells的x和y坐标
+            check_indices_x = torch.randperm(num_movable_nodes)[:num_check//2]
+            check_indices_y = num_nodes + torch.randperm(num_movable_nodes)[:num_check//2]
+            check_indices = torch.cat([check_indices_x, check_indices_y])
+        else:
+            check_indices = torch.randperm(pos.numel())[:num_check]
+        
+        # === 1. 计算自动微分梯度 ===
+        if pos.grad is not None:
+            pos.grad.zero_()
+        
+        cost = self.l_shape_routability_obj(pos)
+        cost.backward()
+        auto_grad = pos.grad.clone()
+        
+        # === 2. 计算数值梯度 ===
+        numerical_grad = torch.zeros_like(pos)
+        
+        logging.info("=" * 60)
+        logging.info("L-SHAPE GRADIENT NUMERICAL CHECK")
+        logging.info(f"Checking {len(check_indices)} positions with eps={eps}")
+        logging.info("=" * 60)
+        
+        for i, idx in enumerate(check_indices):
+            idx = idx.item()
+            
+            # f(x + eps)
+            pos_plus = pos.detach().clone()
+            pos_plus[idx] += eps
+            with torch.no_grad():
+                cost_plus = self.l_shape_routability_obj(pos_plus)
+            
+            # f(x - eps)
+            pos_minus = pos.detach().clone()
+            pos_minus[idx] -= eps
+            with torch.no_grad():
+                cost_minus = self.l_shape_routability_obj(pos_minus)
+            
+            # 中心差分
+            numerical_grad[idx] = (cost_plus - cost_minus) / (2 * eps)
+            
+            if verbose and i < 20:  # 只打印前20个
+                coord_type = "x" if idx < num_nodes else "y"
+                node_idx = idx if idx < num_nodes else idx - num_nodes
+                is_movable = node_idx < num_movable_nodes
+                
+                diff = abs(auto_grad[idx].item() - numerical_grad[idx].item())
+                rel_err = diff / (abs(auto_grad[idx].item()) + 1e-10)
+                
+                logging.info(f"  [{i:3d}] node={node_idx:5d}({coord_type}), movable={is_movable}, "
+                           f"auto={auto_grad[idx].item():+.6e}, num={numerical_grad[idx].item():+.6e}, "
+                           f"diff={diff:.2e}, rel_err={rel_err:.2%}")
+        
+        # === 3. 统计分析 ===
+        checked_auto = auto_grad[check_indices]
+        checked_num = numerical_grad[check_indices]
+        
+        abs_diff = (checked_auto - checked_num).abs()
+        rel_diff = abs_diff / (checked_auto.abs() + 1e-10)
+        
+        # 计算相关系数
+        if checked_auto.std() > 1e-10 and checked_num.std() > 1e-10:
+            correlation = torch.corrcoef(torch.stack([checked_auto, checked_num]))[0, 1].item()
+        else:
+            correlation = float('nan')
+        
+        # 计算cosine相似度
+        if checked_auto.norm() > 1e-10 and checked_num.norm() > 1e-10:
+            cosine_sim = (checked_auto @ checked_num) / (checked_auto.norm() * checked_num.norm())
+            cosine_sim = cosine_sim.item()
+        else:
+            cosine_sim = float('nan')
+        
+        results = {
+            'abs_diff_mean': abs_diff.mean().item(),
+            'abs_diff_max': abs_diff.max().item(),
+            'rel_diff_mean': rel_diff.mean().item(),
+            'rel_diff_max': rel_diff.max().item(),
+            'correlation': correlation,
+            'cosine_similarity': cosine_sim,
+            'auto_grad_norm': checked_auto.norm().item(),
+            'numerical_grad_norm': checked_num.norm().item(),
+            'auto_grad_mean': checked_auto.mean().item(),
+            'numerical_grad_mean': checked_num.mean().item(),
+            'num_zero_auto': (checked_auto.abs() < 1e-10).sum().item(),
+            'num_zero_num': (checked_num.abs() < 1e-10).sum().item(),
+        }
+        
+        logging.info("-" * 60)
+        logging.info("SUMMARY:")
+        logging.info(f"  Auto-diff grad norm:    {results['auto_grad_norm']:.6e}")
+        logging.info(f"  Numerical grad norm:    {results['numerical_grad_norm']:.6e}")
+        logging.info(f"  Abs diff (mean/max):    {results['abs_diff_mean']:.6e} / {results['abs_diff_max']:.6e}")
+        logging.info(f"  Rel diff (mean/max):    {results['rel_diff_mean']:.2%} / {results['rel_diff_max']:.2%}")
+        logging.info(f"  Correlation:            {results['correlation']:.4f}")
+        logging.info(f"  Cosine similarity:      {results['cosine_similarity']:.4f}")
+        logging.info(f"  Zero gradients (auto/num): {results['num_zero_auto']}/{results['num_zero_num']}")
+        
+        # 判断梯度是否正确
+        if results['cosine_similarity'] > 0.99 and results['rel_diff_mean'] < 0.05:
+            logging.info("  ✓ Gradient check PASSED")
+        elif results['cosine_similarity'] > 0.9 and results['rel_diff_mean'] < 0.1:
+            logging.info("  ~ Gradient check MARGINAL (may have minor issues)")
+        else:
+            logging.warning("  ✗ Gradient check FAILED (gradient may be incorrect)")
+        
+        logging.info("=" * 60)
+        
+        pos.grad.zero_()
+        return results
+
+    def diagnose_l_shape_gradient_chain(self, tpos):
+        """
+        @brief 诊断L-shape routability梯度链路，找出梯度断裂点
+        @param tpos: cell位置
+        """
+        if not self.use_l_shape_routability or self.l_shape_routability_op is None:
+            logging.warning("L-shape routability not enabled")
+            return
+        
+        logging.info("=" * 60)
+        logging.info("L-SHAPE GRADIENT CHAIN DIAGNOSIS")
+        logging.info("=" * 60)
+        
+        pos = tpos.detach().clone()
+        pos.requires_grad_(True)
+        original_device = pos.device
+        
+        steiner_topo_op = self.op_collections.steiner_topo_op
+        pin_pos_op = self.op_collections.pin_pos_op
+        l_shape_op = self.l_shape_routability_op
+        
+        # === Step 1: pos → pin_pos ===
+        logging.info("\n[Step 1] pos → pin_pos_op → pin_pos")
+        pin_pos = pin_pos_op(pos)
+        logging.info(f"  pin_pos.requires_grad: {pin_pos.requires_grad}")
+        logging.info(f"  pin_pos.grad_fn: {pin_pos.grad_fn}")
+        logging.info(f"  pin_pos.device: {pin_pos.device}")
+        
+        # === Step 2: pin_pos.cpu() → pin_pos_cpu ===
+        logging.info("\n[Step 2] pin_pos → pin_pos.cpu() → pin_pos_cpu")
+        if pin_pos.is_cuda:
+            pin_pos_cpu = pin_pos.cpu()
+            logging.info(f"  pin_pos_cpu.requires_grad: {pin_pos_cpu.requires_grad}")
+            logging.info(f"  pin_pos_cpu.grad_fn: {pin_pos_cpu.grad_fn}")
+        else:
+            pin_pos_cpu = pin_pos
+            logging.info(f"  pin_pos already on CPU")
+        
+        # === Step 3: pin_pos_cpu → steiner_topo_op → newx, newy ===
+        logging.info("\n[Step 3] pin_pos_cpu → steiner_topo_op → newx, newy (on CPU)")
+        newx, newy = steiner_topo_op(pin_pos_cpu)
+        logging.info(f"  newx.requires_grad: {newx.requires_grad}")
+        logging.info(f"  newy.requires_grad: {newy.requires_grad}")
+        logging.info(f"  newx.grad_fn: {newx.grad_fn}")
+        logging.info(f"  newx.device: {newx.device}")
+        
+        # === Step 4: newx, newy → segments (on CPU) ===
+        logging.info("\n[Step 4] newx, newy → segment_builder → segments (on CPU)")
+        
+        flat_pin_from = steiner_topo_op.flat_pin_from
+        flat_pin_to = steiner_topo_op.flat_pin_to
+        if flat_pin_from.is_cuda:
+            flat_pin_from = flat_pin_from.cpu()
+            flat_pin_to = flat_pin_to.cpu()
+        
+        if steiner_topo_op.edge_l_directions is not None:
+            l_directions = steiner_topo_op.edge_l_directions
+            if l_directions.is_cuda:
+                l_directions = l_directions.cpu()
+        else:
+            l_directions = torch.full((flat_pin_from.numel(),), -1, dtype=torch.int32, device=newx.device)
+        
+        segment_result = l_shape_op.segment_builder(newx, newy, flat_pin_from, flat_pin_to, l_directions)
+        
+        logging.info(f"  num_segments: {segment_result['num_segments']}")
+        if segment_result['num_segments'] > 0:
+            seg_llx = segment_result['segment_llx']
+            seg_lly = segment_result['segment_lly']
+            seg_size_x = segment_result['segment_size_x']
+            seg_size_y = segment_result['segment_size_y']
+            
+            logging.info(f"  segment_llx.requires_grad: {seg_llx.requires_grad}")
+            logging.info(f"  segment_size_x.requires_grad: {seg_size_x.requires_grad}")
+            logging.info(f"  segment_llx.grad_fn: {seg_llx.grad_fn}")
+            logging.info(f"  segment_llx.device: {seg_llx.device}")
+            
+            # === Step 5: segments → density_op → cost ===
+            logging.info("\n[Step 5] segments → density_op → cost")
+            segment_pos = segment_result['segment_pos']
+            logging.info(f"  segment_pos.requires_grad: {segment_pos.requires_grad}")
+            
+            # 移到CUDA（如果需要）
+            if original_device.type == 'cuda':
+                segment_pos = segment_pos.to(original_device)
+                seg_size_x = seg_size_x.to(original_device)
+                seg_size_y = seg_size_y.to(original_device)
+                logging.info(f"  Moved segments to CUDA for density_op")
+            
+            cost = l_shape_op.density_op(segment_pos, seg_size_x, seg_size_y)
+            logging.info(f"  cost.requires_grad: {cost.requires_grad}")
+            logging.info(f"  cost.grad_fn: {cost.grad_fn}")
+            logging.info(f"  cost.item(): {cost.item():.6e}")
+            
+            # === Step 6: 尝试backward ===
+            logging.info("\n[Step 6] Backward pass")
+            if pos.grad is not None:
+                pos.grad.zero_()
+            
+            try:
+                cost.backward()
+                grad_norm = pos.grad.norm().item() if pos.grad is not None else 0
+                num_nonzero = (pos.grad.abs() > 1e-10).sum().item() if pos.grad is not None else 0
+                logging.info(f"  ✓ backward succeeded")
+                logging.info(f"  pos.grad norm: {grad_norm:.6e}")
+                logging.info(f"  pos.grad non-zero count: {num_nonzero}/{pos.numel()}")
+            except Exception as e:
+                logging.error(f"  ✗ backward failed: {e}")
+        
+        # === 额外检查: 哪些cell有pin ===
+        logging.info("\n[Extra] Cell-Pin connectivity check")
+        num_movable_nodes = self.placedb.num_movable_nodes
+        pin2node_map = self.data_collections.pin2node_map
+        
+        # 统计每个movable cell有多少pin
+        movable_pin_counts = torch.zeros(num_movable_nodes, dtype=torch.long, device=pos.device)
+        for node_id in pin2node_map:
+            if node_id < num_movable_nodes:
+                movable_pin_counts[node_id] += 1
+        
+        cells_with_pins = (movable_pin_counts > 0).sum().item()
+        cells_without_pins = num_movable_nodes - cells_with_pins
+        logging.info(f"  Movable cells with pins: {cells_with_pins}")
+        logging.info(f"  Movable cells without pins: {cells_without_pins}")
+        
+        logging.info("=" * 60)
 
     def estimate_initial_learning_rate(self, x_k, lr):
         """

@@ -75,11 +75,19 @@ class EGRLDirectionResolver:
         net_data = defaultdict(lambda: {'wires': [], 'pins': []})
         current_net = None
         
+        # 头部说明行的关键词（用于跳过）
+        header_keywords = {'net_name', 'grid_x', 'grid_y', 'grid1_x', 'grid2_x', 
+                          'real_x', 'real_y', 'real1_x', 'real2_x', 'layer1', 'layer2'}
+        
         try:
             with open(guide_path, 'r') as f:
                 for line in f:
                     parts = line.strip().split()
                     if not parts:
+                        continue
+                    
+                    # 跳过头部说明行（包含 grid_x, net_name 等关键词）
+                    if len(parts) > 1 and parts[1] in header_keywords:
                         continue
                     
                     if parts[0] == 'guide':
@@ -286,7 +294,7 @@ class EGRLDirectionResolver:
     
     def resolve_l_directions(self, steiner_topo_op, guide_path=None):
         """
-        解析所有Steiner树边的L方向
+        解析所有Steiner树边的L方向（优化版本）
         
         Args:
             steiner_topo_op: SteinerTopo对象
@@ -314,41 +322,57 @@ class EGRLDirectionResolver:
         num_pins = self.placedb.num_pins
         num_nets = self.placedb.num_nets
         
+        # ========== 优化1: 预计算所有顶点的net_id ==========
+        vertex_to_net = self._precompute_vertex_to_net(num_pins, net_steiner_start, len(newx))
+        
+        # ========== 优化2: 向量化坐标转换 ==========
+        # DREAMPlace坐标 -> micron (一次性转换所有顶点)
+        scale = self.params.scale_factor
+        shift_x, shift_y = self.params.shift_factor
+        dbu = self.placedb.dbu
+        
+        newx_um = (newx / scale + shift_x) / dbu
+        newy_um = (newy / scale + shift_y) / dbu
+        
+        # ========== 优化3: 预构建 net_name -> net_data 的快速查找 ==========
+        # 将net_id直接映射到net_data（避免字符串查找）
+        net_id_to_data = {}
+        for net_id in range(num_nets):
+            net_name = self.placedb.net_names[net_id]
+            if isinstance(net_name, bytes):
+                net_name = net_name.decode('utf-8')
+            if net_name in self.egr_net_data:
+                net_id_to_data[net_id] = self.egr_net_data[net_name]
+        
+        # ========== 优化4: 向量化过滤无效边 ==========
+        valid_mask = (flat_pin_from >= 0) & (flat_pin_to >= 0)
+        valid_indices = np.where(valid_mask)[0]
+        
         # 结果数组
         l_directions = np.full(num_edges, self.UNKNOWN, dtype=np.int32)
         
         # 统计
         stats = {self.H_FIRST: 0, self.V_FIRST: 0, self.STRAIGHT: 0, self.FAKE_STRAIGHT: 0, self.UNKNOWN: 0}
         
-        for edge_idx in range(num_edges):
+        # ========== 优化5: 只遍历有效边 ==========
+        for edge_idx in valid_indices:
             from_idx = flat_pin_from[edge_idx]
             to_idx = flat_pin_to[edge_idx]
             
-            if from_idx == -1 or to_idx == -1:
-                continue
+            # 直接使用预计算的坐标（已转换为micron）
+            p1_um = (newx_um[from_idx], newy_um[from_idx])
+            p2_um = (newx_um[to_idx], newy_um[to_idx])
             
-            # 获取顶点坐标（DREAMPlace内部坐标）
-            p1_dp = (newx[from_idx], newy[from_idx])
-            p2_dp = (newx[to_idx], newy[to_idx])
-            
-            # 转换为micron
-            p1_um = self._coord_dp_to_micron(p1_dp[0], p1_dp[1])
-            p2_um = self._coord_dp_to_micron(p2_dp[0], p2_dp[1])
-            
-            # 找到对应的net
-            net_id = self._find_net_for_vertex(from_idx, num_pins, net_steiner_start)
+            # 使用预计算的 vertex -> net_id 映射
+            net_id = vertex_to_net[from_idx]
             if net_id < 0 or net_id >= num_nets:
                 continue
             
-            net_name = self.placedb.net_names[net_id]
-            if isinstance(net_name, bytes):
-                net_name = net_name.decode('utf-8')
-            
-            # 获取该net的EGR数据
-            if net_name not in self.egr_net_data:
+            # 使用预构建的 net_id -> net_data 映射（避免字符串查找）
+            if net_id not in net_id_to_data:
                 continue
             
-            net_data = self.egr_net_data[net_name]
+            net_data = net_id_to_data[net_id]
             
             # 判断L方向
             direction = self._determine_l_direction_for_edge(net_data, p1_um, p2_um)
@@ -361,6 +385,39 @@ class EGRLDirectionResolver:
         
         self.edge_l_directions = torch.from_numpy(l_directions)
         return self.edge_l_directions
+    
+    def _precompute_vertex_to_net(self, num_pins, net_steiner_start, num_vertices):
+        """
+        预计算所有顶点到net_id的映射
+        
+        Args:
+            num_pins: pin总数
+            net_steiner_start: 每个net的Steiner点起始索引
+            num_vertices: 顶点总数
+            
+        Returns:
+            numpy array: vertex_idx -> net_id
+        """
+        vertex_to_net = np.full(num_vertices, -1, dtype=np.int32)
+        
+        # Pin -> net (使用 pin2net_map)
+        pin2net = self.placedb.pin2net_map
+        if hasattr(pin2net, 'cpu'):
+            pin2net = pin2net.cpu().numpy()
+        elif hasattr(pin2net, '__iter__'):
+            pin2net = np.array(pin2net)
+        
+        vertex_to_net[:num_pins] = pin2net[:num_pins]
+        
+        # Steiner点 -> net (使用 net_steiner_start)
+        num_nets = len(net_steiner_start) - 1
+        for net_id in range(num_nets):
+            start = net_steiner_start[net_id]
+            end = net_steiner_start[net_id + 1]
+            if start < num_vertices and end <= num_vertices:
+                vertex_to_net[start:end] = net_id
+        
+        return vertex_to_net
     
     def _find_net_for_vertex(self, vertex_idx, num_pins, net_steiner_start):
         """

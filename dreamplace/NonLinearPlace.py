@@ -30,6 +30,8 @@ import pdb
 import dreamplace.ops.fence_region.fence_region as fence_region
 import math
 
+from dreamplace.ops.routability.egr_resample import create_supply_and_demand_maps_from_egr
+
 
 class NonLinearPlace(BasicPlace.BasicPlace):
     """
@@ -711,18 +713,18 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
                     # ========== L形Routability Density Objective ==========
                     # 根据overflow条件启用L形routability
-                    if getattr(params, 'l_shape_routability_flag', False):
-                        enable_l_shape_routability = False
+                    if params.l_shape_routability_flag == True:
                         
-                        # # 条件1: overflow足够小时启用
-                        # if cur_metric.overflow[-1] < getattr(params, 'l_shape_overflow_threshold', 0.2):
-                        #     enable_l_shape_routability = True
+                        if not model.enable_l_shape_routability:
+                            # 条件1: overflow足够小时启用
+                            if cur_metric.overflow[-1] < getattr(params, 'l_shape_overflow_threshold', 0.4):
+                                model.enable_l_shape_routability = True
+                            
+                            # # 条件2: 也可以根据iteration启用
+                            # if iteration >= getattr(params, 'l_shape_start_iteration', 100):
+                            #     model.enable_l_shape_routability = True
                         
-                        # 条件2: 也可以根据iteration启用（可选）
-                        if iteration >= getattr(params, 'l_shape_start_iteration', 100):
-                            enable_l_shape_routability = True
-                        
-                        if enable_l_shape_routability and not model.use_l_shape_routability:
+                        if model.enable_l_shape_routability and not model.use_l_shape_routability:
                             # 首次启用L形routability
                             t_l_shape_init = time.time()
                             
@@ -745,6 +747,38 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 os.path.dirname(os.path.dirname(os.path.dirname(params.result_dir))), 
                                 "iEDA/data/rt/rt_temp_directory/early_router/route_planar.guide"
                             )
+
+                                    
+                            
+                            egr_dir = os.path.join(
+                                os.path.dirname(os.path.dirname(os.path.dirname(params.result_dir))), 
+                                "iEDA/data/rt/rt_temp_directory/early_router/"
+                            )
+
+                            L_shape_num_bins_x = 359
+                            L_shape_num_bins_y = 359
+
+                            # 获取 supply_map / demand_map 和 wire_width (基于 GCell 最小边长)
+                            supply_map, demand_map, wire_width = create_supply_and_demand_maps_from_egr(
+                                egr_dir=egr_dir,
+                                placedb=placedb,
+                                params=params,
+                                num_bins_x=L_shape_num_bins_x,
+                                num_bins_y=L_shape_num_bins_y,
+                                layer='planar',  
+                                normalize_supply=False,
+                                normalize_demand=False,
+                                return_wire_width=True  # 返回基于 GCell 尺寸的 wire_width
+                            )
+                            
+                            # # plot supply map (for debugging)
+                            # plt.imshow(supply_map.cpu().numpy(), cmap="binary", interpolation="nearest", origin="lower")
+                            # plt.colorbar(label="Supply")
+                            # plt.title("EGR Supply Map")
+                            # plt.xlabel("Bin X")
+                            # plt.ylabel("Bin Y")
+                            # plt.savefig("supply_map.png")
+                            # exit(0)
                             
                             # Step 4: 解析EGR L方向
                             steiner_topo_op = self.op_collections.steiner_topo_op
@@ -839,14 +873,58 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             # Step 5: 初始化L形routability模块
 
                             model.init_l_shape_routability(
-                                wire_width=1,
-                                num_bins_x=params.route_num_bins_x,
-                                num_bins_y=params.route_num_bins_y
+                                wire_width=wire_width,  # 使用 GCell 最小边长作为 wire_width
+                                num_bins_x=L_shape_num_bins_x,
+                                num_bins_y=L_shape_num_bins_y,
+                                target_density=supply_map,  # 使用 EGR supply map 作为 target density
+                                target_demand=demand_map    # 使用 EGR net map 作为 demand 标定
                             )
                             
                             logging.info(f"L-shape routability enabled at iteration {iteration}, "
                                         f"overflow={cur_metric.overflow[-1]:.4f}, "
                                         f"init time={((time.time() - t_l_shape_init) * 1000):.2f}ms")
+                            
+                            # ========== 梯度正确性检查 (可选) ==========
+                            if getattr(params, 'l_shape_gradient_check', False):
+                                # 1. 运行梯度链诊断
+                                logging.info("Running L-shape gradient chain diagnosis...")
+                                model.diagnose_l_shape_gradient_chain(pos)
+                                
+                                # 2. 运行梯度问题诊断（检查边界问题）
+                                logging.info("Running L-shape gradient issues diagnosis...")
+                                model.diagnose_l_shape_gradient_issues(pos)
+                                
+                                # 3. 运行梯度方向检查（更实用）
+                                logging.info("Running L-shape gradient direction check...")
+                                direction_results = model.check_l_shape_gradient_direction(
+                                    pos, 
+                                    step_sizes=[0.1, 1.0, 10.0, 100.0]
+                                )
+                                
+                                # 4. 可选：运行数值梯度检查（对bin-based函数可能失败）
+                                logging.info("Running L-shape gradient numerical check...")
+                                logging.info("Note: Numerical check may fail for bin-based density functions")
+                                grad_check_results = model.check_l_shape_gradient_numerical(
+                                    pos, 
+                                    num_check=200,  # 检查200个位置
+                                    eps=1e-3,       # 有限差分步长
+                                    check_movable_only=True,
+                                    verbose=True
+                                )
+                                
+                                # 保存结果到文件
+                                import json
+                                results_to_save = {
+                                    'direction_check': direction_results,
+                                    'numerical_check': grad_check_results
+                                }
+                                grad_check_path = os.path.join(params.result_dir, "l_shape_grad_check.json")
+                                with open(grad_check_path, 'w') as f:
+                                    json.dump(results_to_save, f, indent=2)
+                                logging.info(f"Gradient check results saved to {grad_check_path}")
+
+                                exit(0)
+                            # =============================================
                             
                             # 可视化L形密度图和segments
                             if params.l_shape_plot_flag:
@@ -885,8 +963,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 
                             # exit(0)
                         # 定期更新Steiner树和L方向（每N次迭代）
-                        elif model.use_l_shape_routability and (iteration % getattr(params, 'l_shape_update_interval', 50) == 0):
+                        elif model.use_l_shape_routability and (iteration % getattr(params, 'l_shape_update_interval', 10) == 0):
                             t_l_shape_update = time.time()
+                            
+                            # 重置L形segment缓存（EGR将重新运行）
+                            if model.l_shape_routability_op is not None:
+                                model.l_shape_routability_op.segment_builder.reset_cache()
                             
                             with torch.no_grad():
                                 pin_pos = self.op_collections.pin_pos_op(pos)
@@ -925,7 +1007,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                         )
                                         plot_segment_density_map(
                                             density_map, density_plot_path,
-                                            title=f"L-shape Density (iter={iteration})"
+                                            title=f"L-shape Density (iter={iteration})",
+                                            colormap="binary"
                                         )
                                     
                                     # 绘制L形segments
@@ -1120,6 +1203,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     num_area_adjust = 0
 
                 Llambda_flat_iteration = 0
+
+                # L-shape routability 状态初始化
+                model.enable_l_shape_routability = False
 
                 # preparation for self-adaptive divergence check
                 overflow_list = [1]

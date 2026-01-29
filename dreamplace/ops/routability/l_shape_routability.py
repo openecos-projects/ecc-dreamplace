@@ -52,7 +52,7 @@ class LShapeRoutabilityOp(nn.Module):
     """
     
     def __init__(self, placedb, params, wire_width=None, num_bins_x=64, num_bins_y=64,
-                 density_mode="electric", target_density=1.0):
+                 density_mode="electric", target_density=1.0, target_demand=None):
         """
         Args:
             placedb: placement database
@@ -61,6 +61,7 @@ class LShapeRoutabilityOp(nn.Module):
             num_bins_x, num_bins_y: 密度计算的bin数量
             density_mode: 密度计算模式 ("rudy" 或 "electric")
             target_density: 目标密度 (用于electric模式)
+            target_demand: 目标需求 (EGR net map，用于electric模式的单位标定)
         """
         super(LShapeRoutabilityOp, self).__init__()
         
@@ -81,19 +82,22 @@ class LShapeRoutabilityOp(nn.Module):
         
         # 根据模式选择密度计算器
         if density_mode == "electric":
-            # C++/CUDA电势场模型
+
             self.density_op = create_l_shape_electric_potential(
                 placedb,
                 num_bins_x=num_bins_x,
                 num_bins_y=num_bins_y,
                 target_density=target_density,
+                target_demand=target_demand,
+                # padding=1,  # 边界填充
                 fast_mode=False
             )
             self.overflow_op = create_l_shape_electric_overflow(
                 placedb,
                 num_bins_x=num_bins_x,
                 num_bins_y=num_bins_y,
-                target_density=target_density
+                target_density=target_density,
+                # padding=1  # 边界填充
             )
             logger.info(f"Using C++/CUDA electric potential for routability")
         else:
@@ -111,6 +115,12 @@ class LShapeRoutabilityOp(nn.Module):
         
         self.num_bins_x = num_bins_x
         self.num_bins_y = num_bins_y
+        
+        # 存储边界信息用于clamp
+        self.xl = placedb.xl
+        self.yl = placedb.yl
+        self.xh = placedb.xh
+        self.yh = placedb.yh
         
         # 缓存
         self.cached_segments = None
@@ -130,50 +140,72 @@ class LShapeRoutabilityOp(nn.Module):
             routability_cost: 可微的代价值
         """
         tt = time.time()
-        device = pos.device
+        original_device = pos.device
+        
+        # ========== 关键修复: 保持梯度链完整 ==========
+        # steiner_topo_op 只支持CPU，所以我们需要：
+        # 1. 计算pin_pos (CUDA)
+        # 2. Clamp pin_pos到芯片边界内（防止out-of-bound）
+        # 3. 将pin_pos移到CPU (保持梯度)
+        # 4. 在CPU上调用steiner_topo_op
+        # 5. 在CPU上计算segments和density
+        # 6. 将结果移回CUDA
         
         # 1. 计算pin位置
         pin_pos = pin_pos_op(pos)
         
-        # 2. 计算Steiner点坐标（steiner_topo_op要求CPU tensor）
-        pin_pos_cpu = pin_pos.cpu() if pin_pos.is_cuda else pin_pos
+        # 2. Clamp pin位置到芯片边界内（保持可微）
+        # 这防止优化器把cell推出边界导致segment超出范围
+        num_pins = pin_pos.numel() // 2
+        pin_x = pin_pos[:num_pins]
+        pin_y = pin_pos[num_pins:]        
+        pin_x = torch.clamp(pin_x, min=self.xl, max=self.xh)
+        pin_y = torch.clamp(pin_y, min=self.yl, max=self.yh)
+        pin_pos = torch.cat([pin_x, pin_y], dim=0)
+        
+        # 3. 将pin_pos移到CPU（保持梯度连接）
+        if pin_pos.is_cuda:
+            pin_pos_cpu = pin_pos.cpu()  # .cpu() 会创建 ToCopyBackward，梯度可以流回
+        else:
+            pin_pos_cpu = pin_pos
+        
+        # 4. 调用steiner_topo_op (在CPU上)
         newx, newy = steiner_topo_op(pin_pos_cpu)
+                
+        # Clamp newx, newy到边界内（Steiner点也可能超出边界）
+        newx = torch.clamp(newx, min=self.xl, max=self.xh)
+        newy = torch.clamp(newy, min=self.yl, max=self.yh)
         
-        # 将结果移回原设备
-        if device.type == 'cuda':
-            newx = newx.to(device)
-            newy = newy.to(device)
-        
-        # 3. 获取边信息
+        # 5. 获取边信息（确保在CPU上）
         flat_pin_from = steiner_topo_op.flat_pin_from
         flat_pin_to = steiner_topo_op.flat_pin_to
         
         if flat_pin_from is None or flat_pin_to is None:
             logger.warning("Steiner edges not available, returning zero cost")
-            return torch.zeros(1, dtype=pos.dtype, device=pos.device)
+            return torch.zeros(1, dtype=pos.dtype, device=original_device, requires_grad=True)
         
-        # 确保边信息在正确的设备上
-        if flat_pin_from.device != device:
-            flat_pin_from = flat_pin_from.to(device)
-        if flat_pin_to.device != device:
-            flat_pin_to = flat_pin_to.to(device)
+        # 确保边信息在CPU上（与newx, newy一致）
+        if flat_pin_from.is_cuda:
+            flat_pin_from = flat_pin_from.cpu()
+        if flat_pin_to.is_cuda:
+            flat_pin_to = flat_pin_to.cpu()
         
-        # 4. 获取L方向信息
+        # 5. 获取L方向信息
         if use_l_direction and hasattr(steiner_topo_op, 'edge_l_directions') and steiner_topo_op.edge_l_directions is not None:
             l_directions = steiner_topo_op.edge_l_directions
-            # 确保L方向在正确的设备上
-            if l_directions.device != device:
-                l_directions = l_directions.to(device)
+            # 确保L方向在CPU上
+            if l_directions.is_cuda:
+                l_directions = l_directions.cpu()
             logger.debug(f"Using EGR L-directions: {len(l_directions)} edges")
         else:
             # 没有L方向信息，使用默认（全部UNKNOWN，会被当作H_FIRST处理）
             l_directions = torch.full(
                 (flat_pin_from.numel(),), UNKNOWN,
-                dtype=torch.int32, device=device
+                dtype=torch.int32, device=newx.device  # CPU
             )
             logger.debug("No L-direction info, using default H_FIRST")
         
-        # 5. 构建L形segments
+        # 6. 构建L形segments（在CPU上）
         segment_result = self.segment_builder(
             newx, newy, flat_pin_from, flat_pin_to, l_directions
         )
@@ -181,7 +213,7 @@ class LShapeRoutabilityOp(nn.Module):
         num_segments = segment_result['num_segments']
         if num_segments == 0:
             logger.warning("No valid segments built")
-            return torch.zeros(1, dtype=pos.dtype, device=pos.device)
+            return torch.zeros(1, dtype=pos.dtype, device=original_device, requires_grad=True)
         
         # 保存缓存（包含绘图所需的原始数据）
         self.cached_segments = segment_result
@@ -191,7 +223,7 @@ class LShapeRoutabilityOp(nn.Module):
         self.cached_segments['flat_to'] = flat_pin_to.detach()
         self.cached_segments['l_directions'] = l_directions.detach()
         
-        # 6. 计算密度代价
+        # 7. 计算密度代价（在CPU上）
         segment_pos = segment_result['segment_pos']
         segment_size_x = segment_result['segment_size_x']
         segment_size_y = segment_result['segment_size_y']
@@ -199,10 +231,19 @@ class LShapeRoutabilityOp(nn.Module):
         # 根据模式选择计算方式
         if self.density_mode == "electric":
             # 使用C++/CUDA电势场模型
+            # 如果density_op支持CUDA，将数据移到CUDA
+            if original_device.type == 'cuda':
+                segment_pos = segment_pos.to(original_device)
+                segment_size_x = segment_size_x.to(original_device)
+                segment_size_y = segment_size_y.to(original_device)
             cost = self.density_op(segment_pos, segment_size_x, segment_size_y)
         else:
             # 使用Python RUDY密度的energy模式
             cost = self.density_op(segment_pos, segment_size_x, segment_size_y, mode="energy")
+        
+        # 确保cost在原始设备上
+        if cost.device != original_device:
+            cost = cost.to(original_device)
         
         logger.debug(f"L-shape routability cost: {cost.item():.4f}, "
                     f"{num_segments} segments, {(time.time() - tt) * 1000:.2f} ms")
@@ -221,9 +262,21 @@ class LShapeRoutabilityOp(nn.Module):
         # 复用forward的逻辑，但使用density模式
         pin_pos = pin_pos_op(pos)
         
+        # Clamp pin位置到边界内
+        num_pins = pin_pos.numel() // 2
+        pin_x = pin_pos[:num_pins]
+        pin_y = pin_pos[num_pins:]
+        pin_x = torch.clamp(pin_x, min=self.xl, max=self.xh)
+        pin_y = torch.clamp(pin_y, min=self.yl, max=self.yh)
+        pin_pos = torch.cat([pin_x, pin_y], dim=0)
+        
         # steiner_topo_op要求CPU tensor
         pin_pos_cpu = pin_pos.cpu() if pin_pos.is_cuda else pin_pos
         newx, newy = steiner_topo_op(pin_pos_cpu)
+        
+        # Clamp Steiner点到边界内
+        newx = torch.clamp(newx, min=self.xl, max=self.xh)
+        newy = torch.clamp(newy, min=self.yl, max=self.yh)
         
         # 将结果移回原设备
         if device.type == 'cuda':
@@ -335,7 +388,8 @@ class LShapeRoutabilityMixin:
     
     def init_l_shape_routability(self, placedb, params, wire_width=None, 
                                   num_bins_x=64, num_bins_y=64,
-                                  density_mode="electric", target_density=1.0):
+                                  density_mode="electric", target_density=1.0,
+                                  target_demand=None):
         """
         初始化L形routability模块
         
@@ -346,10 +400,12 @@ class LShapeRoutabilityMixin:
             num_bins_x, num_bins_y: 密度计算的bin数量
             density_mode: 密度计算模式 ("rudy" 或 "electric")
             target_density: 目标密度
+            target_demand: 目标需求 (EGR net map)
         """
         self.l_shape_routability_op = LShapeRoutabilityOp(
             placedb, params, wire_width, num_bins_x, num_bins_y,
-            density_mode=density_mode, target_density=target_density
+            density_mode=density_mode, target_density=target_density,
+            target_demand=target_demand
         )
         self.use_l_shape_routability = True
         self.l_shape_routability_weight = getattr(params, 'l_shape_routability_weight', 1.0)
@@ -385,7 +441,8 @@ class LShapeRoutabilityMixin:
 
 def create_l_shape_routability_op(placedb, params, wire_width=None, 
                                    num_bins_x=64, num_bins_y=64,
-                                   density_mode="electric", target_density=1.0):
+                                   density_mode="electric", target_density=1.0,
+                                   target_demand=None):
     """
     工厂函数：创建LShapeRoutabilityOp
     
@@ -396,13 +453,15 @@ def create_l_shape_routability_op(placedb, params, wire_width=None,
         num_bins_x, num_bins_y: 密度计算的bin数量
         density_mode: 密度计算模式 ("rudy" 或 "electric")
         target_density: 目标密度
+        target_demand: 目标需求 (EGR net map)
         
     Returns:
         LShapeRoutabilityOp
     """
     return LShapeRoutabilityOp(
         placedb, params, wire_width, num_bins_x, num_bins_y,
-        density_mode=density_mode, target_density=target_density
+        density_mode=density_mode, target_density=target_density,
+        target_demand=target_demand
     )
 
 

@@ -775,27 +775,27 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 return_wire_width=True  # fallback: GCell 尺寸的 wire_width
                             )
 
-                            # 使用 placedb 计算 supply_map（替代 EGR supply）
-                            lef_path = "/nfs/share/home/qiming/0924/N551P6M_cmax.lef"
-                            supply_map = create_supply_map_from_gcellinfo_and_lef(
-                                egr_dir=egr_dir,
-                                lef_path=lef_path,
-                                placedb=placedb,
-                                params=params,
-                                num_bins_x=L_shape_num_bins_x,
-                                num_bins_y=L_shape_num_bins_y,
-                                device=None,
-                                dtype=None,
-                                normalize=False,
-                                wire_width=None
-                            )
+                            # 使用 placedb 计算 supply_map
+                            # lef_path = "/nfs/share/home/qiming/0924/N551P6M_cmax.lef"
+                            # supply_map = create_supply_map_from_gcellinfo_and_lef(
+                            #     egr_dir=egr_dir,
+                            #     lef_path=lef_path,
+                            #     placedb=placedb,
+                            #     params=params,
+                            #     num_bins_x=L_shape_num_bins_x,
+                            #     num_bins_y=L_shape_num_bins_y,
+                            #     device=None,
+                            #     dtype=None,
+                            #     normalize=False,
+                            #     wire_width=None
+                            # )
 
                             # print("wire_width:", wire_width)
-                            # min_wire_widths = getattr(placedb, "min_wire_widths", None)
-                            # if min_wire_widths is None:
-                            #     logging.info("min_wire_widths len=0, head=[]")
-                            # else:
-                            #     logging.info(f"min_wire_widths len={len(min_wire_widths)}, head={min_wire_widths[:5]}")
+                            min_wire_widths = getattr(placedb, "min_wire_widths", None)
+                            if min_wire_widths is None:
+                                logging.info("min_wire_widths len=0, head=[]")
+                            else:
+                                logging.info(f"min_wire_widths len={len(min_wire_widths)}, head={min_wire_widths[:5]}")
 
                             # Prefer LEF min wire width from placedb if available (already scaled)
                             # if getattr(placedb, "min_wire_widths", None) is not None and len(placedb.min_wire_widths) > 0:

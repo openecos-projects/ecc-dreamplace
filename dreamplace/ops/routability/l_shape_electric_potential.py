@@ -299,15 +299,92 @@ class SegmentElectricPotentialFunction(Function):
         bin_area = bin_size_x * bin_size_y
         
         if isinstance(target_density, torch.Tensor) and target_density.dim() == 2:
-            # Scheme A: supply_map already in area units; use direct overflow without calibration.
-            supply_map = target_density
+                        
+            supply_map = target_density  
             logger.info(
                 f"[L-shape supply/demand] demand_sum={density_map.sum().item():.3e}, "
                 f"supply_sum={supply_map.sum().item():.3e}, "
                 f"ratio={density_map.sum().item() / max(supply_map.sum().item(), 1e-9):.2f}"
             )
-            overflow_map = density_map - supply_map * 10
-            overflow_map.clamp_(min=0)
+            
+            if isinstance(target_demand, torch.Tensor) and target_demand.dim() == 2:
+                # Scheme 3: Calibrate area_per_track once using EGR net_map (demand map)
+                total_density = density_map.sum()
+                total_demand = target_demand.sum()
+                
+                if total_demand > 0 and total_density > 0:
+                    # Initialize area_per_track once (persistent buffer)
+                    if isinstance(area_per_track, torch.Tensor) and area_per_track.numel() == 1:
+                        if (area_per_track <= 0).all():
+                            area_per_track.fill_(total_density / total_demand)
+                        calibrated_area_per_track = area_per_track
+                    else:
+                        calibrated_area_per_track = total_density / total_demand
+                    
+                    # Convert density (area) to demand (track equivalents)
+                    demand_in_tracks = density_map / calibrated_area_per_track
+                    # Compute utilization per bin for debugging
+                    utilization = demand_in_tracks / supply_map.clamp(min=1e-6)
+                    # Overflow in track units: positive means congestion (utilization > 1)
+                    overflow_in_tracks = (demand_in_tracks - supply_map).clamp(min=0)
+                
+                    # Convert back to area units for gradient consistency
+                    overflow_map = overflow_in_tracks * calibrated_area_per_track
+                    
+                    # Debug logging
+                    logger.debug(f"Calibration(net_map): area_per_track={calibrated_area_per_track:.3f}, "
+                                f"utilization: mean={utilization.mean():.2f}, max={utilization.max():.2f}, "
+                                f"overflow_bins={(overflow_in_tracks > 0).sum().item()}/{overflow_map.numel()}")
+                else:
+                    # Fallback: use density map directly
+                    overflow_map = density_map
+                    logger.debug("Fallback: using density map directly (net_map or density is zero)")
+            else:
+                # Fallback to utilization-based calibration (legacy)
+                # Target utilization: what fraction of supply should demand use on average
+                # Lower value = more aggressive spreading (easier to trigger overflow)
+                target_utilization = 0.8  # TODO: make this configurable
+                
+                # Compute calibration factor
+                total_density = density_map.sum()
+                total_supply = supply_map.sum()
+                
+                if total_supply > 0 and total_density > 0:
+                    # area_per_track: how much segment area corresponds to 1 track
+                    # At target_utilization, total demand_in_tracks = target_utilization * total_supply
+                    # So: total_density / k = target_utilization * total_supply
+                    # => k = total_density / (target_utilization * total_supply)
+                    calibrated_area_per_track = total_density / (target_utilization * total_supply)
+                    
+                    # Convert density (area) to demand (track equivalents)
+                    if hv_split and density_map_h is not None and density_map_v is not None:
+                        demand_in_tracks_h = density_map_h / calibrated_area_per_track
+                        demand_in_tracks_v = density_map_v / calibrated_area_per_track
+                        supply_h = supply_map * 0.5
+                        supply_v = supply_map * 0.5
+                        overflow_in_tracks_h = (demand_in_tracks_h - supply_h)
+                        overflow_in_tracks_v = (demand_in_tracks_v - supply_v)
+                        overflow_in_tracks = overflow_in_tracks_h + overflow_in_tracks_v
+                        utilization = (demand_in_tracks_h + demand_in_tracks_v) / supply_map.clamp(min=1e-6)
+                    else:
+                        demand_in_tracks = density_map / calibrated_area_per_track
+                        # Compute utilization per bin for debugging
+                        utilization = demand_in_tracks / supply_map.clamp(min=1e-6)
+                        # Overflow in track units: positive means congestion (utilization > 1)
+                        overflow_in_tracks = (demand_in_tracks - supply_map)
+                    
+                    # Convert back to area units for gradient consistency
+                    overflow_map = overflow_in_tracks * calibrated_area_per_track
+                    
+                    # Debug logging
+                    logger.debug(f"Calibration(legacy): area_per_track={calibrated_area_per_track:.3f}, "
+                                f"target_util={target_utilization}, "
+                                f"utilization: mean={utilization.mean():.2f}, max={utilization.max():.2f}, "
+                                f"overflow_bins={(overflow_in_tracks > 0).sum().item()}/{overflow_map.numel()}")
+                else:
+                    # Fallback: use density map directly
+                    overflow_map = density_map
+                    logger.debug("Fallback: using density map directly (supply or density is zero)")
         else:
             # Uniform target_density (scalar): use original density map
             # This is the standard electric potential without supply-aware adjustment

@@ -97,8 +97,12 @@ class LShapeSegmentBuilder:
             # 判断是否是直线（水平或垂直）
             is_horizontal_line = torch.abs(y1 - y2) < 1e-6
             is_vertical_line = torch.abs(x1 - x2) < 1e-6
+            # 如果l_dir标记为STRAIGHT但几何上是斜线，强制按L形处理
+            is_straight = (is_horizontal_line or is_vertical_line) or (
+                l_dir == STRAIGHT and (is_horizontal_line or is_vertical_line)
+            )
             
-            if is_horizontal_line or is_vertical_line or l_dir == STRAIGHT:
+            if is_straight:
                 # 直线段：创建一个segment
                 seg_llx, seg_lly, seg_sx, seg_sy, seg_is_h = self._create_segment(
                     x1, y1, x2, y2, half_width
@@ -111,6 +115,9 @@ class LShapeSegmentBuilder:
                 segment_is_horizontal_list.append(seg_is_h)
             else:
                 # L形：根据方向确定拐点，拆分为两个segment
+                # STRAIGHT但为斜线时，默认按H_FIRST处理
+                if l_dir == STRAIGHT:
+                    l_dir = H_FIRST
                 if l_dir == H_FIRST:
                     # 先水平后垂直，拐点在 (x2, y1)
                     corner_x, corner_y = x2, y1
@@ -276,8 +283,14 @@ def build_l_shape_segments_vectorized(newx, newy, flat_from, flat_to, l_directio
     # 判断边的类型
     is_horizontal_line = torch.abs(y1 - y2) < 1e-6
     is_vertical_line = torch.abs(x1 - x2) < 1e-6
-    is_straight = is_horizontal_line | is_vertical_line | (valid_l_dir == STRAIGHT)
-    is_upper_l = (~is_straight) & ((valid_l_dir == H_FIRST) | (valid_l_dir == UNKNOWN))
+    # 如果l_dir标记为STRAIGHT但几何上为斜线，强制按L形处理
+    straight_by_dir = (valid_l_dir == STRAIGHT)
+    diag_straight = straight_by_dir & ~(is_horizontal_line | is_vertical_line)
+    is_straight = (is_horizontal_line | is_vertical_line) | (straight_by_dir & ~diag_straight)
+    # 对斜线但被标记为STRAIGHT的边，默认按H_FIRST处理
+    is_upper_l = (~is_straight) & (
+        (valid_l_dir == H_FIRST) | (valid_l_dir == UNKNOWN) | diag_straight
+    )
     is_lower_l = (~is_straight) & ((valid_l_dir == V_FIRST) | (valid_l_dir == FAKE_STRAIGHT))
     
     # 计算拐点坐标
@@ -542,9 +555,12 @@ class LShapeSegmentOp:
         # 判断几何上的直线
         is_horizontal_line = torch.abs(y1 - y2) < 1e-6
         is_vertical_line = torch.abs(x1 - x2) < 1e-6
-        is_straight = is_horizontal_line | is_vertical_line | is_straight_by_dir
+        # 如果l_dir标记为STRAIGHT但几何上为斜线，强制按L形处理
+        diag_straight = is_straight_by_dir & ~(is_horizontal_line | is_vertical_line)
+        is_straight = (is_horizontal_line | is_vertical_line) | (is_straight_by_dir & ~diag_straight)
         
-        is_upper_l = (~is_straight) & is_h_first
+        # 对斜线但被标记为STRAIGHT的边，默认按H_FIRST处理
+        is_upper_l = (~is_straight) & (is_h_first | diag_straight)
         is_lower_l = (~is_straight) & is_v_first
         
         # 计算拐点坐标

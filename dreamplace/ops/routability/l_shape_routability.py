@@ -115,16 +115,94 @@ class LShapeRoutabilityOp(nn.Module):
         
         self.num_bins_x = num_bins_x
         self.num_bins_y = num_bins_y
+        self.bin_size_x = (placedb.xh - placedb.xl) / num_bins_x
+        self.bin_size_y = (placedb.yh - placedb.yl) / num_bins_y
         
-        # 存储边界信息用于clamp
-        self.xl = placedb.xl
-        self.yl = placedb.yl
-        self.xh = placedb.xh
-        self.yh = placedb.yh
+        # 存储边界信息用于OOB检查（优先 routing grid）
+        self.xl = getattr(placedb, "routing_grid_xl", placedb.xl)
+        self.yl = getattr(placedb, "routing_grid_yl", placedb.yl)
+        self.xh = getattr(placedb, "routing_grid_xh", placedb.xh)
+        self.yh = getattr(placedb, "routing_grid_yh", placedb.yh)
         
         # 缓存
         self.cached_segments = None
         self.cached_density_map = None
+
+    def _build_vertex_to_net(self, steiner_topo_op, num_vertices):
+        """Build vertex->net mapping for pins and Steiner points."""
+        vertex_to_net = torch.full((num_vertices,), -1, dtype=torch.int32)
+        num_pins = self.placedb.num_pins
+        pin2net = self.placedb.pin2net_map
+        if hasattr(pin2net, "__len__") and len(pin2net) >= num_pins:
+            vertex_to_net[:num_pins] = torch.tensor(pin2net[:num_pins], dtype=torch.int32)
+
+        net_steiner_start = getattr(steiner_topo_op, "net_steiner_start", None)
+        if net_steiner_start is not None:
+            if hasattr(net_steiner_start, "cpu"):
+                ns = net_steiner_start.cpu().numpy()
+            else:
+                ns = net_steiner_start
+            if len(ns) >= 2:
+                for net_id in range(len(ns) - 1):
+                    s = int(ns[net_id])
+                    e = int(ns[net_id + 1])
+                    if s < e and s < num_vertices:
+                        vertex_to_net[s:min(e, num_vertices)] = net_id
+        return vertex_to_net
+
+    def _debug_abnormal_segments(self, segment_result, steiner_topo_op, flat_pin_from, flat_pin_to, newx, newy):
+        """Log segments that look abnormally 'fat' to locate bad edges/nets."""
+        if not getattr(self.params, "l_shape_debug_segments", False):
+            return
+        seg_size_x = segment_result["segment_size_x"]
+        seg_size_y = segment_result["segment_size_y"]
+        seg_edge_idx = segment_result.get("segment_edge_idx", None)
+        if seg_edge_idx is None or seg_edge_idx.numel() == 0:
+            return
+        min_side = torch.minimum(seg_size_x, seg_size_y)
+        min_bin = min(self.bin_size_x, self.bin_size_y)
+        thresh = max(3.0 * float(self.wire_width), 0.5 * float(min_bin))
+        abnormal_mask = min_side > thresh
+        if abnormal_mask.sum().item() == 0:
+            logger.info(f"L-shape debug: no abnormal segments (min_side > {thresh:.3f})")
+            return
+
+        idx = torch.nonzero(abnormal_mask, as_tuple=True)[0]
+        area = seg_size_x * seg_size_y
+        topk = int(getattr(self.params, "l_shape_debug_topk", 20))
+        if idx.numel() > topk:
+            _, sel = torch.topk(area[idx], k=topk)
+            idx = idx[sel]
+
+        vertex_to_net = self._build_vertex_to_net(steiner_topo_op, newx.numel())
+        net_names = getattr(self.placedb, "net_names", [])
+        seg_llx = segment_result.get("segment_llx", None)
+        seg_lly = segment_result.get("segment_lly", None)
+
+        logger.warning(
+            f"L-shape debug: {idx.numel()} abnormal segments (min_side > {thresh:.3f}); "
+            f"wire_width={self.wire_width:.3f}, bin=({self.bin_size_x:.3f},{self.bin_size_y:.3f})"
+        )
+        for seg_i in idx.tolist():
+            edge_idx = int(seg_edge_idx[seg_i].item())
+            if edge_idx < 0 or edge_idx >= flat_pin_from.numel():
+                continue
+            v1 = int(flat_pin_from[edge_idx].item())
+            v2 = int(flat_pin_to[edge_idx].item())
+            net_id = int(vertex_to_net[v1].item()) if v1 < vertex_to_net.numel() else -1
+            net_name = ""
+            if 0 <= net_id < len(net_names):
+                net_name = net_names[net_id]
+                if isinstance(net_name, bytes):
+                    net_name = net_name.decode("utf-8")
+            llx = float(seg_llx[seg_i].item()) if seg_llx is not None else float("nan")
+            lly = float(seg_lly[seg_i].item()) if seg_lly is not None else float("nan")
+            logger.warning(
+                f"[L-shape debug] seg={seg_i} edge={edge_idx} net={net_id}({net_name}) "
+                f"v1={v1} v2={v2} size=({seg_size_x[seg_i]:.3f},{seg_size_y[seg_i]:.3f}) "
+                f"ll=({llx:.3f},{lly:.3f}) "
+                f"p1=({newx[v1]:.3f},{newy[v1]:.3f}) p2=({newx[v2]:.3f},{newy[v2]:.3f})"
+            )
     
     def forward(self, pos, steiner_topo_op, pin_pos_op, use_l_direction=True):
         """
@@ -144,24 +222,42 @@ class LShapeRoutabilityOp(nn.Module):
         
         # ========== 关键修复: 保持梯度链完整 ==========
         # steiner_topo_op 只支持CPU，所以我们需要：
-        # 1. 计算pin_pos (CUDA)
-        # 2. Clamp pin_pos到芯片边界内（防止out-of-bound）
+        # 1. 检查pos是否越界（仅movable）
+        # 2. 计算pin_pos（不再clamp）
         # 3. 将pin_pos移到CPU (保持梯度)
         # 4. 在CPU上调用steiner_topo_op
         # 5. 在CPU上计算segments和density
         # 6. 将结果移回CUDA
         
-        # 1. 计算pin位置
+        # 1. 检查pos是否越界（仅检查movable节点）
+        num_nodes = pos.numel() // 2
+        num_movable = min(self.placedb.num_movable_nodes, num_nodes)
+        pos_x = pos[:num_nodes][:num_movable]
+        pos_y = pos[num_nodes:][:num_movable]
+        oob_xl = (pos_x < self.xl)
+        oob_xh = (pos_x > self.xh)
+        oob_yl = (pos_y < self.yl)
+        oob_yh = (pos_y > self.yh)
+        oob_cnt = (oob_xl | oob_xh | oob_yl | oob_yh).sum().item()
+        if oob_cnt > 0:
+            max_dx = torch.max(
+                torch.clamp(self.xl - pos_x, min=0),
+                torch.clamp(pos_x - self.xh, min=0),
+            ).max().item()
+            max_dy = torch.max(
+                torch.clamp(self.yl - pos_y, min=0),
+                torch.clamp(pos_y - self.yh, min=0),
+            ).max().item()
+            logger.warning(
+                f"L-shape: pos OOB {oob_cnt}/{num_movable} (max_dx={max_dx:.3f}, max_dy={max_dy:.3f})"
+            )
+
+        # 2. 计算pin位置并clamp到边界（防止out-of-bound）
         pin_pos = pin_pos_op(pos)
-        
-        # 2. Clamp pin位置到芯片边界内（保持可微）
-        # 这防止优化器把cell推出边界导致segment超出范围
         num_pins = pin_pos.numel() // 2
-        pin_x = pin_pos[:num_pins]
-        pin_y = pin_pos[num_pins:]        
-        pin_x = torch.clamp(pin_x, min=self.xl, max=self.xh)
-        pin_y = torch.clamp(pin_y, min=self.yl, max=self.yh)
-        pin_pos = torch.cat([pin_x, pin_y], dim=0)
+        pin_pos_x = pin_pos[:num_pins].clamp(self.xl, self.xh)
+        pin_pos_y = pin_pos[num_pins:].clamp(self.yl, self.yh)
+        pin_pos = torch.cat([pin_pos_x, pin_pos_y], dim=0)
         
         # 3. 将pin_pos移到CPU（保持梯度连接）
         if pin_pos.is_cuda:
@@ -172,10 +268,6 @@ class LShapeRoutabilityOp(nn.Module):
         # 4. 调用steiner_topo_op (在CPU上)
         newx, newy = steiner_topo_op(pin_pos_cpu)
                 
-        # Clamp newx, newy到边界内（Steiner点也可能超出边界）
-        newx = torch.clamp(newx, min=self.xl, max=self.xh)
-        newy = torch.clamp(newy, min=self.yl, max=self.yh)
-        
         # 5. 获取边信息（确保在CPU上）
         flat_pin_from = steiner_topo_op.flat_pin_from
         flat_pin_to = steiner_topo_op.flat_pin_to
@@ -209,12 +301,17 @@ class LShapeRoutabilityOp(nn.Module):
         segment_result = self.segment_builder(
             newx, newy, flat_pin_from, flat_pin_to, l_directions
         )
-        
+
         num_segments = segment_result['num_segments']
         if num_segments == 0:
             logger.warning("No valid segments built")
             return torch.zeros(1, dtype=pos.dtype, device=original_device, requires_grad=True)
-        
+
+        # Debug abnormal segments (fat rectangles)
+        self._debug_abnormal_segments(
+            segment_result, steiner_topo_op, flat_pin_from, flat_pin_to, newx, newy
+        )
+
         # 保存缓存（包含绘图所需的原始数据）
         self.cached_segments = segment_result
         self.cached_segments['newx'] = newx.detach()
@@ -236,7 +333,8 @@ class LShapeRoutabilityOp(nn.Module):
                 segment_pos = segment_pos.to(original_device)
                 segment_size_x = segment_size_x.to(original_device)
                 segment_size_y = segment_size_y.to(original_device)
-            cost = self.density_op(segment_pos, segment_size_x, segment_size_y)
+            segment_is_horizontal = segment_result.get('segment_is_horizontal', None)
+            cost = self.density_op(segment_pos, segment_size_x, segment_size_y, segment_is_horizontal)
         else:
             # 使用Python RUDY密度的energy模式
             cost = self.density_op(segment_pos, segment_size_x, segment_size_y, mode="energy")
@@ -260,23 +358,37 @@ class LShapeRoutabilityOp(nn.Module):
         device = pos.device
         
         # 复用forward的逻辑，但使用density模式
+        num_nodes = pos.numel() // 2
+        num_movable = min(self.placedb.num_movable_nodes, num_nodes)
+        pos_x = pos[:num_nodes][:num_movable]
+        pos_y = pos[num_nodes:][:num_movable]
+        oob_xl = (pos_x < self.xl)
+        oob_xh = (pos_x > self.xh)
+        oob_yl = (pos_y < self.yl)
+        oob_yh = (pos_y > self.yh)
+        oob_cnt = (oob_xl | oob_xh | oob_yl | oob_yh).sum().item()
+        if oob_cnt > 0:
+            max_dx = torch.max(
+                torch.clamp(self.xl - pos_x, min=0),
+                torch.clamp(pos_x - self.xh, min=0),
+            ).max().item()
+            max_dy = torch.max(
+                torch.clamp(self.yl - pos_y, min=0),
+                torch.clamp(pos_y - self.yh, min=0),
+            ).max().item()
+            logger.warning(
+                f"L-shape: pos OOB {oob_cnt}/{num_movable} (max_dx={max_dx:.3f}, max_dy={max_dy:.3f})"
+            )
+
         pin_pos = pin_pos_op(pos)
-        
-        # Clamp pin位置到边界内
         num_pins = pin_pos.numel() // 2
-        pin_x = pin_pos[:num_pins]
-        pin_y = pin_pos[num_pins:]
-        pin_x = torch.clamp(pin_x, min=self.xl, max=self.xh)
-        pin_y = torch.clamp(pin_y, min=self.yl, max=self.yh)
-        pin_pos = torch.cat([pin_x, pin_y], dim=0)
+        pin_pos_x = pin_pos[:num_pins].clamp(self.xl, self.xh)
+        pin_pos_y = pin_pos[num_pins:].clamp(self.yl, self.yh)
+        pin_pos = torch.cat([pin_pos_x, pin_pos_y], dim=0)
         
         # steiner_topo_op要求CPU tensor
         pin_pos_cpu = pin_pos.cpu() if pin_pos.is_cuda else pin_pos
         newx, newy = steiner_topo_op(pin_pos_cpu)
-        
-        # Clamp Steiner点到边界内
-        newx = torch.clamp(newx, min=self.xl, max=self.xh)
-        newy = torch.clamp(newy, min=self.yl, max=self.yh)
         
         # 将结果移回原设备
         if device.type == 'cuda':
@@ -424,7 +536,9 @@ class LShapeRoutabilityMixin:
         steiner_topo_op = self.op_collections.steiner_topo_op
         pin_pos_op = self.op_collections.pin_pos_op
         
-        return self.l_shape_routability_op(pos, steiner_topo_op, pin_pos_op, use_l_direction)
+        return self.l_shape_routability_op(
+            pos, steiner_topo_op, pin_pos_op, use_l_direction
+        )
     
     def get_l_shape_density_map(self, pos, use_l_direction=True):
         """获取L形密度图"""

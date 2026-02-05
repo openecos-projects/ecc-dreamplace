@@ -129,6 +129,8 @@ class MacroPlaceDB(object):
         self.unit_vertical_capacity = None  # per unit distance, projected to one layer
         self.unit_horizontal_capacities = None  # per unit distance, layer by layer
         self.unit_vertical_capacities = None  # per unit distance, layer by layer
+        self.min_wire_widths = None  # min wire width per routing layer (scaled coords)
+        self.min_wire_spacings = None  # min wire spacing per routing layer (scaled coords)
         # routing demand map from fixed cells, indexed by (grid x, grid y), projected to one layer
         self.initial_horizontal_demand_map = None
         # routing demand map from fixed cells, indexed by (grid x, grid y), projected to one layer
@@ -240,6 +242,10 @@ class MacroPlaceDB(object):
         self.yh *= scale_factor
         self.row_height *= scale_factor
         self.site_width *= scale_factor
+        if self.min_wire_widths is not None:
+            self.min_wire_widths *= scale_factor
+        if self.min_wire_spacings is not None:
+            self.min_wire_spacings *= scale_factor
 
         # # bin
         # self.bin_size_x *= scale_factor
@@ -1028,6 +1034,10 @@ class MacroPlaceDB(object):
                 pydb.unit_horizontal_capacities, dtype=self.dtype)
             self.unit_vertical_capacities = np.array(
                 pydb.unit_vertical_capacities, dtype=self.dtype)
+            if hasattr(pydb, "min_wire_widths") and len(pydb.min_wire_widths):
+                self.min_wire_widths = np.array(pydb.min_wire_widths, dtype=self.dtype)
+            if hasattr(pydb, "min_wire_spacings") and len(pydb.min_wire_spacings):
+                self.min_wire_spacings = np.array(pydb.min_wire_spacings, dtype=self.dtype)
             self.initial_horizontal_demand_map = np.array(pydb.initial_horizontal_demand_map, dtype=self.dtype).reshape(
                 (-1, self.num_routing_grids_x, self.num_routing_grids_y)).sum(axis=0)
             self.initial_vertical_demand_map = np.array(pydb.initial_vertical_demand_map, dtype=self.dtype).reshape(

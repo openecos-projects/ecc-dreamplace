@@ -29,6 +29,32 @@ def plot_density_map(density_map, title="Density Map", save_path=None):
     print(f"Density map saved to {save_path}")
 
 
+def plot_potential_map(potential_map, title="Potential Map", save_path=None, vmin_p=5, vmax_p=95):
+    """
+    可视化 potential map，使用百分位裁剪以避免极值拉伸色条
+    :param potential_map: 2D numpy array or torch.Tensor
+    :param title: 图标题
+    :param save_path: 如果指定则保存图片，否则直接显示
+    :param vmin_p: vmin 百分位
+    :param vmax_p: vmax 百分位
+    """
+    if hasattr(potential_map, "detach"):
+        potential_map = potential_map.detach().cpu().numpy()
+
+    plt_map = potential_map.transpose()
+    vmin = np.percentile(plt_map, vmin_p)
+    vmax = np.percentile(plt_map, vmax_p)
+    plt.figure(figsize=(8, 6))
+    plt.imshow(plt_map, cmap="binary", interpolation="nearest", origin="lower",
+               vmin=vmin, vmax=vmax)
+    plt.colorbar(label="Potential")
+    plt.title(title)
+    plt.xlabel("Bin X")
+    plt.ylabel("Bin Y")
+
+    plt.savefig(save_path, bbox_inches="tight")
+    print(f"Potential map saved to {save_path}")
+
 def plot_bboxes_on_die(
     pos,
     node_size_x_clamped,

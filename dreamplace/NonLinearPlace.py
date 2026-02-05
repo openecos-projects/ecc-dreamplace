@@ -30,7 +30,11 @@ import pdb
 import dreamplace.ops.fence_region.fence_region as fence_region
 import math
 
-from dreamplace.ops.routability.egr_resample import create_supply_and_demand_maps_from_egr
+from dreamplace.ops.routability.egr_resample import (
+    create_supply_and_demand_maps_from_egr,
+    create_supply_map_from_placedb,
+    create_supply_map_from_gcellinfo_and_lef,
+)
 
 
 class NonLinearPlace(BasicPlace.BasicPlace):
@@ -755,10 +759,10 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 "iEDA/data/rt/rt_temp_directory/early_router/"
                             )
 
-                            L_shape_num_bins_x = 359
-                            L_shape_num_bins_y = 359
+                            L_shape_num_bins_x = params.num_bins_x
+                            L_shape_num_bins_y = params.num_bins_y
 
-                            # 获取 supply_map / demand_map 和 wire_width (基于 GCell 最小边长)
+                            # 获取 demand_map（EGR net map）和 wire_width
                             supply_map, demand_map, wire_width = create_supply_and_demand_maps_from_egr(
                                 egr_dir=egr_dir,
                                 placedb=placedb,
@@ -768,16 +772,45 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 layer='planar',  
                                 normalize_supply=False,
                                 normalize_demand=False,
-                                return_wire_width=True  # 返回基于 GCell 尺寸的 wire_width
+                                return_wire_width=True  # fallback: GCell 尺寸的 wire_width
                             )
-                            
-                            # # plot supply map (for debugging)
-                            # plt.imshow(supply_map.cpu().numpy(), cmap="binary", interpolation="nearest", origin="lower")
-                            # plt.colorbar(label="Supply")
-                            # plt.title("EGR Supply Map")
-                            # plt.xlabel("Bin X")
-                            # plt.ylabel("Bin Y")
-                            # plt.savefig("supply_map.png")
+
+                            # 使用 placedb 计算 supply_map（替代 EGR supply）
+                            lef_path = "/nfs/share/home/qiming/0924/N551P6M_cmax.lef"
+                            supply_map = create_supply_map_from_gcellinfo_and_lef(
+                                egr_dir=egr_dir,
+                                lef_path=lef_path,
+                                placedb=placedb,
+                                params=params,
+                                num_bins_x=L_shape_num_bins_x,
+                                num_bins_y=L_shape_num_bins_y,
+                                device=None,
+                                dtype=None,
+                                normalize=False,
+                                wire_width=None
+                            )
+
+                            # print("wire_width:", wire_width)
+                            # min_wire_widths = getattr(placedb, "min_wire_widths", None)
+                            # if min_wire_widths is None:
+                            #     logging.info("min_wire_widths len=0, head=[]")
+                            # else:
+                            #     logging.info(f"min_wire_widths len={len(min_wire_widths)}, head={min_wire_widths[:5]}")
+
+                            # Prefer LEF min wire width from placedb if available (already scaled)
+                            # if getattr(placedb, "min_wire_widths", None) is not None and len(placedb.min_wire_widths) > 0:
+                            #     widths = np.array(placedb.min_wire_widths, dtype=float)
+                            #     widths = widths[widths > 0]
+                            #     if widths.size > 0:
+                            #         wire_width = float(widths.min())
+                            #         logging.info(f"Use LEF min wire width for segments: {wire_width:.4f}")
+
+                            print("wire_width:", wire_width)
+                            print("bin_size_x:", placedb.bin_size_x, "bin_size_y:", placedb.bin_size_y)
+                            print("row_height:", placedb.row_height, "site_width:", placedb.site_width)
+                            if getattr(placedb, "min_wire_widths", None) is not None:
+                                print("min_wire_widths head:", placedb.min_wire_widths[:5])
+
                             # exit(0)
                             
                             # Step 4: 解析EGR L方向

@@ -15,9 +15,294 @@ import torch
 import numpy as np
 import logging
 import os
+import re
 from collections import defaultdict
 
 logger = logging.getLogger(__name__)
+
+
+def _build_uniform_gcell_info(xl, yl, xh, yh, num_x, num_y):
+    """Build a uniform-grid GCell info (in DREAMPlace coordinates)."""
+    gcell_info = EGRGCellInfo()
+    gcell_info.gcell_info = {}
+    gcell_info.num_gcells_x = num_x
+    gcell_info.num_gcells_y = num_y
+    gcell_info.xl = xl
+    gcell_info.yl = yl
+    gcell_info.xh = xh
+    gcell_info.yh = yh
+
+    size_x = (xh - xl) / num_x
+    size_y = (yh - yl) / num_y
+    for gx in range(num_x):
+        llx = xl + gx * size_x
+        urx = llx + size_x
+        for gy in range(num_y):
+            lly = yl + gy * size_y
+            ury = lly + size_y
+            gcell_info.gcell_info[(gx, gy)] = (llx, lly, urx, ury)
+    return gcell_info
+
+
+def create_supply_map_from_placedb(placedb, params, num_bins_x, num_bins_y,
+                                   device=None, dtype=None,
+                                   wire_width=None, as_area=False):
+    """
+    Create supply map from placedb routing grid.
+    If as_area=True, convert track capacity to area capacity using wire_width.
+    """
+
+    bin_size_x = (placedb.xh - placedb.xl) / num_bins_x
+    bin_size_y = (placedb.yh - placedb.yl) / num_bins_y
+
+    cap_h = placedb.unit_horizontal_capacity * bin_size_y
+    cap_v = placedb.unit_vertical_capacity * bin_size_x
+    logger.info(
+        f"placedb scale: dbu={getattr(placedb,'dbu',None)} "
+        f"scale_factor={getattr(placedb,'scale_factor',None)}"
+    )
+    logger.info(
+        f"unit_cap: H={placedb.unit_horizontal_capacity:.6g}, "
+        f"V={placedb.unit_vertical_capacity:.6g}, "
+        f"bin_size=({bin_size_x:.6g},{bin_size_y:.6g}), "
+        f"wire_width={wire_width}"
+    )
+    if placedb.unit_horizontal_capacity > 0 and placedb.unit_vertical_capacity > 0:
+        logger.info(
+            f"pitch_est: H={1.0/placedb.unit_horizontal_capacity:.3f}, "
+            f"V={1.0/placedb.unit_vertical_capacity:.3f}"
+        )
+
+    supply_h = np.full((num_bins_x, num_bins_y), cap_h, dtype=np.float32)
+    supply_v = np.full((num_bins_x, num_bins_y), cap_v, dtype=np.float32)
+
+    supply_h = np.maximum(supply_h, 0.0)
+    supply_v = np.maximum(supply_v, 0.0)
+
+    if as_area:
+        if wire_width is None or wire_width <= 0:
+            logger.warning("wire_width invalid; fallback to track-units supply map")
+            supply = supply_h + supply_v
+        else:
+            # Convert track capacity to area capacity per direction
+            supply = supply_h * bin_size_x * wire_width + supply_v * bin_size_y * wire_width
+    else:
+        supply = supply_h + supply_v
+
+    supply_tensor = torch.from_numpy(supply)
+    if device is not None:
+        supply_tensor = supply_tensor.to(device)
+    if dtype is not None:
+        supply_tensor = supply_tensor.to(dtype)
+
+    unit = "area" if as_area else "tracks"
+    logger.info(f"Placedb supply map ({unit}): min={supply_tensor.min():.3f}, max={supply_tensor.max():.3f}, "
+                f"mean={supply_tensor.mean():.3f}")
+    return supply_tensor
+
+
+def _lef_value_to_micron(value, dbu_per_micron):
+    if dbu_per_micron and value > dbu_per_micron:
+        return value / dbu_per_micron
+    return value
+
+
+def _parse_lef_routing_layers(lef_path):
+    """
+    Parse LEF routing layers for pitch/width/direction.
+    Returns: (layers, dbu_per_micron)
+    """
+    layers = []
+    dbu_per_micron = None
+    in_layer = False
+    layer_name = None
+    is_routing = False
+    direction = None
+    pitch_x = None
+    pitch_y = None
+    width = None
+
+    def flush_layer():
+        if in_layer and is_routing:
+            layers.append(
+                {
+                    "name": layer_name,
+                    "direction": direction,
+                    "pitch_x": pitch_x,
+                    "pitch_y": pitch_y,
+                    "width": width,
+                }
+            )
+
+    with open(lef_path, "r") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                continue
+            upper = line.upper()
+            if "DATABASE MICRONS" in upper:
+                m = re.search(r"DATABASE\s+MICRONS\s+([0-9.]+)", upper)
+                if m:
+                    try:
+                        dbu_per_micron = float(m.group(1))
+                    except ValueError:
+                        pass
+            if upper.startswith("LAYER "):
+                flush_layer()
+                parts = line.split()
+                layer_name = parts[1] if len(parts) > 1 else None
+                in_layer = True
+                is_routing = False
+                direction = None
+                pitch_x = None
+                pitch_y = None
+                width = None
+                continue
+            if in_layer and upper.startswith("END"):
+                flush_layer()
+                in_layer = False
+                layer_name = None
+                continue
+            if not in_layer:
+                continue
+            if upper.startswith("TYPE") and "ROUTING" in upper:
+                is_routing = True
+                continue
+            if upper.startswith("DIRECTION"):
+                parts = upper.split()
+                if len(parts) >= 2:
+                    direction = parts[1]
+                continue
+            if upper.startswith("PITCH"):
+                nums = re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", line)
+                if nums:
+                    pitch_x = float(nums[0])
+                    if len(nums) > 1:
+                        pitch_y = float(nums[1])
+                continue
+            if upper.startswith("WIDTH"):
+                nums = re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", line)
+                if nums:
+                    width = float(nums[0])
+                continue
+
+    flush_layer()
+    return layers, dbu_per_micron
+
+
+def create_supply_map_from_gcellinfo_and_lef(
+    egr_dir,
+    lef_path,
+    placedb,
+    params,
+    num_bins_x,
+    num_bins_y,
+    device=None,
+    dtype=None,
+    normalize=False,
+    wire_width=None,
+    return_wire_width=False,
+):
+    """
+    Create supply map from EGR gcell.info and LEF routing pitch/width (no EGR supply CSV).
+    Supply is computed per GCell and resampled to place bins.
+    """
+    gcell_info_path = os.path.join(egr_dir, "gcell.info")
+    gcell_info = EGRGCellInfo(gcell_info_path)
+
+    layers, dbu_per_micron = _parse_lef_routing_layers(lef_path)
+    if not layers:
+        raise RuntimeError(f"No routing layers parsed from LEF: {lef_path}")
+
+    h_pitches = []
+    v_pitches = []
+    min_width = None
+    for layer in layers:
+        px = layer.get("pitch_x")
+        py = layer.get("pitch_y")
+        if px is None and py is None:
+            continue
+        if px is None:
+            px = py
+        if py is None:
+            py = px
+        px = _lef_value_to_micron(px, dbu_per_micron)
+        py = _lef_value_to_micron(py, dbu_per_micron)
+        direction = layer.get("direction")
+        if direction == "HORIZONTAL":
+            h_pitches.append(py)
+        elif direction == "VERTICAL":
+            v_pitches.append(px)
+        else:
+            h_pitches.append(py)
+            v_pitches.append(px)
+        w = layer.get("width")
+        if w is not None:
+            w = _lef_value_to_micron(w, dbu_per_micron)
+            if min_width is None or w < min_width:
+                min_width = w
+
+    if not h_pitches or not v_pitches:
+        # Fallback: use all pitches for both directions
+        all_pitches = h_pitches + v_pitches
+        if not all_pitches:
+            raise RuntimeError("No pitch parsed from LEF routing layers")
+        h_pitches = all_pitches
+        v_pitches = all_pitches
+
+    micron_to_nm = 1000.0
+    h_pitches_dp = [(p * micron_to_nm) * params.scale_factor for p in h_pitches]
+    v_pitches_dp = [(p * micron_to_nm) * params.scale_factor for p in v_pitches]
+
+    if wire_width is None:
+        if min_width is None:
+            raise RuntimeError("No wire width parsed from LEF")
+        wire_width = (min_width * micron_to_nm) * params.scale_factor
+
+    sum_inv_pitch_h = sum(1.0 / p for p in h_pitches_dp if p > 0)
+    sum_inv_pitch_v = sum(1.0 / p for p in v_pitches_dp if p > 0)
+
+    logger.info(
+        f"LEF pitch (dp): H_mean={np.mean(h_pitches_dp):.3f}, V_mean={np.mean(v_pitches_dp):.3f}, "
+        f"wire_width={wire_width:.3f}"
+    )
+
+    supply_map = np.zeros(
+        (gcell_info.num_gcells_x, gcell_info.num_gcells_y), dtype=np.float32
+    )
+    for (gx, gy), (llx, lly, urx, ury) in gcell_info.gcell_info.items():
+        w = (urx - llx) * params.scale_factor
+        h = (ury - lly) * params.scale_factor
+        if w <= 0 or h <= 0:
+            continue
+        tracks_h = h * sum_inv_pitch_h
+        tracks_v = w * sum_inv_pitch_v
+        supply_area = tracks_h * w * wire_width + tracks_v * h * wire_width
+        supply_map[gx, gy] = supply_area
+
+    resampler = EGRCapacityResampler(
+        gcell_info,
+        target_xl=placedb.xl,
+        target_yl=placedb.yl,
+        target_xh=placedb.xh,
+        target_yh=placedb.yh,
+        num_bins_x=num_bins_x,
+        num_bins_y=num_bins_y,
+        scale_factor=params.scale_factor,
+        shift_factor=params.shift_factor,
+    )
+    supply_resampled = resampler.resample_map(supply_map, device=device, dtype=dtype)
+    if normalize and supply_resampled.max() > 0:
+        supply_resampled = supply_resampled / supply_resampled.max()
+
+    logger.info(
+        f"Supply map (gcell+lef): min={supply_resampled.min():.3f}, "
+        f"max={supply_resampled.max():.3f}, mean={supply_resampled.mean():.3f}"
+    )
+
+    if return_wire_width:
+        return supply_resampled, wire_width
+    return supply_resampled
 
 
 def load_egr_csv_map(csv_path):
@@ -174,14 +459,25 @@ class EGRGCellInfo:
         Returns:
             min(avg_gcell_width, avg_gcell_height) in DREAMPlace coordinates
         """
-        avg_width, avg_height = self.get_average_gcell_size()
+        if not self.gcell_info:
+            return 0.0
+
+        min_width = None
+        min_height = None
+        for (gx, gy), (llx, lly, urx, ury) in self.gcell_info.items():
+            w = urx - llx
+            h = ury - lly
+            if min_width is None or w < min_width:
+                min_width = w
+            if min_height is None or h < min_height:
+                min_height = h
+
         # Convert from nm to DREAMPlace coordinates
-        dp_width = avg_width * scale_factor
-        dp_height = avg_height * scale_factor
-        
+        dp_width = min_width * scale_factor
+        dp_height = min_height * scale_factor
         min_dim = min(dp_width, dp_height)
-        logger.info(f"GCell average size: {avg_width:.1f} x {avg_height:.1f} nm, "
-                   f"min dimension in DP coords: {min_dim:.3f}")
+        logger.info(f"GCell min size: {min_width:.1f} x {min_height:.1f} nm, "
+                    f"min dimension in DP coords: {min_dim:.3f}")
         return min_dim
 
 

@@ -7,6 +7,7 @@
 
 #include "PyPlaceDB.h"
 #include <boost/polygon/polygon.hpp>
+#include <algorithm>
 
 DREAMPLACE_BEGIN_NAMESPACE
 
@@ -535,6 +536,16 @@ void PyPlaceDB::set(PlaceDB const& db)
         {
             initial_vertical_demand_map.append(item);
         }
+    }
+
+    // Always expose LEF min wire width/spacing if available (independent of routing grids)
+    PlaceDB::index_type num_min_width = db.minWireWidth().size();
+    PlaceDB::index_type num_min_space = db.minWireSpacing().size();
+    PlaceDB::index_type num_min = std::min(num_min_width, num_min_space);
+    for (PlaceDB::index_type layer = 0; layer < num_min; ++layer)
+    {
+        min_wire_widths.append((double)db.minWireWidth().at(layer));
+        min_wire_spacings.append((double)db.minWireSpacing().at(layer));
     }
 
     convertOrient(); 

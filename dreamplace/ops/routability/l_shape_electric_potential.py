@@ -25,10 +25,33 @@ if configure.compile_configurations["CUDA_FOUND"] == "TRUE":
     import dreamplace.ops.electric_potential.electric_potential_cuda as electric_potential_cuda
 
 from .l_shape_electric_overflow import SegmentDensityMapFunction
-from .plot_map import plot_density_map
+from .plot_map import plot_density_map, plot_potential_map
+
+import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 _PLOT_ITER = 0
+
+
+def _log_topk_bins(map_tensor, k, name, xl, yl, bin_size_x, bin_size_y):
+    if not torch.is_tensor(map_tensor):
+        return
+    flat = map_tensor.detach().reshape(-1)
+    if flat.numel() == 0:
+        return
+    k = min(k, flat.numel())
+    values, idx = torch.topk(flat, k)
+    values = values.cpu().tolist()
+    idx = idx.cpu().tolist()
+    num_bins_y = map_tensor.shape[1]
+    entries = []
+    for v, i in zip(values, idx):
+        ix = i // num_bins_y
+        iy = i % num_bins_y
+        x = xl + (ix + 0.5) * bin_size_x
+        y = yl + (iy + 0.5) * bin_size_y
+        entries.append(f"({ix},{iy}) xy=({x:.3f},{y:.3f}) v={v:.3e}")
+    logger.info(f"[L-shape topk] {name} top{len(entries)}: " + "; ".join(entries))
 
 
 class SegmentElectricPotentialFunction(Function):
@@ -45,6 +68,7 @@ class SegmentElectricPotentialFunction(Function):
         segment_pos,
         segment_size_x,
         segment_size_y,
+        segment_is_horizontal,
         segment_size_x_clamped,
         segment_size_y_clamped,
         offset_x,
@@ -83,30 +107,156 @@ class SegmentElectricPotentialFunction(Function):
         tt = time.time()
         
         # Compute density map using C++/CUDA backend
-        density_map = SegmentDensityMapFunction.forward(
-            segment_pos,
-            segment_size_x,
-            segment_size_y,
-            segment_size_x_clamped,
-            segment_size_y_clamped,
-            offset_x,
-            offset_y,
-            ratio,
-            bin_center_x,
-            bin_center_y,
-            initial_density_map,
-            target_density,
-            xl, yl, xh, yh,
-            bin_size_x, bin_size_y,
-            num_segments,
-            padding,
-            padding_mask,
-            num_bins_x, num_bins_y,
-            num_impacted_bins_x,
-            num_impacted_bins_y,
-            deterministic_flag,
-            sorted_segment_map
-        )
+        density_map_h = None
+        density_map_v = None
+        hv_split = isinstance(segment_is_horizontal, torch.Tensor) and segment_is_horizontal.numel() == num_segments
+        if hv_split:
+            # Split demand into H/V components
+            def _build_subset(mask):
+                if mask is None or mask.numel() == 0 or mask.sum().item() == 0:
+                    return None
+                idx = torch.nonzero(mask, as_tuple=True)[0]
+                seg_llx = segment_pos[:num_segments][idx]
+                seg_lly = segment_pos[num_segments:][idx]
+                seg_pos = torch.cat([seg_llx, seg_lly], dim=0)
+                seg_sx = segment_size_x[idx]
+                seg_sy = segment_size_y[idx]
+                return seg_pos, seg_sx, seg_sy
+
+            def _prepare(seg_pos, seg_sx, seg_sy):
+                sqrt2 = math.sqrt(2)
+                seg_sx_clamped = seg_sx
+                seg_sy_clamped = seg_sy
+                seg_off_x = (seg_sx - seg_sx_clamped).mul(0.5)
+                seg_off_y = (seg_sy - seg_sy_clamped).mul(0.5)
+                seg_area = seg_sx * seg_sy
+                seg_clamped_area = seg_sx_clamped * seg_sy_clamped
+                seg_ratio = seg_area / seg_clamped_area.clamp(min=1e-10)
+                sqrt2_bin_x = sqrt2 * bin_size_x
+                sqrt2_bin_y = sqrt2 * bin_size_y
+                if seg_sx.numel() > 0:
+                    seg_num_impacted_bins_x = int(
+                        ((seg_sx.max() + 2 * sqrt2_bin_x) / bin_size_x)
+                        .ceil().clamp(max=num_bins_x).item()
+                    )
+                    seg_num_impacted_bins_y = int(
+                        ((seg_sy.max() + 2 * sqrt2_bin_y) / bin_size_y)
+                        .ceil().clamp(max=num_bins_y).item()
+                    )
+                else:
+                    seg_num_impacted_bins_x = 0
+                    seg_num_impacted_bins_y = 0
+                if seg_sx.numel() > 0:
+                    seg_sorted_map = torch.argsort(seg_sx).to(torch.int32)
+                else:
+                    seg_sorted_map = torch.tensor([], dtype=torch.int32, device=seg_pos.device)
+                return (
+                    seg_sx_clamped, seg_sy_clamped,
+                    seg_off_x, seg_off_y, seg_ratio,
+                    seg_num_impacted_bins_x, seg_num_impacted_bins_y,
+                    seg_sorted_map
+                )
+
+            mask_h = segment_is_horizontal.to(torch.bool)
+            mask_v = ~mask_h
+            subset_h = _build_subset(mask_h)
+            subset_v = _build_subset(mask_v)
+
+            density_map_h = torch.zeros_like(initial_density_map)
+            density_map_v = torch.zeros_like(initial_density_map)
+
+            if subset_h is not None:
+                h_pos, h_sx, h_sy = subset_h
+                (
+                    h_sx_clamped, h_sy_clamped,
+                    h_off_x, h_off_y, h_ratio,
+                    h_imp_x, h_imp_y,
+                    h_sorted_map
+                ) = _prepare(h_pos, h_sx, h_sy)
+                density_map_h = SegmentDensityMapFunction.forward(
+                    h_pos,
+                    h_sx,
+                    h_sy,
+                    h_sx_clamped,
+                    h_sy_clamped,
+                    h_off_x,
+                    h_off_y,
+                    h_ratio,
+                    bin_center_x,
+                    bin_center_y,
+                    initial_density_map,
+                    target_density,
+                    xl, yl, xh, yh,
+                    bin_size_x, bin_size_y,
+                    h_sx.numel(),
+                    padding,
+                    padding_mask,
+                    num_bins_x, num_bins_y,
+                    h_imp_x,
+                    h_imp_y,
+                    deterministic_flag,
+                    h_sorted_map
+                )
+
+            if subset_v is not None:
+                v_pos, v_sx, v_sy = subset_v
+                (
+                    v_sx_clamped, v_sy_clamped,
+                    v_off_x, v_off_y, v_ratio,
+                    v_imp_x, v_imp_y,
+                    v_sorted_map
+                ) = _prepare(v_pos, v_sx, v_sy)
+                density_map_v = SegmentDensityMapFunction.forward(
+                    v_pos,
+                    v_sx,
+                    v_sy,
+                    v_sx_clamped,
+                    v_sy_clamped,
+                    v_off_x,
+                    v_off_y,
+                    v_ratio,
+                    bin_center_x,
+                    bin_center_y,
+                    initial_density_map,
+                    target_density,
+                    xl, yl, xh, yh,
+                    bin_size_x, bin_size_y,
+                    v_sx.numel(),
+                    padding,
+                    padding_mask,
+                    num_bins_x, num_bins_y,
+                    v_imp_x,
+                    v_imp_y,
+                    deterministic_flag,
+                    v_sorted_map
+                )
+
+            density_map = density_map_h + density_map_v
+        else:
+            density_map = SegmentDensityMapFunction.forward(
+                segment_pos,
+                segment_size_x,
+                segment_size_y,
+                segment_size_x_clamped,
+                segment_size_y_clamped,
+                offset_x,
+                offset_y,
+                ratio,
+                bin_center_x,
+                bin_center_y,
+                initial_density_map,
+                target_density,
+                xl, yl, xh, yh,
+                bin_size_x, bin_size_y,
+                num_segments,
+                padding,
+                padding_mask,
+                num_bins_x, num_bins_y,
+                num_impacted_bins_x,
+                num_impacted_bins_y,
+                deterministic_flag,
+                sorted_segment_map
+            )
 
         # plot density map
         # plot_density_map(density_map, 
@@ -149,102 +299,15 @@ class SegmentElectricPotentialFunction(Function):
         bin_area = bin_size_x * bin_size_y
         
         if isinstance(target_density, torch.Tensor) and target_density.dim() == 2:
-            # EGR supply map: target_density contains track counts per bin
-            # 
-            # Problem: density_map (segment area) and supply_map (track count) have 
-            # different physical units. We need a calibration factor to convert
-            # segment area to equivalent track demand.
-            #
-            # Calibration factor k (area_per_track):
-            #   demand_in_tracks = density / k
-            #   overflow = demand_in_tracks - supply
-            #
-            # How to determine k:
-            # Method 1 (current): k = total_density / (target_utilization * total_supply)
-            #   - target_utilization controls how aggressively we penalize congestion
-            #   - target_utilization = 1.0: demand matches supply on average (no slack)
-            #   - target_utilization = 0.8: 80% utilization, 20% slack (more conservative)
-            #   - target_utilization < 1.0: easier to trigger overflow (more spreading)
-            #
-            # Method 2 (physical): k = wire_width * track_pitch
-            #   - Requires technology parameters
-            #
-            # We use Method 1 with configurable target_utilization
-            
-            supply_map = target_density  
-            
-            if isinstance(target_demand, torch.Tensor) and target_demand.dim() == 2:
-                # Scheme 3: Calibrate area_per_track once using EGR net_map (demand map)
-                total_density = density_map.sum()
-                total_demand = target_demand.sum()
-                
-                if total_demand > 0 and total_density > 0:
-                    # Initialize area_per_track once (persistent buffer)
-                    if isinstance(area_per_track, torch.Tensor) and area_per_track.numel() == 1:
-                        if (area_per_track <= 0).all():
-                            area_per_track.fill_(total_density / total_demand)
-                        calibrated_area_per_track = area_per_track
-                    else:
-                        calibrated_area_per_track = total_density / total_demand
-                    
-                    # Convert density (area) to demand (track equivalents)
-                    demand_in_tracks = density_map / calibrated_area_per_track
-                    
-                    # Compute utilization per bin for debugging
-                    utilization = demand_in_tracks / supply_map.clamp(min=1e-6)
-                    
-                    # Overflow in track units: positive means congestion (utilization > 1)
-                    overflow_in_tracks = (demand_in_tracks - supply_map).clamp(min=0)
-                    
-                    # Convert back to area units for gradient consistency
-                    overflow_map = overflow_in_tracks * calibrated_area_per_track
-                    
-                    # Debug logging
-                    logger.debug(f"Calibration(net_map): area_per_track={calibrated_area_per_track:.3f}, "
-                                f"utilization: mean={utilization.mean():.2f}, max={utilization.max():.2f}, "
-                                f"overflow_bins={(overflow_in_tracks > 0).sum().item()}/{overflow_map.numel()}")
-                else:
-                    # Fallback: use density map directly
-                    overflow_map = density_map
-                    logger.debug("Fallback: using density map directly (net_map or density is zero)")
-            else:
-                # Fallback to utilization-based calibration (legacy)
-                # Target utilization: what fraction of supply should demand use on average
-                # Lower value = more aggressive spreading (easier to trigger overflow)
-                target_utilization = 0.8  # TODO: make this configurable
-                
-                # Compute calibration factor
-                total_density = density_map.sum()
-                total_supply = supply_map.sum()
-                
-                if total_supply > 0 and total_density > 0:
-                    # area_per_track: how much segment area corresponds to 1 track
-                    # At target_utilization, total demand_in_tracks = target_utilization * total_supply
-                    # So: total_density / k = target_utilization * total_supply
-                    # => k = total_density / (target_utilization * total_supply)
-                    calibrated_area_per_track = total_density / (target_utilization * total_supply)
-                    
-                    # Convert density (area) to demand (track equivalents)
-                    demand_in_tracks = density_map / calibrated_area_per_track
-                    
-                    # Compute utilization per bin for debugging
-                    utilization = demand_in_tracks / supply_map.clamp(min=1e-6)
-                    
-                    # Overflow in track units: positive means congestion (utilization > 1)
-                    overflow_in_tracks = (demand_in_tracks - supply_map).clamp(min=0)
-                    
-                    # Convert back to area units for gradient consistency
-                    overflow_map = overflow_in_tracks * calibrated_area_per_track
-                    
-                    # Debug logging
-                    logger.debug(f"Calibration(legacy): area_per_track={calibrated_area_per_track:.3f}, "
-                                f"target_util={target_utilization}, "
-                                f"utilization: mean={utilization.mean():.2f}, max={utilization.max():.2f}, "
-                                f"overflow_bins={(overflow_in_tracks > 0).sum().item()}/{overflow_map.numel()}")
-                else:
-                    # Fallback: use density map directly
-                    overflow_map = density_map
-                    logger.debug("Fallback: using density map directly (supply or density is zero)")
+            # Scheme A: supply_map already in area units; use direct overflow without calibration.
+            supply_map = target_density
+            logger.info(
+                f"[L-shape supply/demand] demand_sum={density_map.sum().item():.3e}, "
+                f"supply_sum={supply_map.sum().item():.3e}, "
+                f"ratio={density_map.sum().item() / max(supply_map.sum().item(), 1e-9):.2f}"
+            )
+            overflow_map = density_map - supply_map * 10
+            overflow_map.clamp_(min=0)
         else:
             # Uniform target_density (scalar): use original density map
             # This is the standard electric potential without supply-aware adjustment
@@ -291,11 +354,38 @@ class SegmentElectricPotentialFunction(Function):
         iter = _PLOT_ITER
         _PLOT_ITER += 1
         plot_root = "/home/sxr/workspace/test-benchmark/benchmark/AiEDA/third_party/AutoDMP/dreamplace/ops/routability/plot"
+        if logger.isEnabledFor(logging.INFO):
+            ov_mean = overflow_map_normalized.mean().item()
+            ov_sum = overflow_map_normalized.sum().item()
+            logger.info(f"[L-shape stats] overflow_norm_iter{iter}: mean={ov_mean:.3e}, sum={ov_sum:.3e}")
+            # log a few low-frequency DCT coefficients (real)
+            if auv.numel() >= 4:
+                a01 = auv[0, 1].item()
+                a10 = auv[1, 0].item()
+                a11 = auv[1, 1].item()
+                logger.info(
+                    f"[L-shape stats] dct_lowfreq_iter{iter}: "
+                    f"a01={a01:.3e}, a10={a10:.3e}, a11={a11:.3e}"
+                )
+            _log_topk_bins(
+                overflow_map_normalized, 10,
+                f"overflow_norm_iter{iter}",
+                xl, yl, bin_size_x, bin_size_y
+            )
+            if not fast_mode:
+                _log_topk_bins(
+                    potential_map, 10,
+                    f"potential_iter{iter}",
+                    xl, yl, bin_size_x, bin_size_y
+                )
         plot_dirs = [
             "overflow",
+            "overflow_h",
+            "overflow_v",
             "density",
             "egr_supply",
             "egr_overflow",
+            "egr_overflow_resampled",
             "egr_netmap",
             "egr_supply_original",
             "potential",
@@ -306,6 +396,16 @@ class SegmentElectricPotentialFunction(Function):
         plot_density_map(overflow_map_normalized, 
             title="Overflow Map", 
             save_path=f"{plot_root}/overflow/overflow_map_iter{iter}.png")
+
+        if hv_split and 'overflow_in_tracks_h' in locals() and 'overflow_in_tracks_v' in locals():
+            overflow_map_h = overflow_in_tracks_h * calibrated_area_per_track
+            overflow_map_v = overflow_in_tracks_v * calibrated_area_per_track
+            plot_density_map(overflow_map_h, 
+                title="Overflow Map (H)", 
+                save_path=f"{plot_root}/overflow_h/overflow_map_h_iter{iter}.png")
+            plot_density_map(overflow_map_v, 
+                title="Overflow Map (V)", 
+                save_path=f"{plot_root}/overflow_v/overflow_map_v_iter{iter}.png")
         
         # plot density map (segment demand)
         plot_density_map(density_map, 
@@ -325,14 +425,23 @@ class SegmentElectricPotentialFunction(Function):
         
         # plot EGR overflow map
         from .egr_resample import load_egr_csv_map
-        egr_overflow_path = "/nfs/share/home/sxr/routability_benchmark/dataset_cx55/20251023/BM64/workspace/output/iEDA/data/rt/rt_temp_directory/early_router/overflow_map_planar.csv"
+        egr_overflow_path = "/nfs/share/home/sxr/routability_benchmark/dataset_cx55/20251023/APU/workspace/output/iEDA/data/rt/rt_temp_directory/early_router/overflow_map_planar.csv"
         egr_overflow_map = load_egr_csv_map(egr_overflow_path)
         egr_overflow_tensor = torch.from_numpy(egr_overflow_map).to(segment_pos.device)
         plot_density_map(egr_overflow_tensor, 
             title="EGR Overflow Map (from CSV)", 
             save_path=f"{plot_root}/egr_overflow/egr_overflow_map_iter{iter}.png")
+        egr_overflow_resampled = F.interpolate(
+            egr_overflow_tensor.unsqueeze(0).unsqueeze(0),
+            size=(num_bins_x, num_bins_y),
+            mode="bilinear",
+            align_corners=False
+        ).squeeze(0).squeeze(0)
+        plot_density_map(egr_overflow_resampled, 
+            title="EGR Overflow Map (resampled)", 
+            save_path=f"{plot_root}/egr_overflow_resampled/egr_overflow_resampled_iter{iter}.png")
 
-        egr_netmap_path = "/nfs/share/home/sxr/routability_benchmark/dataset_cx55/20251023/BM64/workspace/output/iEDA/data/rt/rt_temp_directory/early_router/net_map_planar.csv"
+        egr_netmap_path = "/nfs/share/home/sxr/routability_benchmark/dataset_cx55/20251023/APU/workspace/output/iEDA/data/rt/rt_temp_directory/early_router/net_map_planar.csv"
         egr_netmap = load_egr_csv_map(egr_netmap_path)
         egr_netmap_tensor = torch.from_numpy(egr_netmap).to(segment_pos.device)
         plot_density_map(egr_netmap_tensor, 
@@ -340,18 +449,21 @@ class SegmentElectricPotentialFunction(Function):
             save_path=f"{plot_root}/egr_netmap/egr_netmap_iter{iter}.png")
         
         # plot EGR ORIGINAL supply map (before resample) for comparison
-        egr_supply_path = "/nfs/share/home/sxr/routability_benchmark/dataset_cx55/20251023/BM64/workspace/output/iEDA/data/rt/rt_temp_directory/early_router/supply_map_planar.csv"
-        egr_supply_original = load_egr_csv_map(egr_supply_path)
-        egr_supply_original_tensor = torch.from_numpy(egr_supply_original).to(segment_pos.device)
-        logger.info(f"EGR ORIGINAL supply: shape={egr_supply_original.shape}, min={egr_supply_original.min():.2f}, max={egr_supply_original.max():.2f}")
-        plot_density_map(egr_supply_original_tensor, 
-            title="EGR Supply Map (ORIGINAL from CSV)", 
-            save_path=f"{plot_root}/egr_supply_original/egr_supply_original_iter{iter}.png")
+        # egr_supply_path = "/nfs/share/home/sxr/routability_benchmark/dataset_cx55/20251023/APU/workspace/output/iEDA/data/rt/rt_temp_directory/early_router/supply_map_planar.csv"
+        # egr_supply_original = load_egr_csv_map(egr_supply_path)
+        # egr_supply_original_tensor = torch.from_numpy(egr_supply_original).to(segment_pos.device)
+        # logger.info(f"EGR ORIGINAL supply: shape={egr_supply_original.shape}, min={egr_supply_original.min():.2f}, max={egr_supply_original.max():.2f}")
+        # plot_density_map(egr_supply_original_tensor, 
+        #     title="EGR Supply Map (ORIGINAL from CSV)", 
+        #     save_path=f"{plot_root}/egr_supply_original/egr_supply_original_iter{iter}.png")
         
         # plot potential map
-        plot_density_map(potential_map, 
+        plot_potential_map(potential_map, 
             title="Potential Map", 
-            save_path=f"{plot_root}/potential/potential_map_iter{iter}.png")
+            save_path=f"{plot_root}/potential/potential_map_iter{iter}.png",
+            vmin_p=0,
+            vmax_p=100
+        )
         # exit(0)
 
         if segment_pos.is_cuda:
@@ -419,7 +531,7 @@ class SegmentElectricPotentialFunction(Function):
         logger.debug(f"Segment electric potential backward: {(time.time() - tt) * 1000:.2f} ms")
         
         # Return gradients (only for segment_pos, others are None)
-        return (output,) + (None,) * 38
+        return (output,) + (None,) * 39
 
 
 class LShapeElectricPotential(nn.Module):
@@ -748,7 +860,7 @@ class LShapeElectricPotential(nn.Module):
             sorted_segment_map
         )
     
-    def forward(self, segment_pos, segment_size_x, segment_size_y):
+    def forward(self, segment_pos, segment_size_x, segment_size_y, segment_is_horizontal=None):
         """
         Compute electric potential energy for routing segments.
         
@@ -756,6 +868,7 @@ class LShapeElectricPotential(nn.Module):
             segment_pos: [num_segments * 2] positions (llx then lly)
             segment_size_x: [num_segments] segment widths
             segment_size_y: [num_segments] segment heights
+            segment_is_horizontal: [num_segments] bool tensor, optional
             
         Returns:
             energy: electric potential energy (scalar)
@@ -782,12 +895,16 @@ class LShapeElectricPotential(nn.Module):
             num_impacted_bins_y,
             sorted_segment_map
         ) = self._prepare_segment_data(segment_pos, segment_size_x, segment_size_y)
+
+        if isinstance(segment_is_horizontal, torch.Tensor) and segment_is_horizontal.device != segment_pos.device:
+            segment_is_horizontal = segment_is_horizontal.to(segment_pos.device)
         
         # Compute electric potential
         energy = SegmentElectricPotentialFunction.apply(
             segment_pos,
             segment_size_x,
             segment_size_y,
+            segment_is_horizontal,
             segment_size_x_clamped,
             segment_size_y_clamped,
             offset_x,
@@ -940,8 +1057,11 @@ class LShapeRoutabilityPotentialOp(nn.Module):
         segment_pos = segment_result['segment_pos']
         segment_size_x = segment_result['segment_size_x']
         segment_size_y = segment_result['segment_size_y']
+        segment_is_horizontal = segment_result.get('segment_is_horizontal', None)
         
-        cost = self.electric_potential_op(segment_pos, segment_size_x, segment_size_y)
+        cost = self.electric_potential_op(
+            segment_pos, segment_size_x, segment_size_y, segment_is_horizontal
+        )
         
         return cost
 

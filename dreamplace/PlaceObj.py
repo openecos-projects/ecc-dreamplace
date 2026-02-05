@@ -408,7 +408,7 @@ class PlaceObj(nn.Module):
         # ========== L形Routability初始化 ==========
         self.use_l_shape_routability = False
         self.l_shape_routability_op = None
-        # 初始权重设为很小的值，后续会自适应调整
+        
         self.l_shape_routability_weight = torch.tensor(
             [getattr(params, 'l_shape_routability_weight', 1e-5)],
             dtype=self.data_collections.pos[0].dtype,
@@ -487,7 +487,7 @@ class PlaceObj(nn.Module):
             pos,
             self.op_collections.steiner_topo_op,
             self.op_collections.pin_pos_op,
-            use_l_direction=use_l_direction
+            use_l_direction=use_l_direction,
         )
     
     def get_l_shape_density_map(self, pos, use_l_direction=True):
@@ -495,10 +495,10 @@ class PlaceObj(nn.Module):
         if self.l_shape_routability_op is None:
             return None
         return self.l_shape_routability_op.get_density_map(
-            pos, 
+            pos,
             self.op_collections.steiner_topo_op,
             self.op_collections.pin_pos_op,
-            use_l_direction=use_l_direction
+            use_l_direction=use_l_direction,
         )
 
     def obj_fn(self, pos):

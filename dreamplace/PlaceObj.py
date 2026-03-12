@@ -415,12 +415,12 @@ class PlaceObj(nn.Module):
             device=self.data_collections.pos[0].device,
         )
         # 目标：L-shape梯度范数占density梯度范数的比例
-        self.l_shape_grad_target_ratio = getattr(params, 'l_shape_grad_target_ratio', 0.2) 
+        self.l_shape_grad_target_ratio = getattr(params, 'l_shape_grad_target_ratio', 0.3) 
         # 权重调整的平滑因子 (0~1, 越小越平滑)
         self.l_shape_weight_momentum = getattr(params, 'l_shape_weight_momentum', 0.1)
         # ==========================================
 
-    def init_l_shape_routability(self, wire_width, num_bins_x, num_bins_y,
+    def init_l_shape_routability(self, wire_width, num_bins_x, num_bins_y, 
                                  target_density=1.0, target_demand=None):
         """
         初始化L形routability模块
@@ -1630,6 +1630,95 @@ class PlaceObj(nn.Module):
 
         return obj, pos_w.grad
 
+    def _apply_gradient_masks_only(self, grad):
+        """
+        Apply the same fixed/update masks as precondition, without extra scaling.
+        This is used after adding L-shape gradients so fixed/terminated nodes stay zero.
+        """
+        with torch.no_grad():
+            debug_mask = bool(getattr(self.params, "l_shape_mask_debug", True))
+            before_nonzero = 0
+            if debug_mask:
+                before_nonzero = (grad.abs() > 0).sum().item()
+
+            fixed_zero_xy = 2 * max(
+                0, self.placedb.num_physical_nodes - self.placedb.num_movable_nodes
+            )
+            update_zero_xy = 0
+            fix_nodes_zero_xy = 0
+
+            # Keep fixed physical nodes zero (x and y parts).
+            grad[self.placedb.num_movable_nodes : self.placedb.num_physical_nodes] = 0
+            grad[
+                self.placedb.num_nodes
+                + self.placedb.num_movable_nodes : self.placedb.num_nodes
+                + self.placedb.num_physical_nodes
+            ] = 0
+
+            # For multi-fence flow: stop gradients for terminated electric fields.
+            if self.update_mask is not None and len(self.placedb.regions) > 0:
+                precond_op = self.op_collections.precondition_op
+                if (
+                    hasattr(precond_op, "movablenode2fence_region_map_clamp")
+                    and hasattr(precond_op, "filler2fence_region_map")
+                ):
+                    grad2 = grad.view(2, -1)
+                    stop_mask = ~self.update_mask
+                    movable_mask = stop_mask[
+                        precond_op.movablenode2fence_region_map_clamp
+                    ]
+                    filler_mask = stop_mask[precond_op.filler2fence_region_map]
+                    update_zero_xy = int(movable_mask.sum().item()) * 2 + int(
+                        filler_mask.sum().item()
+                    ) * 2
+                    grad2[0, : self.placedb.num_movable_nodes].masked_fill_(
+                        movable_mask, 0
+                    )
+                    grad2[1, : self.placedb.num_movable_nodes].masked_fill_(
+                        movable_mask, 0
+                    )
+                    grad2[
+                        0, self.placedb.num_nodes - self.placedb.num_filler_nodes :
+                    ].masked_fill_(filler_mask, 0)
+                    grad2[
+                        1, self.placedb.num_nodes - self.placedb.num_filler_nodes :
+                    ].masked_fill_(filler_mask, 0)
+
+            # User-specified mask for temporarily fixed movable nodes.
+            if self.fix_nodes_mask is not None:
+                grad2 = grad.view(2, -1)
+                fix_nodes_zero_xy = int(
+                    self.fix_nodes_mask[: self.placedb.num_movable_nodes].sum().item()
+                ) * 2
+                grad2[0, : self.placedb.num_movable_nodes].masked_fill_(
+                    self.fix_nodes_mask[: self.placedb.num_movable_nodes], 0
+                )
+                grad2[1, : self.placedb.num_movable_nodes].masked_fill_(
+                    self.fix_nodes_mask[: self.placedb.num_movable_nodes], 0
+                )
+
+            if debug_mask:
+                after_nonzero = (grad.abs() > 0).sum().item()
+                removed_nonzero = before_nonzero - after_nonzero
+                if not hasattr(self, "_l_shape_mask_debug_iter"):
+                    self._l_shape_mask_debug_iter = 0
+                self._l_shape_mask_debug_iter += 1
+                interval = int(getattr(self.params, "l_shape_mask_debug_interval", 20))
+                if interval <= 0:
+                    interval = 1
+                if self._l_shape_mask_debug_iter % interval == 0:
+                    logging.info(
+                        "L-shape mask debug iter=%d nonzero %d->%d (removed=%d), "
+                        "target_zero_xy: fixed=%d, update=%d, fix_nodes=%d",
+                        self._l_shape_mask_debug_iter,
+                        before_nonzero,
+                        after_nonzero,
+                        removed_nonzero,
+                        fixed_zero_xy,
+                        update_zero_xy,
+                        fix_nodes_zero_xy,
+                    )
+
     def obj_and_grad_fn(self, pos):
         """
         @brief compute objective and gradient.
@@ -1701,6 +1790,7 @@ class PlaceObj(nn.Module):
             l_shape_weighted = l_shape_cost * self.l_shape_routability_weight.item()
             obj = obj + l_shape_weighted
             pos.grad.data.add_(base_grad)
+            self._apply_gradient_masks_only(pos.grad.data)
             
             # self.check_gradient(pos)
         # ==========================================

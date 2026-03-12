@@ -437,13 +437,14 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     "hpwl": self.op_collections.hpwl_op,
                     "overflow": self.op_collections.density_overflow_op,
                 }
-                if params.routability_opt_flag:
-                    eval_ops.update(
-                        {
-                            "route_utilization": self.op_collections.route_utilization_map_op,
-                            "pin_utilization": self.op_collections.pin_utilization_map_op,
-                        }
-                    )
+                # [DISABLED] route_overflow and pin_overflow computation disabled
+                # if params.routability_opt_flag:
+                #     eval_ops.update(
+                #         {
+                #             "route_utilization": self.op_collections.route_utilization_map_op,
+                #             "pin_utilization": self.op_collections.pin_utilization_map_op,
+                #         }
+                #     )
                 if len(placedb.regions) > 0:
                     eval_ops.update(
                         {
@@ -721,7 +722,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         
                         if not model.enable_l_shape_routability:
                             # 条件1: overflow足够小时启用
-                            if cur_metric.overflow[-1] < getattr(params, 'l_shape_overflow_threshold', 0.4):
+                            if cur_metric.overflow[-1] < getattr(params, 'l_shape_overflow_threshold', 0.3):
                                 model.enable_l_shape_routability = True
                             
                             # # 条件2: 也可以根据iteration启用
@@ -775,6 +776,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 return_wire_width=True  # fallback: GCell 尺寸的 wire_width
                             )
 
+                            supply_map.fill_(supply_map.max())
+
                             # 使用 placedb 计算 supply_map
                             # lef_path = "/nfs/share/home/qiming/0924/N551P6M_cmax.lef"
                             # supply_map = create_supply_map_from_gcellinfo_and_lef(
@@ -798,12 +801,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 logging.info(f"min_wire_widths len={len(min_wire_widths)}, head={min_wire_widths[:5]}")
 
                             # Prefer LEF min wire width from placedb if available (already scaled)
-                            # if getattr(placedb, "min_wire_widths", None) is not None and len(placedb.min_wire_widths) > 0:
-                            #     widths = np.array(placedb.min_wire_widths, dtype=float)
-                            #     widths = widths[widths > 0]
-                            #     if widths.size > 0:
-                            #         wire_width = float(widths.min())
-                            #         logging.info(f"Use LEF min wire width for segments: {wire_width:.4f}")
+                            if getattr(placedb, "min_wire_widths", None) is not None and len(placedb.min_wire_widths) > 0:
+                                widths = np.array(placedb.min_wire_widths, dtype=float)
+                                widths = widths[widths > 0]
+                                if widths.size > 0:
+                                    wire_width = float(widths.min())
+                                    logging.info(f"Use LEF min wire width for segments: {wire_width:.4f}")
 
                             print("wire_width:", wire_width)
                             print("bin_size_x:", placedb.bin_size_x, "bin_size_y:", placedb.bin_size_y)
@@ -912,6 +915,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 target_density=supply_map,  # 使用 EGR supply map 作为 target density
                                 target_demand=demand_map    # 使用 EGR net map 作为 demand 标定
                             )
+                            # 初始化基于L-shape overflow的外环状态
+                            model._l_shape_overflow_ema = None
+                            model._l_shape_overflow_last = None
                             
                             logging.info(f"L-shape routability enabled at iteration {iteration}, "
                                         f"overflow={cur_metric.overflow[-1]:.4f}, "
@@ -1022,6 +1028,319 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             egr_guide_path = getattr(params, 'egr_guide_path', egr_default_path)
                             steiner_topo_op = self.op_collections.steiner_topo_op
                             l_directions = steiner_topo_op.resolve_l_directions_from_egr(egr_guide_path)
+                            density_map = None
+
+                            # 基于L-shape overflow变化更新target_ratio（外环慢速更新）
+                            if getattr(params, 'l_shape_overflow_update_flag', True):
+                                try:
+                                    with torch.no_grad():
+                                        density_map = model.get_l_shape_density_map(
+                                            pos, use_l_direction=True
+                                        )
+                                        l_shape_op = model.l_shape_routability_op
+                                        overflow_op = (
+                                            getattr(l_shape_op, "overflow_op", None)
+                                            if l_shape_op is not None
+                                            else None
+                                        )
+                                        if density_map is not None and overflow_op is not None:
+                                            l_shape_overflow = None
+                                            overflow_ratio = None
+                                            l_shape_max_density = None
+
+                                            # 优先使用potential中的供需标定口径（tracks + area_per_track）
+                                            density_driver = getattr(l_shape_op, "density_op", None)
+                                            if density_driver is not None:
+                                                supply_map = getattr(
+                                                    density_driver, "target_density", None
+                                                )
+                                                demand_map = getattr(
+                                                    density_driver, "target_demand", None
+                                                )
+                                                area_per_track_buf = getattr(
+                                                    density_driver, "area_per_track", None
+                                                )
+                                                if (
+                                                    isinstance(supply_map, torch.Tensor)
+                                                    and supply_map.dim() == 2
+                                                ):
+                                                    supply_map = supply_map.to(
+                                                        density_map.device,
+                                                        dtype=density_map.dtype,
+                                                    )
+                                                    total_density = density_map.sum()
+                                                    calibrated_area_per_track = None
+
+                                                    if (
+                                                        isinstance(demand_map, torch.Tensor)
+                                                        and demand_map.dim() == 2
+                                                    ):
+                                                        demand_map = demand_map.to(
+                                                            density_map.device,
+                                                            dtype=density_map.dtype,
+                                                        )
+                                                        total_demand = demand_map.sum()
+                                                        if total_demand > 0 and total_density > 0:
+                                                            if (
+                                                                isinstance(
+                                                                    area_per_track_buf,
+                                                                    torch.Tensor,
+                                                                )
+                                                                and area_per_track_buf.numel() == 1
+                                                            ):
+                                                                if (
+                                                                    float(
+                                                                        area_per_track_buf.item()
+                                                                    )
+                                                                    <= 0
+                                                                ):
+                                                                    area_per_track_buf.fill_(
+                                                                        total_density / total_demand
+                                                                    )
+                                                                calibrated_area_per_track = area_per_track_buf.to(
+                                                                    density_map.device,
+                                                                    dtype=density_map.dtype,
+                                                                )
+                                                            else:
+                                                                calibrated_area_per_track = (
+                                                                    total_density / total_demand
+                                                                )
+                                                    else:
+                                                        # 与potential fallback一致：基于target_utilization估计标定
+                                                        target_utilization = float(
+                                                            getattr(
+                                                                params,
+                                                                "l_shape_target_utilization",
+                                                                0.8,
+                                                            )
+                                                        )
+                                                        total_supply = supply_map.sum()
+                                                        if total_supply > 0 and total_density > 0:
+                                                            calibrated_area_per_track = total_density / (
+                                                                target_utilization
+                                                                * total_supply.clamp(min=1e-12)
+                                                            )
+
+                                                    if calibrated_area_per_track is not None:
+                                                        demand_in_tracks = (
+                                                            density_map
+                                                            / calibrated_area_per_track
+                                                        )
+                                                        overflow_in_tracks = (
+                                                            demand_in_tracks - supply_map
+                                                        ).clamp(min=0.0)
+                                                        utilization = demand_in_tracks / supply_map.clamp(
+                                                            min=1e-6
+                                                        )
+                                                        l_shape_overflow = float(
+                                                            (
+                                                                overflow_in_tracks
+                                                                * calibrated_area_per_track
+                                                            )
+                                                            .sum()
+                                                            .item()
+                                                        )
+                                                        overflow_ratio = float(
+                                                            (
+                                                                overflow_in_tracks.sum()
+                                                                / supply_map.sum().clamp(min=1e-12)
+                                                            )
+                                                            .item()
+                                                        )
+                                                        l_shape_max_density = float(
+                                                            utilization.max().item()
+                                                        )
+
+                                            # 若potential口径不可用，退化为overflow_op口径
+                                            if (
+                                                l_shape_overflow is None
+                                                or overflow_ratio is None
+                                                or l_shape_max_density is None
+                                            ):
+                                                cached_segments = getattr(
+                                                    l_shape_op, "cached_segments", None
+                                                )
+                                                if (
+                                                    cached_segments is not None
+                                                    and int(
+                                                        cached_segments.get(
+                                                            "num_segments", 0
+                                                        )
+                                                    )
+                                                    > 0
+                                                ):
+                                                    seg_pos = cached_segments.get(
+                                                        "segment_pos", None
+                                                    )
+                                                    seg_size_x = cached_segments.get(
+                                                        "segment_size_x", None
+                                                    )
+                                                    seg_size_y = cached_segments.get(
+                                                        "segment_size_y", None
+                                                    )
+                                                    if (
+                                                        seg_pos is not None
+                                                        and seg_size_x is not None
+                                                        and seg_size_y is not None
+                                                    ):
+                                                        ov_cost, ov_max_density = overflow_op(
+                                                            seg_pos,
+                                                            seg_size_x,
+                                                            seg_size_y,
+                                                        )
+                                                        l_shape_overflow = float(
+                                                            ov_cost.item()
+                                                        )
+                                                        l_shape_max_density = float(
+                                                            ov_max_density.item()
+                                                        )
+
+                                                bin_area = float(
+                                                    overflow_op.bin_size_x
+                                                    * overflow_op.bin_size_y
+                                                )
+                                                target_density = overflow_op.target_density
+                                                if isinstance(target_density, torch.Tensor):
+                                                    target_total = float(
+                                                        (
+                                                            target_density.to(
+                                                                density_map.device,
+                                                                dtype=density_map.dtype,
+                                                            )
+                                                            * bin_area
+                                                        )
+                                                        .sum()
+                                                        .item()
+                                                    )
+                                                else:
+                                                    target_total = float(
+                                                        float(target_density)
+                                                        * bin_area
+                                                        * overflow_op.num_bins_x
+                                                        * overflow_op.num_bins_y
+                                                    )
+                                                overflow_ratio = float(
+                                                    l_shape_overflow / (target_total + 1e-12)
+                                                )
+                                            model.l_shape_overflow = l_shape_overflow
+                                            model.l_shape_overflow_ratio = overflow_ratio
+                                            model.l_shape_overflow_max_density = (
+                                                l_shape_max_density
+                                            )
+                                            cur_metric.l_shape_overflow = l_shape_overflow
+                                            cur_metric.l_shape_overflow_ratio = overflow_ratio
+                                            cur_metric.l_shape_overflow_max_density = (
+                                                l_shape_max_density
+                                            )
+                                            logging.info(
+                                                "L-shape overflow iter=%d: "
+                                                "ov_raw=%.6e, ov_ratio=%.6e, max_density=%.6f",
+                                                iteration,
+                                                l_shape_overflow,
+                                                overflow_ratio,
+                                                l_shape_max_density,
+                                            )
+
+                                            beta = float(
+                                                getattr(
+                                                    params,
+                                                    "l_shape_overflow_ema_beta",
+                                                    0.8,
+                                                )
+                                            )
+                                            beta = max(0.0, min(0.999, beta))
+                                            if (
+                                                not hasattr(model, "_l_shape_overflow_ema")
+                                                or model._l_shape_overflow_ema is None
+                                            ):
+                                                model._l_shape_overflow_ema = overflow_ratio
+                                                model._l_shape_overflow_last = overflow_ratio
+                                                logging.info(
+                                                    "L-shape overflow outer-loop initialized: "
+                                                    "ov_raw=%.6e, ov_ratio=%.6e, target_ratio=%.4f",
+                                                    l_shape_overflow,
+                                                    overflow_ratio,
+                                                    model.l_shape_grad_target_ratio,
+                                                )
+                                            else:
+                                                prev_ema = float(
+                                                    model._l_shape_overflow_ema
+                                                )
+                                                ema = beta * prev_ema + (1.0 - beta) * overflow_ratio
+                                                delta = ema - prev_ema
+                                                model._l_shape_overflow_last = overflow_ratio
+                                                model._l_shape_overflow_ema = ema
+
+                                                deadband = float(
+                                                    getattr(
+                                                        params,
+                                                        "l_shape_overflow_deadband",
+                                                        1e-4,
+                                                    )
+                                                )
+                                                if abs(delta) > deadband:
+                                                    k = float(
+                                                        getattr(
+                                                            params,
+                                                            "l_shape_overflow_update_k",
+                                                            2.0,
+                                                        )
+                                                    )
+                                                    old_ratio = float(
+                                                        model.l_shape_grad_target_ratio
+                                                    )
+                                                    ratio_min = float(
+                                                        getattr(
+                                                            params,
+                                                            "l_shape_grad_target_ratio_min",
+                                                            0.05,
+                                                        )
+                                                    )
+                                                    ratio_max = float(
+                                                        getattr(
+                                                            params,
+                                                            "l_shape_grad_target_ratio_max",
+                                                            0.5,
+                                                        )
+                                                    )
+                                                    if ratio_min > ratio_max:
+                                                        ratio_min, ratio_max = ratio_max, ratio_min
+                                                    new_ratio = old_ratio * math.exp(k * delta)
+                                                    new_ratio = max(
+                                                        ratio_min, min(ratio_max, new_ratio)
+                                                    )
+                                                    model.l_shape_grad_target_ratio = new_ratio
+                                                    logging.info(
+                                                        "L-shape overflow outer-loop iter=%d: "
+                                                        "ov_raw=%.6e, ov_ratio=%.6e, ov_ema %.6e->%.6e, delta=%.3e, "
+                                                        "target_ratio %.4f->%.4f",
+                                                        iteration,
+                                                        l_shape_overflow,
+                                                        overflow_ratio,
+                                                        prev_ema,
+                                                        ema,
+                                                        delta,
+                                                        old_ratio,
+                                                        new_ratio,
+                                                    )
+                                                else:
+                                                    logging.debug(
+                                                        "L-shape overflow outer-loop iter=%d: "
+                                                        "ov_raw=%.6e, ov_ratio=%.6e, ov_ema %.6e->%.6e, delta=%.3e "
+                                                        "(deadband=%.3e), target_ratio=%.4f",
+                                                        iteration,
+                                                        l_shape_overflow,
+                                                        overflow_ratio,
+                                                        prev_ema,
+                                                        ema,
+                                                        delta,
+                                                        deadband,
+                                                        model.l_shape_grad_target_ratio,
+                                                    )
+                                except Exception as e:
+                                    logging.warning(
+                                        f"L-shape overflow outer-loop update failed at iter {iteration}: {e}"
+                                    )
                             
                             logging.debug(f"L-shape routability updated at iteration {iteration}, "
                                          f"time={((time.time() - t_l_shape_update) * 1000):.2f}ms")
@@ -1033,7 +1352,10 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                         plot_segment_density_map, plot_l_shape_segments
                                     )
                                     
-                                    density_map = model.get_l_shape_density_map(pos, use_l_direction=True)
+                                    if density_map is None:
+                                        density_map = model.get_l_shape_density_map(
+                                            pos, use_l_direction=True
+                                        )
                                     if density_map is not None:
                                         density_plot_path = os.path.join(
                                             params.result_dir, f"l_shape_density_iter{iteration}.png"

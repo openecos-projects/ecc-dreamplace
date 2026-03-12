@@ -299,7 +299,7 @@ class SegmentElectricPotentialFunction(Function):
         bin_area = bin_size_x * bin_size_y
         
         if isinstance(target_density, torch.Tensor) and target_density.dim() == 2:
-                        
+
             supply_map = target_density  
             logger.info(
                 f"[L-shape supply/demand] demand_sum={density_map.sum().item():.3e}, "
@@ -427,120 +427,120 @@ class SegmentElectricPotentialFunction(Function):
         
 
         # plot overflow map
-        global _PLOT_ITER
-        iter = _PLOT_ITER
-        _PLOT_ITER += 1
-        plot_root = "/home/sxr/workspace/test-benchmark/benchmark/AiEDA/third_party/AutoDMP/dreamplace/ops/routability/plot"
-        if logger.isEnabledFor(logging.INFO):
-            ov_mean = overflow_map_normalized.mean().item()
-            ov_sum = overflow_map_normalized.sum().item()
-            logger.info(f"[L-shape stats] overflow_norm_iter{iter}: mean={ov_mean:.3e}, sum={ov_sum:.3e}")
-            # log a few low-frequency DCT coefficients (real)
-            if auv.numel() >= 4:
-                a01 = auv[0, 1].item()
-                a10 = auv[1, 0].item()
-                a11 = auv[1, 1].item()
-                logger.info(
-                    f"[L-shape stats] dct_lowfreq_iter{iter}: "
-                    f"a01={a01:.3e}, a10={a10:.3e}, a11={a11:.3e}"
-                )
-            _log_topk_bins(
-                overflow_map_normalized, 10,
-                f"overflow_norm_iter{iter}",
-                xl, yl, bin_size_x, bin_size_y
-            )
-            if not fast_mode:
-                _log_topk_bins(
-                    potential_map, 10,
-                    f"potential_iter{iter}",
-                    xl, yl, bin_size_x, bin_size_y
-                )
-        plot_dirs = [
-            "overflow",
-            "overflow_h",
-            "overflow_v",
-            "density",
-            "egr_supply",
-            "egr_overflow",
-            "egr_overflow_resampled",
-            "egr_netmap",
-            "egr_supply_original",
-            "potential",
-        ]
-        for d in plot_dirs:
-            os.makedirs(os.path.join(plot_root, d), exist_ok=True)
+        # global _PLOT_ITER
+        # iter = _PLOT_ITER
+        # _PLOT_ITER += 1
+        # plot_root = "/home/sxr/workspace/test-benchmark/benchmark/AiEDA/third_party/AutoDMP/dreamplace/ops/routability/plot"
+        # if logger.isEnabledFor(logging.INFO):
+        #     ov_mean = overflow_map_normalized.mean().item()
+        #     ov_sum = overflow_map_normalized.sum().item()
+        #     logger.info(f"[L-shape stats] overflow_norm_iter{iter}: mean={ov_mean:.3e}, sum={ov_sum:.3e}")
+        #     # log a few low-frequency DCT coefficients (real)
+        #     if auv.numel() >= 4:
+        #         a01 = auv[0, 1].item()
+        #         a10 = auv[1, 0].item()
+        #         a11 = auv[1, 1].item()
+        #         logger.info(
+        #             f"[L-shape stats] dct_lowfreq_iter{iter}: "
+        #             f"a01={a01:.3e}, a10={a10:.3e}, a11={a11:.3e}"
+        #         )
+        #     _log_topk_bins(
+        #         overflow_map_normalized, 10,
+        #         f"overflow_norm_iter{iter}",
+        #         xl, yl, bin_size_x, bin_size_y
+        #     )
+        #     if not fast_mode:
+        #         _log_topk_bins(
+        #             potential_map, 10,
+        #             f"potential_iter{iter}",
+        #             xl, yl, bin_size_x, bin_size_y
+        #         )
+        # plot_dirs = [
+        #     "overflow",
+        #     "overflow_h",
+        #     "overflow_v",
+        #     "density",
+        #     "egr_supply",
+        #     "egr_overflow",
+        #     "egr_overflow_resampled",
+        #     "egr_netmap",
+        #     "egr_supply_original",
+        #     "potential",
+        # ]
+        # for d in plot_dirs:
+        #     os.makedirs(os.path.join(plot_root, d), exist_ok=True)
 
-        plot_density_map(overflow_map_normalized, 
-            title="Overflow Map", 
-            save_path=f"{plot_root}/overflow/overflow_map_iter{iter}.png")
+        # plot_density_map(overflow_map_normalized, 
+        #     title="Overflow Map", 
+        #     save_path=f"{plot_root}/overflow/overflow_map_iter{iter}.png")
 
-        if hv_split and 'overflow_in_tracks_h' in locals() and 'overflow_in_tracks_v' in locals():
-            overflow_map_h = overflow_in_tracks_h * calibrated_area_per_track
-            overflow_map_v = overflow_in_tracks_v * calibrated_area_per_track
-            plot_density_map(overflow_map_h, 
-                title="Overflow Map (H)", 
-                save_path=f"{plot_root}/overflow_h/overflow_map_h_iter{iter}.png")
-            plot_density_map(overflow_map_v, 
-                title="Overflow Map (V)", 
-                save_path=f"{plot_root}/overflow_v/overflow_map_v_iter{iter}.png")
+        # if hv_split and 'overflow_in_tracks_h' in locals() and 'overflow_in_tracks_v' in locals():
+        #     overflow_map_h = overflow_in_tracks_h * calibrated_area_per_track
+        #     overflow_map_v = overflow_in_tracks_v * calibrated_area_per_track
+        #     plot_density_map(overflow_map_h, 
+        #         title="Overflow Map (H)", 
+        #         save_path=f"{plot_root}/overflow_h/overflow_map_h_iter{iter}.png")
+        #     plot_density_map(overflow_map_v, 
+        #         title="Overflow Map (V)", 
+        #         save_path=f"{plot_root}/overflow_v/overflow_map_v_iter{iter}.png")
         
-        # plot density map (segment demand)
-        plot_density_map(density_map, 
-            title="Density Map (Segment Demand)", 
-            save_path=f"{plot_root}/density/density_map_iter{iter}.png")
+        # # plot density map (segment demand)
+        # plot_density_map(density_map, 
+        #     title="Density Map (Segment Demand)", 
+        #     save_path=f"{plot_root}/density/density_map_iter{iter}.png")
         
-        # Debug: print statistics
-        # logger.info(f"=== Debug Statistics ===")
-        # logger.info(f"density_map: min={density_map.min():.2f}, max={density_map.max():.2f}, sum={density_map.sum():.2f}")
-        # logger.info(f"supply_map (target_density): min={supply_map.min():.2f}, max={supply_map.max():.2f}, sum={supply_map.sum():.2f}")
-        # logger.info(f"supply_map shape: {supply_map.shape}, density_map shape: {density_map.shape}")
+        # # Debug: print statistics
+        # # logger.info(f"=== Debug Statistics ===")
+        # # logger.info(f"density_map: min={density_map.min():.2f}, max={density_map.max():.2f}, sum={density_map.sum():.2f}")
+        # # logger.info(f"supply_map (target_density): min={supply_map.min():.2f}, max={supply_map.max():.2f}, sum={supply_map.sum():.2f}")
+        # # logger.info(f"supply_map shape: {supply_map.shape}, density_map shape: {density_map.shape}")
         
-        # plot EGR supply map
-        plot_density_map(supply_map, 
-            title="EGR Supply Map", 
-            save_path=f"{plot_root}/egr_supply/egr_supply_map_iter{iter}.png")
+        # # plot EGR supply map
+        # plot_density_map(supply_map, 
+        #     title="EGR Supply Map", 
+        #     save_path=f"{plot_root}/egr_supply/egr_supply_map_iter{iter}.png")
         
-        # plot EGR overflow map
-        from .egr_resample import load_egr_csv_map
-        egr_overflow_path = "/nfs/share/home/sxr/routability_benchmark/dataset_cx55/20251023/APU/workspace/output/iEDA/data/rt/rt_temp_directory/early_router/overflow_map_planar.csv"
-        egr_overflow_map = load_egr_csv_map(egr_overflow_path)
-        egr_overflow_tensor = torch.from_numpy(egr_overflow_map).to(segment_pos.device)
-        plot_density_map(egr_overflow_tensor, 
-            title="EGR Overflow Map (from CSV)", 
-            save_path=f"{plot_root}/egr_overflow/egr_overflow_map_iter{iter}.png")
-        egr_overflow_resampled = F.interpolate(
-            egr_overflow_tensor.unsqueeze(0).unsqueeze(0),
-            size=(num_bins_x, num_bins_y),
-            mode="bilinear",
-            align_corners=False
-        ).squeeze(0).squeeze(0)
-        plot_density_map(egr_overflow_resampled, 
-            title="EGR Overflow Map (resampled)", 
-            save_path=f"{plot_root}/egr_overflow_resampled/egr_overflow_resampled_iter{iter}.png")
+        # # plot EGR overflow map
+        # from .egr_resample import load_egr_csv_map
+        # egr_overflow_path = "/nfs/share/home/sxr/routability_benchmark/dataset_cx55/20251023/APU/workspace/output/iEDA/data/rt/rt_temp_directory/early_router/overflow_map_planar.csv"
+        # egr_overflow_map = load_egr_csv_map(egr_overflow_path)
+        # egr_overflow_tensor = torch.from_numpy(egr_overflow_map).to(segment_pos.device)
+        # plot_density_map(egr_overflow_tensor, 
+        #     title="EGR Overflow Map (from CSV)", 
+        #     save_path=f"{plot_root}/egr_overflow/egr_overflow_map_iter{iter}.png")
+        # egr_overflow_resampled = F.interpolate(
+        #     egr_overflow_tensor.unsqueeze(0).unsqueeze(0),
+        #     size=(num_bins_x, num_bins_y),
+        #     mode="bilinear",
+        #     align_corners=False
+        # ).squeeze(0).squeeze(0)
+        # plot_density_map(egr_overflow_resampled, 
+        #     title="EGR Overflow Map (resampled)", 
+        #     save_path=f"{plot_root}/egr_overflow_resampled/egr_overflow_resampled_iter{iter}.png")
 
-        egr_netmap_path = "/nfs/share/home/sxr/routability_benchmark/dataset_cx55/20251023/APU/workspace/output/iEDA/data/rt/rt_temp_directory/early_router/net_map_planar.csv"
-        egr_netmap = load_egr_csv_map(egr_netmap_path)
-        egr_netmap_tensor = torch.from_numpy(egr_netmap).to(segment_pos.device)
-        plot_density_map(egr_netmap_tensor, 
-            title="EGR Netmap (from CSV)", 
-            save_path=f"{plot_root}/egr_netmap/egr_netmap_iter{iter}.png")
+        # egr_netmap_path = "/nfs/share/home/sxr/routability_benchmark/dataset_cx55/20251023/APU/workspace/output/iEDA/data/rt/rt_temp_directory/early_router/net_map_planar.csv"
+        # egr_netmap = load_egr_csv_map(egr_netmap_path)
+        # egr_netmap_tensor = torch.from_numpy(egr_netmap).to(segment_pos.device)
+        # plot_density_map(egr_netmap_tensor, 
+        #     title="EGR Netmap (from CSV)", 
+        #     save_path=f"{plot_root}/egr_netmap/egr_netmap_iter{iter}.png")
         
-        # plot EGR ORIGINAL supply map (before resample) for comparison
-        # egr_supply_path = "/nfs/share/home/sxr/routability_benchmark/dataset_cx55/20251023/APU/workspace/output/iEDA/data/rt/rt_temp_directory/early_router/supply_map_planar.csv"
-        # egr_supply_original = load_egr_csv_map(egr_supply_path)
-        # egr_supply_original_tensor = torch.from_numpy(egr_supply_original).to(segment_pos.device)
-        # logger.info(f"EGR ORIGINAL supply: shape={egr_supply_original.shape}, min={egr_supply_original.min():.2f}, max={egr_supply_original.max():.2f}")
-        # plot_density_map(egr_supply_original_tensor, 
-        #     title="EGR Supply Map (ORIGINAL from CSV)", 
-        #     save_path=f"{plot_root}/egr_supply_original/egr_supply_original_iter{iter}.png")
+        # # plot EGR ORIGINAL supply map (before resample) for comparison
+        # # egr_supply_path = "/nfs/share/home/sxr/routability_benchmark/dataset_cx55/20251023/APU/workspace/output/iEDA/data/rt/rt_temp_directory/early_router/supply_map_planar.csv"
+        # # egr_supply_original = load_egr_csv_map(egr_supply_path)
+        # # egr_supply_original_tensor = torch.from_numpy(egr_supply_original).to(segment_pos.device)
+        # # logger.info(f"EGR ORIGINAL supply: shape={egr_supply_original.shape}, min={egr_supply_original.min():.2f}, max={egr_supply_original.max():.2f}")
+        # # plot_density_map(egr_supply_original_tensor, 
+        # #     title="EGR Supply Map (ORIGINAL from CSV)", 
+        # #     save_path=f"{plot_root}/egr_supply_original/egr_supply_original_iter{iter}.png")
         
-        # plot potential map
-        plot_potential_map(potential_map, 
-            title="Potential Map", 
-            save_path=f"{plot_root}/potential/potential_map_iter{iter}.png",
-            vmin_p=0,
-            vmax_p=100
-        )
+        # # plot potential map
+        # plot_potential_map(potential_map, 
+        #     title="Potential Map", 
+        #     save_path=f"{plot_root}/potential/potential_map_iter{iter}.png",
+        #     vmin_p=0,
+        #     vmax_p=100
+        # )
         # exit(0)
 
         if segment_pos.is_cuda:

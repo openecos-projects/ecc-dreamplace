@@ -153,24 +153,13 @@ class PlacementEngine:
         # solve placement
         tt = time.time()
         self.params.plot_flag = True
-        timer = None
         if self.params.timing_opt_flag:
-            tt = time.time()
-            # timer = Timer.Timer()
-            # timer(params, self.placedb)
-            # This must be done to explicitly execute the parser builders.
-            # The parsers in OpenTimer are all in lazy mode.
-            # timer.update_timing()
-            logging.info("reading timer takes %.2f seconds" %
-                         (time.time() - tt))
-
-            # Dump example here. Some dump functions are defined.
-            # Check instance methods defined in Timer.py for debugging.
-            # timer.dump_pin_cap("pin_caps.txt")
-            # timer.dump_graph("timing_graph.txt")
+            raise RuntimeError(
+                "timing_opt_flag is no longer supported because OpenTimer integration has been removed"
+            )
 
         self.placer = NonLinearPlace.NonLinearPlace(
-            self.params, self.placedb, timer)
+            self.params, self.placedb)
         logging.info(
             "non-linear placement initialization takes %.2f seconds"
             % (time.time() - tt)

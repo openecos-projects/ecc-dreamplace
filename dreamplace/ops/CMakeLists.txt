@@ -28,11 +28,6 @@ add_subdirectory(rudy)
 add_subdirectory(pinrudy)
 add_subdirectory(nctugr_binary)
 add_subdirectory(adjust_node_area)
-# timing operator
-# add_subdirectory(pin_weight_sum)
-# add_subdirectory(timing)
-
-#diff tdp 
 add_subdirectory(timing_propagation)
 add_subdirectory(rc_timing)
 add_subdirectory(steiner_topo)

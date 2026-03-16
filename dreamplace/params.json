@@ -91,6 +91,10 @@
         "description": "noise to initial positions for global placement",
         "default": 0.025
     },
+    "auto_adjust_bins": {
+        "description": "automatically derive num_bins_x and num_bins_y from the number of physical nodes",
+        "default": 0
+    },
     "enable_fillers": {
         "description": "enable filler cells",
         "default": 1
@@ -179,6 +183,14 @@
         "description": "whether enable routability optimization",
         "default": 0
     },
+    "macro_place_flag": {
+        "description": "whether enable two-stage macro placement",
+        "default": 0
+    },
+    "use_bb": {
+        "description": "whether use the Barzilai-Borwein step size in Nesterov optimization",
+        "default": 0
+    },
     "route_num_bins_x": {
         "description": "number of routing grids/tiles",
         "default": 512
@@ -190,6 +202,10 @@
     "node_area_adjust_overflow": {
         "description": "the overflow where to adjust node area",
         "default": 0.15
+    },
+    "two_stage_density_scaler": {
+        "description": "scale density weight after the macro placement stage",
+        "default": 1000
     },
     "max_num_area_adjust": {
         "description": "maximum times to adjust node area",
@@ -251,6 +267,90 @@
         "description": "whether require run-to-run determinism, may have efficiency overhead",
         "default": 0
     },
+    "timing_opt_flag": {
+        "description": "legacy timing-driven global placement flag; enabling it raises an error because OpenTimer integration has been removed",
+        "default": 0
+    },
+    "early_lib_input": {
+        "description": "legacy early cell library file for the removed timing_opt flow",
+        "default": "",
+        "required": "required for the legacy timing_opt flow"
+    },
+    "late_lib_input": {
+        "description": "legacy late cell library file for the removed timing_opt flow",
+        "default": "",
+        "required": "required for the legacy timing_opt flow"
+    },
+    "lib_input": {
+        "description": "legacy shared cell library file for the removed timing_opt flow",
+        "default": "",
+        "required": "required for the legacy timing_opt flow"
+    },
+    "sdc_input": {
+        "description": "legacy SDC file for the removed timing_opt flow",
+        "default": "",
+        "required": "required for the legacy timing_opt flow"
+    },
+    "wire_resistance_per_micron": {
+        "description": "legacy unit-length wire resistance for the removed timing_opt flow",
+        "default": 0
+    },
+    "wire_capacitance_per_micron": {
+        "description": "legacy unit-length wire capacitance for the removed timing_opt flow",
+        "default": 0
+    },
+    "net_weighting_scheme": {
+        "description": "net-weighting scheme for timing-aware optimization, e.g. adam | lilith",
+        "default": "lilith"
+    },
+    "momentum_decay_factor": {
+        "description": "momentum decay factor used in timing-aware net-weight updates",
+        "default": 0.5
+    },
+    "enable_net_weighting": {
+        "description": "enable timing-aware net weighting during global placement",
+        "default": 1
+    },
+    "max_net_weight": {
+        "description": "maximum net weight for timing optimization; negative values or \"inf\" mean no limit",
+        "default": "inf"
+    },
+    "pin2pin_net_weighting": {
+        "description": "enable pin-to-pin net weighting for timing optimization",
+        "default": 0
+    },
+    "timing_eval_flag": {
+        "description": "enable timing evaluation reporting",
+        "default": 0
+    },
+    "show_important_info": {
+        "description": "print condensed timing-related summary information",
+        "default": 0
+    },
+    "pin2pin_weight": {
+        "description": "base multiplier for pin-to-pin net weights",
+        "default": 2.5e-05
+    },
+    "start_iter": {
+        "description": "iteration to start pin-to-pin timing weighting",
+        "default": 500
+    },
+    "min_stop_iter": {
+        "description": "minimum iteration before convergence checking in timing-aware mode",
+        "default": 700
+    },
+    "pin2pin_max_weight": {
+        "description": "maximum pin-to-pin timing weight",
+        "default": 50
+    },
+    "pin2pin_min_weight": {
+        "description": "minimum pin-to-pin timing weight",
+        "default": 10
+    },
+    "pin2pin_accumulate_weight": {
+        "description": "increment added when accumulating an extra critical path",
+        "default": 0.2
+    },
     "get_congestion_map": {
         "description": "compute congestion map after placement complete",
         "default": 0
@@ -304,15 +404,23 @@
         "default": 0
     },
     "macro_pin_halo_x": {
-        "description": "whether use weighted smooth HPWL with RISA net weights",
+        "description": "horizontal halo applied to macro pins for pin-aware macro shaping",
         "default": 1000
     },
     "macro_pin_halo_y": {
-        "description": "whether use weighted smooth HPWL with RISA net weights",
+        "description": "vertical halo applied to macro pins for pin-aware macro shaping",
         "default": 1000
     },
     "with_sta": {
-        "description": "Open STA for Place",
+        "description": "enable integrated STA initialization and differentiable timing updates during placement",
         "default": 1
+    },
+    "differentiable_timing_obj": {
+        "description": "compatibility flag for differentiable timing objective configuration",
+        "default": 1
+    },
+    "base_design_name": {
+        "description": "base design name used when naming dumped solutions and reports",
+        "default": ""
     }
 }

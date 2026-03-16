@@ -24,10 +24,10 @@ class IRT_eGR(object):
         self.params = params
         self.placedb = placedb
 
-    def __call__(self, pos):
-        return self.forward(pos)
+    def __call__(self, pos, stage="egr2D", resolve_congestion="low"):
+        return self.forward(pos, stage, resolve_congestion)
 
-    def forward(self, pos):
+    def forward(self, pos, stage="egr2D", resolve_congestion="low"):
         if pos.is_cuda:
             pos_cpu = pos.cpu().data.numpy().copy()
         else:
@@ -55,7 +55,17 @@ class IRT_eGR(object):
 
         # update raw database
         self.placedb.write_placement_back(node_x, node_y)
-        utilization_map_py = self.placedb.pydb.getCongestionMap("sum")
+        try:
+            utilization_map_py = self.placedb.pydb.getCongestionMap(
+                "sum", stage, resolve_congestion
+            )
+        except TypeError:
+            # Keep the old one-argument bridge working until ieda_py is rebuilt.
+            logger.warning(
+                "PyPlaceDB.getCongestionMap does not accept stage/resolve_congestion yet; "
+                "falling back to the legacy one-argument call."
+            )
+            utilization_map_py = self.placedb.pydb.getCongestionMap("sum")
         utilization_map_np = np.array(utilization_map_py, dtype=np.float32)
         utilization_map = torch.from_numpy(utilization_map_np).to(pos.device).T
         utilization_map = utilization_map.contiguous()

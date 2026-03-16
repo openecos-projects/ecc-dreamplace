@@ -660,7 +660,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         logging.info("Update steiner topo %.3f ms" %
                                      ((time.time() - t_steiner) * 1000))
                         
-                        model.op_collections.irt_egr_congestion_map_op(pos)
+                        model.op_collections.irt_egr_congestion_map_op(
+                            pos, stage="egr2D", resolve_congestion="low"
+                        )
                         
                         # EGR guide路径
                         guide_path = "/nfs/share/home/sxr/routability_benchmark/dataset_cx55/20251023/gcd/workspace/output/iEDA/data/rt/rt_temp_directory/early_router/route_planar.guide"
@@ -743,7 +745,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     self.data_collections.flat_pin_from = self.op_collections.steiner_topo_op.rebuild_tree(pin_pos)
                             
                             # Step 2: 运行EGR获取路由信息
-                            model.op_collections.irt_egr_congestion_map_op(pos)
+                            model.op_collections.irt_egr_congestion_map_op(
+                                pos, stage="egr2D", resolve_congestion="low"
+                            )
                             
                             # Step 3: 获取EGR guide路径（从params或默认路径）
                             # params.result_dir: .../workspace/output/dreamplace
@@ -1018,7 +1022,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     self.data_collections.flat_pin_from = self.op_collections.steiner_topo_op.rebuild_tree(pin_pos)
                             
                             # 重新运行EGR
-                            model.op_collections.irt_egr_congestion_map_op(pos)
+                            model.op_collections.irt_egr_congestion_map_op(
+                                pos, stage="egr2D", resolve_congestion="low"
+                            )
                             
                             # 更新L方向
                             egr_default_path = os.path.join(
@@ -1687,7 +1693,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             if adjust_route_area_flag:
                                 if params.adjust_nctugr_area_flag:
                                     route_utilization_map = model.op_collections.irt_egr_congestion_map_op(
-                                        pos)
+                                        pos, stage="egr3D", resolve_congestion="high")
                                 else:
                                     route_utilization_map = model.op_collections.route_utilization_map_op(
                                         pos)

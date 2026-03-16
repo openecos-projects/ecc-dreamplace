@@ -17,9 +17,6 @@ import numpy as np
 import logging
 import pdb
 import itertools
-
-from tools.iEDA.data.design import IEDADesign
-from tools.iEDA.module.io import IEDAIO
 # import macro_placer.database.fence_region.fence_region as fence_region
 
 datatypes = {
@@ -33,7 +30,7 @@ class MacroPlaceDB(object):
     @brief placement database
     """
 
-    def __init__(self, data_manager: IEDAIO):
+    def __init__(self, data_manager):
         """
         initialization
         To avoid the usage of list, I flatten everything.
@@ -281,9 +278,8 @@ class MacroPlaceDB(object):
     def setup_rawdb(self, params):
         self.dtype = datatypes[params.dtype]
         if self.pydb is None:
-            ieda_dm = IEDAIO(self.data_manager.dir_workspace)
-            self.get_dmInst_ptr = ieda_dm.get_dmInst_ptr()
-            self.pydb = ieda_dm.pydb(
+            self.get_dmInst_ptr = self.data_manager.get_dmInst_ptr()
+            self.pydb = self.data_manager.pydb(
                 self.get_dmInst_ptr,
                 params.route_num_bins_x,
                 params.route_num_bins_y,
@@ -603,8 +599,7 @@ class MacroPlaceDB(object):
     def virtual_net_init(self):
         max_hop = 2
         print("build macro connections Begin")
-        ieda_design = IEDADesign(self.data_manager.dir_workspace)
-        macro_connections = ieda_design.build_macro_connection_map(max_hop)
+        macro_connections = self.data_manager.build_macro_connection_map(max_hop)
         print("build macro connections finished")
         print(f" self.num_physical_nodes =  {self.num_physical_nodes}")
         print(f" self.row_height =  {self.row_height}")
@@ -2005,8 +2000,7 @@ row height = %g, site width = %g
     def write_placement_back(self, node_x, node_y):
         # unscale locations
         # TODO:
-        ieda_io = IEDAIO(self.data_manager.dir_workspace)
-        ieda_io.write_placement_back(self.get_dmInst_ptr, node_x, node_y)
+        self.data_manager.write_placement_back(self.get_dmInst_ptr, node_x, node_y)
 
     def unscale_pl(self, shift_factor, scale_factor):
         """

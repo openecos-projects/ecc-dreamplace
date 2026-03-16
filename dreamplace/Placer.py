@@ -26,6 +26,7 @@ import json
 import os
 import sys
 import time
+from typing import Any
 import torch
 import random
 import numpy as np
@@ -48,10 +49,6 @@ import dreamplace.configure as configure
 from dreamplace.Params import Params
 from dreamplace.macroPlaceDB import MacroPlaceDB as PlaceDB
 import dreamplace.NonLinearPlace as NonLinearPlace
-
-# from data_manager.aimp_dm import AimpDataManager
-from tools.iEDA.module.sta import IEDASta
-from tools.iEDA.module.io import IEDAIO
 # import dreamplace.Timer as Timer
 
 
@@ -115,15 +112,14 @@ class PlacementEngine:
         self.density = float("inf")
         self.metrics = None
 
-    def setup_rawdb(self, data_manager: IEDAIO):
+    def setup_rawdb(self, data_manager: Any):
         # read cpp database
         tt = time.time()
         if self.placedb is None:
             self.data_manager = data_manager
             self.placedb = PlaceDB(data_manager)
             if self.params.with_sta:
-                ieda_sta = IEDASta(self.data_manager.dir_workspace)
-                ieda_sta.init_sta()
+                self.data_manager.get_sta_adapter().init_sta()
             self.placedb.setup_rawdb(self.params)
 
         logging.info("setting up raw database takes %.2f seconds" %
@@ -141,8 +137,7 @@ class PlacementEngine:
     def write_back(self, def_file="output.def"):
         # self.placedb.write_placement_back(self.params)
         # self.engine_data_ieda.gds_save(def_file+".gds")
-        ieda_io = IEDAIO(self.data_manager.dir_workspace)
-        ieda_io.def_save(def_file)
+        self.data_manager.def_save(def_file)
 
     def update_params(self, new_params: Params):
         self.params.fromJson(new_params.__dict__)
@@ -296,8 +291,7 @@ class PlacementEngine:
             "%s.tcl"
             % (self.params.design_name()),
         )
-        ieda_io = IEDAIO(self.data_manager.dir_workspace)
-        ieda_io.tcl_save(tcl_file)
+        self.data_manager.tcl_save(tcl_file)
         # self.placedb.write(self.params, self.gp_out_file)
 
     def run(self):
@@ -386,10 +380,8 @@ if __name__ == "__main__":
     data_manager = DataManager(workspace_path)
     params = Params.Params()
     workspace = data_manager.workspace
-    ieda_io = IEDAIO(dir_workspace=workspace.workspace,
-                     input_def=workspace.json_path.def_input_path)
-    data_manager.set_ieda_io(ieda_io)
-    ieda_io.read_def()
+    # The standalone example below is kept only for manual debugging.
+    # Integrations should provide a data_manager that already exposes DB IO.
     # params.with_sta = False
     # init PlacementEngine
     # json_file = '/home/xingchaoyu/code/ai-mp/workspace_aimp/workspace_NutShell/aimp/log/run-0_0_0/parameters.json'

@@ -53,7 +53,6 @@ import dreamplace.ops.macro_refinement.macro_refinement as macro_refinement
 from dreamplace.ops.timing_propagation.timing_propagation import TimingPropagation
 from dreamplace.ops.rc_timing.rc_timing import RCTiming
 from dreamplace.BasicPlace import PlaceDataCollection
-from tools.iEDA.module.sta import IEDASta
 
 
 class PreconditionOp:
@@ -523,7 +522,7 @@ class PlaceObj(nn.Module):
         # --- 步骤 2: 初始化iEDA并使用正确的线电容为其构建RC树 ---
         # ==============================================================================
         logging.info("正在初始化iEDA STA引擎...")
-        ieda_sta = IEDASta(self.placedb.data_manager.dir_workspace)
+        ieda_sta = self.placedb.data_manager.get_sta_adapter()
         num_pins = len(self.placedb.pin_names)
         self.id2net_name_map = {v: k for k, v in self.placedb.net_name2id_map.items()}
 

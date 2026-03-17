@@ -68,61 +68,7 @@ void PlaceDB::lef_manufacturing_cbk(double) {}
 void PlaceDB::lef_useminspacing_cbk(LefParser::lefiUseMinSpacing const&) {}
 void PlaceDB::lef_clearancemeasure_cbk(std::string const&) {}
 void PlaceDB::lef_busbitchars_cbk(std::string const&) {}
-void PlaceDB::lef_layer_cbk(LefParser::lefiLayer const& l) {
-  if (!lefiLayer_hasType(&l)) {
-    return;
-  }
-  const char* type = lefiLayer_type(&l);
-  if (!type || !limbo::iequals(type, "ROUTING")) {
-    return;
-  }
-
-  std::string layer_name = lefiLayer_name(&l);
-  if (layer_name.empty()) {
-    return;
-  }
-
-  index_type layer_id = 0;
-  auto it = m_mLayerName2Index.find(layer_name);
-  if (it == m_mLayerName2Index.end()) {
-    layer_id = m_vLayerName.size();
-    m_vLayerName.push_back(layer_name);
-    m_mLayerName2Index[layer_name] = layer_id;
-  } else {
-    layer_id = it->second;
-  }
-
-  if (m_vMinWireWidth.size() <= layer_id) {
-    m_vMinWireWidth.resize(layer_id + 1, 0);
-  }
-  if (m_vMinWireSpacing.size() <= layer_id) {
-    m_vMinWireSpacing.resize(layer_id + 1, 0);
-  }
-
-  if (lefiLayer_hasWidth(&l)) {
-    double w = lefiLayer_width(&l);
-    if (w > 0) {
-      m_vMinWireWidth[layer_id] = (index_type)round(w * m_lefUnit);
-    }
-  }
-
-  int nsp = lefiLayer_numSpacing(&l);
-  if (nsp > 0) {
-    double min_sp = 0.0;
-    for (int i = 0; i < nsp; ++i) {
-      double sp = lefiLayer_spacing(&l, i);
-      if (sp <= 0) {
-        continue;
-      }
-      if (min_sp == 0.0 || sp < min_sp) {
-        min_sp = sp;
-      }
-    }
-    if (min_sp > 0) {
-      m_vMinWireSpacing[layer_id] = (index_type)round(min_sp * m_lefUnit);
-    }
-  }
-}
+void PlaceDB::lef_layer_cbk(LefParser::lefiLayer const&) {}
 void PlaceDB::lef_via_cbk(LefParser::lefiVia const&) {}
 void PlaceDB::lef_viarule_cbk(LefParser::lefiViaRule const&) {}
 void PlaceDB::lef_spacing_cbk(LefParser::lefiSpacing const&) {}

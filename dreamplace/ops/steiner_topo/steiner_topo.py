@@ -192,6 +192,24 @@ class SteinerTopo(nn.Module):
         self.edge_l_directions = self.l_direction_resolver.resolve_l_directions(self, guide_path)
         
         return self.edge_l_directions
+
+    def resolve_l_directions_from_gpugr(self, route_entries):
+        """
+        从 gpugr 导出的 route_entries 解析每条边的 L 方向。
+
+        Args:
+            route_entries: gpugr.RouteForce.route_entries() 的返回结果
+
+        Returns:
+            torch.Tensor: shape=(num_edges,), 每条边的L方向
+        """
+        if self.l_direction_resolver is None:
+            logger.error("L direction resolver not initialized, call init_l_direction_resolver first")
+            return None
+
+        self.l_direction_resolver.parse_gpugr_route_entries(route_entries)
+        self.edge_l_directions = self.l_direction_resolver.resolve_l_directions(self)
+        return self.edge_l_directions
     
     def get_edge_l_direction(self, edge_idx):
         """

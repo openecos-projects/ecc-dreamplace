@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import logging
 import torch
+import torch.nn.functional as F
 import gzip
 import copy
 import matplotlib.pyplot as plt
@@ -32,8 +33,6 @@ import math
 
 from dreamplace.ops.routability.egr_resample import (
     create_supply_and_demand_maps_from_egr,
-    create_supply_map_from_placedb,
-    create_supply_map_from_gcellinfo_and_lef,
 )
 
 
@@ -90,6 +89,19 @@ def _compute_gpugr_route_grid_like_xplace(params, placedb):
     return route_xsize, route_ysize
 
 
+def _resample_xy_map(map_xy, target_x, target_y):
+    if map_xy.shape == (target_x, target_y):
+        return map_xy.contiguous()
+    image_yx = map_xy.t().unsqueeze(0).unsqueeze(0)
+    image_yx = F.interpolate(
+        image_yx,
+        size=(target_y, target_x),
+        mode="bilinear",
+        align_corners=False,
+    )
+    return image_yx.squeeze(0).squeeze(0).t().contiguous()
+
+
 def _sync_gpugr_route_grid_to_autodmp(params, placedb, model=None):
     route_xsize, route_ysize = _compute_gpugr_route_grid_like_xplace(params, placedb)
     old_route_xsize = getattr(placedb, "num_routing_grids_x", None)
@@ -125,6 +137,101 @@ def _sync_gpugr_route_grid_to_autodmp(params, placedb, model=None):
         logging.info("AutoDMP routing grid already matches the gpugr grid. Skip rebuilding related ops.")
 
     return route_xsize, route_ysize
+
+
+def _resolve_l_shape_wire_width(placedb, route_xsize, route_ysize):
+    min_wire_widths = getattr(placedb, "min_wire_widths", None)
+    if min_wire_widths is not None and len(min_wire_widths) > 0:
+        widths = np.array(min_wire_widths, dtype=float)
+        widths = widths[widths > 0]
+        if widths.size > 0:
+            wire_width = float(widths.min())
+            logging.info("Use LEF min wire width for L-shape segments: %.4f", wire_width)
+            return wire_width
+
+    fallback_wire_width = min(
+        float(placedb.xh - placedb.xl) / max(int(route_xsize), 1),
+        float(placedb.yh - placedb.yl) / max(int(route_ysize), 1),
+    )
+    logging.warning(
+        "Fallback L-shape wire width to gpugr gcell size: %.4f (route grid %dx%d)",
+        fallback_wire_width,
+        route_xsize,
+        route_ysize,
+    )
+    return fallback_wire_width
+
+
+def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
+    from tools.iEDA.module.gpugr import IEDAGPUGR
+
+    _write_back_autodmp_pos_to_ieda(pos, params, placedb)
+    route_xsize, route_ysize = _sync_gpugr_route_grid_to_autodmp(
+        params,
+        placedb,
+        model=model,
+    )
+    l_shape_num_bins_x = int(getattr(params, "num_bins_x", placedb.num_bins_x))
+    l_shape_num_bins_y = int(getattr(params, "num_bins_y", placedb.num_bins_y))
+
+    gpugr_op = IEDAGPUGR(dir_workspace=placedb.data_manager.dir_workspace)
+    result = gpugr_op.run_gpugr(
+        out_dir=os.path.join(params.result_dir, "gpugr_l_shape"),
+        design_name=params.design_name(),
+        gpu=getattr(params, "gpu_id", 0),
+        threads=params.num_threads,
+        route_xsize=route_xsize,
+        route_ysize=route_ysize,
+        rrr_iters=int(getattr(params, "gpugr_l_direction_rrr_iters", 0)),
+        skip_m1_route=True,
+        keep_temp_def=False,
+        save_artifacts=bool(getattr(params, "gpugr_l_direction_save_artifacts", 0)),
+        include_route_entries=True,
+    )
+
+    maps = result["maps"]
+    metrics = result["metrics"]
+    route_entries = result.get("route_entries", [])
+    total_entries = sum(len(net.get("entries", [])) for net in route_entries)
+
+    supply_xy = maps["capacity_map"].sum(dim=0).detach().to(device=pos.device, dtype=pos.dtype)
+    demand_xy = (
+        maps["wire_demand_map"] + maps["via_demand_map"]
+    ).sum(dim=0).detach().to(device=pos.device, dtype=pos.dtype)
+    supply_map = _resample_xy_map(supply_xy, l_shape_num_bins_x, l_shape_num_bins_y)
+    demand_map = _resample_xy_map(demand_xy, l_shape_num_bins_x, l_shape_num_bins_y)
+    wire_width = _resolve_l_shape_wire_width(placedb, route_xsize, route_ysize)
+
+    logging.info(
+        "Prepared gpugr L-shape inputs: route_grid=%dx%d l_shape_bins=%dx%d nets=%d entries=%d "
+        "supply[min=%.3f max=%.3f mean=%.3f] demand[min=%.3f max=%.3f mean=%.3f] "
+        "#OvflNets=%d EstShorts=%.0f",
+        route_xsize,
+        route_ysize,
+        l_shape_num_bins_x,
+        l_shape_num_bins_y,
+        len(route_entries),
+        total_entries,
+        supply_map.min().item(),
+        supply_map.max().item(),
+        supply_map.mean().item(),
+        demand_map.min().item(),
+        demand_map.max().item(),
+        demand_map.mean().item(),
+        metrics["num_overflow_nets"],
+        metrics["gr_est_shorts"],
+    )
+    return {
+        "supply_map": supply_map,
+        "demand_map": demand_map,
+        "wire_width": wire_width,
+        "route_entries": route_entries,
+        "metrics": metrics,
+        "route_xsize": route_xsize,
+        "route_ysize": route_ysize,
+        "num_bins_x": l_shape_num_bins_x,
+        "num_bins_y": l_shape_num_bins_y,
+    }
 
 
 def _run_gpugr_before_first_area_adjust_and_exit(params, placedb, pos, num_area_adjust, model=None):
@@ -168,6 +275,56 @@ def _run_gpugr_before_first_area_adjust_and_exit(params, placedb, pos, num_area_
         )
     )
     raise SystemExit(0)
+
+
+def _get_default_egr_guide_path(params):
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(params.result_dir))),
+        "iEDA/data/rt/rt_temp_directory/early_router/route_planar.guide",
+    )
+
+
+def _resolve_l_directions_for_l_shape(
+    params,
+    placedb,
+    pos,
+    steiner_topo_op,
+    gpugr_route_entries=None,
+    gpugr_metrics=None,
+    gpugr_route_grid=None,
+):
+    if steiner_topo_op.l_direction_resolver is None:
+        steiner_topo_op.init_l_direction_resolver(placedb, params)
+
+    if getattr(params, "l_direction_use_gpugr", False):
+        if gpugr_route_entries is None:
+            gpugr_inputs = _prepare_l_shape_inputs_from_gpugr(params, placedb, pos)
+            route_entries = gpugr_inputs["route_entries"]
+            metrics = gpugr_inputs["metrics"]
+            route_xsize = gpugr_inputs["route_xsize"]
+            route_ysize = gpugr_inputs["route_ysize"]
+        else:
+            route_entries = gpugr_route_entries
+            metrics = gpugr_metrics or {"num_overflow_nets": -1, "gr_est_shorts": -1.0}
+            if gpugr_route_grid is None:
+                route_xsize, route_ysize = _compute_gpugr_route_grid_like_xplace(params, placedb)
+            else:
+                route_xsize, route_ysize = gpugr_route_grid
+        total_entries = sum(len(net.get("entries", [])) for net in route_entries)
+        logging.info(
+            "Resolve L directions from gpugr route entries: grid=%dx%d nets=%d entries=%d #OvflNets=%d EstShorts=%.0f",
+            route_xsize,
+            route_ysize,
+            len(route_entries),
+            total_entries,
+            metrics["num_overflow_nets"],
+            metrics["gr_est_shorts"],
+        )
+        return steiner_topo_op.resolve_l_directions_from_gpugr(route_entries)
+
+    egr_guide_path = getattr(params, "egr_guide_path", _get_default_egr_guide_path(params))
+    logging.info("Resolve L directions from EGR guide: %s", egr_guide_path)
+    return steiner_topo_op.resolve_l_directions_from_egr(egr_guide_path)
 
 
 class NonLinearPlace(BasicPlace.BasicPlace):
@@ -877,88 +1034,74 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     self.data_collections.pin_fa, self.data_collections.flat_pin_to, self.data_collections.flat_pin_to_start, \
                                     self.data_collections.flat_pin_from = self.op_collections.steiner_topo_op.rebuild_tree(pin_pos)
                             
-                            # Step 2: 运行EGR获取路由信息
-                            model.op_collections.irt_egr_congestion_map_op(
-                                pos, stage="egr2D", resolve_congestion="low"
-                            )
-                            
-                            # Step 3: 获取EGR guide路径（从params或默认路径）
-                            # params.result_dir: .../workspace/output/dreamplace
-                            # EGR guide路径: .../workspace/output/iEDA/data/rt/rt_temp_directory/early_router/route_planar.guide
-                            egr_guide_path = os.path.join(
-                                os.path.dirname(os.path.dirname(os.path.dirname(params.result_dir))), 
-                                "iEDA/data/rt/rt_temp_directory/early_router/route_planar.guide"
-                            )
-
-                                    
-                            
-                            egr_dir = os.path.join(
-                                os.path.dirname(os.path.dirname(os.path.dirname(params.result_dir))), 
-                                "iEDA/data/rt/rt_temp_directory/early_router/"
-                            )
-
                             L_shape_num_bins_x = params.num_bins_x
                             L_shape_num_bins_y = params.num_bins_y
 
-                            # 获取 demand_map（EGR net map）和 wire_width
-                            supply_map, demand_map, wire_width = create_supply_and_demand_maps_from_egr(
-                                egr_dir=egr_dir,
-                                placedb=placedb,
-                                params=params,
-                                num_bins_x=L_shape_num_bins_x,
-                                num_bins_y=L_shape_num_bins_y,
-                                layer='planar',  
-                                normalize_supply=False,
-                                normalize_demand=False,
-                                return_wire_width=True  # fallback: GCell 尺寸的 wire_width
-                            )
-
-                            supply_map.fill_(supply_map.max())
-
-                            # 使用 placedb 计算 supply_map
-                            # lef_path = "/nfs/share/home/qiming/0924/N551P6M_cmax.lef"
-                            # supply_map = create_supply_map_from_gcellinfo_and_lef(
-                            #     egr_dir=egr_dir,
-                            #     lef_path=lef_path,
-                            #     placedb=placedb,
-                            #     params=params,
-                            #     num_bins_x=L_shape_num_bins_x,
-                            #     num_bins_y=L_shape_num_bins_y,
-                            #     device=None,
-                            #     dtype=None,
-                            #     normalize=False,
-                            #     wire_width=None
-                            # )
-
-                            # print("wire_width:", wire_width)
-                            min_wire_widths = getattr(placedb, "min_wire_widths", None)
-                            if min_wire_widths is None:
-                                logging.info("min_wire_widths len=0, head=[]")
+                            if getattr(params, "l_direction_use_gpugr", False):
+                                gpugr_inputs = _prepare_l_shape_inputs_from_gpugr(
+                                    params,
+                                    placedb,
+                                    pos,
+                                    model=model,
+                                )
+                                supply_map = gpugr_inputs["supply_map"]
+                                demand_map = gpugr_inputs["demand_map"]
+                                wire_width = gpugr_inputs["wire_width"]
                             else:
-                                logging.info(f"min_wire_widths len={len(min_wire_widths)}, head={min_wire_widths[:5]}")
+                                # Step 2: 运行EGR获取路由信息
+                                model.op_collections.irt_egr_congestion_map_op(
+                                    pos, stage="egr2D", resolve_congestion="low"
+                                )
+                                egr_dir = os.path.join(
+                                    os.path.dirname(os.path.dirname(os.path.dirname(params.result_dir))), 
+                                    "iEDA/data/rt/rt_temp_directory/early_router/"
+                                )
+                                supply_map, demand_map, wire_width = create_supply_and_demand_maps_from_egr(
+                                    egr_dir=egr_dir,
+                                    placedb=placedb,
+                                    params=params,
+                                    num_bins_x=L_shape_num_bins_x,
+                                    num_bins_y=L_shape_num_bins_y,
+                                    layer='planar',
+                                    normalize_supply=False,
+                                    normalize_demand=False,
+                                    return_wire_width=True,
+                                )
+                                min_wire_widths = getattr(placedb, "min_wire_widths", None)
+                                if min_wire_widths is None:
+                                    logging.info("min_wire_widths len=0, head=[]")
+                                else:
+                                    logging.info(f"min_wire_widths len={len(min_wire_widths)}, head={min_wire_widths[:5]}")
+                                if getattr(placedb, "min_wire_widths", None) is not None and len(placedb.min_wire_widths) > 0:
+                                    widths = np.array(placedb.min_wire_widths, dtype=float)
+                                    widths = widths[widths > 0]
+                                    if widths.size > 0:
+                                        wire_width = float(widths.min())
+                                        logging.info(f"Use LEF min wire width for segments: {wire_width:.4f}")
 
-                            # Prefer LEF min wire width from placedb if available (already scaled)
-                            if getattr(placedb, "min_wire_widths", None) is not None and len(placedb.min_wire_widths) > 0:
-                                widths = np.array(placedb.min_wire_widths, dtype=float)
-                                widths = widths[widths > 0]
-                                if widths.size > 0:
-                                    wire_width = float(widths.min())
-                                    logging.info(f"Use LEF min wire width for segments: {wire_width:.4f}")
-
-                            print("wire_width:", wire_width)
-                            print("bin_size_x:", placedb.bin_size_x, "bin_size_y:", placedb.bin_size_y)
-                            print("row_height:", placedb.row_height, "site_width:", placedb.site_width)
-                            if getattr(placedb, "min_wire_widths", None) is not None:
-                                print("min_wire_widths head:", placedb.min_wire_widths[:5])
-
-                            # exit(0)
-                            
-                            # Step 4: 解析EGR L方向
+                            # Step 4: 解析路由器输出的 L 方向
                             steiner_topo_op = self.op_collections.steiner_topo_op
-                            if steiner_topo_op.l_direction_resolver is None:
-                                steiner_topo_op.init_l_direction_resolver(placedb, params)
-                            
-                            l_directions = steiner_topo_op.resolve_l_directions_from_egr(egr_guide_path)
+                            l_directions = _resolve_l_directions_for_l_shape(
+                                params,
+                                placedb,
+                                pos,
+                                steiner_topo_op,
+                                gpugr_route_entries=(
+                                    gpugr_inputs["route_entries"]
+                                    if getattr(params, "l_direction_use_gpugr", False)
+                                    else None
+                                ),
+                                gpugr_metrics=(
+                                    gpugr_inputs["metrics"]
+                                    if getattr(params, "l_direction_use_gpugr", False)
+                                    else None
+                                ),
+                                gpugr_route_grid=(
+                                    (gpugr_inputs["route_xsize"], gpugr_inputs["route_ysize"])
+                                    if getattr(params, "l_direction_use_gpugr", False)
+                                    else None
+                                ),
+                            )
 
                             # # ========== Plot edges with L-shape by l_direction ==========
                             # import matplotlib.pyplot as plt
@@ -1046,11 +1189,11 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             # Step 5: 初始化L形routability模块
 
                             model.init_l_shape_routability(
-                                wire_width=wire_width,  # 使用 GCell 最小边长作为 wire_width
+                                wire_width=wire_width,
                                 num_bins_x=L_shape_num_bins_x,
                                 num_bins_y=L_shape_num_bins_y,
-                                target_density=supply_map,  # 使用 EGR supply map 作为 target density
-                                target_demand=demand_map    # 使用 EGR net map 作为 demand 标定
+                                target_density=supply_map,
+                                target_demand=demand_map,
                             )
                             # 初始化基于L-shape overflow的外环状态
                             model._l_shape_overflow_ema = None
@@ -1154,19 +1297,41 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     self.data_collections.pin_fa, self.data_collections.flat_pin_to, self.data_collections.flat_pin_to_start, \
                                     self.data_collections.flat_pin_from = self.op_collections.steiner_topo_op.rebuild_tree(pin_pos)
                             
-                            # 重新运行EGR
-                            model.op_collections.irt_egr_congestion_map_op(
-                                pos, stage="egr2D", resolve_congestion="low"
-                            )
-                            
-                            # 更新L方向
-                            egr_default_path = os.path.join(
-                                os.path.dirname(os.path.dirname(os.path.dirname(params.result_dir))), 
-                                "iEDA/data/rt/rt_temp_directory/early_router/route_planar.guide"
-                            )
-                            egr_guide_path = getattr(params, 'egr_guide_path', egr_default_path)
+                            gpugr_inputs = None
+                            if not getattr(params, "l_direction_use_gpugr", False):
+                                model.op_collections.irt_egr_congestion_map_op(
+                                    pos, stage="egr2D", resolve_congestion="low"
+                                )
+                            else:
+                                gpugr_inputs = _prepare_l_shape_inputs_from_gpugr(
+                                    params,
+                                    placedb,
+                                    pos,
+                                    model=model,
+                                )
+
                             steiner_topo_op = self.op_collections.steiner_topo_op
-                            l_directions = steiner_topo_op.resolve_l_directions_from_egr(egr_guide_path)
+                            l_directions = _resolve_l_directions_for_l_shape(
+                                params,
+                                placedb,
+                                pos,
+                                steiner_topo_op,
+                                gpugr_route_entries=(
+                                    gpugr_inputs["route_entries"]
+                                    if gpugr_inputs is not None
+                                    else None
+                                ),
+                                gpugr_metrics=(
+                                    gpugr_inputs["metrics"]
+                                    if gpugr_inputs is not None
+                                    else None
+                                ),
+                                gpugr_route_grid=(
+                                    (gpugr_inputs["route_xsize"], gpugr_inputs["route_ysize"])
+                                    if gpugr_inputs is not None
+                                    else None
+                                ),
+                            )
                             density_map = None
 
                             # 基于L-shape overflow变化更新target_ratio（外环慢速更新）

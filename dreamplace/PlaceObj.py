@@ -434,10 +434,10 @@ class PlaceObj(nn.Module):
         Args:
             wire_width: segment线宽
             num_bins_x, num_bins_y: 密度计算的bin数量
-            target_density: 目标密度，可以是标量或2D张量(EGR supply map)
-            target_demand: 目标需求(2D张量, EGR net map)，用于标定L-shape密度与EGR单位
+            target_density: 目标密度，可以是标量或2D张量(routing supply map)
+            target_demand: 目标需求(2D张量, routing demand map)，用于标定L-shape密度单位
                 - 标量: 所有bin使用相同的target density
-                - 2D张量: 每个bin有不同的target density (来自EGR supply map)
+                - 2D张量: 每个bin有不同的target density (来自外部router supply map)
         """
         from dreamplace.ops.routability.l_shape_routability import LShapeRoutabilityOp
         
@@ -458,13 +458,13 @@ class PlaceObj(nn.Module):
         
         if isinstance(target_density, torch.Tensor):
             if isinstance(target_demand, torch.Tensor):
-                logging.info(f"L-shape routability initialized with EGR supply/net maps "
+                logging.info(f"L-shape routability initialized with routing supply/demand maps "
                             f"(supply min={target_density.min():.1f}, max={target_density.max():.1f}; "
                             f"demand min={target_demand.min():.1f}, max={target_demand.max():.1f}), "
                             f"init_weight={self.l_shape_routability_weight.item():.2e}, "
                             f"target_grad_ratio={self.l_shape_grad_target_ratio}")
             else:
-                logging.info(f"L-shape routability initialized with EGR supply map "
+                logging.info(f"L-shape routability initialized with routing supply map "
                             f"(min={target_density.min():.1f}, max={target_density.max():.1f}), "
                             f"init_weight={self.l_shape_routability_weight.item():.2e}, "
                             f"target_grad_ratio={self.l_shape_grad_target_ratio}")

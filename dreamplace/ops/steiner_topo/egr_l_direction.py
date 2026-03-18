@@ -154,6 +154,88 @@ class EGRLDirectionResolver:
         logger.info(f"Parsed EGR guide: {len(self.egr_net_data)} nets")
         
         return self.egr_net_data
+
+    def parse_gpugr_route_entries(self, route_entries):
+        """
+        解析 gpugr.route_entries() 返回的有序 route entries。
+
+        Args:
+            route_entries: list of
+                {
+                    "net_name": str,
+                    "route_failed": bool,
+                    "entries": [
+                        {
+                            "type": "wire" / "via",
+                            "grid_x1/grid_y1/grid_x2/grid_y2": int,
+                            "dbu_center_x1/dbu_center_y1/dbu_center_x2/dbu_center_y2": int,
+                            ...
+                        }
+                    ]
+                }
+
+        Returns:
+            dict: 与 parse_egr_guide 相同的 net_data 结构
+        """
+        net_data = {}
+        dbu = float(self.placedb.dbu)
+
+        for net_route in route_entries or []:
+            net_name = net_route.get("net_name", "") or f"net_{net_route.get('net_id', -1)}"
+            entries = net_route.get("entries", []) or []
+
+            data = {
+                "wires": [],
+                "pins": [],
+                "vias": [],
+                "route_failed": bool(net_route.get("route_failed", False)),
+                "source": "gpugr",
+            }
+
+            for entry in entries:
+                entry_type = entry.get("type", "")
+                grid1 = (int(entry.get("grid_x1", 0)), int(entry.get("grid_y1", 0)))
+                grid2 = (int(entry.get("grid_x2", 0)), int(entry.get("grid_y2", 0)))
+                real1 = (
+                    float(entry.get("dbu_center_x1", entry.get("dbu_lx", 0))) / dbu,
+                    float(entry.get("dbu_center_y1", entry.get("dbu_ly", 0))) / dbu,
+                )
+                real2 = (
+                    float(entry.get("dbu_center_x2", entry.get("dbu_hx", 0))) / dbu,
+                    float(entry.get("dbu_center_y2", entry.get("dbu_hy", 0))) / dbu,
+                )
+
+                if entry_type == "wire":
+                    orientation = entry.get("orientation", "")
+                    is_horizontal = orientation == "H" or grid1[1] == grid2[1]
+                    is_vertical = orientation == "V" or grid1[0] == grid2[0]
+                    data["wires"].append(
+                        {
+                            "grid1": grid1,
+                            "grid2": grid2,
+                            "real1": real1,
+                            "real2": real2,
+                            "layer": entry.get("layer_name", ""),
+                            "is_horizontal": is_horizontal,
+                            "is_vertical": is_vertical,
+                            "order": int(entry.get("order", len(data["wires"]))),
+                        }
+                    )
+                elif entry_type == "via":
+                    data["vias"].append(
+                        {
+                            "grid": grid1,
+                            "real": real1,
+                            "layer": entry.get("layer_name", ""),
+                            "order": int(entry.get("order", len(data["vias"]))),
+                        }
+                    )
+
+            net_data[net_name] = data
+
+        self.egr_net_data = net_data
+        logger.info(f"Parsed gpugr route entries: {len(self.egr_net_data)} nets")
+        return self.egr_net_data
     
     def _coord_dp_to_micron(self, x_dp, y_dp):
         """

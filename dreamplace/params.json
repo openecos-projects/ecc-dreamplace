@@ -239,6 +239,18 @@
         "description": "Xplace C++ parser log level for gpugr area adjustment",
         "default": 2
     },
+    "l_direction_use_gpugr": {
+        "description": "whether use Xplace gpugr route entries instead of iRT EGR guide to resolve L directions",
+        "default": 0
+    },
+    "gpugr_l_direction_rrr_iters": {
+        "description": "rrrIters passed to gpugr when l_direction_use_gpugr is enabled",
+        "default": 0
+    },
+    "gpugr_l_direction_save_artifacts": {
+        "description": "whether save gpugr artifacts when l_direction_use_gpugr is enabled",
+        "default": 0
+    },
     "adjust_nctugr_area_flag": {
         "description": "whether use NCTUgr congestion map to guide area adjustment",
         "default": 0

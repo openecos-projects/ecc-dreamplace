@@ -32,7 +32,7 @@ import random
 import numpy as np
 import logging
 
-os.environ['eda_tool'] = "iEDA"
+os.environ['eda_tool'] = "ecc"
 os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
 
 # for consistency between python2 and python3
@@ -44,7 +44,6 @@ top_root_dir = os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))))
 if top_root_dir not in sys.path:
     sys.path.append(top_root_dir)
-    sys.path.append(top_root_dir + "/third_party/aieda")
 import dreamplace.configure as configure
 from dreamplace.Params import Params
 from dreamplace.macroPlaceDB import MacroPlaceDB as PlaceDB

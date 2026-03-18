@@ -517,12 +517,12 @@ class PlaceObj(nn.Module):
         pin_fcap_base[data_collections.end_points] += data_collections.outcaps
         return pin_cap_base, pin_rcap_base, pin_fcap_base
 
-    def build_ieda_rct(self):
+    def build_ecc_rct(self):
         # ==============================================================================
-        # --- 步骤 2: 初始化iEDA并使用正确的线电容为其构建RC树 ---
+        # --- 步骤 2: 初始化ecc并使用正确的线电容为其构建RC树 ---
         # ==============================================================================
-        logging.info("正在初始化iEDA STA引擎...")
-        ieda_sta = self.placedb.data_manager.get_sta_adapter()
+        logging.info("正在初始化ecc STA引擎...")
+        ecc_sta = self.placedb.data_manager.get_sta_adapter()
         num_pins = len(self.placedb.pin_names)
         self.id2net_name_map = {v: k for k, v in self.placedb.net_name2id_map.items()}
 
@@ -532,7 +532,7 @@ class PlaceObj(nn.Module):
         )
         flat_pin_to = self.data_collections.flat_pin_to.clone().detach().cpu().numpy()
 
-        # 关键：使用纯粹的线电容 node_wire_caps_np 来构建iEDA的RC树
+        # 关键：使用纯粹的线电容 node_wire_caps_np 来构建ecc的RC树
         node_wire_caps_np = self.op_collections.elmore_delay_op.net_cap.cpu().numpy()
         edge_resistance = (
             self.op_collections.elmore_delay_op.edge_resistance.cpu().numpy()
@@ -541,7 +541,7 @@ class PlaceObj(nn.Module):
             (u, v): r for u, v, r in zip(flat_pin_from, flat_pin_to, edge_resistance)
         }
 
-        logging.info("开始为iEDA构建所有网络的RC树...")
+        logging.info("开始为ecc构建所有网络的RC树...")
         for net_id, net_name in self.id2net_name_map.items():
             # (RC树构建循环逻辑保持不变，确保传递的是 node_wire_caps)
             # ... 此处省略您已验证通过的RC树构建循环代码 ...
@@ -603,7 +603,7 @@ class PlaceObj(nn.Module):
                         edge_to_res_map.get((parent_idx, global_idx), 0.0)
                     )
                 node_wire_caps.append(node_wire_caps_np[global_idx])
-            ieda_sta.build_rc_tree_from_flat_data(
+            ecc_sta.build_rc_tree_from_flat_data(
                 net_name,
                 node_sta_names,
                 node_is_pin,
@@ -616,13 +616,13 @@ class PlaceObj(nn.Module):
         logging.info("所有网络的RC树构建完成。")
 
         # ==============================================================================
-        # --- 步骤 3: 调用iEDA执行分析并获取所有调试信息 ---
+        # --- 步骤 3: 调用ecc执行分析并获取所有调试信息 ---
         # ==============================================================================
-        logging.info("调用iEDA执行时序分析并获取详细数据...")
+        logging.info("调用ecc执行时序分析并获取详细数据...")
         at_late_cpp, at_early_cpp, rt_late_cpp, rt_early_cpp = [], [], [], []
         pin_net_delay_cpp, cell_arc_delays_cpp, net_timing_details_cpp = [], [], []
 
-        ieda_sta.update_and_get_all_pin_timings(
+        ecc_sta.update_and_get_all_pin_timings(
             self.placedb.pin_names,
             at_late_cpp,
             at_early_cpp,
@@ -633,7 +633,7 @@ class PlaceObj(nn.Module):
             net_timing_details_cpp,
         )
         logging.info(
-            f"成功获取iEDA数据: {len(cell_arc_delays_cpp)}条CellArc, {len(net_timing_details_cpp)}条NetPin记录。"
+            f"成功获取ecc数据: {len(cell_arc_delays_cpp)}条CellArc, {len(net_timing_details_cpp)}条NetPin记录。"
         )
         return (
             at_late_cpp,
@@ -668,15 +668,15 @@ class PlaceObj(nn.Module):
         import math
         import csv
 
-        # 4a. 预处理iEDA返回的Net Pin数据，过滤掉 slew_ns 为 nan 的条目
+        # 4a. 预处理ecc返回的Net Pin数据，过滤掉 slew_ns 为 nan 的条目
         net_timing_details_cpp_filtered = [
             info
             for info in net_timing_details_cpp
             if not math.isnan(info.get("slew_ns", float("nan")))
         ]
 
-        # 使用过滤后的干净数据来创建 ieda_pin_map
-        ieda_pin_map = {
+        # 使用过滤后的干净数据来创建 ecc_pin_map
+        ecc_pin_map = {
             (info["pin_name"], info["mode"], info["transition"]): info
             for info in net_timing_details_cpp_filtered
         }
@@ -772,7 +772,7 @@ class PlaceObj(nn.Module):
         # 4c. 构建用于排序和报告的中间列表
         report_data = []
         common_keys = set(python_pin_map.keys()).intersection(
-            set(ieda_pin_map.keys())
+            set(ecc_pin_map.keys())
         )
 
         # 新增: 创建一个从pin name到id的反向映射，以便查找AT/RT
@@ -781,30 +781,30 @@ class PlaceObj(nn.Module):
         for key in common_keys:
             pin_name, _, _ = key
             py_data = python_pin_map[key]
-            ieda_data = ieda_pin_map[key]
+            ecc_data = ecc_pin_map[key]
 
             # 获取pin_id，如果找不到则跳过 (更稳健)
             pin_id = pin_name_to_id_map.get(pin_name)
             if pin_id is None:
                 continue
 
-            # 从iEDA的列表中获取AT/RT
+            # 从ecc的列表中获取AT/RT
             if key[2] == "Rise":
-                ieda_at_val = at_late_cpp[pin_id][0]
-                ieda_rt_val = rt_late_cpp[pin_id][0]
+                ecc_at_val = at_late_cpp[pin_id][0]
+                ecc_rt_val = rt_late_cpp[pin_id][0]
             else:  # Fall                
-                ieda_at_val = at_late_cpp[pin_id][1]
-                ieda_rt_val = rt_late_cpp[pin_id][1]
+                ecc_at_val = at_late_cpp[pin_id][1]
+                ecc_rt_val = rt_late_cpp[pin_id][1]
 
             # 计算用于排序的差异值 (使用 RT 差异)
-            diff = abs(py_data["rt"] - ieda_rt_val * 1000)
+            diff = abs(py_data["rt"] - ecc_rt_val * 1000)
             report_data.append(
                 {
                     "key": key,
                     "py_data": py_data,
-                    "ieda_data": ieda_data,
-                    "ieda_at": ieda_at_val * 1000,
-                    "ieda_rt": ieda_rt_val * 1000,
+                    "ecc_data": ecc_data,
+                    "ecc_at": ecc_at_val * 1000,
+                    "ecc_rt": ecc_rt_val * 1000,
                     "sort_diff": diff,
                 }
             )
@@ -818,23 +818,23 @@ class PlaceObj(nn.Module):
             "Mode",
             "Trans",
             "Py AT (ps)",
-            "iEDA AT (ps)",
+            "ecc AT (ps)",
             "Py RT (ps)",
-            "iEDA RT (ps)",
+            "ecc RT (ps)",
             "Py Slack(ps)",
-            "iEDA Slack(ps)",
+            "ecc Slack(ps)",
             "Py Slew (ps)",
-            "iEDA Slew (ps)",
+            "ecc Slew (ps)",
             "Py Delay (ps)",
-            "iEDA Delay (ps)",
+            "ecc Delay (ps)",
             "Py Load (pF)",
-            "iEDA Load (pF)",
+            "ecc Load (pF)",
             "Py LDelay (ps)",
-            "iEDA LDelay (ps)",
+            "ecc LDelay (ps)",
             "Py Beta",
-            "iEDA Beta",
+            "ecc Beta",
             "Py Impulse",
-            "iEDA Impulse",
+            "ecc Impulse",
         ]
 
                 
@@ -845,17 +845,17 @@ class PlaceObj(nn.Module):
             for item in report_data:
                 pin_name, mode, trans = item["key"]
                 py_data = item["py_data"]
-                ieda_data = item["ieda_data"]
+                ecc_data = item["ecc_data"]
 
                 # safe extraction and unit handling
-                ieda_slew_val = ieda_data.get("slew_ns", float("nan"))
-                ieda_delay_val = ieda_data.get("delay", float("nan"))
-                ieda_load_val = ieda_data.get("load", float("nan"))
-                ieda_ldelay_val = ieda_data.get("ldelay", float("nan"))
-                ieda_beta_val = ieda_data.get("beta", float("nan"))
-                ieda_impulse_val = (
-                    ieda_data.get("impulse", 0.0)
-                    if ieda_data.get("impulse", 0.0) >= 0
+                ecc_slew_val = ecc_data.get("slew_ns", float("nan"))
+                ecc_delay_val = ecc_data.get("delay", float("nan"))
+                ecc_load_val = ecc_data.get("load", float("nan"))
+                ecc_ldelay_val = ecc_data.get("ldelay", float("nan"))
+                ecc_beta_val = ecc_data.get("beta", float("nan"))
+                ecc_impulse_val = (
+                    ecc_data.get("impulse", 0.0)
+                    if ecc_data.get("impulse", 0.0) >= 0
                     else 0.0
                 )
 
@@ -864,23 +864,23 @@ class PlaceObj(nn.Module):
                     mode,
                     trans,
                     f"{py_data.get('at', float('nan')):.6f}",
-                    f"{item.get('ieda_at', float('nan')):.6f}",
+                    f"{item.get('ecc_at', float('nan')):.6f}",
                     f"{py_data.get('rt', float('nan')):.6f}",
-                    f"{item.get('ieda_rt', float('nan')):.6f}",
+                    f"{item.get('ecc_rt', float('nan')):.6f}",
                     f"{py_data.get('rt', float('nan')) - py_data.get('at', float('nan')):.6f}",
-                    f"{item.get('ieda_rt', float('nan')) - item.get('ieda_at', float('nan')):.6f}",
+                    f"{item.get('ecc_rt', float('nan')) - item.get('ecc_at', float('nan')):.6f}",
                     f"{py_data.get('slew', float('nan')):.6f}",
-                    f"{1000 * ieda_slew_val:.6f}",
+                    f"{1000 * ecc_slew_val:.6f}",
                     f"{py_data.get('delay', float('nan')):.6f}",
-                    f"{ieda_delay_val:.6f}",
+                    f"{ecc_delay_val:.6f}",
                     f"{py_data.get('load', float('nan')):.6f}",
-                    f"{ieda_load_val:.6f}",
+                    f"{ecc_load_val:.6f}",
                     f"{py_data.get('ldelay', float('nan')):.6f}",
-                    f"{ieda_ldelay_val:.6f}",
+                    f"{ecc_ldelay_val:.6f}",
                     f"{py_data.get('beta', float('nan')):.6f}",
-                    f"{ieda_beta_val:.6f}",
+                    f"{ecc_beta_val:.6f}",
                     f"{py_data.get('impulse', float('nan')):.6f}",
-                    f"{ieda_impulse_val:.6f}",
+                    f"{ecc_impulse_val:.6f}",
                 ]
 
                 writer.writerow(row)
@@ -900,8 +900,8 @@ class PlaceObj(nn.Module):
         import numpy as np
         import csv
 
-        # 4a. 预处理iEDA返回的Cell Arc数据 (不变)
-        ieda_arc_map = {
+        # 4a. 预处理ecc返回的Cell Arc数据 (不变)
+        ecc_arc_map = {
         }
         for arc in cell_arc_delays_cpp:
             key_t = (
@@ -911,13 +911,13 @@ class PlaceObj(nn.Module):
                 arc["transition"],
                 arc["arc_sense"],
             )
-            if ieda_arc_map.get(key_t) is not None:
-                tmp = ieda_arc_map[key_t]
+            if ecc_arc_map.get(key_t) is not None:
+                tmp = ecc_arc_map[key_t]
                 if tmp['delay_ns'] < arc['delay_ns']:
-                    ieda_arc_map[key_t] = arc
+                    ecc_arc_map[key_t] = arc
                 # logging.info(f"Warning: Duplicate arc key found: {key_t}. Overwriting previous entry.")
             else:
-                ieda_arc_map[key_t] = arc
+                ecc_arc_map[key_t] = arc
             
 
         # 4b. 预处理Python端计算的Cell Arc数据 (逻辑修正版)
@@ -1047,16 +1047,16 @@ class PlaceObj(nn.Module):
 
         # 4c. 构建用于排序和报告的中间列表 (不变)
         report_data = []
-        common_keys = set(python_arc_map.keys()).intersection(set(ieda_arc_map.keys()))
+        common_keys = set(python_arc_map.keys()).intersection(set(ecc_arc_map.keys()))
 
         for key in common_keys:
             py_data = python_arc_map[key]
-            ieda_data = ieda_arc_map[key]
-            delay_diff = py_data["delay"] - ieda_data["delay_ns"] * 1000
+            ecc_data = ecc_arc_map[key]
+            delay_diff = py_data["delay"] - ecc_data["delay_ns"] * 1000
             report_item = {
                 "key": key,
                 "py_data": py_data,
-                "ieda_data": ieda_data,
+                "ecc_data": ecc_data,
                 "delay_diff": delay_diff,
             }
             report_data.append(report_item)
@@ -1073,12 +1073,12 @@ class PlaceObj(nn.Module):
             "Trans",
             "Sense",
             "Py Delay (ps)",
-            "iEDA Delay (ps)",
+            "ecc Delay (ps)",
             "Diff (ps)",
             "Py Slew (ps)",
-            "iEDA Slew (ps)",
+            "ecc Slew (ps)",
             "Py Load (pF)",
-            "iEDA Load (pF)",
+            "ecc Load (pF)",
         ]
 
         with open(csv_filename, "w", newline="", encoding="utf-8") as csvfile:
@@ -1088,11 +1088,11 @@ class PlaceObj(nn.Module):
             for item in report_data:
                 inst, from_p, to_p, trans, arc_sense = item["key"]
                 py_data = item["py_data"]
-                ieda_data = item["ieda_data"]
+                ecc_data = item["ecc_data"]
 
-                ieda_delay_ps = ieda_data.get("delay_ns", float("nan")) * 1000
-                ieda_in_slew_ps = ieda_data.get("in_slew_ns", float("nan")) * 1000
-                ieda_load = ieda_data.get("load_cap", float("nan"))
+                ecc_delay_ps = ecc_data.get("delay_ns", float("nan")) * 1000
+                ecc_in_slew_ps = ecc_data.get("in_slew_ns", float("nan")) * 1000
+                ecc_load = ecc_data.get("load_cap", float("nan"))
 
                 row = [
                     inst,
@@ -1100,12 +1100,12 @@ class PlaceObj(nn.Module):
                     trans,
                     arc_sense,
                     f"{py_data['delay']:.6f}",
-                    f"{ieda_delay_ps:.6f}",
+                    f"{ecc_delay_ps:.6f}",
                     f"{item['delay_diff']:+.6f}",
                     f"{py_data['slew']:.6f}",
-                    f"{ieda_in_slew_ps:.6f}",
+                    f"{ecc_in_slew_ps:.6f}",
                     f"{py_data['load']:.6f}",
-                    f"{ieda_load:.6f}",
+                    f"{ecc_load:.6f}",
                 ]
 
                 writer.writerow(row)
@@ -1153,10 +1153,10 @@ class PlaceObj(nn.Module):
             tns_cpp_calc = 0.0
 
         logging.info(
-            f"WNS (Python Calculated): {wns / 1000:<15.4f} | WNS (iEDA): {wns_cpp_calc:<15.4f}"
+            f"WNS (Python Calculated): {wns / 1000:<15.4f} | WNS (ecc): {wns_cpp_calc:<15.4f}"
         )
         logging.info(
-            f"TNS (Python Calculated): {tns / 1000:<15.4f} | TNS (iEDA): {tns_cpp_calc:<15.4f}"
+            f"TNS (Python Calculated): {tns / 1000:<15.4f} | TNS (ecc): {tns_cpp_calc:<15.4f}"
         )
         logging.info("-" * 60)
         logging.info(f"flow 输出的 WNS (orig wns): {wns.item():.4f}")
@@ -1168,7 +1168,7 @@ class PlaceObj(nn.Module):
         """
         @brief [修改后] 识别第一层传播引脚，并将详细的Slew/Impulse时序对比报告
             (精度为9位小数) 写入到一个名为 "timing_first_level_pins_report.csv" 的文件中。
-        @param net_timing_details_cpp: 从 C++/iEDA 获取的包含 net pin 时序细节的列表。
+        @param net_timing_details_cpp: 从 C++/ecc 获取的包含 net pin 时序细节的列表。
         """
         import math
         import csv
@@ -1203,7 +1203,7 @@ class PlaceObj(nn.Module):
                 if sinks:
                     start_pin_to_sinks_map[start_pin_id] = sinks
 
-        # 1b. 预处理Python和iEDA的数据
+        # 1b. 预处理Python和ecc的数据
         op_timing = self.op_collections.timing_propagation_op
         op_elmore = self.op_collections.elmore_delay_op
 
@@ -1212,7 +1212,7 @@ class PlaceObj(nn.Module):
         py_pin_r_slew = op_timing.pin_rtran.clone().detach().cpu().numpy()
         py_pin_f_slew = op_timing.pin_ftran.clone().detach().cpu().numpy()
 
-        ieda_pin_map = {
+        ecc_pin_map = {
             (info['pin_name'], info['mode'], info['transition']): info
             for info in net_timing_details_cpp
         }
@@ -1223,10 +1223,10 @@ class PlaceObj(nn.Module):
         # ==============================================================================
         csv_header = [
             "Group", "Pin Type", "Pin Name",
-            "Py Rise Slew (ps)", "iEDA Rise Slew (ns)",
-            "Py Fall Slew (ps)", "iEDA Fall Slew (ns)",
-            "Py Rise Impulse", "iEDA Rise Impulse",
-            "Py Fall Impulse", "iEDA Fall Impulse"
+            "Py Rise Slew (ps)", "ecc Rise Slew (ns)",
+            "Py Fall Slew (ps)", "ecc Fall Slew (ns)",
+            "Py Rise Impulse", "ecc Rise Impulse",
+            "Py Fall Impulse", "ecc Fall Impulse"
         ]
 
         with open(report_filename, "w", newline="", encoding="utf-8") as csvfile:
@@ -1244,23 +1244,23 @@ class PlaceObj(nn.Module):
 
                 key_rise_start = (start_pin_name, "Max", "Rise")
                 key_fall_start = (start_pin_name, "Max", "Fall")
-                ieda_data_rise = ieda_pin_map.get(key_rise_start, {})
-                ieda_data_fall = ieda_pin_map.get(key_fall_start, {})
+                ecc_data_rise = ecc_pin_map.get(key_rise_start, {})
+                ecc_data_fall = ecc_pin_map.get(key_fall_start, {})
 
-                ieda_r_slew_start = ieda_data_rise.get('slew_ns', float('nan'))
-                ieda_f_slew_start = ieda_data_fall.get('slew_ns', float('nan'))
+                ecc_r_slew_start = ecc_data_rise.get('slew_ns', float('nan'))
+                ecc_f_slew_start = ecc_data_fall.get('slew_ns', float('nan'))
 
-                ieda_r_impulse_sq = ieda_data_rise.get('impulse', -1.0)
-                ieda_r_impulse_start = math.sqrt(ieda_r_impulse_sq) if ieda_r_impulse_sq >= 0 else float('nan')
-                ieda_f_impulse_sq = ieda_data_fall.get('impulse', -1.0)
-                ieda_f_impulse_start = math.sqrt(ieda_f_impulse_sq) if ieda_f_impulse_sq >= 0 else float('nan')
+                ecc_r_impulse_sq = ecc_data_rise.get('impulse', -1.0)
+                ecc_r_impulse_start = math.sqrt(ecc_r_impulse_sq) if ecc_r_impulse_sq >= 0 else float('nan')
+                ecc_f_impulse_sq = ecc_data_fall.get('impulse', -1.0)
+                ecc_f_impulse_start = math.sqrt(ecc_f_impulse_sq) if ecc_f_impulse_sq >= 0 else float('nan')
 
                 start_pin_row = [
                     start_pin_name, "Start Pin", start_pin_name,
-                    f"{py_r_slew_start:.9f}", f"{ieda_r_slew_start:.9f}",
-                    f"{py_f_slew_start:.9f}", f"{ieda_f_slew_start:.9f}",
-                    f"{py_r_impulse_start:.9f}", f"{ieda_r_impulse_start:.9f}",
-                    f"{py_f_impulse_start:.9f}", f"{ieda_f_impulse_start:.9f}"
+                    f"{py_r_slew_start:.9f}", f"{ecc_r_slew_start:.9f}",
+                    f"{py_f_slew_start:.9f}", f"{ecc_f_slew_start:.9f}",
+                    f"{py_r_impulse_start:.9f}", f"{ecc_r_impulse_start:.9f}",
+                    f"{py_f_impulse_start:.9f}", f"{ecc_f_impulse_start:.9f}"
                 ]
                 writer.writerow(start_pin_row)
 
@@ -1274,23 +1274,23 @@ class PlaceObj(nn.Module):
 
                     key_rise_sink = (sink_pin_name, "Max", "Rise")
                     key_fall_sink = (sink_pin_name, "Max", "Fall")
-                    ieda_data_rise_sink = ieda_pin_map.get(key_rise_sink, {})
-                    ieda_data_fall_sink = ieda_pin_map.get(key_fall_sink, {})
+                    ecc_data_rise_sink = ecc_pin_map.get(key_rise_sink, {})
+                    ecc_data_fall_sink = ecc_pin_map.get(key_fall_sink, {})
 
-                    ieda_r_slew_sink = ieda_data_rise_sink.get('slew_ns', float('nan'))
-                    ieda_f_slew_sink = ieda_data_fall_sink.get('slew_ns', float('nan'))
+                    ecc_r_slew_sink = ecc_data_rise_sink.get('slew_ns', float('nan'))
+                    ecc_f_slew_sink = ecc_data_fall_sink.get('slew_ns', float('nan'))
 
-                    ieda_r_impulse_sq_sink = ieda_data_rise_sink.get('impulse', -1.0)
-                    ieda_r_impulse_sink = math.sqrt(ieda_r_impulse_sq_sink) if ieda_r_impulse_sq_sink >= 0 else float('nan')
-                    ieda_f_impulse_sq_sink = ieda_data_fall_sink.get('impulse', -1.0)
-                    ieda_f_impulse_sink = math.sqrt(ieda_f_impulse_sq_sink) if ieda_f_impulse_sq_sink >= 0 else float('nan')
+                    ecc_r_impulse_sq_sink = ecc_data_rise_sink.get('impulse', -1.0)
+                    ecc_r_impulse_sink = math.sqrt(ecc_r_impulse_sq_sink) if ecc_r_impulse_sq_sink >= 0 else float('nan')
+                    ecc_f_impulse_sq_sink = ecc_data_fall_sink.get('impulse', -1.0)
+                    ecc_f_impulse_sink = math.sqrt(ecc_f_impulse_sq_sink) if ecc_f_impulse_sq_sink >= 0 else float('nan')
 
                     sink_pin_row = [
                         start_pin_name, "Sink Pin", sink_pin_name,
-                        f"{py_r_slew_sink:.9f}", f"{ieda_r_slew_sink:.9f}",
-                        f"{py_f_slew_sink:.9f}", f"{ieda_f_slew_sink:.9f}",
-                        f"{py_r_impulse_sink:.9f}", f"{ieda_r_impulse_sink:.9f}",
-                        f"{py_f_impulse_sink:.9f}", f"{ieda_f_impulse_sink:.9f}"
+                        f"{py_r_slew_sink:.9f}", f"{ecc_r_slew_sink:.9f}",
+                        f"{py_f_slew_sink:.9f}", f"{ecc_f_slew_sink:.9f}",
+                        f"{py_r_impulse_sink:.9f}", f"{ecc_r_impulse_sink:.9f}",
+                        f"{py_f_impulse_sink:.9f}", f"{ecc_f_impulse_sink:.9f}"
                     ]
                     writer.writerow(sink_pin_row)
 
@@ -1345,7 +1345,7 @@ class PlaceObj(nn.Module):
 
     def check_log(self, wns, tns, ws, ts):
         # ==============================================================================
-        # --- 步骤 2: 初始化iEDA并使用正确的线电容为其构建RC树 ---
+        # --- 步骤 2: 初始化ecc并使用正确的线电容为其构建RC树 ---
         # ==============================================================================
 
         (
@@ -1356,7 +1356,7 @@ class PlaceObj(nn.Module):
             pin_net_delay_cpp,
             cell_arc_delays_cpp,
             net_timing_details_cpp,
-        ) = self.build_ieda_rct()
+        ) = self.build_ecc_rct()
 
         self.write_timing_pin_all(
             at_late_cpp,

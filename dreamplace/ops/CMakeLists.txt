@@ -27,6 +27,7 @@ add_subdirectory(pin_utilization)
 add_subdirectory(rudy)
 add_subdirectory(pinrudy)
 add_subdirectory(nctugr_binary)
+add_subdirectory(irt_egr)
 add_subdirectory(adjust_node_area)
 add_subdirectory(timing_propagation)
 add_subdirectory(rc_timing)
@@ -35,4 +36,14 @@ add_subdirectory(steiner_topo)
 file(GLOB INSTALL_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/*.py")
 install(
     FILES ${INSTALL_SRCS} DESTINATION dreamplace/ops
+    )
+
+file(GLOB MACRO_OVERLAP_INSTALL_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/macro_overlap/*.py")
+install(
+    FILES ${MACRO_OVERLAP_INSTALL_SRCS} DESTINATION dreamplace/ops/macro_overlap
+    )
+
+file(GLOB MACRO_REFINEMENT_INSTALL_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/macro_refinement/*.py")
+install(
+    FILES ${MACRO_REFINEMENT_INSTALL_SRCS} DESTINATION dreamplace/ops/macro_refinement
     )

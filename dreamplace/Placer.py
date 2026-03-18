@@ -47,8 +47,9 @@ if top_root_dir not in sys.path:
 import dreamplace.configure as configure
 from dreamplace.Params import Params
 from dreamplace.macroPlaceDB import MacroPlaceDB as PlaceDB
-import dreamplace.NonLinearPlace as NonLinearPlace
-# import dreamplace.Timer as Timer
+# NonLinearPlace is imported inside place() to avoid pulling in compiled
+# C++ extensions at module import time. This keeps `import dreamplace.Placer`
+# pure-Python so the environment check can succeed before the CMake ops exist.
 
 
 
@@ -145,6 +146,7 @@ class PlacementEngine:
 
     def place(self):
         # solve placement
+        import dreamplace.NonLinearPlace as NonLinearPlace  # deferred to avoid compiled-op imports at module level
         tt = time.time()
         self.params.plot_flag = True
         if self.params.timing_opt_flag:

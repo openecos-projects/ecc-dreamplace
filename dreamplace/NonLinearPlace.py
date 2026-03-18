@@ -37,6 +37,139 @@ from dreamplace.ops.routability.egr_resample import (
 )
 
 
+def _write_back_autodmp_pos_to_ieda(pos, params, placedb):
+    if pos.is_cuda:
+        pos_cpu = pos.detach().cpu().numpy().copy()
+    else:
+        pos_cpu = pos.detach().numpy().copy()
+
+    node_x = pos_cpu[: placedb.num_movable_nodes]
+    node_y = pos_cpu[
+        placedb.num_nodes : placedb.num_nodes + placedb.num_movable_nodes
+    ]
+    if params.cell_padding_x >= 0:
+        node_x += params.cell_padding_x
+
+    unscale_factor = 1.0 / params.scale_factor
+    node_x = node_x * unscale_factor + params.shift_factor[0]
+    node_y = node_y * unscale_factor + params.shift_factor[1]
+    placedb.write_placement_back(node_x, node_y)
+
+
+def _compute_gpugr_route_grid_like_xplace(params, placedb):
+    place_num_bins_y = int(getattr(placedb, "num_bins_y", getattr(params, "num_bins_y", 512)))
+    if place_num_bins_y <= 0:
+        place_num_bins_y = 512
+
+    die_w = float(placedb.xh - placedb.xl)
+    die_h = float(placedb.yh - placedb.yl)
+    if die_w <= 0 or die_h <= 0:
+        logging.warning(
+            "Invalid die size for gpugr grid computation (die_w=%g, die_h=%g). Fallback to square %dx%d grid.",
+            die_w,
+            die_h,
+            place_num_bins_y,
+            place_num_bins_y,
+        )
+        return place_num_bins_y, place_num_bins_y
+
+    route_size = min(512, place_num_bins_y)
+    die_ratio = die_w / die_h
+    route_xsize = route_size if die_ratio <= 1.0 else int(round(route_size * die_ratio))
+    route_ysize = route_size if die_ratio >= 1.0 else int(round(route_size / die_ratio))
+    route_xsize = max(1, route_xsize)
+    route_ysize = max(1, route_ysize)
+
+    logging.info(
+        "Compute gpugr grid with Xplace rule: place_bins_y=%d die_ratio=%.4f -> route_xsize=%d route_ysize=%d",
+        place_num_bins_y,
+        die_ratio,
+        route_xsize,
+        route_ysize,
+    )
+    return route_xsize, route_ysize
+
+
+def _sync_gpugr_route_grid_to_autodmp(params, placedb, model=None):
+    route_xsize, route_ysize = _compute_gpugr_route_grid_like_xplace(params, placedb)
+    old_route_xsize = getattr(placedb, "num_routing_grids_x", None)
+    old_route_ysize = getattr(placedb, "num_routing_grids_y", None)
+    grid_changed = old_route_xsize != route_xsize or old_route_ysize != route_ysize
+
+    params.route_num_bins_x = route_xsize
+    params.route_num_bins_y = route_ysize
+    placedb.num_routing_grids_x = route_xsize
+    placedb.num_routing_grids_y = route_ysize
+
+    logging.info(
+        "Sync AutoDMP routing grid to gpugr grid: route_num_bins (%s, %s) -> (%d, %d)",
+        str(old_route_xsize),
+        str(old_route_ysize),
+        route_xsize,
+        route_ysize,
+    )
+
+    if grid_changed and model is not None and hasattr(model, "op_collections") and hasattr(model, "data_collections"):
+        model.op_collections.pin_utilization_map_op = model.build_pin_utilization_map(
+            params,
+            placedb,
+            model.data_collections,
+        )
+        model.op_collections.adjust_node_area_op = model.build_adjust_node_area(
+            params,
+            placedb,
+            model.data_collections,
+        )
+        logging.info("Rebuilt pin_utilization_map_op and adjust_node_area_op for the gpugr routing grid.")
+    elif not grid_changed:
+        logging.info("AutoDMP routing grid already matches the gpugr grid. Skip rebuilding related ops.")
+
+    return route_xsize, route_ysize
+
+
+def _run_gpugr_before_first_area_adjust_and_exit(params, placedb, pos, num_area_adjust, model=None):
+    if not getattr(params, "gpugr_first_inflation_exit", False):
+        return
+    if num_area_adjust != 0:
+        return
+
+    from tools.iEDA.module.gpugr import IEDAGPUGR
+
+    logging.info(
+        "Run gpugr operator before the first AutoDMP area-adjust round and exit after it finishes."
+    )
+    _write_back_autodmp_pos_to_ieda(pos, params, placedb)
+    route_xsize, route_ysize = _sync_gpugr_route_grid_to_autodmp(params, placedb, model=model)
+
+    out_dir = os.path.join(params.result_dir, "gpugr_first_inflation")
+    gpugr_op = IEDAGPUGR(dir_workspace=placedb.data_manager.dir_workspace)
+    result = gpugr_op.run_gpugr(
+        out_dir=out_dir,
+        design_name=params.design_name(),
+        gpu=getattr(params, "gpu_id", 0),
+        threads=params.num_threads,
+        route_xsize=route_xsize,
+        route_ysize=route_ysize,
+        rrr_iters=getattr(params, "gpugr_first_inflation_rrr_iters", 0),
+        skip_m1_route=True,
+        verbose_parser_log=bool(getattr(params, "gpugr_first_inflation_verbose_parser_log", 0)),
+        cpp_log_level=int(getattr(params, "gpugr_first_inflation_cpp_log_level", 2)),
+        keep_temp_def=True,
+        save_artifacts=True,
+    )
+    metrics = result["metrics"]
+    logging.info(
+        "gpugr finished before first area-adjust. #OvflNets=%d GR_WL=%.0f GR_Vias=%.0f EstShorts=%.0f"
+        % (
+            metrics["num_overflow_nets"],
+            metrics["gr_wirelength"],
+            metrics["gr_num_vias"],
+            metrics["gr_est_shorts"],
+        )
+    )
+    raise SystemExit(0)
+
+
 class NonLinearPlace(BasicPlace.BasicPlace):
     """
     @brief Nonlinear placement engine.
@@ -1559,7 +1692,11 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
                 if params.routability_opt_flag:
                     adjust_area_flag = True
-                    adjust_route_area_flag = params.adjust_nctugr_area_flag or params.adjust_rudy_area_flag
+                    adjust_route_area_flag = (
+                        getattr(params, "adjust_gpugr_area_flag", False)
+                        or params.adjust_nctugr_area_flag
+                        or params.adjust_rudy_area_flag
+                    )
                     adjust_pin_area_flag = params.adjust_pin_area_flag
                     num_area_adjust = 0
 
@@ -1687,11 +1824,27 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 )
                             )
                             pos = model.data_collections.pos[0]
+                            _run_gpugr_before_first_area_adjust_and_exit(
+                                params,
+                                placedb,
+                                pos,
+                                num_area_adjust,
+                                model,
+                            )
 
                             route_utilization_map = None
                             pin_utilization_map = None
                             if adjust_route_area_flag:
-                                if params.adjust_nctugr_area_flag:
+                                if getattr(params, "adjust_gpugr_area_flag", False):
+                                    _sync_gpugr_route_grid_to_autodmp(
+                                        params,
+                                        placedb,
+                                        model=model,
+                                    )
+                                    route_utilization_map = model.op_collections.gpugr_congestion_map_op(
+                                        pos
+                                    )
+                                elif params.adjust_nctugr_area_flag:
                                     route_utilization_map = model.op_collections.irt_egr_congestion_map_op(
                                         pos, stage="egr3D", resolve_congestion="high")
                                 else:

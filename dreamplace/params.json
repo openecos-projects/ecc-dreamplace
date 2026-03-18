@@ -203,6 +203,42 @@
         "description": "maximum times to adjust node area",
         "default": 3
     },
+    "gpugr_first_inflation_exit": {
+        "description": "run the external gpugr operator before the first routability area-adjust round, then exit immediately",
+        "default": 0
+    },
+    "gpugr_first_inflation_rrr_iters": {
+        "description": "rrrIters passed to gpugr when gpugr_first_inflation_exit is enabled",
+        "default": 0
+    },
+    "adjust_gpugr_area_flag": {
+        "description": "whether use Xplace gpugr overflow map to guide area adjustment",
+        "default": 0
+    },
+    "gpugr_area_adjust_rrr_iters": {
+        "description": "rrrIters passed to gpugr when adjust_gpugr_area_flag is enabled",
+        "default": 0
+    },
+    "gpugr_area_adjust_skip_m1_route": {
+        "description": "whether skip M1 when converting gpugr demand/capacity into overflow maps for area adjustment",
+        "default": 1
+    },
+    "gpugr_area_adjust_keep_temp_def": {
+        "description": "whether keep temporary DEF files produced by the gpugr area-adjust operator",
+        "default": 0
+    },
+    "gpugr_area_adjust_save_artifacts": {
+        "description": "whether save npz/json/png artifacts for each gpugr area-adjust call",
+        "default": 0
+    },
+    "gpugr_area_adjust_verbose_parser_log": {
+        "description": "whether print verbose Xplace parser logs during gpugr area adjustment",
+        "default": 0
+    },
+    "gpugr_area_adjust_cpp_log_level": {
+        "description": "Xplace C++ parser log level for gpugr area adjustment",
+        "default": 2
+    },
     "adjust_nctugr_area_flag": {
         "description": "whether use NCTUgr congestion map to guide area adjustment",
         "default": 0

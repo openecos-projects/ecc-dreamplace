@@ -121,10 +121,12 @@ class LShapeSegmentBuilder:
                 if l_dir == H_FIRST:
                     # 先水平后垂直，拐点在 (x2, y1)
                     corner_x, corner_y = x2, y1
-                elif l_dir == V_FIRST or l_dir == FAKE_STRAIGHT:
+                elif l_dir == V_FIRST:
                     # 先垂直后水平，拐点在 (x1, y2)
-                    # FAKE_STRAIGHT也当作V_FIRST处理
                     corner_x, corner_y = x1, y2
+                elif l_dir == UNKNOWN or l_dir == FAKE_STRAIGHT:
+                    # unresolved 时和 UNKNOWN 保持一致，默认按 H_FIRST 处理
+                    corner_x, corner_y = x2, y1
                 else:
                     # UNKNOWN: 不参与L-shape segment构建
                     continue
@@ -289,9 +291,9 @@ def build_l_shape_segments_vectorized(newx, newy, flat_from, flat_to, l_directio
     is_straight = (is_horizontal_line | is_vertical_line) | (straight_by_dir & ~diag_straight)
     # 对斜线但被标记为STRAIGHT的边，默认按H_FIRST处理
     is_upper_l = (~is_straight) & (
-        (valid_l_dir == H_FIRST) | (valid_l_dir == UNKNOWN) | diag_straight
+        (valid_l_dir == H_FIRST) | (valid_l_dir == UNKNOWN) | (valid_l_dir == FAKE_STRAIGHT) | diag_straight
     )
-    is_lower_l = (~is_straight) & ((valid_l_dir == V_FIRST) | (valid_l_dir == FAKE_STRAIGHT))
+    is_lower_l = (~is_straight) & (valid_l_dir == V_FIRST)
     
     # 计算拐点坐标
     # H_FIRST: corner = (x2, y1)
@@ -492,8 +494,8 @@ class LShapeSegmentOp:
         # 判断边的类型（基于l_direction，不依赖坐标）
         # 注意：is_horizontal_line 和 is_vertical_line 需要坐标，但我们可以延迟判断
         # 这里只预计算 l_direction 相关的类型
-        is_h_first = (valid_l_dir == H_FIRST) | (valid_l_dir == UNKNOWN)
-        is_v_first = (valid_l_dir == V_FIRST) | (valid_l_dir == FAKE_STRAIGHT)
+        is_h_first = (valid_l_dir == H_FIRST) | (valid_l_dir == UNKNOWN) | (valid_l_dir == FAKE_STRAIGHT)
+        is_v_first = (valid_l_dir == V_FIRST)
         is_straight_by_dir = (valid_l_dir == STRAIGHT)
         
         return {

@@ -155,12 +155,6 @@ class SteinerTopo(nn.Module):
         return self.net_flat_topo_sort, self.net_flat_topo_sort_start, self.pin_fa, \
             self.flat_pin_to, self.flat_pin_to_start, self.flat_pin_from
 
-    def refresh_vertex_cache(self, pos):
-        updated_newx, updated_newy = self.forward(pos)
-        self.newx = updated_newx.contiguous()
-        self.newy = updated_newy.contiguous()
-        return self.newx, self.newy
-
     def init_l_direction_resolver(self, placedb, params):
         """
         初始化L方向解析器

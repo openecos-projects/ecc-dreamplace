@@ -5,7 +5,7 @@
 import torch
 import numpy as np
 import logging
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +82,8 @@ class EGRLDirectionResolver:
         self._route_grid_y_um = None
         self._route_pitch_x_um = None
         self._route_pitch_y_um = None
+        route_x_coords = []
+        route_y_coords = []
         
         # 头部说明行的关键词（用于跳过）
         header_keywords = {'net_name', 'grid_x', 'grid_y', 'grid1_x', 'grid2_x', 
@@ -150,17 +152,23 @@ class EGRLDirectionResolver:
                                 'is_horizontal': is_horizontal,
                                 'is_vertical': is_vertical
                             })
+                            route_x_coords.extend((real1_x, real2_x))
+                            route_y_coords.extend((real1_y, real2_y))
                         except (ValueError, IndexError) as e:
                             logger.debug(f"Failed to parse wire line: {line}, error: {e}")
                             
         except FileNotFoundError:
             logger.error(f"EGR guide file not found: {guide_path}")
             return {}
-        
+
         self.egr_net_data = dict(net_data)
-        
+        self._route_grid_x_um = self._build_route_coord_axis(route_x_coords)
+        self._route_grid_y_um = self._build_route_coord_axis(route_y_coords)
+        self._route_pitch_x_um = self._estimate_route_pitch(self._route_grid_x_um)
+        self._route_pitch_y_um = self._estimate_route_pitch(self._route_grid_y_um)
+
         logger.info(f"Parsed EGR guide: {len(self.egr_net_data)} nets")
-        
+
         return self.egr_net_data
 
     def parse_gpugr_route_entries(self, route_entries):
@@ -309,6 +317,102 @@ class EGRLDirectionResolver:
         ]
         return sorted({round(float(value), 6) for value in tolerances if value > 0}) or [1.0]
 
+    def _endpoint_match_tolerance(self, net_data, segment_tolerance):
+        if net_data.get("source") != "gpugr":
+            return float(segment_tolerance)
+
+        pitches = [
+            pitch
+            for pitch in (self._route_pitch_x_um, self._route_pitch_y_um)
+            if pitch is not None and pitch > 0
+        ]
+        if not pitches:
+            return min(float(segment_tolerance), 1.0)
+
+        base_pitch = min(pitches)
+        return min(float(segment_tolerance), max(base_pitch * 0.10, 0.10))
+
+    def _log_edge_geometry_statistics(self, flat_pin_from, flat_pin_to, newx_um, newy_um, l_directions, valid_indices, eps=1e-5):
+        if valid_indices is None or len(valid_indices) == 0:
+            return
+
+        valid_from = flat_pin_from[valid_indices]
+        valid_to = flat_pin_to[valid_indices]
+        dx = np.abs(newx_um[valid_from] - newx_um[valid_to])
+        dy = np.abs(newy_um[valid_from] - newy_um[valid_to])
+        lengths = dx + dy
+
+        is_horizontal = dy < eps
+        is_vertical = dx < eps
+        geo_straight_mask = is_horizontal | is_vertical
+        label_straight_mask = l_directions[valid_indices] == self.STRAIGHT
+        nonstraight_label_mask = ~label_straight_mask
+
+        geo_straight = int(geo_straight_mask.sum())
+        geo_diagonal = int((~geo_straight_mask).sum())
+        label_straight = int(label_straight_mask.sum())
+        straight_but_diag = int((label_straight_mask & ~geo_straight_mask).sum())
+        nonstraight_but_geo_straight = int((nonstraight_label_mask & geo_straight_mask).sum())
+        horizontal_straight = int((is_horizontal & ~is_vertical).sum())
+        vertical_straight = int((is_vertical & ~is_horizontal).sum())
+        degenerate = int((is_horizontal & is_vertical).sum())
+
+        logger.info(
+            "L-direction geometry stats: valid_edges=%d geo_straight=%d (horizontal=%d vertical=%d degenerate=%d) "
+            "geo_diagonal=%d label_straight=%d mismatches[straight_but_diag=%d nonstraight_but_geo_straight=%d]",
+            len(valid_indices),
+            geo_straight,
+            horizontal_straight,
+            vertical_straight,
+            degenerate,
+            geo_diagonal,
+            label_straight,
+            straight_but_diag,
+            nonstraight_but_geo_straight,
+        )
+
+        straight_lengths = lengths[label_straight_mask]
+        if straight_lengths.size == 0:
+            return
+
+        p50 = float(np.percentile(straight_lengths, 50))
+        p90 = float(np.percentile(straight_lengths, 90))
+        p99 = float(np.percentile(straight_lengths, 99))
+        mean_len = float(np.mean(straight_lengths))
+        max_len = float(np.max(straight_lengths))
+
+        logger.info(
+            "L-direction straight length stats (um): count=%d mean=%.3f p50=%.3f p90=%.3f p99=%.3f max=%.3f",
+            straight_lengths.size,
+            mean_len,
+            p50,
+            p90,
+            p99,
+            max_len,
+        )
+
+        pitches = [
+            pitch
+            for pitch in (self._route_pitch_x_um, self._route_pitch_y_um)
+            if pitch is not None and pitch > 0
+        ]
+        if not pitches:
+            return
+
+        base_pitch = min(pitches)
+        le_1x = int((straight_lengths <= base_pitch + eps).sum())
+        le_2x = int((straight_lengths <= base_pitch * 2 + eps).sum())
+        le_4x = int((straight_lengths <= base_pitch * 4 + eps).sum())
+        gt_4x = int((straight_lengths > base_pitch * 4 + eps).sum())
+        logger.info(
+            "L-direction straight pitch histogram: base_pitch=%.3fum <=1x=%d <=2x=%d <=4x=%d >4x=%d",
+            base_pitch,
+            le_1x,
+            le_2x,
+            le_4x,
+            gt_4x,
+        )
+
     def _axis_index(self, coords, value):
         if coords is None or len(coords) == 0:
             return None
@@ -363,7 +467,7 @@ class EGRLDirectionResolver:
         self._accumulate_path_usage(temp_h, temp_v, p1_um, p2_um, direction)
         return float((temp_h * usage_h).sum() + (temp_v * usage_v).sum())
 
-    def _fallback_unknown_with_path_maps(self, edge_records, l_directions):
+    def _fallback_unresolved_with_path_maps(self, edge_records, l_directions, tie_tol=1e-6):
         if self._route_grid_x_um is None or self._route_grid_y_um is None:
             return 0
 
@@ -377,23 +481,32 @@ class EGRLDirectionResolver:
             self._accumulate_path_usage(usage_h, usage_v, record["p1_match_um"], record["p2_match_um"], direction)
 
         fallback_count = 0
+        fake_straight_to_unknown = 0
         for record in edge_records:
             edge_idx = record["edge_idx"]
-            if int(l_directions[edge_idx]) != self.UNKNOWN:
+            current_direction = int(l_directions[edge_idx])
+            if current_direction not in (self.UNKNOWN, self.FAKE_STRAIGHT):
                 continue
 
             cost_h = self._score_candidate_path(usage_h, usage_v, record["p1_match_um"], record["p2_match_um"], self.H_FIRST)
             cost_v = self._score_candidate_path(usage_h, usage_v, record["p1_match_um"], record["p2_match_um"], self.V_FIRST)
 
-            if cost_h == cost_v:
+            if abs(cost_h - cost_v) <= tie_tol:
+                if current_direction == self.FAKE_STRAIGHT:
+                    l_directions[edge_idx] = self.UNKNOWN
+                    fake_straight_to_unknown += 1
                 continue
 
             l_directions[edge_idx] = self.H_FIRST if cost_h < cost_v else self.V_FIRST
             fallback_count += 1
 
-        if fallback_count > 0:
-            logger.info("Known-path map fallback resolved %d UNKNOWN edges.", fallback_count)
-        return fallback_count
+        if fallback_count > 0 or fake_straight_to_unknown > 0:
+            logger.info(
+                "Known-path map fallback resolved %d unresolved edges and downgraded %d FAKE_STRAIGHT ties to UNKNOWN.",
+                fallback_count,
+                fake_straight_to_unknown,
+            )
+        return fallback_count + fake_straight_to_unknown
     
     def _coord_dp_to_micron(self, x_dp, y_dp):
         """
@@ -414,8 +527,68 @@ class EGRLDirectionResolver:
         y_um = y_dbu / self.placedb.dbu
         
         return x_um, y_um
-    
-    def _find_wire_at_point(self, net_data, x, y, tolerance=1.0):
+
+    def _wire_distance_metrics(self, wire, x, y):
+        rx1, ry1 = wire['real1']
+        rx2, ry2 = wire['real2']
+        endpoint_distance = min(
+            float(np.hypot(rx1 - x, ry1 - y)),
+            float(np.hypot(rx2 - x, ry2 - y)),
+        )
+
+        if wire.get('is_horizontal', False):
+            lo, hi = sorted((rx1, rx2))
+            closest_x = min(max(x, lo), hi)
+            closest_y = ry1
+        elif wire.get('is_vertical', False):
+            lo, hi = sorted((ry1, ry2))
+            closest_x = rx1
+            closest_y = min(max(y, lo), hi)
+        else:
+            candidates = [(rx1, ry1), (rx2, ry2)]
+            closest_x, closest_y = min(
+                candidates,
+                key=lambda point: float(np.hypot(point[0] - x, point[1] - y)),
+            )
+
+        segment_distance = float(np.hypot(closest_x - x, closest_y - y))
+        return endpoint_distance, segment_distance
+
+    def _wire_progress_score(self, wire, start_x, start_y, target_point=None):
+        if target_point is None:
+            return 0.0
+
+        target_x, target_y = target_point
+        current_distance = abs(target_x - start_x) + abs(target_y - start_y)
+        rx1, ry1 = wire['real1']
+        rx2, ry2 = wire['real2']
+
+        candidates = []
+        if wire.get('is_horizontal', False):
+            lo, hi = sorted((rx1, rx2))
+            candidates.append((min(max(target_x, lo), hi), ry1))
+        elif wire.get('is_vertical', False):
+            lo, hi = sorted((ry1, ry2))
+            candidates.append((rx1, min(max(target_y, lo), hi)))
+        else:
+            candidates.extend([(rx1, ry1), (rx2, ry2)])
+
+        best_next_distance = min(
+            abs(target_x - cx) + abs(target_y - cy)
+            for cx, cy in candidates
+        )
+        return float(current_distance - best_next_distance)
+
+    def _find_wire_at_point(
+        self,
+        net_data,
+        x,
+        y,
+        endpoint_tolerance=1.0,
+        segment_tolerance=1.0,
+        target_point=None,
+        endpoint_only=False,
+    ):
         """
         找到经过给定点的wire
         
@@ -433,38 +606,57 @@ class EGRLDirectionResolver:
             rx2, ry2 = wire['real2']
             
             # 先检查端点命中，再检查是否落在线段内部。
-            at_start = (abs(rx1 - x) <= tolerance and abs(ry1 - y) <= tolerance)
-            at_end = (abs(rx2 - x) <= tolerance and abs(ry2 - y) <= tolerance)
-            min_x = min(rx1, rx2) - tolerance
-            max_x = max(rx1, rx2) + tolerance
-            min_y = min(ry1, ry2) - tolerance
-            max_y = max(ry1, ry2) + tolerance
+            at_start = (abs(rx1 - x) <= endpoint_tolerance and abs(ry1 - y) <= endpoint_tolerance)
+            at_end = (abs(rx2 - x) <= endpoint_tolerance and abs(ry2 - y) <= endpoint_tolerance)
+            min_x = min(rx1, rx2) - segment_tolerance
+            max_x = max(rx1, rx2) + segment_tolerance
+            min_y = min(ry1, ry2) - segment_tolerance
+            max_y = max(ry1, ry2) + segment_tolerance
 
             if wire.get('is_horizontal', False):
-                on_segment = abs(ry1 - y) <= tolerance and min_x <= x <= max_x
+                on_segment = abs(ry1 - y) <= segment_tolerance and min_x <= x <= max_x
             elif wire.get('is_vertical', False):
-                on_segment = abs(rx1 - x) <= tolerance and min_y <= y <= max_y
+                on_segment = abs(rx1 - x) <= segment_tolerance and min_y <= y <= max_y
             else:
                 on_segment = min_x <= x <= max_x and min_y <= y <= max_y
-            
-            if at_start or at_end or on_segment:
+
+            if endpoint_only:
+                matched = at_start or at_end
+            else:
+                matched = at_start or at_end or on_segment
+
+            if matched:
+                endpoint_distance, segment_distance = self._wire_distance_metrics(wire, x, y)
                 matching_wires.append({
                     **wire,
                     'at_start': at_start,
                     'at_end': at_end,
                     'on_segment': on_segment,
+                    'endpoint_distance': endpoint_distance,
+                    'segment_distance': segment_distance,
+                    'progress_score': self._wire_progress_score(wire, x, y, target_point),
                 })
 
         matching_wires.sort(
             key=lambda wire: (
                 0 if (wire['at_start'] or wire['at_end']) else 1,
+                -wire['progress_score'],
+                wire['segment_distance'],
+                wire['endpoint_distance'],
                 int(wire.get('order', 0)),
             )
         )
         
         return matching_wires
-    
-    def _find_first_wire_direction_from_point(self, net_data, start_x, start_y, tolerance=1.0):
+
+    def _find_first_wire_direction_from_point(
+        self,
+        net_data,
+        start_x,
+        start_y,
+        tolerance=1.0,
+        target_point=None,
+    ):
         """
         从给定起点出发，找到第一段wire的方向
         
@@ -476,13 +668,24 @@ class EGRLDirectionResolver:
         Returns:
             'horizontal', 'vertical', or None
         """
-        matching_wires = self._find_wire_at_point(net_data, start_x, start_y, tolerance)
-        
-        for wire in matching_wires:
-            if wire['is_horizontal']:
-                return 'horizontal'
-            elif wire['is_vertical']:
-                return 'vertical'
+        endpoint_tolerance = self._endpoint_match_tolerance(net_data, tolerance)
+
+        for endpoint_only in (True, False):
+            matching_wires = self._find_wire_at_point(
+                net_data,
+                start_x,
+                start_y,
+                endpoint_tolerance=endpoint_tolerance,
+                segment_tolerance=tolerance,
+                target_point=target_point,
+                endpoint_only=endpoint_only,
+            )
+
+            for wire in matching_wires:
+                if wire['is_horizontal']:
+                    return 'horizontal'
+                if wire['is_vertical']:
+                    return 'vertical'
         
         return None
     
@@ -536,6 +739,7 @@ class EGRLDirectionResolver:
                 match_p1_um[0],
                 match_p1_um[1],
                 tolerance=tolerance,
+                target_point=match_p2_um,
             )
             if first_dir_from_p1 == 'horizontal':
                 return self.H_FIRST
@@ -548,6 +752,7 @@ class EGRLDirectionResolver:
                 match_p2_um[0],
                 match_p2_um[1],
                 tolerance=tolerance,
+                target_point=match_p1_um,
             )
             if first_dir_from_p2 == 'horizontal':
                 return self.V_FIRST
@@ -677,9 +882,8 @@ class EGRLDirectionResolver:
                 }
             )
 
-        gpugr_records = [record for record in edge_records if record["source"] == "gpugr"]
-        if gpugr_records and stats[self.UNKNOWN] > 0:
-            resolved_by_fallback = self._fallback_unknown_with_path_maps(gpugr_records, l_directions)
+        if edge_records and (stats[self.UNKNOWN] > 0 or stats[self.FAKE_STRAIGHT] > 0):
+            resolved_by_fallback = self._fallback_unresolved_with_path_maps(edge_records, l_directions)
             if resolved_by_fallback > 0:
                 stats = {self.H_FIRST: 0, self.V_FIRST: 0, self.STRAIGHT: 0, self.FAKE_STRAIGHT: 0, self.UNKNOWN: 0}
                 for direction in l_directions:
@@ -688,8 +892,18 @@ class EGRLDirectionResolver:
         logger.info(f"L direction resolution: h_first={stats[self.H_FIRST]}, "
                    f"v_first={stats[self.V_FIRST]}, straight={stats[self.STRAIGHT]}, "
                    f"fake_straight={stats[self.FAKE_STRAIGHT]}, unknown={stats[self.UNKNOWN]}")
+        self._log_edge_geometry_statistics(
+            flat_pin_from,
+            flat_pin_to,
+            newx_um,
+            newy_um,
+            l_directions,
+            valid_indices,
+        )
         
         self.edge_l_directions = torch.from_numpy(l_directions)
+        if steiner_topo_op is not None:
+            steiner_topo_op.edge_l_directions = self.edge_l_directions
         return self.edge_l_directions
     
     def _precompute_vertex_to_net(self, num_pins, net_steiner_start, num_vertices):
@@ -777,16 +991,50 @@ class EGRLDirectionResolver:
         flat_pin_to = steiner_topo_op.flat_pin_to.cpu().numpy()
         pin_relate_x = steiner_topo_op.pin_relate_x.cpu().numpy().copy()
         pin_relate_y = steiner_topo_op.pin_relate_y.cpu().numpy().copy()
-        newx = steiner_topo_op.newx.cpu().numpy()
-        newy = steiner_topo_op.newy.cpu().numpy()
         l_directions = self.edge_l_directions.cpu().numpy()
         
         num_pins = self.placedb.num_pins
-        num_vertices = len(pin_relate_x)
         num_edges = len(flat_pin_from)
         
         # 统计更新次数
         update_count = 0
+        conflict_count = 0
+        x_proposals = defaultdict(list)
+        y_proposals = defaultdict(list)
+
+        def collect_proposal(vertex_idx, new_relate_x, new_relate_y):
+            x_proposals[int(vertex_idx)].append(int(new_relate_x))
+            y_proposals[int(vertex_idx)].append(int(new_relate_y))
+
+        def resolve_axis_proposal(vertex_idx, axis_name, proposals, current_value):
+            if not proposals:
+                return int(current_value), False
+
+            counter = Counter(int(value) for value in proposals)
+            if len(counter) == 1:
+                return int(next(iter(counter))), False
+
+            most_common = counter.most_common()
+            top_value, top_count = most_common[0]
+            second_count = most_common[1][1] if len(most_common) > 1 else 0
+            if top_count > second_count:
+                logger.debug(
+                    "Steiner vertex %d resolved conflicting %s proposals by majority: %s -> %d",
+                    vertex_idx,
+                    axis_name,
+                    dict(counter),
+                    top_value,
+                )
+                return int(top_value), False
+
+            logger.debug(
+                "Steiner vertex %d has tied conflicting %s proposals: %s; keep current=%d",
+                vertex_idx,
+                axis_name,
+                dict(counter),
+                int(current_value),
+            )
+            return int(current_value), True
         
         # 遍历所有边
         for edge_idx in range(num_edges):
@@ -798,7 +1046,7 @@ class EGRLDirectionResolver:
                 continue
             
             # 跳过直线和未知方向
-            if l_dir == self.STRAIGHT or l_dir == self.UNKNOWN:
+            if l_dir == self.STRAIGHT or l_dir == self.UNKNOWN or l_dir == self.FAKE_STRAIGHT:
                 continue
             
             # 确定哪个是Steiner点
@@ -807,10 +1055,6 @@ class EGRLDirectionResolver:
             
             # 如果边连接了Steiner点，需要更新
             if from_is_steiner or to_is_steiner:
-                # 获取两端点坐标
-                x1, y1 = newx[from_idx], newy[from_idx]
-                x2, y2 = newx[to_idx], newy[to_idx]
-                
                 # 找到这两个顶点对应的原始pin索引
                 # relate_x/y存储的是pin索引
                 from_pin_x = pin_relate_x[from_idx]
@@ -825,18 +1069,14 @@ class EGRLDirectionResolver:
                         # Steiner点的x来自to方向（水平），y来自自己方向（垂直）
                         new_relate_x = to_pin_x
                         new_relate_y = from_pin_y
-                    elif l_dir == self.V_FIRST or l_dir == self.FAKE_STRAIGHT:
+                    elif l_dir == self.V_FIRST:
                         # 垂直优先：corner在(x1, y2)
                         # Steiner点的x来自自己方向（垂直），y来自to方向（水平）
                         new_relate_x = from_pin_x
                         new_relate_y = to_pin_y
                     else:
                         continue
-                    
-                    if pin_relate_x[from_idx] != new_relate_x or pin_relate_y[from_idx] != new_relate_y:
-                        pin_relate_x[from_idx] = new_relate_x
-                        pin_relate_y[from_idx] = new_relate_y
-                        update_count += 1
+                    collect_proposal(from_idx, new_relate_x, new_relate_y)
                 
                 if to_is_steiner:
                     # 更新to_idx的relate
@@ -845,18 +1085,39 @@ class EGRLDirectionResolver:
                         # Steiner点的x来自from方向（水平），y来自自己方向（垂直）
                         new_relate_x = from_pin_x
                         new_relate_y = to_pin_y
-                    elif l_dir == self.V_FIRST or l_dir == self.FAKE_STRAIGHT:
+                    elif l_dir == self.V_FIRST:
                         # 垂直优先：corner在(x1, y2)
                         # Steiner点的x来自自己方向（垂直），y来自from方向（水平）
                         new_relate_x = to_pin_x
                         new_relate_y = from_pin_y
                     else:
                         continue
-                    
-                    if pin_relate_x[to_idx] != new_relate_x or pin_relate_y[to_idx] != new_relate_y:
-                        pin_relate_x[to_idx] = new_relate_x
-                        pin_relate_y[to_idx] = new_relate_y
-                        update_count += 1
+
+                    collect_proposal(to_idx, new_relate_x, new_relate_y)
+
+        all_vertices = sorted(set(x_proposals.keys()) | set(y_proposals.keys()))
+        for vertex_idx in all_vertices:
+            current_x = int(pin_relate_x[vertex_idx])
+            current_y = int(pin_relate_y[vertex_idx])
+            resolved_x, x_conflict = resolve_axis_proposal(
+                vertex_idx,
+                "x",
+                x_proposals.get(vertex_idx, []),
+                current_x,
+            )
+            resolved_y, y_conflict = resolve_axis_proposal(
+                vertex_idx,
+                "y",
+                y_proposals.get(vertex_idx, []),
+                current_y,
+            )
+            if x_conflict or y_conflict:
+                conflict_count += 1
+
+            if current_x != resolved_x or current_y != resolved_y:
+                pin_relate_x[vertex_idx] = resolved_x
+                pin_relate_y[vertex_idx] = resolved_y
+                update_count += 1
         
         # 更新回steiner_topo_op
         steiner_topo_op.pin_relate_x = torch.from_numpy(pin_relate_x).to(
@@ -864,7 +1125,11 @@ class EGRLDirectionResolver:
         steiner_topo_op.pin_relate_y = torch.from_numpy(pin_relate_y).to(
             steiner_topo_op.pin_relate_y.device)
         
-        logger.info(f"update_steiner_relate: updated {update_count} Steiner point relates")
+        logger.info(
+            "update_steiner_relate: updated %d Steiner point relates (conflicted_vertices=%d)",
+            update_count,
+            conflict_count,
+        )
         return update_count
     
     def get_l_direction(self, edge_idx):

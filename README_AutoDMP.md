@@ -24,10 +24,10 @@ AutoDMP adds simultaneous macro and standard cell placement enhancements and aut
 - GPU architecture compatibility 6.0 or later (Optional)
     - Code has been tested on GPUs with compute compatibility 8.0 on DGX A100 machine. 
 
-# How to Build 
+# How to Build
 
 You can build in two ways:
-- Build without Docker by following the instructions of the DREAMPlace build at [README_DREAMPlace.md](README_DREAMPlace.md).
+- Build without Docker by following the instructions of the DREAMPlace build at [README_DREAMPlace.md](README_DREAMPlace.md). Note that `TORCH_INSTALL_PREFIX`, `TORCH_VERSION`, and `TORCH_ENABLE_CUDA` must be passed as CMake cache entries (see the DREAMPlace README for details).
 - Use the provided Dockerfile to build an image with the required library dependencies.
 
 # How to Run Multi-Objective Bayesian Optimization

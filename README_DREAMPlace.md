@@ -148,31 +148,50 @@ docker run -it -v /dreamplace limbo018/dreamplace:cuda bash
 
 ## Build without Docker
 
-[CMake](https://cmake.org) is adopted as the makefile system. 
-To build, go to the root directory. 
+[CMake](https://cmake.org) is adopted as the makefile system.
+To build, go to the root directory.
+
+You must provide the PyTorch installation path and version via CMake cache entries,
+since the build system does not auto-detect them at configure time.
 ```
-mkdir build 
-cd build 
-cmake .. -DCMAKE_INSTALL_PREFIX=your_install_path -DPYTHON_EXECUTABLE=$(which python)
-make 
+# Detect torch info from your Python environment
+TORCH_PREFIX=$(python -c "import torch; print(torch.__path__[0])")
+TORCH_VER=$(python -c "import torch; print(torch.__version__)")
+TORCH_CUDA=$(python -c "import torch; print(int(torch.cuda.is_available()))")
+
+mkdir build
+cd build
+cmake .. \
+  -DCMAKE_INSTALL_PREFIX=your_install_path \
+  -DPYTHON_EXECUTABLE=$(which python) \
+  -DTORCH_INSTALL_PREFIX=$TORCH_PREFIX \
+  -DTORCH_VERSION=$TORCH_VER \
+  -DTORCH_ENABLE_CUDA=$TORCH_CUDA
+make
 make install
 ```
 
 Third party submodules are automatically built except for [Boost](https://www.boost.org).
 
-To clean, go to the root directory. 
+To clean, go to the root directory.
 ```
 rm -r build
 ```
 
-Here are the available options for CMake. 
+Here are the available options for CMake.
 - CMAKE_INSTALL_PREFIX: installation directory
     - Example ```cmake -DCMAKE_INSTALL_PREFIX=path/to/your/directory```
+- TORCH_INSTALL_PREFIX: path to the torch package directory (e.g. the output of `python -c "import torch; print(torch.__path__[0])"`)
+    - **Required**. No default — must be provided explicitly.
+- TORCH_VERSION: torch version string (e.g. `2.10.0`)
+    - **Required**. No default — must be provided explicitly.
+- TORCH_ENABLE_CUDA: 0|1 whether to enable CUDA support (e.g. the output of `python -c "import torch; print(int(torch.cuda.is_available()))"`)
+    - **Required**. No default — must be provided explicitly.
 - CMAKE_CUDA_FLAGS: custom string for NVCC (default -gencode=arch=compute_60,code=sm_60)
     - Example ```cmake -DCMAKE_CUDA_FLAGS=-gencode=arch=compute_60,code=sm_60```
-- CMAKE_CXX_ABI: 0|1 for the value of _GLIBCXX_USE_CXX11_ABI for C++ compiler, default is 0. 
+- CMAKE_CXX_ABI: 0|1 for the value of _GLIBCXX_USE_CXX11_ABI for C++ compiler, default is 0.
     - Example ```cmake -DCMAKE_CXX_ABI=0```
-    - It must be consistent with the _GLIBCXX_USE_CXX11_ABI for compling all the C++ dependencies, such as Boost and PyTorch. 
+    - It must be consistent with the _GLIBCXX_USE_CXX11_ABI for compling all the C++ dependencies, such as Boost and PyTorch.
     - PyTorch in default is compiled with _GLIBCXX_USE_CXX11_ABI=0, but in a customized PyTorch environment, it might be compiled with _GLIBCXX_USE_CXX11_ABI=1. 
 
 # How to Get Benchmarks

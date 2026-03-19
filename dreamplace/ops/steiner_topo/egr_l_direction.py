@@ -5,6 +5,7 @@
 import torch
 import numpy as np
 import logging
+import time
 from collections import Counter, defaultdict
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,11 @@ class EGRLDirectionResolver:
         self._route_grid_y_um = None
         self._route_pitch_x_um = None
         self._route_pitch_y_um = None
-        
+        self._route_snap_cache_x = {}
+        self._route_snap_cache_y = {}
+        self._route_axis_index_cache_x = {}
+        self._route_axis_index_cache_y = {}
+
         # L方向结果: edge_idx -> direction
         self.edge_l_directions = None
         
@@ -82,6 +87,7 @@ class EGRLDirectionResolver:
         self._route_grid_y_um = None
         self._route_pitch_x_um = None
         self._route_pitch_y_um = None
+        self._reset_route_lookup_caches()
         route_x_coords = []
         route_y_coords = []
         
@@ -197,6 +203,7 @@ class EGRLDirectionResolver:
         dbu = float(self.placedb.dbu)
         route_x_coords = []
         route_y_coords = []
+        self._reset_route_lookup_caches()
 
         for net_route in route_entries or []:
             net_name = net_route.get("net_name", "") or f"net_{net_route.get('net_id', -1)}"
@@ -263,6 +270,42 @@ class EGRLDirectionResolver:
         logger.info(f"Parsed gpugr route entries: {len(self.egr_net_data)} nets")
         return self.egr_net_data
 
+    def _reset_route_lookup_caches(self):
+        self._route_snap_cache_x = {}
+        self._route_snap_cache_y = {}
+        self._route_axis_index_cache_x = {}
+        self._route_axis_index_cache_y = {}
+
+    def _point_cache_key(self, x, y, scale=1e6):
+        return (int(round(float(x) * scale)), int(round(float(y) * scale)))
+
+    def _ensure_net_lookup_cache(self, net_data):
+        cache = net_data.get("_resolver_cache")
+        if cache is not None:
+            return cache
+
+        endpoint_index = defaultdict(list)
+        point_count = Counter()
+        point_value = {}
+        for wire in net_data.get("wires", []):
+            p1 = wire["real1"]
+            p2 = wire["real2"]
+            key1 = self._point_cache_key(*p1)
+            key2 = self._point_cache_key(*p2)
+            endpoint_index[key1].append(wire)
+            endpoint_index[key2].append(wire)
+            point_count[key1] += 1
+            point_count[key2] += 1
+            point_value.setdefault(key1, (float(p1[0]), float(p1[1])))
+            point_value.setdefault(key2, (float(p2[0]), float(p2[1])))
+
+        cache = {
+            "endpoint_index": dict(endpoint_index),
+            "shared_points": [point_value[key] for key, count in point_count.items() if count > 1],
+        }
+        net_data["_resolver_cache"] = cache
+        return cache
+
     def _build_route_coord_axis(self, coords, eps=1e-6):
         if not coords:
             return None
@@ -285,13 +328,24 @@ class EGRLDirectionResolver:
     def _snap_value_to_axis(self, value, coords):
         if coords is None or len(coords) == 0:
             return float(value)
+        cache = None
+        if coords is self._route_grid_x_um:
+            cache = self._route_snap_cache_x
+        elif coords is self._route_grid_y_um:
+            cache = self._route_snap_cache_y
+        key = float(value)
+        if cache is not None and key in cache:
+            return cache[key]
         idx = int(np.searchsorted(coords, value))
         candidates = []
         if idx < len(coords):
             candidates.append(coords[idx])
         if idx > 0:
             candidates.append(coords[idx - 1])
-        return float(min(candidates, key=lambda candidate: abs(candidate - value))) if candidates else float(value)
+        snapped = float(min(candidates, key=lambda candidate: abs(candidate - value))) if candidates else float(value)
+        if cache is not None:
+            cache[key] = snapped
+        return snapped
 
     def _snap_point_to_route_grid(self, net_data, point_um):
         if net_data.get("source") != "gpugr":
@@ -416,13 +470,44 @@ class EGRLDirectionResolver:
     def _axis_index(self, coords, value):
         if coords is None or len(coords) == 0:
             return None
+        cache = None
+        if coords is self._route_grid_x_um:
+            cache = self._route_axis_index_cache_x
+        elif coords is self._route_grid_y_um:
+            cache = self._route_axis_index_cache_y
+        key = float(value)
+        if cache is not None and key in cache:
+            return cache[key]
         idx = int(np.searchsorted(coords, value))
         candidates = []
         if idx < len(coords):
             candidates.append((abs(coords[idx] - value), idx))
         if idx > 0:
             candidates.append((abs(coords[idx - 1] - value), idx - 1))
-        return min(candidates)[1] if candidates else None
+        result = min(candidates)[1] if candidates else None
+        if cache is not None:
+            cache[key] = result
+        return result
+
+    def _path_axis_indices(self, p1_um, p2_um):
+        return (
+            self._axis_index(self._route_grid_x_um, p1_um[0]),
+            self._axis_index(self._route_grid_y_um, p1_um[1]),
+            self._axis_index(self._route_grid_x_um, p2_um[0]),
+            self._axis_index(self._route_grid_y_um, p2_um[1]),
+        )
+
+    def _add_horizontal_usage_indices(self, usage_map, x_idx1, x_idx2, y_idx):
+        if usage_map is None or x_idx1 is None or x_idx2 is None or y_idx is None:
+            return
+        lo, hi = sorted((x_idx1, x_idx2))
+        usage_map[lo:hi + 1, y_idx] += 1.0
+
+    def _add_vertical_usage_indices(self, usage_map, x_idx, y_idx1, y_idx2):
+        if usage_map is None or x_idx is None or y_idx1 is None or y_idx2 is None:
+            return
+        lo, hi = sorted((y_idx1, y_idx2))
+        usage_map[x_idx, lo:hi + 1] += 1.0
 
     def _add_horizontal_usage(self, usage_map, x1, x2, y):
         if usage_map is None:
@@ -430,10 +515,7 @@ class EGRLDirectionResolver:
         x_idx1 = self._axis_index(self._route_grid_x_um, x1)
         x_idx2 = self._axis_index(self._route_grid_x_um, x2)
         y_idx = self._axis_index(self._route_grid_y_um, y)
-        if x_idx1 is None or x_idx2 is None or y_idx is None:
-            return
-        lo, hi = sorted((x_idx1, x_idx2))
-        usage_map[lo:hi + 1, y_idx] += 1.0
+        self._add_horizontal_usage_indices(usage_map, x_idx1, x_idx2, y_idx)
 
     def _add_vertical_usage(self, usage_map, x, y1, y2):
         if usage_map is None:
@@ -441,10 +523,21 @@ class EGRLDirectionResolver:
         x_idx = self._axis_index(self._route_grid_x_um, x)
         y_idx1 = self._axis_index(self._route_grid_y_um, y1)
         y_idx2 = self._axis_index(self._route_grid_y_um, y2)
-        if x_idx is None or y_idx1 is None or y_idx2 is None:
-            return
-        lo, hi = sorted((y_idx1, y_idx2))
-        usage_map[x_idx, lo:hi + 1] += 1.0
+        self._add_vertical_usage_indices(usage_map, x_idx, y_idx1, y_idx2)
+
+    def _accumulate_path_usage_indices(self, usage_h, usage_v, axis_indices, direction):
+        x_idx1, y_idx1, x_idx2, y_idx2 = axis_indices
+        if direction == self.H_FIRST:
+            self._add_horizontal_usage_indices(usage_h, x_idx1, x_idx2, y_idx1)
+            self._add_vertical_usage_indices(usage_v, x_idx2, y_idx1, y_idx2)
+        elif direction == self.V_FIRST:
+            self._add_vertical_usage_indices(usage_v, x_idx1, y_idx1, y_idx2)
+            self._add_horizontal_usage_indices(usage_h, x_idx1, x_idx2, y_idx2)
+        elif direction == self.STRAIGHT:
+            if y_idx1 == y_idx2 and y_idx1 is not None:
+                self._add_horizontal_usage_indices(usage_h, x_idx1, x_idx2, y_idx1)
+            elif x_idx1 == x_idx2 and x_idx1 is not None:
+                self._add_vertical_usage_indices(usage_v, x_idx1, y_idx1, y_idx2)
 
     def _accumulate_path_usage(self, usage_h, usage_v, p1_um, p2_um, direction, eps=1e-6):
         x1, y1 = p1_um
@@ -462,10 +555,32 @@ class EGRLDirectionResolver:
                 self._add_vertical_usage(usage_v, x1, y1, y2)
 
     def _score_candidate_path(self, usage_h, usage_v, p1_um, p2_um, direction):
-        temp_h = np.zeros_like(usage_h)
-        temp_v = np.zeros_like(usage_v)
-        self._accumulate_path_usage(temp_h, temp_v, p1_um, p2_um, direction)
-        return float((temp_h * usage_h).sum() + (temp_v * usage_v).sum())
+        return self._score_candidate_path_indices(usage_h, usage_v, self._path_axis_indices(p1_um, p2_um), direction)
+
+    def _score_candidate_path_indices(self, usage_h, usage_v, axis_indices, direction):
+        x_idx1, y_idx1, x_idx2, y_idx2 = axis_indices
+        if None in axis_indices:
+            return 0.0
+
+        cost = 0.0
+        if direction == self.H_FIRST:
+            x_lo, x_hi = sorted((x_idx1, x_idx2))
+            y_lo, y_hi = sorted((y_idx1, y_idx2))
+            cost += float(usage_h[x_lo:x_hi + 1, y_idx1].sum())
+            cost += float(usage_v[x_idx2, y_lo:y_hi + 1].sum())
+        elif direction == self.V_FIRST:
+            x_lo, x_hi = sorted((x_idx1, x_idx2))
+            y_lo, y_hi = sorted((y_idx1, y_idx2))
+            cost += float(usage_v[x_idx1, y_lo:y_hi + 1].sum())
+            cost += float(usage_h[x_lo:x_hi + 1, y_idx2].sum())
+        elif direction == self.STRAIGHT:
+            if y_idx1 == y_idx2:
+                x_lo, x_hi = sorted((x_idx1, x_idx2))
+                cost += float(usage_h[x_lo:x_hi + 1, y_idx1].sum())
+            elif x_idx1 == x_idx2:
+                y_lo, y_hi = sorted((y_idx1, y_idx2))
+                cost += float(usage_v[x_idx1, y_lo:y_hi + 1].sum())
+        return cost
 
     def _fallback_unresolved_with_path_maps(self, edge_records, l_directions, tie_tol=1e-6):
         if self._route_grid_x_um is None or self._route_grid_y_um is None:
@@ -473,23 +588,27 @@ class EGRLDirectionResolver:
 
         usage_h = np.zeros((len(self._route_grid_x_um), len(self._route_grid_y_um)), dtype=np.float32)
         usage_v = np.zeros_like(usage_h)
+        usage_build_start = time.perf_counter()
 
         for record in edge_records:
             direction = int(l_directions[record["edge_idx"]])
             if direction == self.UNKNOWN or direction == self.FAKE_STRAIGHT:
                 continue
-            self._accumulate_path_usage(usage_h, usage_v, record["p1_match_um"], record["p2_match_um"], direction)
+            self._accumulate_path_usage_indices(usage_h, usage_v, record["path_axis_indices"], direction)
 
         fallback_count = 0
         fake_straight_to_unknown = 0
+        unresolved_count = 0
+        scoring_start = time.perf_counter()
         for record in edge_records:
             edge_idx = record["edge_idx"]
             current_direction = int(l_directions[edge_idx])
             if current_direction not in (self.UNKNOWN, self.FAKE_STRAIGHT):
                 continue
+            unresolved_count += 1
 
-            cost_h = self._score_candidate_path(usage_h, usage_v, record["p1_match_um"], record["p2_match_um"], self.H_FIRST)
-            cost_v = self._score_candidate_path(usage_h, usage_v, record["p1_match_um"], record["p2_match_um"], self.V_FIRST)
+            cost_h = self._score_candidate_path_indices(usage_h, usage_v, record["path_axis_indices"], self.H_FIRST)
+            cost_v = self._score_candidate_path_indices(usage_h, usage_v, record["path_axis_indices"], self.V_FIRST)
 
             if abs(cost_h - cost_v) <= tie_tol:
                 if current_direction == self.FAKE_STRAIGHT:
@@ -506,6 +625,12 @@ class EGRLDirectionResolver:
                 fallback_count,
                 fake_straight_to_unknown,
             )
+        logger.info(
+            "Known-path map fallback timing: unresolved=%d usage_build=%.2fms scoring=%.2fms",
+            unresolved_count,
+            (scoring_start - usage_build_start) * 1000.0,
+            (time.perf_counter() - scoring_start) * 1000.0,
+        )
         return fallback_count + fake_straight_to_unknown
     
     def _coord_dp_to_micron(self, x_dp, y_dp):
@@ -601,7 +726,14 @@ class EGRLDirectionResolver:
             list of wires that pass through or start/end at the point
         """
         matching_wires = []
-        for wire in net_data.get('wires', []):
+        candidate_wires = net_data.get('wires', [])
+        if endpoint_only:
+            cache = self._ensure_net_lookup_cache(net_data)
+            indexed_wires = cache["endpoint_index"].get(self._point_cache_key(x, y))
+            if indexed_wires:
+                candidate_wires = indexed_wires
+
+        for wire in candidate_wires:
             rx1, ry1 = wire['real1']
             rx2, ry2 = wire['real2']
             
@@ -759,16 +891,7 @@ class EGRLDirectionResolver:
             if first_dir_from_p2 == 'vertical':
                 return self.H_FIRST
         
-        point_count = defaultdict(int)
-
-        for wire in wires:
-            rx1, ry1 = wire['real1']
-            rx2, ry2 = wire['real2']
-
-            point_count[(rx1, ry1)] += 1
-            point_count[(rx2, ry2)] += 1
-            
-        corners = [point for point, count in point_count.items() if count > 1]
+        corners = self._ensure_net_lookup_cache(net_data)["shared_points"]
         
         # 检查每个拐点距离 h_first_corner 还是 v_first_corner 更近
         for corner in corners:
@@ -847,6 +970,7 @@ class EGRLDirectionResolver:
         stats = {self.H_FIRST: 0, self.V_FIRST: 0, self.STRAIGHT: 0, self.FAKE_STRAIGHT: 0, self.UNKNOWN: 0}
         
         # ========== 优化5: 只遍历有效边 ==========
+        edge_pass_start = time.perf_counter()
         for edge_idx in valid_indices:
             from_idx = flat_pin_from[edge_idx]
             to_idx = flat_pin_to[edge_idx]
@@ -878,16 +1002,27 @@ class EGRLDirectionResolver:
                     "net_id": net_id,
                     "p1_match_um": p1_match_um,
                     "p2_match_um": p2_match_um,
+                    "path_axis_indices": self._path_axis_indices(p1_match_um, p2_match_um),
                     "source": net_data.get("source", ""),
                 }
             )
 
+        edge_pass_ms = (time.perf_counter() - edge_pass_start) * 1000.0
+
+        fallback_start = time.perf_counter()
         if edge_records and (stats[self.UNKNOWN] > 0 or stats[self.FAKE_STRAIGHT] > 0):
             resolved_by_fallback = self._fallback_unresolved_with_path_maps(edge_records, l_directions)
             if resolved_by_fallback > 0:
                 stats = {self.H_FIRST: 0, self.V_FIRST: 0, self.STRAIGHT: 0, self.FAKE_STRAIGHT: 0, self.UNKNOWN: 0}
                 for direction in l_directions:
                     stats[int(direction)] += 1
+        fallback_ms = (time.perf_counter() - fallback_start) * 1000.0
+        logger.info(
+            "L-direction resolve timing: valid_edges=%d edge_pass=%.2fms fallback=%.2fms",
+            len(valid_indices),
+            edge_pass_ms,
+            fallback_ms,
+        )
         
         logger.info(f"L direction resolution: h_first={stats[self.H_FIRST]}, "
                    f"v_first={stats[self.V_FIRST]}, straight={stats[self.STRAIGHT]}, "

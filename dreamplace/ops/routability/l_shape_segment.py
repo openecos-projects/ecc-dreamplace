@@ -15,7 +15,7 @@ H_FIRST = 0       # 先水平后垂直, 拐点在 (x2, y1)
 V_FIRST = 1       # 先垂直后水平, 拐点在 (x1, y2)
 STRAIGHT = 2      # 直线（水平或垂直）
 FAKE_STRAIGHT = 3 # 伪直线（在gcell下只有一条wire）
-UNKNOWN = -1      # 未知，默认使用H_FIRST
+UNKNOWN = -1      # 未知，segment阶段跳过
 
 
 class LShapeSegmentBuilder:
@@ -124,11 +124,14 @@ class LShapeSegmentBuilder:
                 elif l_dir == V_FIRST:
                     # 先垂直后水平，拐点在 (x1, y2)
                     corner_x, corner_y = x1, y2
-                elif l_dir == UNKNOWN or l_dir == FAKE_STRAIGHT:
-                    # unresolved 时和 UNKNOWN 保持一致，默认按 H_FIRST 处理
+                elif l_dir == FAKE_STRAIGHT:
+                    # 残余 FAKE_STRAIGHT 仍按 H_FIRST fallback 处理
                     corner_x, corner_y = x2, y1
+                elif l_dir == UNKNOWN:
+                    # 解析后仍未知的边不参与 L-shape segment 构建
+                    continue
                 else:
-                    # UNKNOWN: 不参与L-shape segment构建
+                    # 非法方向值不参与 L-shape segment 构建
                     continue
                 
                 # Segment 1: p1 -> corner
@@ -289,9 +292,10 @@ def build_l_shape_segments_vectorized(newx, newy, flat_from, flat_to, l_directio
     straight_by_dir = (valid_l_dir == STRAIGHT)
     diag_straight = straight_by_dir & ~(is_horizontal_line | is_vertical_line)
     is_straight = (is_horizontal_line | is_vertical_line) | (straight_by_dir & ~diag_straight)
-    # 对斜线但被标记为STRAIGHT的边，默认按H_FIRST处理
+    # 对斜线但被标记为STRAIGHT的边，默认按H_FIRST处理。
+    # 残余 UNKNOWN 在 segment 阶段跳过，不生成 L-shape。
     is_upper_l = (~is_straight) & (
-        (valid_l_dir == H_FIRST) | (valid_l_dir == UNKNOWN) | (valid_l_dir == FAKE_STRAIGHT) | diag_straight
+        (valid_l_dir == H_FIRST) | (valid_l_dir == FAKE_STRAIGHT) | diag_straight
     )
     is_lower_l = (~is_straight) & (valid_l_dir == V_FIRST)
     
@@ -343,15 +347,16 @@ def build_l_shape_segments_vectorized(newx, newy, flat_from, flat_to, l_directio
     # 过滤有效segment2（只有L形边有第二段）
     is_l_shape = is_upper_l | is_lower_l
     seg2_valid = is_l_shape & (seg2_size_x > 1e-6) & (seg2_size_y > 1e-6)
+    seg1_valid = is_straight | is_l_shape
     
     # 合并所有segments
-    # Segment 1 (所有边都有)
-    all_llx = [seg1_llx]
-    all_lly = [seg1_lly]
-    all_size_x = [seg1_size_x]
-    all_size_y = [seg1_size_y]
-    all_edge_idx = [valid_edge_idx]
-    all_is_h = [seg1_is_h]
+    # Segment 1 (直线边或L形边的第一段)
+    all_llx = [seg1_llx[seg1_valid]]
+    all_lly = [seg1_lly[seg1_valid]]
+    all_size_x = [seg1_size_x[seg1_valid]]
+    all_size_y = [seg1_size_y[seg1_valid]]
+    all_edge_idx = [valid_edge_idx[seg1_valid]]
+    all_is_h = [seg1_is_h[seg1_valid]]
     
     # Segment 2 (只有L形边)
     if seg2_valid.any():
@@ -494,7 +499,7 @@ class LShapeSegmentOp:
         # 判断边的类型（基于l_direction，不依赖坐标）
         # 注意：is_horizontal_line 和 is_vertical_line 需要坐标，但我们可以延迟判断
         # 这里只预计算 l_direction 相关的类型
-        is_h_first = (valid_l_dir == H_FIRST) | (valid_l_dir == UNKNOWN) | (valid_l_dir == FAKE_STRAIGHT)
+        is_h_first = (valid_l_dir == H_FIRST) | (valid_l_dir == FAKE_STRAIGHT)
         is_v_first = (valid_l_dir == V_FIRST)
         is_straight_by_dir = (valid_l_dir == STRAIGHT)
         
@@ -561,7 +566,8 @@ class LShapeSegmentOp:
         diag_straight = is_straight_by_dir & ~(is_horizontal_line | is_vertical_line)
         is_straight = (is_horizontal_line | is_vertical_line) | (is_straight_by_dir & ~diag_straight)
         
-        # 对斜线但被标记为STRAIGHT的边，默认按H_FIRST处理
+        # 对斜线但被标记为STRAIGHT的边，默认按H_FIRST处理。
+        # 残余 UNKNOWN 在 segment 阶段跳过，不生成 L-shape。
         is_upper_l = (~is_straight) & (is_h_first | diag_straight)
         is_lower_l = (~is_straight) & is_v_first
         
@@ -586,6 +592,7 @@ class LShapeSegmentOp:
         
         # Segment 2: 只有L形边有 (corner -> p2)
         is_l_shape = is_upper_l | is_lower_l
+        seg1_valid = is_straight | is_l_shape
         
         seg2_min_x = torch.minimum(corner_x, x2)
         seg2_max_x = torch.maximum(corner_x, x2)
@@ -601,12 +608,12 @@ class LShapeSegmentOp:
         seg2_valid = is_l_shape & (seg2_size_x > 1e-6) & (seg2_size_y > 1e-6)
         
         # 合并所有segments
-        all_llx = [seg1_llx]
-        all_lly = [seg1_lly]
-        all_size_x = [seg1_size_x]
-        all_size_y = [seg1_size_y]
-        all_edge_idx = [valid_edge_idx]
-        all_is_h = [seg1_is_h]
+        all_llx = [seg1_llx[seg1_valid]]
+        all_lly = [seg1_lly[seg1_valid]]
+        all_size_x = [seg1_size_x[seg1_valid]]
+        all_size_y = [seg1_size_y[seg1_valid]]
+        all_edge_idx = [valid_edge_idx[seg1_valid]]
+        all_is_h = [seg1_is_h[seg1_valid]]
         
         if seg2_valid.any():
             all_llx.append(seg2_llx[seg2_valid])

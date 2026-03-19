@@ -319,9 +319,9 @@ class LShapeRoutabilityOp(nn.Module):
                 l_directions = l_directions.cpu()
             logger.debug(f"Using EGR L-directions: {len(l_directions)} edges")
         else:
-            # 没有L方向信息，使用默认（全部UNKNOWN，会被当作H_FIRST处理）
+            # 没有L方向信息时，显式使用 H_FIRST fallback，而不是残余 UNKNOWN。
             l_directions = torch.full(
-                (flat_pin_from.numel(),), UNKNOWN,
+                (flat_pin_from.numel(),), H_FIRST,
                 dtype=torch.int32, device=newx.device  # CPU
             )
             logger.debug("No L-direction info, using default H_FIRST")
@@ -445,7 +445,7 @@ class LShapeRoutabilityOp(nn.Module):
                 l_directions = l_directions.to(device)
         else:
             l_directions = torch.full(
-                (flat_pin_from.numel(),), UNKNOWN,
+                (flat_pin_from.numel(),), H_FIRST,
                 dtype=torch.int32, device=device
             )
         
@@ -697,8 +697,11 @@ def plot_l_shape_segments(segments, newx=None, newy=None, flat_from=None, flat_t
                 corner_x, corner_y = x1, y2
                 ax.plot([x1, corner_x], [y1, corner_y], 'm-', linewidth=0.8, alpha=0.7)
                 ax.plot([corner_x, x2], [corner_y, y2], 'm-', linewidth=0.8, alpha=0.7)
+            elif l_dir == UNKNOWN:
+                # 残余 UNKNOWN 与 segment 构建保持一致：跳过，不画 L 形
+                continue
             else:
-                # Upper-L (包括 H_FIRST 和 UNKNOWN): 先水平后垂直，拐点在 (x2, y1)
+                # Upper-L (包括 H_FIRST 和残余 FAKE_STRAIGHT): 先水平后垂直
                 corner_x, corner_y = x2, y1
                 ax.plot([x1, corner_x], [y1, corner_y], 'r-', linewidth=0.8, alpha=0.7)
                 ax.plot([corner_x, x2], [corner_y, y2], 'r-', linewidth=0.8, alpha=0.7)

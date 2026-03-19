@@ -170,6 +170,36 @@ class LShapeElectricOverflow(nn.Module):
         self.bin_center_y = None
         self.padding_mask = None
         self.initial_density_map = None
+
+    def set_target_density(self, target_density):
+        """
+        Update target density (routing supply map) used by overflow estimation.
+
+        Args:
+            target_density: scalar or 2D tensor (num_bins_x, num_bins_y)
+        """
+        if isinstance(target_density, torch.Tensor):
+            if target_density.shape != (self.num_bins_x, self.num_bins_y):
+                from torch.nn.functional import interpolate
+                td = target_density.unsqueeze(0).unsqueeze(0)
+                td = interpolate(td, size=(self.num_bins_x, self.num_bins_y), mode='bilinear', align_corners=False)
+                target_density = td.squeeze(0).squeeze(0)
+
+            if self.bin_center_x is not None:
+                target_density = target_density.to(
+                    device=self.bin_center_x.device,
+                    dtype=self.bin_center_x.dtype,
+                )
+            self.target_density = target_density
+            logger.info(
+                "Set overflow target_density: min=%.3f, max=%.3f, mean=%.3f",
+                target_density.min().item(),
+                target_density.max().item(),
+                target_density.mean().item(),
+            )
+        else:
+            self.target_density = target_density
+            logger.info(f"Set overflow scalar target_density: {target_density}")
     
     def _init_bins(self, device, dtype):
         """Initialize bin centers and padding mask."""

@@ -339,6 +339,98 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
     }
 
 
+def _run_gpugr_final_eval(params, placedb, pos):
+    if not bool(getattr(params, "gpugr_final_eval_flag", 0)):
+        return None
+
+    from tools.iEDA.module.gpugr import IEDAGPUGR
+
+    _write_back_autodmp_pos_to_ieda(pos, params, placedb)
+
+    override_xsize = int(getattr(params, "gpugr_final_eval_route_xsize", 0))
+    override_ysize = int(getattr(params, "gpugr_final_eval_route_ysize", 0))
+    if override_xsize > 0 and override_ysize > 0:
+        route_xsize = override_xsize
+        route_ysize = override_ysize
+        logging.info(
+            "Run final gpugr eval with user grid override: route_xsize=%d route_ysize=%d",
+            route_xsize,
+            route_ysize,
+        )
+    else:
+        route_xsize, route_ysize = _compute_gpugr_route_grid_like_xplace(params, placedb)
+
+    out_dir = os.path.join(params.result_dir, "gpugr_final_eval")
+    logging.info(
+        "Run final gpugr eval after placement: route_grid=%dx%d rrr_iters=%d skip_m1_route=%s",
+        route_xsize,
+        route_ysize,
+        int(getattr(params, "gpugr_final_eval_rrr_iters", 1)),
+        str(bool(getattr(params, "gpugr_final_eval_skip_m1_route", 1))),
+    )
+    gpugr_op = IEDAGPUGR(dir_workspace=placedb.data_manager.dir_workspace)
+    result = gpugr_op.run_gpugr(
+        out_dir=out_dir,
+        design_name=params.design_name(),
+        gpu=getattr(params, "gpu_id", 0),
+        threads=params.num_threads,
+        route_xsize=route_xsize,
+        route_ysize=route_ysize,
+        rrr_iters=int(getattr(params, "gpugr_final_eval_rrr_iters", 1)),
+        skip_m1_route=bool(getattr(params, "gpugr_final_eval_skip_m1_route", 1)),
+        verbose_parser_log=bool(getattr(params, "gpugr_final_eval_verbose_parser_log", 0)),
+        cpp_log_level=int(getattr(params, "gpugr_final_eval_cpp_log_level", 2)),
+        keep_temp_def=bool(getattr(params, "gpugr_final_eval_keep_temp_def", 0)),
+        save_artifacts=bool(getattr(params, "gpugr_final_eval_save_artifacts", 1)),
+        include_route_entries=False,
+    )
+    metrics = result["metrics"]
+    logging.info(
+        "Final gpugr eval finished. #OvflNets=%d GR_WL=%.0f GR_Vias=%.0f EstShorts=%.0f elapsed=%.3fs",
+        metrics["num_overflow_nets"],
+        metrics["gr_wirelength"],
+        metrics["gr_num_vias"],
+        metrics["gr_est_shorts"],
+        metrics["elapsed_sec"],
+    )
+    return result
+
+
+def _prepare_l_shape_inputs_from_egr(params, placedb, pos, model):
+    model.op_collections.irt_egr_congestion_map_op(
+        pos, stage="egr2D", resolve_congestion="low"
+    )
+    l_shape_num_bins_x = int(getattr(params, "num_bins_x", placedb.num_bins_x))
+    l_shape_num_bins_y = int(getattr(params, "num_bins_y", placedb.num_bins_y))
+    egr_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(params.result_dir))),
+        "iEDA/data/rt/rt_temp_directory/early_router/",
+    )
+    supply_map, demand_map, wire_width = create_supply_and_demand_maps_from_egr(
+        egr_dir=egr_dir,
+        placedb=placedb,
+        params=params,
+        num_bins_x=l_shape_num_bins_x,
+        num_bins_y=l_shape_num_bins_y,
+        layer='planar',
+        normalize_supply=False,
+        normalize_demand=False,
+        return_wire_width=True,
+    )
+    wire_width = _resolve_l_shape_wire_width(
+        params,
+        placedb,
+        fallback_wire_width=wire_width,
+    )
+    return {
+        "supply_map": supply_map,
+        "demand_map": demand_map,
+        "wire_width": wire_width,
+        "num_bins_x": l_shape_num_bins_x,
+        "num_bins_y": l_shape_num_bins_y,
+    }
+
+
 def _run_gpugr_before_first_area_adjust_and_exit(params, placedb, pos, num_area_adjust, model=None):
     if not getattr(params, "gpugr_first_inflation_exit", False):
         return
@@ -1172,30 +1264,15 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 demand_map = gpugr_inputs["demand_map"]
                                 wire_width = gpugr_inputs["wire_width"]
                             else:
-                                # Step 2: 运行EGR获取路由信息
-                                model.op_collections.irt_egr_congestion_map_op(
-                                    pos, stage="egr2D", resolve_congestion="low"
-                                )
-                                egr_dir = os.path.join(
-                                    os.path.dirname(os.path.dirname(os.path.dirname(params.result_dir))), 
-                                    "iEDA/data/rt/rt_temp_directory/early_router/"
-                                )
-                                supply_map, demand_map, wire_width = create_supply_and_demand_maps_from_egr(
-                                    egr_dir=egr_dir,
-                                    placedb=placedb,
-                                    params=params,
-                                    num_bins_x=L_shape_num_bins_x,
-                                    num_bins_y=L_shape_num_bins_y,
-                                    layer='planar',
-                                    normalize_supply=False,
-                                    normalize_demand=False,
-                                    return_wire_width=True,
-                                )
-                                wire_width = _resolve_l_shape_wire_width(
+                                egr_inputs = _prepare_l_shape_inputs_from_egr(
                                     params,
                                     placedb,
-                                    fallback_wire_width=wire_width,
+                                    pos,
+                                    model=model,
                                 )
+                                supply_map = egr_inputs["supply_map"]
+                                demand_map = egr_inputs["demand_map"]
+                                wire_width = egr_inputs["wire_width"]
 
                             # Step 4: 解析路由器输出的 L 方向
                             steiner_topo_op = self.op_collections.steiner_topo_op
@@ -1417,9 +1494,13 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     self.data_collections.flat_pin_from = self.op_collections.steiner_topo_op.rebuild_tree(pin_pos)
                             
                             gpugr_inputs = None
+                            l_shape_inputs = None
                             if not getattr(params, "l_direction_use_gpugr", False):
-                                model.op_collections.irt_egr_congestion_map_op(
-                                    pos, stage="egr2D", resolve_congestion="low"
+                                l_shape_inputs = _prepare_l_shape_inputs_from_egr(
+                                    params,
+                                    placedb,
+                                    pos,
+                                    model=model,
                                 )
                             else:
                                 gpugr_inputs = _prepare_l_shape_inputs_from_gpugr(
@@ -1428,6 +1509,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     pos,
                                     model=model,
                                 )
+                                l_shape_inputs = gpugr_inputs
 
                             steiner_topo_op = self.op_collections.steiner_topo_op
                             l_directions = _resolve_l_directions_for_l_shape(
@@ -1452,6 +1534,20 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 ),
                             )
                             _apply_l_directions_to_steiner_relate(steiner_topo_op, pin_pos)
+                            if model.l_shape_routability_op is not None and l_shape_inputs is not None:
+                                model.l_shape_routability_op.update_targets(
+                                    target_density=l_shape_inputs["supply_map"],
+                                    target_demand=l_shape_inputs["demand_map"],
+                                )
+                                updated_wire_width = float(l_shape_inputs["wire_width"])
+                                current_wire_width = float(model.l_shape_routability_op.wire_width)
+                                if abs(updated_wire_width - current_wire_width) > 1e-6:
+                                    logging.info(
+                                        "L-shape periodic target update kept existing wire_width %.4f while refreshed maps imply %.4f. "
+                                        "Segment width is not updated online after initialization.",
+                                        current_wire_width,
+                                        updated_wire_width,
+                                    )
                             density_map = None
 
                             # 基于L-shape overflow变化更新target_ratio（外环慢速更新）
@@ -2751,6 +2847,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             rsmt_wl = self.op_collections.rsmt_wl_op(self.pos[0]) / placedb.dbu
             logging.info("flute rsmt %.6E um" % rsmt_wl)
             logging.info("unweighted hpwl %.6E" % hpwl)
+
+        _run_gpugr_final_eval(params, placedb, self.pos[0])
 
         # save nets degree, RSMT, HPWL
         # with torch.no_grad():

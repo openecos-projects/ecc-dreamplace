@@ -128,6 +128,35 @@ class LShapeRoutabilityOp(nn.Module):
         self.cached_segments = None
         self.cached_density_map = None
 
+    def update_targets(self, target_density=None, target_demand=None):
+        """
+        Refresh external routing targets used by the electric L-shape model.
+
+        Args:
+            target_density: 2D routing supply map or scalar
+            target_demand: 2D routing demand map or None
+        """
+        if self.density_mode != "electric":
+            logger.debug("Skip L-shape target update because density_mode=%s", self.density_mode)
+            return
+
+        updated = False
+        if target_density is not None and hasattr(self.density_op, "set_target_density"):
+            self.density_op.set_target_density(target_density)
+            updated = True
+        if target_density is not None and self.overflow_op is not None and hasattr(self.overflow_op, "set_target_density"):
+            self.overflow_op.set_target_density(target_density)
+            updated = True
+        if hasattr(self.density_op, "set_target_demand"):
+            self.density_op.set_target_demand(target_demand)
+            updated = True
+
+        if updated:
+            self.cached_density_map = None
+            logger.info("Updated L-shape routing targets (density=%s, demand=%s).",
+                        "set" if target_density is not None else "keep",
+                        "set" if target_demand is not None else "clear")
+
     def _build_vertex_to_net(self, steiner_topo_op, num_vertices):
         """Build vertex->net mapping for pins and Steiner points."""
         vertex_to_net = torch.full((num_vertices,), -1, dtype=torch.int32)

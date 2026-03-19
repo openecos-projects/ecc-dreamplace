@@ -251,6 +251,42 @@
         "description": "whether save gpugr artifacts when l_direction_use_gpugr is enabled",
         "default": 0
     },
+    "gpugr_final_eval_flag": {
+        "description": "whether run a final gpugr evaluation after placement finishes, similar to Xplace final_route_eval",
+        "default": 0
+    },
+    "gpugr_final_eval_rrr_iters": {
+        "description": "rrrIters passed to gpugr final evaluation",
+        "default": 1
+    },
+    "gpugr_final_eval_skip_m1_route": {
+        "description": "whether skip M1 when converting gpugr demand/capacity into final evaluation metrics",
+        "default": 1
+    },
+    "gpugr_final_eval_save_artifacts": {
+        "description": "whether save npz/json/png artifacts for gpugr final evaluation",
+        "default": 1
+    },
+    "gpugr_final_eval_keep_temp_def": {
+        "description": "whether keep temporary DEF files produced by gpugr final evaluation",
+        "default": 0
+    },
+    "gpugr_final_eval_verbose_parser_log": {
+        "description": "whether print verbose Xplace parser logs during gpugr final evaluation",
+        "default": 0
+    },
+    "gpugr_final_eval_cpp_log_level": {
+        "description": "Xplace C++ parser log level for gpugr final evaluation",
+        "default": 2
+    },
+    "gpugr_final_eval_route_xsize": {
+        "description": "optional route_xSize override for gpugr final evaluation; use 0 to follow the Xplace grid rule",
+        "default": 0
+    },
+    "gpugr_final_eval_route_ysize": {
+        "description": "optional route_ySize override for gpugr final evaluation; use 0 to follow the Xplace grid rule",
+        "default": 0
+    },
     "l_shape_wire_width_mode": {
         "description": "effective segment width mode for L-shape routability: min_width, cap_weighted_width, or cap_weighted_footprint",
         "default": "cap_weighted_width"

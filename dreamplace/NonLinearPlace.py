@@ -139,27 +139,127 @@ def _sync_gpugr_route_grid_to_autodmp(params, placedb, model=None):
     return route_xsize, route_ysize
 
 
-def _resolve_l_shape_wire_width(placedb, route_xsize, route_ysize):
-    min_wire_widths = getattr(placedb, "min_wire_widths", None)
-    if min_wire_widths is not None and len(min_wire_widths) > 0:
-        widths = np.array(min_wire_widths, dtype=float)
-        widths = widths[widths > 0]
-        if widths.size > 0:
-            wire_width = float(widths.min())
-            logging.info("Use LEF min wire width for L-shape segments: %.4f", wire_width)
-            return wire_width
+def _normalize_l_shape_wire_width_mode(params):
+    mode = str(getattr(params, "l_shape_wire_width_mode", "cap_weighted_width")).strip().lower()
+    alias_map = {
+        "min": "min_width",
+        "minwidth": "min_width",
+        "cap_weighted": "cap_weighted_width",
+        "capacity_weighted": "cap_weighted_width",
+        "capacity_weighted_width": "cap_weighted_width",
+        "cap_weighted_width_spacing": "cap_weighted_footprint",
+        "capacity_weighted_footprint": "cap_weighted_footprint",
+        "cap_weighted_pitch": "cap_weighted_footprint",
+        "capacity_weighted_pitch": "cap_weighted_footprint",
+        "pitch": "cap_weighted_footprint",
+        "footprint": "cap_weighted_footprint",
+    }
+    return alias_map.get(mode, mode)
 
-    fallback_wire_width = min(
-        float(placedb.xh - placedb.xl) / max(int(route_xsize), 1),
-        float(placedb.yh - placedb.yl) / max(int(route_ysize), 1),
+
+def _fallback_l_shape_wire_width(placedb, route_xsize=None, route_ysize=None, fallback_wire_width=None):
+    if fallback_wire_width is not None and float(fallback_wire_width) > 0:
+        return float(fallback_wire_width), "external_fallback"
+
+    if route_xsize is not None and route_ysize is not None:
+        gcell_wire_width = min(
+            float(placedb.xh - placedb.xl) / max(int(route_xsize), 1),
+            float(placedb.yh - placedb.yl) / max(int(route_ysize), 1),
+        )
+        return gcell_wire_width, f"gcell_size({int(route_xsize)}x{int(route_ysize)})"
+
+    route_x = getattr(placedb, "num_routing_grids_x", None)
+    route_y = getattr(placedb, "num_routing_grids_y", None)
+    if route_x is not None and route_y is not None:
+        gcell_wire_width = min(
+            float(placedb.xh - placedb.xl) / max(int(route_x), 1),
+            float(placedb.yh - placedb.yl) / max(int(route_y), 1),
+        )
+        return gcell_wire_width, f"routing_grid({int(route_x)}x{int(route_y)})"
+
+    return 0.0, "none"
+
+
+def _resolve_l_shape_wire_width(params, placedb, route_xsize=None, route_ysize=None, fallback_wire_width=None):
+    mode = _normalize_l_shape_wire_width_mode(params)
+
+    raw_widths = getattr(placedb, "min_wire_widths", None)
+    widths = np.array(raw_widths, dtype=float) if raw_widths is not None and len(raw_widths) > 0 else np.array([], dtype=float)
+    raw_spacings = getattr(placedb, "min_wire_spacings", None)
+    spacings = np.array(raw_spacings, dtype=float) if raw_spacings is not None and len(raw_spacings) > 0 else np.array([], dtype=float)
+    raw_h_caps = getattr(placedb, "unit_horizontal_capacities", None)
+    raw_v_caps = getattr(placedb, "unit_vertical_capacities", None)
+    h_caps = np.array(raw_h_caps, dtype=float) if raw_h_caps is not None else np.array([], dtype=float)
+    v_caps = np.array(raw_v_caps, dtype=float) if raw_v_caps is not None else np.array([], dtype=float)
+
+    def _finalize(value, source):
+        wire_width = float(value)
+        logging.info(
+            "Resolved L-shape wire width: mode=%s source=%s value=%.4f",
+            mode,
+            source,
+            wire_width,
+        )
+        return wire_width
+
+    positive_width_mask = widths > 0
+    positive_widths = widths[positive_width_mask]
+    if mode == "min_width":
+        if positive_widths.size > 0:
+            return _finalize(positive_widths.min(), "min_wire_width")
+    else:
+        num_layers = widths.size
+        if num_layers > 0 and h_caps.size >= num_layers and v_caps.size >= num_layers:
+            layer_caps = h_caps[:num_layers] + v_caps[:num_layers]
+            layer_mask = positive_width_mask & (layer_caps > 0)
+            if mode == "cap_weighted_footprint":
+                if spacings.size >= num_layers:
+                    layer_footprints = widths[:num_layers] + np.clip(spacings[:num_layers], a_min=0.0, a_max=None)
+                    layer_mask = layer_mask & (layer_footprints > 0)
+                    if np.any(layer_mask):
+                        return _finalize(
+                            np.average(layer_footprints[layer_mask], weights=layer_caps[layer_mask]),
+                            "capacity_weighted(width+spacing)",
+                        )
+                logging.warning(
+                    "Cannot compute cap_weighted_footprint for L-shape wire width because valid min_wire_spacings are unavailable. "
+                    "Fall back to cap_weighted_width."
+                )
+                mode = "cap_weighted_width"
+
+            if mode == "cap_weighted_width" and np.any(layer_mask):
+                return _finalize(
+                    np.average(widths[:num_layers][layer_mask], weights=layer_caps[layer_mask]),
+                    "capacity_weighted(width)",
+                )
+        elif positive_widths.size > 0:
+            logging.warning(
+                "Cannot compute %s for L-shape wire width because routing-layer capacities are unavailable. "
+                "Fall back to min_width.",
+                mode,
+            )
+            return _finalize(positive_widths.min(), "min_wire_width(no_capacity)")
+
+    fallback_value, fallback_source = _fallback_l_shape_wire_width(
+        placedb,
+        route_xsize=route_xsize,
+        route_ysize=route_ysize,
+        fallback_wire_width=fallback_wire_width,
     )
+    if fallback_value > 0:
+        logging.warning(
+            "Fallback L-shape wire width: mode=%s source=%s value=%.4f",
+            mode,
+            fallback_source,
+            fallback_value,
+        )
+        return float(fallback_value)
+
     logging.warning(
-        "Fallback L-shape wire width to gpugr gcell size: %.4f (route grid %dx%d)",
-        fallback_wire_width,
-        route_xsize,
-        route_ysize,
+        "Failed to resolve L-shape wire width for mode=%s. Fall back to 0.0, which may collapse segment thickness.",
+        mode,
     )
-    return fallback_wire_width
+    return 0.0
 
 
 def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
@@ -200,7 +300,12 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
     ).sum(dim=0).detach().to(device=pos.device, dtype=pos.dtype)
     supply_map = _resample_xy_map(supply_xy, l_shape_num_bins_x, l_shape_num_bins_y)
     demand_map = _resample_xy_map(demand_xy, l_shape_num_bins_x, l_shape_num_bins_y)
-    wire_width = _resolve_l_shape_wire_width(placedb, route_xsize, route_ysize)
+    wire_width = _resolve_l_shape_wire_width(
+        params,
+        placedb,
+        route_xsize=route_xsize,
+        route_ysize=route_ysize,
+    )
 
     logging.info(
         "Prepared gpugr L-shape inputs: route_grid=%dx%d l_shape_bins=%dx%d nets=%d entries=%d "
@@ -1086,17 +1191,11 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     normalize_demand=False,
                                     return_wire_width=True,
                                 )
-                                min_wire_widths = getattr(placedb, "min_wire_widths", None)
-                                if min_wire_widths is None:
-                                    logging.info("min_wire_widths len=0, head=[]")
-                                else:
-                                    logging.info(f"min_wire_widths len={len(min_wire_widths)}, head={min_wire_widths[:5]}")
-                                if getattr(placedb, "min_wire_widths", None) is not None and len(placedb.min_wire_widths) > 0:
-                                    widths = np.array(placedb.min_wire_widths, dtype=float)
-                                    widths = widths[widths > 0]
-                                    if widths.size > 0:
-                                        wire_width = float(widths.min())
-                                        logging.info(f"Use LEF min wire width for segments: {wire_width:.4f}")
+                                wire_width = _resolve_l_shape_wire_width(
+                                    params,
+                                    placedb,
+                                    fallback_wire_width=wire_width,
+                                )
 
                             # Step 4: 解析路由器输出的 L 方向
                             steiner_topo_op = self.op_collections.steiner_topo_op

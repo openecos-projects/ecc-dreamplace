@@ -251,6 +251,10 @@
         "description": "whether save gpugr artifacts when l_direction_use_gpugr is enabled",
         "default": 0
     },
+    "l_shape_wire_width_mode": {
+        "description": "effective segment width mode for L-shape routability: min_width, cap_weighted_width, or cap_weighted_footprint",
+        "default": "cap_weighted_width"
+    },
     "adjust_nctugr_area_flag": {
         "description": "whether use NCTUgr congestion map to guide area adjustment",
         "default": 0

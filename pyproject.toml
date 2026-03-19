@@ -8,11 +8,13 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
   "matplotlib>=3.4",
+  "scipy>=1.7",
+  "numpy>=1.21",
+  "pyunpack>=0.1.2",
+  "patool>=1.12",
   "cairocffi>=0.9.0",
   "pkgconfig>=1.4.0",
   "setuptools>=39.1.0",
-  "scipy>=1.7",
-  "numpy>=1.21",
   "torch>=1.6.0",
   "shapely>=1.7.0",
   "pygmo>=2.16.1",
@@ -22,8 +24,6 @@ dependencies = [
   "ConfigSpace>=0.6.0",
   "statsmodels>=0.13.2",
   "xgboost>=1.5.1",
-  "pyunpack>=0.1.2",
-  "patool>=1.12",
 ]
 
 [tool.setuptools.packages.find]

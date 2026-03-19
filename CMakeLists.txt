@@ -3,8 +3,6 @@ cmake_minimum_required(VERSION 3.14)
 project(DREAMPlace LANGUAGES CXX)
 set(CMAKE_VERBOSE_MAKEFILE ON)
 
-# set(PYTHON_EXECUTABLE "/home/zhaoxueyan/anaconda3/envs/PlaceOPT/bin/python")
-
 if (CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     set (CMAKE_INSTALL_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/install" CACHE PATH "Prefix prepended to install directories" FORCE )
 endif()
@@ -26,39 +24,12 @@ string(REGEX REPLACE "-std=c\\+\\+([0-9a-z]+)" " " CMAKE_CXX_FLAGS_INIT ${CMAKE_
 endif(CMAKE_CXX_FLAGS)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS_INIT}" CACHE STRING "Flags used by the compiler during all build types." FORCE)
 
-set(_dreamplace_detected_cxx_abi "")
-if(PYTHON_EXECUTABLE)
-    execute_process(
-        COMMAND ${PYTHON_EXECUTABLE} -c "import torch; print(int(bool(torch._C._GLIBCXX_USE_CXX11_ABI)))"
-        RESULT_VARIABLE _dreamplace_torch_abi_result
-        OUTPUT_VARIABLE _dreamplace_torch_abi_output
-        ERROR_QUIET
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    if(_dreamplace_torch_abi_result EQUAL 0 AND _dreamplace_torch_abi_output MATCHES "^[01]$")
-        set(_dreamplace_detected_cxx_abi "${_dreamplace_torch_abi_output}")
-        message(STATUS "Detected PyTorch C++ ABI from ${PYTHON_EXECUTABLE}: ${_dreamplace_detected_cxx_abi}")
-    endif()
-endif()
+if(NOT CMAKE_CXX_ABI)
+    set(CMAKE_CXX_ABI 0 CACHE STRING
+        "Choose the value for _GLIBCXX_USE_CXX11_ABI, options are: 0|1."
+        FORCE)
+endif(NOT CMAKE_CXX_ABI)
 
-if(NOT DEFINED CMAKE_CXX_ABI OR "${CMAKE_CXX_ABI}" STREQUAL "")
-    if(_dreamplace_detected_cxx_abi)
-        set(CMAKE_CXX_ABI ${_dreamplace_detected_cxx_abi} CACHE STRING
-            "Choose the value for _GLIBCXX_USE_CXX11_ABI, options are: 0|1."
-            FORCE)
-    else()
-        set(CMAKE_CXX_ABI 0 CACHE STRING
-            "Choose the value for _GLIBCXX_USE_CXX11_ABI, options are: 0|1."
-            FORCE)
-    endif()
-endif()
-if(NOT "${_dreamplace_detected_cxx_abi}" STREQUAL "" AND NOT "${CMAKE_CXX_ABI}" STREQUAL "${_dreamplace_detected_cxx_abi}")
-    message(WARNING
-        "CMAKE_CXX_ABI=${CMAKE_CXX_ABI} does not match PyTorch ABI "
-        "${_dreamplace_detected_cxx_abi} from ${PYTHON_EXECUTABLE}. "
-        "DreamPlace extensions may fail to import."
-    )
-endif()
 message(STATUS "CMAKE_CXX_ABI: _GLIBCXX_USE_CXX11_ABI=${CMAKE_CXX_ABI}")
 add_definitions(-D_GLIBCXX_USE_CXX11_ABI=${CMAKE_CXX_ABI})
 
@@ -141,68 +112,18 @@ message(STATUS "LEMON_INCLUDE_DIRS ${LEMON_INCLUDE_DIRS}")
 message(STATUS "LEMON_LINK_DIRS ${LEMON_LINK_DIRS}")
 
 if (CUDA_FOUND)
-  set(_dreamplace_default_cuda_architectures 6.0 6.1 7.0)
-  if (${CUDA_VERSION_MAJOR} VERSION_GREATER "9")
-    list(APPEND _dreamplace_default_cuda_architectures 7.5)
-  endif(${CUDA_VERSION_MAJOR} VERSION_GREATER "9")
-  if (${CUDA_VERSION_MAJOR} VERSION_GREATER "10")
-    list(APPEND _dreamplace_default_cuda_architectures 8.0)
-    # arch 8.6 removed for compatability with 3090
-    # list(APPEND _dreamplace_default_cuda_architectures 8.6)
-  endif(${CUDA_VERSION_MAJOR} VERSION_GREATER "10")
-
-  # Newer CUDA toolchains can drop support for older architectures such as
-  # compute_60. Filter the default list against the architectures reported by
-  # the active nvcc so the generated -gencode flags remain valid.
-  execute_process(
-    COMMAND ${CUDA_NVCC_EXECUTABLE} --list-gpu-arch
-    OUTPUT_VARIABLE _dreamplace_nvcc_arches_raw
-    ERROR_QUIET
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    RESULT_VARIABLE _dreamplace_nvcc_arches_result
-  )
-  if (_dreamplace_nvcc_arches_result EQUAL 0 AND _dreamplace_nvcc_arches_raw)
-    string(REPLACE "\n" ";" _dreamplace_nvcc_arches_tokens "${_dreamplace_nvcc_arches_raw}")
-    set(_dreamplace_nvcc_supported_architectures "")
-    foreach(_dreamplace_nvcc_arch ${_dreamplace_nvcc_arches_tokens})
-      if(_dreamplace_nvcc_arch MATCHES "^compute_([0-9]+)$")
-        set(_dreamplace_arch_digits "${CMAKE_MATCH_1}")
-        string(LENGTH "${_dreamplace_arch_digits}" _dreamplace_arch_digits_length)
-        if(_dreamplace_arch_digits_length GREATER 1)
-          math(EXPR _dreamplace_arch_major_length "${_dreamplace_arch_digits_length} - 1")
-          string(SUBSTRING "${_dreamplace_arch_digits}" 0 ${_dreamplace_arch_major_length} _dreamplace_arch_major)
-          string(SUBSTRING "${_dreamplace_arch_digits}" ${_dreamplace_arch_major_length} 1 _dreamplace_arch_minor)
-          list(APPEND _dreamplace_nvcc_supported_architectures "${_dreamplace_arch_major}.${_dreamplace_arch_minor}")
-        endif()
-      endif()
-    endforeach()
-    list(REMOVE_DUPLICATES _dreamplace_nvcc_supported_architectures)
-
-    set(_dreamplace_filtered_cuda_architectures "")
-    foreach(_dreamplace_cuda_arch ${_dreamplace_default_cuda_architectures})
-      list(FIND _dreamplace_nvcc_supported_architectures "${_dreamplace_cuda_arch}" _dreamplace_cuda_arch_index)
-      if(NOT _dreamplace_cuda_arch_index EQUAL -1)
-        list(APPEND _dreamplace_filtered_cuda_architectures "${_dreamplace_cuda_arch}")
-      endif()
-    endforeach()
-
-    if(_dreamplace_filtered_cuda_architectures)
-      set(_dreamplace_default_cuda_architectures ${_dreamplace_filtered_cuda_architectures})
-    else()
-      set(_dreamplace_default_cuda_architectures ${_dreamplace_nvcc_supported_architectures})
-    endif()
-    message(STATUS "nvcc supported CUDA architectures: ${_dreamplace_nvcc_supported_architectures}")
-  endif()
-
-  set(
-    DREAMPLACE_CUDA_ARCHITECTURES
-    "${_dreamplace_default_cuda_architectures}"
-    CACHE STRING
-    "CUDA architectures passed to nvcc for DreamPlace"
-  )
   if (NOT CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES 6.0 6.1 7.0)
+    if (${CUDA_VERSION_MAJOR} VERSION_GREATER "9")
+      list(APPEND CMAKE_CUDA_ARCHITECTURES 7.5)
+    endif(${CUDA_VERSION_MAJOR} VERSION_GREATER "9")
+    if (${CUDA_VERSION_MAJOR} VERSION_GREATER "10")
+      list(APPEND CMAKE_CUDA_ARCHITECTURES 8.0)
+      # arch 8.6 removed for compatability with 3090
+      # list(APPEND CMAKE_CUDA_ARCHITECTURES 8.6)
+    endif(${CUDA_VERSION_MAJOR} VERSION_GREATER "10")
     set(CMAKE_CUDA_ARCHITECTURES ${DREAMPLACE_CUDA_ARCHITECTURES})
-  endif()
+  endif(NOT CMAKE_CUDA_ARCHITECTURES)
   message(STATUS "DreamPlace CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 
   # for cuda_add_library

@@ -40,6 +40,10 @@ class EGRLDirectionResolver:
         
         # EGR解析结果
         self.egr_net_data = {}  # {net_name: {'wires': [...], 'pins': [...]}}
+        self._route_grid_x_um = None
+        self._route_grid_y_um = None
+        self._route_pitch_x_um = None
+        self._route_pitch_y_um = None
         
         # L方向结果: edge_idx -> direction
         self.edge_l_directions = None
@@ -74,6 +78,10 @@ class EGRLDirectionResolver:
         """
         net_data = defaultdict(lambda: {'wires': [], 'pins': []})
         current_net = None
+        self._route_grid_x_um = None
+        self._route_grid_y_um = None
+        self._route_pitch_x_um = None
+        self._route_pitch_y_um = None
         
         # 头部说明行的关键词（用于跳过）
         header_keywords = {'net_name', 'grid_x', 'grid_y', 'grid1_x', 'grid2_x', 
@@ -179,6 +187,8 @@ class EGRLDirectionResolver:
         """
         net_data = {}
         dbu = float(self.placedb.dbu)
+        route_x_coords = []
+        route_y_coords = []
 
         for net_route in route_entries or []:
             net_name = net_route.get("net_name", "") or f"net_{net_route.get('net_id', -1)}"
@@ -209,6 +219,8 @@ class EGRLDirectionResolver:
                     orientation = entry.get("orientation", "")
                     is_horizontal = orientation == "H" or grid1[1] == grid2[1]
                     is_vertical = orientation == "V" or grid1[0] == grid2[0]
+                    route_x_coords.extend((real1[0], real2[0]))
+                    route_y_coords.extend((real1[1], real2[1]))
                     data["wires"].append(
                         {
                             "grid1": grid1,
@@ -222,6 +234,8 @@ class EGRLDirectionResolver:
                         }
                     )
                 elif entry_type == "via":
+                    route_x_coords.append(real1[0])
+                    route_y_coords.append(real1[1])
                     data["vias"].append(
                         {
                             "grid": grid1,
@@ -234,8 +248,152 @@ class EGRLDirectionResolver:
             net_data[net_name] = data
 
         self.egr_net_data = net_data
+        self._route_grid_x_um = self._build_route_coord_axis(route_x_coords)
+        self._route_grid_y_um = self._build_route_coord_axis(route_y_coords)
+        self._route_pitch_x_um = self._estimate_route_pitch(self._route_grid_x_um)
+        self._route_pitch_y_um = self._estimate_route_pitch(self._route_grid_y_um)
         logger.info(f"Parsed gpugr route entries: {len(self.egr_net_data)} nets")
         return self.egr_net_data
+
+    def _build_route_coord_axis(self, coords, eps=1e-6):
+        if not coords:
+            return None
+        coords = np.sort(np.asarray(coords, dtype=np.float64))
+        uniq = [coords[0]]
+        for value in coords[1:]:
+            if abs(value - uniq[-1]) > eps:
+                uniq.append(value)
+        return np.asarray(uniq, dtype=np.float64)
+
+    def _estimate_route_pitch(self, coords, eps=1e-6):
+        if coords is None or len(coords) < 2:
+            return None
+        diffs = np.diff(coords)
+        diffs = diffs[diffs > eps]
+        if diffs.size == 0:
+            return None
+        return float(np.median(diffs))
+
+    def _snap_value_to_axis(self, value, coords):
+        if coords is None or len(coords) == 0:
+            return float(value)
+        idx = int(np.searchsorted(coords, value))
+        candidates = []
+        if idx < len(coords):
+            candidates.append(coords[idx])
+        if idx > 0:
+            candidates.append(coords[idx - 1])
+        return float(min(candidates, key=lambda candidate: abs(candidate - value))) if candidates else float(value)
+
+    def _snap_point_to_route_grid(self, net_data, point_um):
+        if net_data.get("source") != "gpugr":
+            return (float(point_um[0]), float(point_um[1]))
+        return (
+            self._snap_value_to_axis(point_um[0], self._route_grid_x_um),
+            self._snap_value_to_axis(point_um[1], self._route_grid_y_um),
+        )
+
+    def _candidate_match_tolerances(self, net_data):
+        if net_data.get("source") != "gpugr":
+            return [1.0]
+
+        pitches = [pitch for pitch in (self._route_pitch_x_um, self._route_pitch_y_um) if pitch is not None and pitch > 0]
+        if not pitches:
+            return [1.0, 2.0]
+
+        base_pitch = min(pitches)
+        tolerances = [
+            max(base_pitch * 0.10, 0.10),
+            max(base_pitch * 0.25, 0.25),
+            max(base_pitch * 0.50, 0.50),
+        ]
+        return sorted({round(float(value), 6) for value in tolerances if value > 0}) or [1.0]
+
+    def _axis_index(self, coords, value):
+        if coords is None or len(coords) == 0:
+            return None
+        idx = int(np.searchsorted(coords, value))
+        candidates = []
+        if idx < len(coords):
+            candidates.append((abs(coords[idx] - value), idx))
+        if idx > 0:
+            candidates.append((abs(coords[idx - 1] - value), idx - 1))
+        return min(candidates)[1] if candidates else None
+
+    def _add_horizontal_usage(self, usage_map, x1, x2, y):
+        if usage_map is None:
+            return
+        x_idx1 = self._axis_index(self._route_grid_x_um, x1)
+        x_idx2 = self._axis_index(self._route_grid_x_um, x2)
+        y_idx = self._axis_index(self._route_grid_y_um, y)
+        if x_idx1 is None or x_idx2 is None or y_idx is None:
+            return
+        lo, hi = sorted((x_idx1, x_idx2))
+        usage_map[lo:hi + 1, y_idx] += 1.0
+
+    def _add_vertical_usage(self, usage_map, x, y1, y2):
+        if usage_map is None:
+            return
+        x_idx = self._axis_index(self._route_grid_x_um, x)
+        y_idx1 = self._axis_index(self._route_grid_y_um, y1)
+        y_idx2 = self._axis_index(self._route_grid_y_um, y2)
+        if x_idx is None or y_idx1 is None or y_idx2 is None:
+            return
+        lo, hi = sorted((y_idx1, y_idx2))
+        usage_map[x_idx, lo:hi + 1] += 1.0
+
+    def _accumulate_path_usage(self, usage_h, usage_v, p1_um, p2_um, direction, eps=1e-6):
+        x1, y1 = p1_um
+        x2, y2 = p2_um
+        if direction == self.H_FIRST:
+            self._add_horizontal_usage(usage_h, x1, x2, y1)
+            self._add_vertical_usage(usage_v, x2, y1, y2)
+        elif direction == self.V_FIRST:
+            self._add_vertical_usage(usage_v, x1, y1, y2)
+            self._add_horizontal_usage(usage_h, x1, x2, y2)
+        elif direction == self.STRAIGHT:
+            if abs(y1 - y2) <= eps:
+                self._add_horizontal_usage(usage_h, x1, x2, y1)
+            elif abs(x1 - x2) <= eps:
+                self._add_vertical_usage(usage_v, x1, y1, y2)
+
+    def _score_candidate_path(self, usage_h, usage_v, p1_um, p2_um, direction):
+        temp_h = np.zeros_like(usage_h)
+        temp_v = np.zeros_like(usage_v)
+        self._accumulate_path_usage(temp_h, temp_v, p1_um, p2_um, direction)
+        return float((temp_h * usage_h).sum() + (temp_v * usage_v).sum())
+
+    def _fallback_unknown_with_path_maps(self, edge_records, l_directions):
+        if self._route_grid_x_um is None or self._route_grid_y_um is None:
+            return 0
+
+        usage_h = np.zeros((len(self._route_grid_x_um), len(self._route_grid_y_um)), dtype=np.float32)
+        usage_v = np.zeros_like(usage_h)
+
+        for record in edge_records:
+            direction = int(l_directions[record["edge_idx"]])
+            if direction == self.UNKNOWN or direction == self.FAKE_STRAIGHT:
+                continue
+            self._accumulate_path_usage(usage_h, usage_v, record["p1_match_um"], record["p2_match_um"], direction)
+
+        fallback_count = 0
+        for record in edge_records:
+            edge_idx = record["edge_idx"]
+            if int(l_directions[edge_idx]) != self.UNKNOWN:
+                continue
+
+            cost_h = self._score_candidate_path(usage_h, usage_v, record["p1_match_um"], record["p2_match_um"], self.H_FIRST)
+            cost_v = self._score_candidate_path(usage_h, usage_v, record["p1_match_um"], record["p2_match_um"], self.V_FIRST)
+
+            if cost_h == cost_v:
+                continue
+
+            l_directions[edge_idx] = self.H_FIRST if cost_h < cost_v else self.V_FIRST
+            fallback_count += 1
+
+        if fallback_count > 0:
+            logger.info("Known-path map fallback resolved %d UNKNOWN edges.", fallback_count)
+        return fallback_count
     
     def _coord_dp_to_micron(self, x_dp, y_dp):
         """
@@ -274,16 +432,35 @@ class EGRLDirectionResolver:
             rx1, ry1 = wire['real1']
             rx2, ry2 = wire['real2']
             
-            # 检查点是否在wire的端点
-            at_start = (abs(rx1 - x) < tolerance and abs(ry1 - y) < tolerance)
-            at_end = (abs(rx2 - x) < tolerance and abs(ry2 - y) < tolerance)
+            # 先检查端点命中，再检查是否落在线段内部。
+            at_start = (abs(rx1 - x) <= tolerance and abs(ry1 - y) <= tolerance)
+            at_end = (abs(rx2 - x) <= tolerance and abs(ry2 - y) <= tolerance)
+            min_x = min(rx1, rx2) - tolerance
+            max_x = max(rx1, rx2) + tolerance
+            min_y = min(ry1, ry2) - tolerance
+            max_y = max(ry1, ry2) + tolerance
+
+            if wire.get('is_horizontal', False):
+                on_segment = abs(ry1 - y) <= tolerance and min_x <= x <= max_x
+            elif wire.get('is_vertical', False):
+                on_segment = abs(rx1 - x) <= tolerance and min_y <= y <= max_y
+            else:
+                on_segment = min_x <= x <= max_x and min_y <= y <= max_y
             
-            if at_start or at_end:
+            if at_start or at_end or on_segment:
                 matching_wires.append({
                     **wire,
                     'at_start': at_start,
-                    'at_end': at_end
+                    'at_end': at_end,
+                    'on_segment': on_segment,
                 })
+
+        matching_wires.sort(
+            key=lambda wire: (
+                0 if (wire['at_start'] or wire['at_end']) else 1,
+                int(wire.get('order', 0)),
+            )
+        )
         
         return matching_wires
     
@@ -349,6 +526,33 @@ class EGRLDirectionResolver:
 
         if len(wires) == 1:
             return self.FAKE_STRAIGHT
+
+        match_p1_um = self._snap_point_to_route_grid(net_data, p1_um)
+        match_p2_um = self._snap_point_to_route_grid(net_data, p2_um)
+
+        for tolerance in self._candidate_match_tolerances(net_data):
+            first_dir_from_p1 = self._find_first_wire_direction_from_point(
+                net_data,
+                match_p1_um[0],
+                match_p1_um[1],
+                tolerance=tolerance,
+            )
+            if first_dir_from_p1 == 'horizontal':
+                return self.H_FIRST
+            if first_dir_from_p1 == 'vertical':
+                return self.V_FIRST
+
+            # 从 p2 反推时，末段方向与 p1 出发的首段方向互补。
+            first_dir_from_p2 = self._find_first_wire_direction_from_point(
+                net_data,
+                match_p2_um[0],
+                match_p2_um[1],
+                tolerance=tolerance,
+            )
+            if first_dir_from_p2 == 'horizontal':
+                return self.V_FIRST
+            if first_dir_from_p2 == 'vertical':
+                return self.H_FIRST
         
         point_count = defaultdict(int)
 
@@ -432,6 +636,7 @@ class EGRLDirectionResolver:
         
         # 结果数组
         l_directions = np.full(num_edges, self.UNKNOWN, dtype=np.int32)
+        edge_records = []
         
         # 统计
         stats = {self.H_FIRST: 0, self.V_FIRST: 0, self.STRAIGHT: 0, self.FAKE_STRAIGHT: 0, self.UNKNOWN: 0}
@@ -455,11 +660,30 @@ class EGRLDirectionResolver:
                 continue
             
             net_data = net_id_to_data[net_id]
+            p1_match_um = self._snap_point_to_route_grid(net_data, p1_um)
+            p2_match_um = self._snap_point_to_route_grid(net_data, p2_um)
             
             # 判断L方向
             direction = self._determine_l_direction_for_edge(net_data, p1_um, p2_um)
             l_directions[edge_idx] = direction
             stats[direction] += 1
+            edge_records.append(
+                {
+                    "edge_idx": edge_idx,
+                    "net_id": net_id,
+                    "p1_match_um": p1_match_um,
+                    "p2_match_um": p2_match_um,
+                    "source": net_data.get("source", ""),
+                }
+            )
+
+        gpugr_records = [record for record in edge_records if record["source"] == "gpugr"]
+        if gpugr_records and stats[self.UNKNOWN] > 0:
+            resolved_by_fallback = self._fallback_unknown_with_path_maps(gpugr_records, l_directions)
+            if resolved_by_fallback > 0:
+                stats = {self.H_FIRST: 0, self.V_FIRST: 0, self.STRAIGHT: 0, self.FAKE_STRAIGHT: 0, self.UNKNOWN: 0}
+                for direction in l_directions:
+                    stats[int(direction)] += 1
         
         logger.info(f"L direction resolution: h_first={stats[self.H_FIRST]}, "
                    f"v_first={stats[self.V_FIRST]}, straight={stats[self.STRAIGHT]}, "

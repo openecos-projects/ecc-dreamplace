@@ -126,8 +126,8 @@ class LShapeSegmentBuilder:
                     # FAKE_STRAIGHT也当作V_FIRST处理
                     corner_x, corner_y = x1, y2
                 else:
-                    # UNKNOWN: 默认使用H_FIRST
-                    corner_x, corner_y = x2, y1
+                    # UNKNOWN: 不参与L-shape segment构建
+                    continue
                 
                 # Segment 1: p1 -> corner
                 seg1_llx, seg1_lly, seg1_sx, seg1_sy, seg1_is_h = self._create_segment(

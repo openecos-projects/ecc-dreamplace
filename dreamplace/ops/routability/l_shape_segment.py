@@ -425,9 +425,10 @@ class LShapeSegmentOp:
     优化：预计算拓扑结构，只在坐标更新时重新计算segment位置
     """
     
-    def __init__(self, wire_width=0.0, use_vectorized=True):
+    def __init__(self, wire_width=0.0, use_vectorized=True, soft_min_weight=0.0):
         self.wire_width = wire_width
         self.use_vectorized = use_vectorized
+        self.soft_min_weight = float(soft_min_weight)
         self.builder = LShapeSegmentBuilder(wire_width)
         
         # 缓存拓扑结构（不随pos变化）
@@ -456,6 +457,32 @@ class LShapeSegmentOp:
         l_dir_sum = l_directions.sum().item()
         
         return (num_edges, from_sample, to_sample, l_dir_sum)
+
+    def _empty_segment_result(self, dtype, device):
+        empty = torch.tensor([], dtype=dtype, device=device)
+        return {
+            'segment_llx': empty,
+            'segment_lly': empty,
+            'segment_size_x': empty,
+            'segment_size_y': empty,
+            'segment_edge_idx': torch.tensor([], dtype=torch.long, device=device),
+            'segment_is_horizontal': torch.tensor([], dtype=torch.bool, device=device),
+            'segment_weight': empty,
+            'num_segments': 0
+        }
+
+    def _create_segment_batch(self, x1, y1, x2, y2, half_width):
+        min_x = torch.minimum(x1, x2)
+        max_x = torch.maximum(x1, x2)
+        min_y = torch.minimum(y1, y2)
+        max_y = torch.maximum(y1, y2)
+
+        llx = min_x - half_width
+        lly = min_y - half_width
+        size_x = (max_x - min_x) + 2 * half_width
+        size_y = (max_y - min_y) + 2 * half_width
+        is_horizontal = torch.abs(x2 - x1) >= torch.abs(y2 - y1)
+        return llx, lly, size_x, size_y, is_horizontal
     
     def _compute_topology(self, flat_from, flat_to, l_directions, num_vertices, device):
         """
@@ -495,64 +522,48 @@ class LShapeSegmentOp:
                 'valid': False,
                 'num_valid': 0
             }
-        
-        # 判断边的类型（基于l_direction，不依赖坐标）
-        # 注意：is_horizontal_line 和 is_vertical_line 需要坐标，但我们可以延迟判断
-        # 这里只预计算 l_direction 相关的类型
-        is_h_first = (valid_l_dir == H_FIRST) | (valid_l_dir == FAKE_STRAIGHT)
-        is_v_first = (valid_l_dir == V_FIRST)
-        is_straight_by_dir = (valid_l_dir == STRAIGHT)
-        
+
         return {
             'valid': True,
             'num_valid': num_valid,
+            'valid_mask': valid_mask,
             'valid_from': valid_from,
             'valid_to': valid_to,
             'valid_edge_idx': valid_edge_idx,
-            'is_h_first': is_h_first,
-            'is_v_first': is_v_first,
-            'is_straight_by_dir': is_straight_by_dir,
             'half_width': half_width,
             'num_edges': num_edges
         }
-    
-    def _compute_segments_fast(self, newx, newy, topo):
+
+    def _compute_segments_hard(self, newx, newy, topo, l_directions):
         """
-        快速计算segment坐标（使用预计算的拓扑）
+        使用 hard L-direction 计算 segment
         """
         device = newx.device
         dtype = newx.dtype
         half_width = topo['half_width']
-        
+
         if not topo['valid']:
-            empty = torch.tensor([], dtype=dtype, device=device)
-            return {
-                'segment_llx': empty,
-                'segment_lly': empty,
-                'segment_size_x': empty,
-                'segment_size_y': empty,
-                'segment_edge_idx': torch.tensor([], dtype=torch.long, device=device),
-                'segment_is_horizontal': torch.tensor([], dtype=torch.bool, device=device),
-                'num_segments': 0
-            }
-        
+            return self._empty_segment_result(dtype, device)
+
         # 确保索引在同一设备上
         valid_from = topo['valid_from']
         valid_to = topo['valid_to']
         valid_edge_idx = topo['valid_edge_idx']
-        is_h_first = topo['is_h_first']
-        is_v_first = topo['is_v_first']
-        is_straight_by_dir = topo['is_straight_by_dir']
-        
         # 关键：将索引移到与newx相同的设备
         if valid_from.device != device:
             valid_from = valid_from.to(device)
             valid_to = valid_to.to(device)
             valid_edge_idx = valid_edge_idx.to(device)
-            is_h_first = is_h_first.to(device)
-            is_v_first = is_v_first.to(device)
-            is_straight_by_dir = is_straight_by_dir.to(device)
-        
+        valid_mask = topo['valid_mask']
+        if valid_mask.device != device:
+            valid_mask = valid_mask.to(device)
+        if l_directions.device != device:
+            l_directions = l_directions.to(device)
+        valid_l_dir = l_directions[valid_mask]
+        is_h_first = (valid_l_dir == H_FIRST) | (valid_l_dir == FAKE_STRAIGHT)
+        is_v_first = (valid_l_dir == V_FIRST)
+        is_straight_by_dir = (valid_l_dir == STRAIGHT)
+
         # 获取端点坐标
         x1 = newx[valid_from]
         y1 = newy[valid_from]
@@ -614,6 +625,7 @@ class LShapeSegmentOp:
         all_size_y = [seg1_size_y[seg1_valid]]
         all_edge_idx = [valid_edge_idx[seg1_valid]]
         all_is_h = [seg1_is_h[seg1_valid]]
+        all_weight = [torch.ones_like(seg1_size_x[seg1_valid])]
         
         if seg2_valid.any():
             all_llx.append(seg2_llx[seg2_valid])
@@ -622,6 +634,7 @@ class LShapeSegmentOp:
             all_size_y.append(seg2_size_y[seg2_valid])
             all_edge_idx.append(valid_edge_idx[seg2_valid])
             all_is_h.append(seg2_is_h[seg2_valid])
+            all_weight.append(torch.ones_like(seg2_size_x[seg2_valid]))
         
         segment_llx = torch.cat(all_llx)
         segment_lly = torch.cat(all_lly)
@@ -629,6 +642,7 @@ class LShapeSegmentOp:
         segment_size_y = torch.cat(all_size_y)
         segment_edge_idx = torch.cat(all_edge_idx)
         segment_is_horizontal = torch.cat(all_is_h)
+        segment_weight = torch.cat(all_weight)
         
         # 过滤零尺寸segment
         min_size = max(half_width * 2, 1e-6)
@@ -640,6 +654,7 @@ class LShapeSegmentOp:
         segment_size_y = segment_size_y[valid_seg]
         segment_edge_idx = segment_edge_idx[valid_seg]
         segment_is_horizontal = segment_is_horizontal[valid_seg]
+        segment_weight = segment_weight[valid_seg]
         
         num_segments = segment_llx.numel()
         
@@ -650,10 +665,147 @@ class LShapeSegmentOp:
             'segment_size_y': segment_size_y,
             'segment_edge_idx': segment_edge_idx,
             'segment_is_horizontal': segment_is_horizontal,
+            'segment_weight': segment_weight,
             'num_segments': num_segments
         }
-    
-    def __call__(self, newx, newy, flat_from, flat_to, l_directions):
+
+    def _compute_segments_soft(self, newx, newy, topo, soft_l_weights):
+        """
+        使用 soft H/V 权重生成候选 segment
+        """
+        device = newx.device
+        dtype = newx.dtype
+        half_width = topo['half_width']
+
+        if not topo['valid']:
+            return self._empty_segment_result(dtype, device)
+
+        valid_from = topo['valid_from']
+        valid_to = topo['valid_to']
+        valid_edge_idx = topo['valid_edge_idx']
+        valid_mask = topo['valid_mask']
+        if valid_from.device != device:
+            valid_from = valid_from.to(device)
+            valid_to = valid_to.to(device)
+            valid_edge_idx = valid_edge_idx.to(device)
+        if valid_mask.device != device:
+            valid_mask = valid_mask.to(device)
+        if soft_l_weights.device != device:
+            soft_l_weights = soft_l_weights.to(device)
+
+        valid_soft = soft_l_weights[valid_mask].to(dtype=dtype)
+        if valid_soft.dim() != 2 or valid_soft.size(1) != 2:
+            raise ValueError("soft_l_weights must have shape [num_edges, 2]")
+
+        valid_soft = torch.clamp(valid_soft, min=0.0)
+        weight_sum = valid_soft.sum(dim=1, keepdim=True)
+        fallback = torch.full_like(valid_soft, 0.5)
+        valid_soft = torch.where(weight_sum > 1e-12, valid_soft / weight_sum.clamp_min(1e-12), fallback)
+
+        x1 = newx[valid_from]
+        y1 = newy[valid_from]
+        x2 = newx[valid_to]
+        y2 = newy[valid_to]
+
+        is_horizontal_line = torch.abs(y1 - y2) < 1e-6
+        is_vertical_line = torch.abs(x1 - x2) < 1e-6
+        is_straight = is_horizontal_line | is_vertical_line
+        is_diagonal = ~is_straight
+
+        all_llx = []
+        all_lly = []
+        all_size_x = []
+        all_size_y = []
+        all_edge_idx = []
+        all_is_h = []
+        all_weight = []
+
+        def append_group(llx, lly, size_x, size_y, edge_idx, is_h, weight, valid):
+            if valid.any():
+                all_llx.append(llx[valid])
+                all_lly.append(lly[valid])
+                all_size_x.append(size_x[valid])
+                all_size_y.append(size_y[valid])
+                all_edge_idx.append(edge_idx[valid])
+                all_is_h.append(is_h[valid])
+                all_weight.append(weight[valid])
+
+        straight_llx, straight_lly, straight_size_x, straight_size_y, straight_is_h = self._create_segment_batch(
+            x1, y1, x2, y2, half_width
+        )
+        append_group(
+            straight_llx,
+            straight_lly,
+            straight_size_x,
+            straight_size_y,
+            valid_edge_idx,
+            straight_is_h,
+            torch.ones_like(straight_size_x),
+            is_straight,
+        )
+
+        h_weight = valid_soft[:, 0]
+        v_weight = valid_soft[:, 1]
+        min_weight = max(self.soft_min_weight, 0.0)
+
+        h_corner_x = x2
+        h_corner_y = y1
+        h_seg1_llx, h_seg1_lly, h_seg1_size_x, h_seg1_size_y, h_seg1_is_h = self._create_segment_batch(
+            x1, y1, h_corner_x, h_corner_y, half_width
+        )
+        h_seg2_llx, h_seg2_lly, h_seg2_size_x, h_seg2_size_y, h_seg2_is_h = self._create_segment_batch(
+            h_corner_x, h_corner_y, x2, y2, half_width
+        )
+        h_valid = is_diagonal & (h_weight > min_weight)
+        append_group(h_seg1_llx, h_seg1_lly, h_seg1_size_x, h_seg1_size_y, valid_edge_idx, h_seg1_is_h, h_weight, h_valid)
+        append_group(h_seg2_llx, h_seg2_lly, h_seg2_size_x, h_seg2_size_y, valid_edge_idx, h_seg2_is_h, h_weight, h_valid)
+
+        v_corner_x = x1
+        v_corner_y = y2
+        v_seg1_llx, v_seg1_lly, v_seg1_size_x, v_seg1_size_y, v_seg1_is_h = self._create_segment_batch(
+            x1, y1, v_corner_x, v_corner_y, half_width
+        )
+        v_seg2_llx, v_seg2_lly, v_seg2_size_x, v_seg2_size_y, v_seg2_is_h = self._create_segment_batch(
+            v_corner_x, v_corner_y, x2, y2, half_width
+        )
+        v_valid = is_diagonal & (v_weight > min_weight)
+        append_group(v_seg1_llx, v_seg1_lly, v_seg1_size_x, v_seg1_size_y, valid_edge_idx, v_seg1_is_h, v_weight, v_valid)
+        append_group(v_seg2_llx, v_seg2_lly, v_seg2_size_x, v_seg2_size_y, valid_edge_idx, v_seg2_is_h, v_weight, v_valid)
+
+        if not all_llx:
+            return self._empty_segment_result(dtype, device)
+
+        segment_llx = torch.cat(all_llx)
+        segment_lly = torch.cat(all_lly)
+        segment_size_x = torch.cat(all_size_x)
+        segment_size_y = torch.cat(all_size_y)
+        segment_edge_idx = torch.cat(all_edge_idx)
+        segment_is_horizontal = torch.cat(all_is_h)
+        segment_weight = torch.cat(all_weight)
+
+        min_size = max(half_width * 2, 1e-6)
+        valid_seg = ((segment_size_x > min_size) | (segment_size_y > min_size)) & (segment_weight > min_weight)
+
+        segment_llx = segment_llx[valid_seg]
+        segment_lly = segment_lly[valid_seg]
+        segment_size_x = segment_size_x[valid_seg]
+        segment_size_y = segment_size_y[valid_seg]
+        segment_edge_idx = segment_edge_idx[valid_seg]
+        segment_is_horizontal = segment_is_horizontal[valid_seg]
+        segment_weight = segment_weight[valid_seg]
+
+        return {
+            'segment_llx': segment_llx,
+            'segment_lly': segment_lly,
+            'segment_size_x': segment_size_x,
+            'segment_size_y': segment_size_y,
+            'segment_edge_idx': segment_edge_idx,
+            'segment_is_horizontal': segment_is_horizontal,
+            'segment_weight': segment_weight,
+            'num_segments': segment_llx.numel()
+        }
+
+    def __call__(self, newx, newy, flat_from, flat_to, l_directions, soft_l_weights=None):
         """
         构建L形segments
         
@@ -682,14 +834,21 @@ class LShapeSegmentOp:
             )
             self._cached_input_hash = current_hash
             logger.info(f"Computed topology: {self._cached_topology['num_valid']} valid edges (hash={current_hash[0]})")
-        
+
         # 快速计算segment坐标
-        result = self._compute_segments_fast(newx, newy, self._cached_topology)
-        
+        if soft_l_weights is None:
+            result = self._compute_segments_hard(newx, newy, self._cached_topology, l_directions)
+            mode_name = "hard"
+        else:
+            result = self._compute_segments_soft(newx, newy, self._cached_topology, soft_l_weights)
+            mode_name = "soft"
+
         # 只在第一次打印详细日志
         if need_recompute_topo and result['num_segments'] > 0:
-            logger.info(f"Built {result['num_segments']} segments from {flat_from.numel()} edges (vectorized)")
-        
+            logger.info(
+                f"Built {result['num_segments']} segments from {flat_from.numel()} edges (vectorized, mode={mode_name})"
+            )
+
         # 添加pos tensor
         if result['num_segments'] > 0:
             result['segment_pos'] = build_segment_pos_tensor(
@@ -697,5 +856,5 @@ class LShapeSegmentOp:
             )
         else:
             result['segment_pos'] = torch.tensor([], dtype=newx.dtype, device=newx.device)
-        
+
         return result

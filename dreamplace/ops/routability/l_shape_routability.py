@@ -73,12 +73,26 @@ class LShapeRoutabilityOp(nn.Module):
         if wire_width is None:
             wire_width = getattr(params, 'route_wire_width', 0.0)
         self.wire_width = wire_width
+        self.soft_l_assignment = bool(getattr(params, "soft_l_assignment", False))
+        self.soft_l_use_resolver_prior = bool(getattr(params, "soft_l_use_resolver_prior", True))
+        self.soft_l_temperature = max(float(getattr(params, "soft_l_temperature", 1.0)), 1e-6)
+        self.soft_l_prior_bias = float(getattr(params, "soft_l_prior_bias", 1.0))
+        self.soft_l_min_weight = max(float(getattr(params, "soft_l_min_weight", 0.05)), 0.0)
         
         # L形segment构建器
         self.segment_builder = LShapeSegmentOp(
             wire_width=wire_width,
-            use_vectorized=True
+            use_vectorized=True,
+            soft_min_weight=self.soft_l_min_weight,
         )
+        if self.soft_l_assignment:
+            logger.info(
+                "Soft L-assignment enabled: tau=%.3f prior=%s bias=%.3f min_weight=%.3f",
+                self.soft_l_temperature,
+                self.soft_l_use_resolver_prior,
+                self.soft_l_prior_bias,
+                self.soft_l_min_weight,
+            )
         
         # 根据模式选择密度计算器
         if density_mode == "electric":
@@ -178,6 +192,149 @@ class LShapeRoutabilityOp(nn.Module):
                     if s < e and s < num_vertices:
                         vertex_to_net[s:min(e, num_vertices)] = net_id
         return vertex_to_net
+
+    def _get_soft_l_cost_map(self, device, dtype):
+        """
+        Select a detached cost map for soft L path scoring.
+
+        Priority:
+        1. previous cached density map
+        2. external target_demand map
+        3. zero map fallback
+        """
+        candidates = [
+            self.cached_density_map,
+            getattr(self.density_op, "target_demand", None),
+        ]
+        for candidate in candidates:
+            if isinstance(candidate, torch.Tensor):
+                cost_map = candidate.detach()
+                if cost_map.device != device:
+                    cost_map = cost_map.to(device)
+                cost_map = cost_map.to(dtype=dtype)
+                if cost_map.shape == (self.num_bins_x, self.num_bins_y):
+                    return torch.clamp(cost_map, min=0.0)
+        return torch.zeros((self.num_bins_x, self.num_bins_y), dtype=dtype, device=device)
+
+    def _coord_to_bin_index(self, coord, low, bin_size, num_bins):
+        idx = torch.floor((coord - low) / bin_size).to(torch.long)
+        return idx.clamp_(0, num_bins - 1)
+
+    def _horizontal_cost(self, prefix_x, y_idx, x_idx1, x_idx2):
+        x_lo = torch.minimum(x_idx1, x_idx2)
+        x_hi = torch.maximum(x_idx1, x_idx2)
+        hi = prefix_x[x_hi, y_idx]
+        lo = torch.where(x_lo > 0, prefix_x[x_lo - 1, y_idx], torch.zeros_like(hi))
+        return hi - lo
+
+    def _vertical_cost(self, prefix_y, x_idx, y_idx1, y_idx2):
+        y_lo = torch.minimum(y_idx1, y_idx2)
+        y_hi = torch.maximum(y_idx1, y_idx2)
+        hi = prefix_y[x_idx, y_hi]
+        lo = torch.where(y_lo > 0, prefix_y[x_idx, y_lo - 1], torch.zeros_like(hi))
+        return hi - lo
+
+    def _compute_soft_l_weights(self, newx, newy, flat_pin_from, flat_pin_to, l_directions):
+        """
+        Build soft H/V weights for each edge.
+
+        All diagonal edges are scored by cost_h / cost_v.
+        Resolver labels only provide optional soft bias.
+        """
+        device = newx.device
+        dtype = newx.dtype
+        num_edges = flat_pin_from.numel()
+        weights = torch.zeros((num_edges, 2), dtype=dtype, device=device)
+        if num_edges == 0:
+            return weights
+
+        if flat_pin_from.device != device:
+            flat_pin_from = flat_pin_from.to(device)
+        if flat_pin_to.device != device:
+            flat_pin_to = flat_pin_to.to(device)
+        if l_directions.device != device:
+            l_directions = l_directions.to(device)
+
+        valid_mask = (flat_pin_from >= 0) & (flat_pin_to >= 0) & (flat_pin_from < len(newx)) & (flat_pin_to < len(newx))
+        if not valid_mask.any():
+            return weights
+
+        valid_from = flat_pin_from[valid_mask]
+        valid_to = flat_pin_to[valid_mask]
+        valid_l_dir = l_directions[valid_mask]
+
+        x1 = newx[valid_from]
+        y1 = newy[valid_from]
+        x2 = newx[valid_to]
+        y2 = newy[valid_to]
+
+        is_horizontal_line = torch.abs(y1 - y2) < 1e-6
+        is_vertical_line = torch.abs(x1 - x2) < 1e-6
+        is_straight = is_horizontal_line | is_vertical_line
+        is_diagonal = ~is_straight
+
+        valid_weights = torch.zeros((valid_from.numel(), 2), dtype=dtype, device=device)
+        valid_weights[:, 0] = 1.0  # straight edge fallback; soft mode only reads diagonal weights
+
+        if is_diagonal.any():
+            cost_map = self._get_soft_l_cost_map(device, dtype)
+            prefix_x = cost_map.cumsum(dim=0)
+            prefix_y = cost_map.cumsum(dim=1)
+
+            dx1 = x1[is_diagonal]
+            dy1 = y1[is_diagonal]
+            dx2 = x2[is_diagonal]
+            dy2 = y2[is_diagonal]
+
+            x1_idx = self._coord_to_bin_index(dx1, self.xl, self.bin_size_x, self.num_bins_x)
+            y1_idx = self._coord_to_bin_index(dy1, self.yl, self.bin_size_y, self.num_bins_y)
+            x2_idx = self._coord_to_bin_index(dx2, self.xl, self.bin_size_x, self.num_bins_x)
+            y2_idx = self._coord_to_bin_index(dy2, self.yl, self.bin_size_y, self.num_bins_y)
+
+            cost_h = self._horizontal_cost(prefix_x, y1_idx, x1_idx, x2_idx) + self._vertical_cost(prefix_y, x2_idx, y1_idx, y2_idx)
+            cost_v = self._vertical_cost(prefix_y, x1_idx, y1_idx, y2_idx) + self._horizontal_cost(prefix_x, y2_idx, x1_idx, x2_idx)
+
+            if self.soft_l_use_resolver_prior:
+                diag_l_dir = valid_l_dir[is_diagonal]
+                cost_h = cost_h - self.soft_l_prior_bias * (diag_l_dir == H_FIRST).to(dtype)
+                cost_v = cost_v - self.soft_l_prior_bias * (diag_l_dir == V_FIRST).to(dtype)
+
+            logits = torch.stack((-cost_h / self.soft_l_temperature, -cost_v / self.soft_l_temperature), dim=1)
+            diag_weights = torch.softmax(logits, dim=1)
+            valid_weights[is_diagonal] = diag_weights
+
+        weights[valid_mask] = valid_weights
+        return weights
+
+    def _apply_segment_weights_to_sizes(self, segment_result):
+        segment_size_x = segment_result['segment_size_x']
+        segment_size_y = segment_result['segment_size_y']
+        segment_weight = segment_result.get('segment_weight', None)
+        segment_is_horizontal = segment_result.get('segment_is_horizontal', None)
+
+        if segment_weight is None or segment_is_horizontal is None:
+            return segment_size_x, segment_size_y
+
+        if segment_weight.device != segment_size_x.device:
+            segment_weight = segment_weight.to(segment_size_x.device)
+        if segment_is_horizontal.device != segment_size_x.device:
+            segment_is_horizontal = segment_is_horizontal.to(segment_size_x.device)
+
+        scaled_size_x = segment_size_x.clone()
+        scaled_size_y = segment_size_y.clone()
+        min_size = torch.tensor(1e-6, dtype=segment_size_x.dtype, device=segment_size_x.device)
+
+        horizontal_mask = segment_is_horizontal
+        vertical_mask = ~segment_is_horizontal
+
+        scaled_size_y[horizontal_mask] = torch.clamp(
+            scaled_size_y[horizontal_mask] * segment_weight[horizontal_mask], min=min_size
+        )
+        scaled_size_x[vertical_mask] = torch.clamp(
+            scaled_size_x[vertical_mask] * segment_weight[vertical_mask], min=min_size
+        )
+
+        return scaled_size_x, scaled_size_y
 
     def _debug_abnormal_segments(self, segment_result, steiner_topo_op, flat_pin_from, flat_pin_to, newx, newy):
         """Log segments that look abnormally 'fat' to locate bad edges/nets."""
@@ -326,9 +483,15 @@ class LShapeRoutabilityOp(nn.Module):
             )
             logger.debug("No L-direction info, using default H_FIRST")
         
+        soft_l_weights = None
+        if self.soft_l_assignment:
+            soft_l_weights = self._compute_soft_l_weights(
+                newx, newy, flat_pin_from, flat_pin_to, l_directions
+            )
+
         # 6. 构建L形segments（在CPU上）
         segment_result = self.segment_builder(
-            newx, newy, flat_pin_from, flat_pin_to, l_directions
+            newx, newy, flat_pin_from, flat_pin_to, l_directions, soft_l_weights=soft_l_weights
         )
 
         num_segments = segment_result['num_segments']
@@ -348,11 +511,12 @@ class LShapeRoutabilityOp(nn.Module):
         self.cached_segments['flat_from'] = flat_pin_from.detach()
         self.cached_segments['flat_to'] = flat_pin_to.detach()
         self.cached_segments['l_directions'] = l_directions.detach()
+        if soft_l_weights is not None:
+            self.cached_segments['soft_l_weights'] = soft_l_weights.detach()
         
         # 7. 计算密度代价（在CPU上）
         segment_pos = segment_result['segment_pos']
-        segment_size_x = segment_result['segment_size_x']
-        segment_size_y = segment_result['segment_size_y']
+        segment_size_x, segment_size_y = self._apply_segment_weights_to_sizes(segment_result)
         
         # 根据模式选择计算方式
         if self.density_mode == "electric":
@@ -449,8 +613,14 @@ class LShapeRoutabilityOp(nn.Module):
                 dtype=torch.int32, device=device
             )
         
+        soft_l_weights = None
+        if self.soft_l_assignment:
+            soft_l_weights = self._compute_soft_l_weights(
+                newx, newy, flat_pin_from, flat_pin_to, l_directions
+            )
+
         segment_result = self.segment_builder(
-            newx, newy, flat_pin_from, flat_pin_to, l_directions
+            newx, newy, flat_pin_from, flat_pin_to, l_directions, soft_l_weights=soft_l_weights
         )
         
         if segment_result['num_segments'] == 0:
@@ -464,14 +634,14 @@ class LShapeRoutabilityOp(nn.Module):
             # 使用overflow_op获取density_map
             density_map = self.overflow_op.compute_density_map(
                 segment_result['segment_pos'],
-                segment_result['segment_size_x'],
-                segment_result['segment_size_y']
+                *self._apply_segment_weights_to_sizes(segment_result)
             )
         else:
+            segment_size_x, segment_size_y = self._apply_segment_weights_to_sizes(segment_result)
             density_map = self.density_op(
                 segment_result['segment_pos'],
-                segment_result['segment_size_x'],
-                segment_result['segment_size_y'],
+                segment_size_x,
+                segment_size_y,
                 mode="density"
             )
         
@@ -482,6 +652,8 @@ class LShapeRoutabilityOp(nn.Module):
         self.cached_segments['flat_from'] = flat_pin_from.detach()
         self.cached_segments['flat_to'] = flat_pin_to.detach()
         self.cached_segments['l_directions'] = l_directions.detach()
+        if soft_l_weights is not None:
+            self.cached_segments['soft_l_weights'] = soft_l_weights.detach()
         self.cached_density_map = density_map
         return density_map
     
@@ -497,8 +669,9 @@ class LShapeRoutabilityOp(nn.Module):
         
         seg_llx = self.cached_segments['segment_llx'].detach().cpu().numpy()
         seg_lly = self.cached_segments['segment_lly'].detach().cpu().numpy()
-        seg_size_x = self.cached_segments['segment_size_x'].detach().cpu().numpy()
-        seg_size_y = self.cached_segments['segment_size_y'].detach().cpu().numpy()
+        seg_size_x, seg_size_y = self._apply_segment_weights_to_sizes(self.cached_segments)
+        seg_size_x = seg_size_x.detach().cpu().numpy()
+        seg_size_y = seg_size_y.detach().cpu().numpy()
         
         segments = []
         for i in range(len(seg_llx)):

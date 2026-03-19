@@ -8,13 +8,8 @@
 # find_package(Python COMPONENTS Interpreter Development)
 add_subdirectory(thirdparty/pybind11)
 
-execute_process(COMMAND ${PYTHON_EXECUTABLE} -c 
-  "import torch; print(torch.__path__[0]); print(int(torch.cuda.is_available())); print(torch.__version__);" 
-  OUTPUT_VARIABLE TORCH_OUTPUT OUTPUT_STRIP_TRAILING_WHITESPACE)
-string(REPLACE "\n" ";" TORCH_OUTPUT_LIST ${TORCH_OUTPUT})
-list(GET TORCH_OUTPUT_LIST 0 TORCH_INSTALL_PREFIX)
-list(GET TORCH_OUTPUT_LIST 1 TORCH_ENABLE_CUDA)
-list(GET TORCH_OUTPUT_LIST 2 TORCH_VERSION)
+# TORCH_INSTALL_PREFIX, TORCH_ENABLE_CUDA, TORCH_VERSION must be set
+# externally via CMake cache entries (e.g. -DTORCH_VERSION=2.10.0).
 string(REPLACE "." ";" TORCH_VERSION_LIST ${TORCH_VERSION})
 list(GET TORCH_VERSION_LIST 0 TORCH_VERSION_MAJOR)
 list(GET TORCH_VERSION_LIST 1 TORCH_VERSION_MINOR)

@@ -7,6 +7,7 @@ obj
 results
 log
 dreamplace/version.py
+dreamplace/configure.py
 dist
 dreamplace.egg-info
 install

@@ -327,6 +327,25 @@ def _resolve_l_directions_for_l_shape(
     return steiner_topo_op.resolve_l_directions_from_egr(egr_guide_path)
 
 
+def _apply_l_directions_to_steiner_relate(steiner_topo_op, pin_pos):
+    resolver = steiner_topo_op.l_direction_resolver
+    if resolver is None or steiner_topo_op.edge_l_directions is None:
+        logging.warning("Skip applying L directions to Steiner relate because resolver or edge_l_directions is missing.")
+        return 0
+
+    if pin_pos.is_cuda:
+        pin_pos = pin_pos.cpu()
+
+    update_count = resolver.update_steiner_relate(steiner_topo_op) or 0
+    with torch.no_grad():
+        steiner_topo_op.refresh_vertex_cache(pin_pos)
+    logging.info(
+        "Applied L-direction updates to Steiner relates and refreshed cached Steiner vertices (updated_relates=%d).",
+        update_count,
+    )
+    return update_count
+
+
 class NonLinearPlace(BasicPlace.BasicPlace):
     """
     @brief Nonlinear placement engine.
@@ -1102,6 +1121,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     else None
                                 ),
                             )
+                            _apply_l_directions_to_steiner_relate(steiner_topo_op, pin_pos)
 
                             # # ========== Plot edges with L-shape by l_direction ==========
                             # import matplotlib.pyplot as plt
@@ -1332,6 +1352,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     else None
                                 ),
                             )
+                            _apply_l_directions_to_steiner_relate(steiner_topo_op, pin_pos)
                             density_map = None
 
                             # 基于L-shape overflow变化更新target_ratio（外环慢速更新）

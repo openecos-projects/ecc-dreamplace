@@ -641,6 +641,7 @@ class EGRLDirectionResolver:
             steiner_topo_op.pin_relate_y.device)
         
         logger.info(f"update_steiner_relate: updated {update_count} Steiner point relates")
+        return update_count
     
     def get_l_direction(self, edge_idx):
         """

@@ -151,22 +151,15 @@ docker run -it -v /dreamplace limbo018/dreamplace:cuda bash
 [CMake](https://cmake.org) is adopted as the makefile system.
 To build, go to the root directory.
 
-You must provide the PyTorch installation path and version via CMake cache entries,
-since the build system does not auto-detect them at configure time.
+The build system auto-detects PyTorch installation path, version, and CUDA support
+via `import torch`. You can also override them explicitly with CMake cache entries
+(e.g. in sandboxed / Bazel builds where `import torch` may not work).
 ```
-# Detect torch info from your Python environment
-TORCH_PREFIX=$(python -c "import torch; print(torch.__path__[0])")
-TORCH_VER=$(python -c "import torch; print(torch.__version__)")
-TORCH_CUDA=$(python -c "import torch; print(int(torch.cuda.is_available()))")
-
 mkdir build
 cd build
 cmake .. \
   -DCMAKE_INSTALL_PREFIX=your_install_path \
-  -DPYTHON_EXECUTABLE=$(which python) \
-  -DTORCH_INSTALL_PREFIX=$TORCH_PREFIX \
-  -DTORCH_VERSION=$TORCH_VER \
-  -DTORCH_ENABLE_CUDA=$TORCH_CUDA
+  -DPYTHON_EXECUTABLE=$(which python)
 make
 make install
 ```
@@ -182,11 +175,11 @@ Here are the available options for CMake.
 - CMAKE_INSTALL_PREFIX: installation directory
     - Example ```cmake -DCMAKE_INSTALL_PREFIX=path/to/your/directory```
 - TORCH_INSTALL_PREFIX: path to the torch package directory (e.g. the output of `python -c "import torch; print(torch.__path__[0])"`)
-    - **Required**. No default — must be provided explicitly.
+    - Optional. Auto-detected from `import torch` if not provided.
 - TORCH_VERSION: torch version string (e.g. `2.10.0`)
-    - **Required**. No default — must be provided explicitly.
+    - Optional. Auto-detected from `import torch` if not provided.
 - TORCH_ENABLE_CUDA: 0|1 whether to enable CUDA support (e.g. the output of `python -c "import torch; print(int(torch.cuda.is_available()))"`)
-    - **Required**. No default — must be provided explicitly.
+    - Optional. Auto-detected from `import torch` if not provided.
 - CMAKE_CUDA_FLAGS: custom string for NVCC (default -gencode=arch=compute_60,code=sm_60)
     - Example ```cmake -DCMAKE_CUDA_FLAGS=-gencode=arch=compute_60,code=sm_60```
 - CMAKE_CXX_ABI: 0|1 for the value of _GLIBCXX_USE_CXX11_ABI for C++ compiler, default is 0.

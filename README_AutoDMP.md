@@ -27,7 +27,7 @@ AutoDMP adds simultaneous macro and standard cell placement enhancements and aut
 # How to Build
 
 You can build in two ways:
-- Build without Docker by following the instructions of the DREAMPlace build at [README_DREAMPlace.md](README_DREAMPlace.md). Note that `TORCH_INSTALL_PREFIX`, `TORCH_VERSION`, and `TORCH_ENABLE_CUDA` must be passed as CMake cache entries (see the DREAMPlace README for details).
+- Build without Docker by following the instructions of the DREAMPlace build at [README_DREAMPlace.md](README_DREAMPlace.md). The build system auto-detects PyTorch configuration via `import torch`; you can also pass `TORCH_INSTALL_PREFIX`, `TORCH_VERSION`, and `TORCH_ENABLE_CUDA` as CMake cache entries to override (e.g. for Bazel / sandboxed builds).
 - Use the provided Dockerfile to build an image with the required library dependencies.
 
 # How to Run Multi-Objective Bayesian Optimization

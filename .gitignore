@@ -8,6 +8,7 @@ results
 log
 dreamplace/version.py
 dreamplace/configure.py
+dreamplace/.install_manifest.txt
 dist
 dreamplace.egg-info
 install

@@ -790,3 +790,169 @@ def create_supply_and_demand_maps_from_egr(egr_dir, placedb, params, num_bins_x,
         return supply_resampled, demand_resampled, wire_width
     
     return supply_resampled, demand_resampled
+
+
+def _normalize_lef_input(lef_input):
+    if isinstance(lef_input, (list, tuple)):
+        return [str(item) for item in lef_input if item]
+    if lef_input:
+        return [str(lef_input)]
+    return []
+
+
+def _collect_routing_layers_from_lefs(lef_paths):
+    layer_by_name = {}
+    order = []
+    for lef_path in lef_paths:
+        if not lef_path or not os.path.exists(lef_path):
+            continue
+        try:
+            layers, _ = _parse_lef_routing_layers(lef_path)
+        except Exception as exc:
+            logger.warning("Failed to parse LEF routing layers from %s: %s", lef_path, exc)
+            continue
+        for layer in layers:
+            name = layer.get("name")
+            if not name:
+                continue
+            if name not in layer_by_name:
+                order.append(name)
+            layer_by_name[name] = layer
+    return [layer_by_name[name] for name in order]
+
+
+def create_directional_supply_and_demand_maps_from_egr(
+    egr_dir,
+    placedb,
+    params,
+    num_bins_x,
+    num_bins_y,
+    device=None,
+    dtype=None,
+    normalize_supply=False,
+    normalize_demand=False,
+    return_wire_width=False,
+):
+    """
+    Create directional H/V supply and demand maps from EGR per-layer CSVs.
+
+    Returns:
+        supply_h, supply_v, demand_h, demand_v [, wire_width]
+    """
+    gcell_info_path = os.path.join(egr_dir, "gcell.info")
+    gcell_info = EGRGCellInfo(gcell_info_path)
+    resampler = EGRCapacityResampler(
+        gcell_info,
+        target_xl=placedb.xl,
+        target_yl=placedb.yl,
+        target_xh=placedb.xh,
+        target_yh=placedb.yh,
+        num_bins_x=num_bins_x,
+        num_bins_y=num_bins_y,
+        scale_factor=params.scale_factor,
+        shift_factor=params.shift_factor,
+    )
+
+    lef_paths = _normalize_lef_input(getattr(params, "lef_input", None))
+    routing_layers = _collect_routing_layers_from_lefs(lef_paths)
+
+    shape = (gcell_info.num_gcells_x, gcell_info.num_gcells_y)
+    supply_h_raw = np.zeros(shape, dtype=np.float32)
+    supply_v_raw = np.zeros(shape, dtype=np.float32)
+    demand_h_raw = np.zeros(shape, dtype=np.float32)
+    demand_v_raw = np.zeros(shape, dtype=np.float32)
+    count_h = 0
+    count_v = 0
+
+    for layer in routing_layers:
+        name = layer.get("name")
+        direction = str(layer.get("direction", "")).upper()
+        if direction not in ("HORIZONTAL", "VERTICAL"):
+            continue
+
+        supply_csv_path = os.path.join(egr_dir, f"supply_map_{name}.csv")
+        demand_csv_path = os.path.join(egr_dir, f"net_map_{name}.csv")
+        if not (os.path.exists(supply_csv_path) and os.path.exists(demand_csv_path)):
+            continue
+
+        supply_layer = load_egr_csv_map(supply_csv_path)
+        demand_layer = load_egr_csv_map(demand_csv_path)
+        if direction == "HORIZONTAL":
+            supply_h_raw += supply_layer
+            demand_h_raw += demand_layer
+            count_h += 1
+        else:
+            supply_v_raw += supply_layer
+            demand_v_raw += demand_layer
+            count_v += 1
+
+    if count_h == 0 or count_v == 0:
+        logger.warning(
+            "Directional EGR maps incomplete (loaded H=%d, V=%d layers). Falling back to planar maps for missing directions.",
+            count_h,
+            count_v,
+        )
+        planar_supply, planar_demand, wire_width = create_supply_and_demand_maps_from_egr(
+            egr_dir=egr_dir,
+            placedb=placedb,
+            params=params,
+            num_bins_x=num_bins_x,
+            num_bins_y=num_bins_y,
+            device=device,
+            dtype=dtype,
+            layer="planar",
+            normalize_supply=normalize_supply,
+            normalize_demand=normalize_demand,
+            return_wire_width=True,
+        )
+        if count_h == 0:
+            supply_h = planar_supply
+            demand_h = planar_demand
+        else:
+            supply_h = resampler.resample_map(supply_h_raw, device=device, dtype=dtype)
+            demand_h = resampler.resample_map(demand_h_raw, device=device, dtype=dtype)
+        if count_v == 0:
+            supply_v = planar_supply
+            demand_v = planar_demand
+        else:
+            supply_v = resampler.resample_map(supply_v_raw, device=device, dtype=dtype)
+            demand_v = resampler.resample_map(demand_v_raw, device=device, dtype=dtype)
+    else:
+        supply_h = resampler.resample_map(supply_h_raw, device=device, dtype=dtype)
+        supply_v = resampler.resample_map(supply_v_raw, device=device, dtype=dtype)
+        demand_h = resampler.resample_map(demand_h_raw, device=device, dtype=dtype)
+        demand_v = resampler.resample_map(demand_v_raw, device=device, dtype=dtype)
+        wire_width = gcell_info.get_min_gcell_dimension(
+            scale_factor=params.scale_factor,
+            shift_factor=params.shift_factor,
+        )
+
+    if normalize_supply:
+        if supply_h.max() > 0:
+            supply_h = supply_h / supply_h.max()
+        if supply_v.max() > 0:
+            supply_v = supply_v / supply_v.max()
+    if normalize_demand:
+        if demand_h.max() > 0:
+            demand_h = demand_h / demand_h.max()
+        if demand_v.max() > 0:
+            demand_v = demand_v / demand_v.max()
+
+    logger.info(
+        "Directional EGR maps: H layers=%d V layers=%d | supply_h[%.3f, %.3f] supply_v[%.3f, %.3f] "
+        "demand_h[%.3f, %.3f] demand_v[%.3f, %.3f]",
+        count_h,
+        count_v,
+        supply_h.min().item(),
+        supply_h.max().item(),
+        supply_v.min().item(),
+        supply_v.max().item(),
+        demand_h.min().item(),
+        demand_h.max().item(),
+        demand_v.min().item(),
+        demand_v.max().item(),
+    )
+
+    if return_wire_width:
+        return supply_h, supply_v, demand_h, demand_v, wire_width
+    return supply_h, supply_v, demand_h, demand_v

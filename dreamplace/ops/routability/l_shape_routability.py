@@ -12,6 +12,7 @@ import time
 
 from dreamplace.ops.routability.l_shape_segment import (
     LShapeSegmentOp,
+    build_segment_pos_tensor,
     build_l_shape_segments_vectorized,
     H_FIRST, V_FIRST, STRAIGHT, FAKE_STRAIGHT, UNKNOWN
 )
@@ -51,8 +52,21 @@ class LShapeRoutabilityOp(nn.Module):
         - "electric": C++/CUDA实现的电势场模型 (更快，梯度更准确)
     """
     
-    def __init__(self, placedb, params, wire_width=None, num_bins_x=64, num_bins_y=64,
-                 density_mode="electric", target_density=1.0, target_demand=None):
+    def __init__(
+        self,
+        placedb,
+        params,
+        wire_width=None,
+        num_bins_x=64,
+        num_bins_y=64,
+        density_mode="electric",
+        target_density=1.0,
+        target_demand=None,
+        target_density_h=None,
+        target_density_v=None,
+        target_demand_h=None,
+        target_demand_v=None,
+    ):
         """
         Args:
             placedb: placement database
@@ -150,9 +164,24 @@ class LShapeRoutabilityOp(nn.Module):
         
         # 缓存
         self.cached_segments = None
+        self.cached_soft_debug = None
         self.cached_density_map = None
+        self.cached_density_map_h = None
+        self.cached_density_map_v = None
+        self.target_density_h = target_density_h
+        self.target_density_v = target_density_v
+        self.target_demand_h = target_demand_h
+        self.target_demand_v = target_demand_v
 
-    def update_targets(self, target_density=None, target_demand=None):
+    def update_targets(
+        self,
+        target_density=None,
+        target_demand=None,
+        target_density_h=None,
+        target_density_v=None,
+        target_demand_h=None,
+        target_demand_v=None,
+    ):
         """
         Refresh external routing targets used by the electric L-shape model.
 
@@ -175,11 +204,33 @@ class LShapeRoutabilityOp(nn.Module):
             self.density_op.set_target_demand(target_demand)
             updated = True
 
+        if target_density_h is not None:
+            self.target_density_h = target_density_h
+            updated = True
+        if target_density_v is not None:
+            self.target_density_v = target_density_v
+            updated = True
+        if target_demand_h is not None:
+            self.target_demand_h = target_demand_h
+            updated = True
+        if target_demand_v is not None:
+            self.target_demand_v = target_demand_v
+            updated = True
+
         if updated:
+            self.cached_soft_debug = None
             self.cached_density_map = None
-            logger.info("Updated L-shape routing targets (density=%s, demand=%s).",
-                        "set" if target_density is not None else "keep",
-                        "set" if target_demand is not None else "clear")
+            self.cached_density_map_h = None
+            self.cached_density_map_v = None
+            logger.info(
+                "Updated L-shape routing targets (density=%s, demand=%s, density_h=%s, density_v=%s, demand_h=%s, demand_v=%s).",
+                "set" if target_density is not None else "keep",
+                "set" if target_demand is not None else "clear",
+                "set" if target_density_h is not None else "keep",
+                "set" if target_density_v is not None else "keep",
+                "set" if target_demand_h is not None else "keep",
+                "set" if target_demand_v is not None else "keep",
+            )
 
     def _build_vertex_to_net(self, steiner_topo_op, num_vertices):
         """Build vertex->net mapping for pins and Steiner points."""
@@ -203,39 +254,25 @@ class LShapeRoutabilityOp(nn.Module):
                         vertex_to_net[s:min(e, num_vertices)] = net_id
         return vertex_to_net
 
-    def _get_soft_l_scoring_maps(self, device, dtype):
-        """
-        Build overflow-aware maps for soft L path scoring.
+    def _prepare_soft_map(self, candidate, device, dtype):
+        if not isinstance(candidate, torch.Tensor):
+            return None
+        tensor = candidate.detach()
+        if tensor.device != device:
+            tensor = tensor.to(device)
+        tensor = tensor.to(dtype=dtype)
+        if tensor.shape != (self.num_bins_x, self.num_bins_y):
+            return None
+        return torch.clamp(tensor, min=0.0)
 
-        `cost_map` focuses on excess demand over supply with a small background term
-        to break ties in non-overflow regions.
-        `hotspot_map` counts bins that are currently over capacity, which helps avoid
-        traversing any overflow hotspot even if the total excess sum is similar.
-        The hotspot penalty is scaled by the current global overflow ratio so it fades
-        out automatically once the design is close to feasible.
-        """
-        def _prepare(candidate):
-            if not isinstance(candidate, torch.Tensor):
-                return None
-            tensor = candidate.detach()
-            if tensor.device != device:
-                tensor = tensor.to(device)
-            tensor = tensor.to(dtype=dtype)
-            if tensor.shape != (self.num_bins_x, self.num_bins_y):
-                return None
-            return torch.clamp(tensor, min=0.0)
-
-        supply = _prepare(getattr(self.density_op, "target_density", None))
-        target_demand = _prepare(getattr(self.density_op, "target_demand", None))
-        cached_density = _prepare(self.cached_density_map)
-
+    def _compose_soft_l_cost_map(self, supply, target_demand, cached_density, device, dtype):
         if supply is None:
             candidates = [cached_density, target_demand]
             for candidate in candidates:
                 if candidate is not None:
-                    return candidate, torch.zeros_like(candidate), 0.0
+                    return candidate, torch.zeros_like(candidate), torch.tensor(0.0, dtype=dtype, device=device)
             zero = torch.zeros((self.num_bins_x, self.num_bins_y), dtype=dtype, device=device)
-            return zero, zero, 0.0
+            return zero, zero, torch.tensor(0.0, dtype=dtype, device=device)
 
         denom = supply.clamp_min(1e-6)
         cost_map = torch.zeros((self.num_bins_x, self.num_bins_y), dtype=dtype, device=device)
@@ -264,12 +301,80 @@ class LShapeRoutabilityOp(nn.Module):
                 torch.sum(torch.relu(cached_density - supply)) / supply.sum().clamp_min(1e-6),
             )
 
+        return cost_map, hotspot_map, overflow_ratio
+
+    def _get_soft_l_scoring_maps(self, device, dtype):
+        """
+        Build overflow-aware directional maps for soft L path scoring.
+
+        Each leg is scored against a direction-matched resource map:
+        - horizontal legs use H maps
+        - vertical legs use V maps
+
+        Each `cost_map_*` focuses on excess demand over supply with a small background term
+        to break ties in non-overflow regions.
+        `hotspot_map_*` counts bins that are currently over capacity, which helps avoid
+        traversing any overflow hotspot even if the total excess sum is similar.
+        The hotspot penalty is scaled by the current global overflow ratio so it fades
+        out automatically once the design is close to feasible.
+        """
+        total_supply = self._prepare_soft_map(getattr(self.density_op, "target_density", None), device, dtype)
+        total_demand = self._prepare_soft_map(getattr(self.density_op, "target_demand", None), device, dtype)
+        total_cached = self._prepare_soft_map(self.cached_density_map, device, dtype)
+        supply_h = self._prepare_soft_map(self.target_density_h, device, dtype)
+        supply_v = self._prepare_soft_map(self.target_density_v, device, dtype)
+        demand_h = self._prepare_soft_map(self.target_demand_h, device, dtype)
+        demand_v = self._prepare_soft_map(self.target_demand_v, device, dtype)
+        cached_h = self._prepare_soft_map(self.cached_density_map_h, device, dtype)
+        cached_v = self._prepare_soft_map(self.cached_density_map_v, device, dtype)
+
+        total_cost, total_hotspot, total_ratio = self._compose_soft_l_cost_map(
+            total_supply, total_demand, total_cached, device, dtype
+        )
+
+        if supply_h is None and demand_h is None and cached_h is None:
+            cost_map_h, hotspot_map_h, ratio_h = total_cost, total_hotspot, total_ratio
+        else:
+            cost_map_h, hotspot_map_h, ratio_h = self._compose_soft_l_cost_map(
+                supply_h, demand_h, cached_h, device, dtype
+            )
+
+        if supply_v is None and demand_v is None and cached_v is None:
+            cost_map_v, hotspot_map_v, ratio_v = total_cost, total_hotspot, total_ratio
+        else:
+            cost_map_v, hotspot_map_v, ratio_v = self._compose_soft_l_cost_map(
+                supply_v, demand_v, cached_v, device, dtype
+            )
+
         effective_hotspot_weight = self.soft_l_hotspot_weight
+        overflow_ratio = torch.maximum(total_ratio, torch.maximum(ratio_h, ratio_v))
         if self.soft_l_hotspot_ramp_ratio > 0.0:
             scale = torch.clamp(overflow_ratio / self.soft_l_hotspot_ramp_ratio, min=0.0, max=1.0)
             effective_hotspot_weight = self.soft_l_hotspot_weight * float(scale.item())
 
-        return cost_map, hotspot_map, effective_hotspot_weight
+        def build_overflow_map(demand, supply, fallback):
+            if demand is None or supply is None:
+                return fallback.detach() if isinstance(fallback, torch.Tensor) else None
+            return (torch.relu(demand - supply) / supply.clamp_min(1e-6)).detach()
+
+        total_ggr_overflow = None
+        if total_demand is not None and total_supply is not None:
+            total_ggr_overflow = torch.relu(total_demand - total_supply) / total_supply.clamp_min(1e-6)
+        ggr_overflow_h = build_overflow_map(demand_h, supply_h, total_ggr_overflow)
+        ggr_overflow_v = build_overflow_map(demand_v, supply_v, total_ggr_overflow)
+
+        self.cached_soft_debug = {
+            "cost_map_h": cost_map_h.detach(),
+            "cost_map_v": cost_map_v.detach(),
+            "hotspot_map_h": hotspot_map_h.detach(),
+            "hotspot_map_v": hotspot_map_v.detach(),
+            "ggr_overflow_h": ggr_overflow_h,
+            "ggr_overflow_v": ggr_overflow_v,
+            "effective_hotspot_weight": effective_hotspot_weight,
+            "overflow_ratio": float(overflow_ratio.detach().item()),
+        }
+
+        return cost_map_h, cost_map_v, hotspot_map_h, hotspot_map_v, effective_hotspot_weight
 
     def _coord_to_bin_index(self, coord, low, bin_size, num_bins):
         idx = torch.floor((coord - low) / bin_size).to(torch.long)
@@ -332,11 +437,11 @@ class LShapeRoutabilityOp(nn.Module):
         valid_weights[:, 0] = 1.0  # straight edge fallback; soft mode only reads diagonal weights
 
         if is_diagonal.any():
-            cost_map, hotspot_map, effective_hotspot_weight = self._get_soft_l_scoring_maps(device, dtype)
-            prefix_x = cost_map.cumsum(dim=0)
-            prefix_y = cost_map.cumsum(dim=1)
-            hotspot_prefix_x = hotspot_map.cumsum(dim=0) if effective_hotspot_weight > 0.0 else None
-            hotspot_prefix_y = hotspot_map.cumsum(dim=1) if effective_hotspot_weight > 0.0 else None
+            cost_map_h, cost_map_v, hotspot_map_h, hotspot_map_v, effective_hotspot_weight = self._get_soft_l_scoring_maps(device, dtype)
+            prefix_x_h = cost_map_h.cumsum(dim=0)
+            prefix_y_v = cost_map_v.cumsum(dim=1)
+            hotspot_prefix_x_h = hotspot_map_h.cumsum(dim=0) if effective_hotspot_weight > 0.0 else None
+            hotspot_prefix_y_v = hotspot_map_v.cumsum(dim=1) if effective_hotspot_weight > 0.0 else None
 
             dx1 = x1[is_diagonal]
             dy1 = y1[is_diagonal]
@@ -348,15 +453,15 @@ class LShapeRoutabilityOp(nn.Module):
             x2_idx = self._coord_to_bin_index(dx2, self.xl, self.bin_size_x, self.num_bins_x)
             y2_idx = self._coord_to_bin_index(dy2, self.yl, self.bin_size_y, self.num_bins_y)
 
-            cost_h = self._horizontal_cost(prefix_x, y1_idx, x1_idx, x2_idx) + self._vertical_cost(prefix_y, x2_idx, y1_idx, y2_idx)
-            cost_v = self._vertical_cost(prefix_y, x1_idx, y1_idx, y2_idx) + self._horizontal_cost(prefix_x, y2_idx, x1_idx, x2_idx)
+            cost_h = self._horizontal_cost(prefix_x_h, y1_idx, x1_idx, x2_idx) + self._vertical_cost(prefix_y_v, x2_idx, y1_idx, y2_idx)
+            cost_v = self._vertical_cost(prefix_y_v, x1_idx, y1_idx, y2_idx) + self._horizontal_cost(prefix_x_h, y2_idx, x1_idx, x2_idx)
 
-            if hotspot_prefix_x is not None and hotspot_prefix_y is not None:
-                hotspot_h = self._horizontal_cost(hotspot_prefix_x, y1_idx, x1_idx, x2_idx) + self._vertical_cost(
-                    hotspot_prefix_y, x2_idx, y1_idx, y2_idx
+            if hotspot_prefix_x_h is not None and hotspot_prefix_y_v is not None:
+                hotspot_h = self._horizontal_cost(hotspot_prefix_x_h, y1_idx, x1_idx, x2_idx) + self._vertical_cost(
+                    hotspot_prefix_y_v, x2_idx, y1_idx, y2_idx
                 )
-                hotspot_v = self._vertical_cost(hotspot_prefix_y, x1_idx, y1_idx, y2_idx) + self._horizontal_cost(
-                    hotspot_prefix_x, y2_idx, x1_idx, x2_idx
+                hotspot_v = self._vertical_cost(hotspot_prefix_y_v, x1_idx, y1_idx, y2_idx) + self._horizontal_cost(
+                    hotspot_prefix_x_h, y2_idx, x1_idx, x2_idx
                 )
                 cost_h = cost_h + effective_hotspot_weight * hotspot_h
                 cost_v = cost_v + effective_hotspot_weight * hotspot_v
@@ -382,35 +487,37 @@ class LShapeRoutabilityOp(nn.Module):
         weights[valid_mask] = valid_weights
         return weights
 
-    def _apply_segment_weights_to_sizes(self, segment_result):
-        segment_size_x = segment_result['segment_size_x']
-        segment_size_y = segment_result['segment_size_y']
+    def _prepare_segment_weights(self, segment_result, device):
         segment_weight = segment_result.get('segment_weight', None)
-        segment_is_horizontal = segment_result.get('segment_is_horizontal', None)
+        if segment_weight is None:
+            return None
+        if segment_weight.device != device:
+            segment_weight = segment_weight.to(device)
+        return segment_weight
 
-        if segment_weight is None or segment_is_horizontal is None:
-            return segment_size_x, segment_size_y
+    def _compute_density_map_from_subset(self, segment_result, segment_size_x, segment_size_y, segment_weight=None, mask=None):
+        if mask is None:
+            llx = segment_result['segment_llx']
+            lly = segment_result['segment_lly']
+            sx = segment_size_x
+            sy = segment_size_y
+            sw = segment_weight
+        else:
+            if not mask.any():
+                return torch.zeros(
+                    self.num_bins_x, self.num_bins_y,
+                    dtype=segment_size_x.dtype, device=segment_size_x.device
+                )
+            llx = segment_result['segment_llx'][mask]
+            lly = segment_result['segment_lly'][mask]
+            sx = segment_size_x[mask]
+            sy = segment_size_y[mask]
+            sw = segment_weight[mask] if segment_weight is not None else None
 
-        if segment_weight.device != segment_size_x.device:
-            segment_weight = segment_weight.to(segment_size_x.device)
-        if segment_is_horizontal.device != segment_size_x.device:
-            segment_is_horizontal = segment_is_horizontal.to(segment_size_x.device)
-
-        scaled_size_x = segment_size_x.clone()
-        scaled_size_y = segment_size_y.clone()
-        min_size = torch.tensor(1e-6, dtype=segment_size_x.dtype, device=segment_size_x.device)
-
-        horizontal_mask = segment_is_horizontal
-        vertical_mask = ~segment_is_horizontal
-
-        scaled_size_y[horizontal_mask] = torch.clamp(
-            scaled_size_y[horizontal_mask] * segment_weight[horizontal_mask], min=min_size
-        )
-        scaled_size_x[vertical_mask] = torch.clamp(
-            scaled_size_x[vertical_mask] * segment_weight[vertical_mask], min=min_size
-        )
-
-        return scaled_size_x, scaled_size_y
+        segment_pos = build_segment_pos_tensor(llx, lly)
+        if self.density_mode == "electric":
+            return self.overflow_op.compute_density_map(segment_pos, sx, sy, segment_weight=sw)
+        return self.density_op(segment_pos, sx, sy, mode="density", segment_weight=sw)
 
     def _debug_abnormal_segments(self, segment_result, steiner_topo_op, flat_pin_from, flat_pin_to, newx, newy):
         """Log segments that look abnormally 'fat' to locate bad edges/nets."""
@@ -564,6 +671,8 @@ class LShapeRoutabilityOp(nn.Module):
             soft_l_weights = self._compute_soft_l_weights(
                 newx, newy, flat_pin_from, flat_pin_to, l_directions
             )
+        else:
+            self.cached_soft_debug = None
 
         # 6. 构建L形segments（在CPU上）
         segment_result = self.segment_builder(
@@ -592,7 +701,9 @@ class LShapeRoutabilityOp(nn.Module):
         
         # 7. 计算密度代价（在CPU上）
         segment_pos = segment_result['segment_pos']
-        segment_size_x, segment_size_y = self._apply_segment_weights_to_sizes(segment_result)
+        segment_size_x = segment_result['segment_size_x']
+        segment_size_y = segment_result['segment_size_y']
+        segment_weight = self._prepare_segment_weights(segment_result, segment_pos.device)
         
         # 根据模式选择计算方式
         if self.density_mode == "electric":
@@ -602,11 +713,25 @@ class LShapeRoutabilityOp(nn.Module):
                 segment_pos = segment_pos.to(original_device)
                 segment_size_x = segment_size_x.to(original_device)
                 segment_size_y = segment_size_y.to(original_device)
+                if segment_weight is not None:
+                    segment_weight = segment_weight.to(original_device)
             segment_is_horizontal = segment_result.get('segment_is_horizontal', None)
-            cost = self.density_op(segment_pos, segment_size_x, segment_size_y, segment_is_horizontal)
+            cost = self.density_op(
+                segment_pos,
+                segment_size_x,
+                segment_size_y,
+                segment_is_horizontal,
+                segment_weight=segment_weight,
+            )
         else:
             # 使用Python RUDY密度的energy模式
-            cost = self.density_op(segment_pos, segment_size_x, segment_size_y, mode="energy")
+            cost = self.density_op(
+                segment_pos,
+                segment_size_x,
+                segment_size_y,
+                mode="energy",
+                segment_weight=segment_weight,
+            )
         
         # 确保cost在原始设备上
         if cost.device != original_device:
@@ -694,6 +819,8 @@ class LShapeRoutabilityOp(nn.Module):
             soft_l_weights = self._compute_soft_l_weights(
                 newx, newy, flat_pin_from, flat_pin_to, l_directions
             )
+        else:
+            self.cached_soft_debug = None
 
         segment_result = self.segment_builder(
             newx, newy, flat_pin_from, flat_pin_to, l_directions, soft_l_weights=soft_l_weights
@@ -705,22 +832,37 @@ class LShapeRoutabilityOp(nn.Module):
                 dtype=pos.dtype, device=pos.device
             )
         
-        # 根据模式选择计算方式
-        if self.density_mode == "electric":
-            # 使用overflow_op获取density_map
-            density_map = self.overflow_op.compute_density_map(
-                segment_result['segment_pos'],
-                *self._apply_segment_weights_to_sizes(segment_result)
-            )
-        else:
-            segment_size_x, segment_size_y = self._apply_segment_weights_to_sizes(segment_result)
-            density_map = self.density_op(
-                segment_result['segment_pos'],
+        segment_size_x = segment_result['segment_size_x']
+        segment_size_y = segment_result['segment_size_y']
+        segment_weight = self._prepare_segment_weights(segment_result, segment_size_x.device)
+        density_map = self._compute_density_map_from_subset(
+            segment_result,
+            segment_size_x,
+            segment_size_y,
+            segment_weight=segment_weight,
+            mask=None,
+        )
+        segment_is_horizontal = segment_result.get('segment_is_horizontal', None)
+        if isinstance(segment_is_horizontal, torch.Tensor) and segment_is_horizontal.numel() == segment_result['num_segments']:
+            segment_is_horizontal = segment_is_horizontal.to(torch.bool)
+            density_map_h = self._compute_density_map_from_subset(
+                segment_result,
                 segment_size_x,
                 segment_size_y,
-                mode="density"
+                segment_weight=segment_weight,
+                mask=segment_is_horizontal,
             )
-        
+            density_map_v = self._compute_density_map_from_subset(
+                segment_result,
+                segment_size_x,
+                segment_size_y,
+                segment_weight=segment_weight,
+                mask=~segment_is_horizontal,
+            )
+        else:
+            density_map_h = None
+            density_map_v = None
+
         # 保存缓存用于绘图（包含原始数据，确保绘图一致性）
         self.cached_segments = segment_result
         self.cached_segments['newx'] = newx.detach()
@@ -731,6 +873,8 @@ class LShapeRoutabilityOp(nn.Module):
         if soft_l_weights is not None:
             self.cached_segments['soft_l_weights'] = soft_l_weights.detach()
         self.cached_density_map = density_map
+        self.cached_density_map_h = density_map_h
+        self.cached_density_map_v = density_map_v
         return density_map
     
     def get_segments_for_plot(self):
@@ -745,7 +889,8 @@ class LShapeRoutabilityOp(nn.Module):
         
         seg_llx = self.cached_segments['segment_llx'].detach().cpu().numpy()
         seg_lly = self.cached_segments['segment_lly'].detach().cpu().numpy()
-        seg_size_x, seg_size_y = self._apply_segment_weights_to_sizes(self.cached_segments)
+        seg_size_x = self.cached_segments['segment_size_x']
+        seg_size_y = self.cached_segments['segment_size_y']
         seg_size_x = seg_size_x.detach().cpu().numpy()
         seg_size_y = seg_size_y.detach().cpu().numpy()
         
@@ -973,6 +1118,194 @@ def plot_l_shape_segments(segments, newx=None, newy=None, flat_from=None, flat_t
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
     logger.info(f"L-shape segments plot saved to {output_path}")
+
+
+def plot_soft_l_intermediate(segments, output_path, max_diagonal_edges=4000):
+    """Plot soft-L candidate paths and edge-level probability statistics."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from matplotlib.lines import Line2D
+
+    required = ("newx", "newy", "flat_from", "flat_to", "soft_l_weights")
+    missing = [key for key in required if key not in segments]
+    if missing:
+        raise ValueError(f"Missing soft-L plotting data: {missing}")
+
+    newx = segments["newx"].detach().cpu().numpy()
+    newy = segments["newy"].detach().cpu().numpy()
+    flat_from = segments["flat_from"].detach().cpu().numpy()
+    flat_to = segments["flat_to"].detach().cpu().numpy()
+    soft_l_weights = segments["soft_l_weights"].detach().cpu().numpy()
+
+    valid = (
+        (flat_from >= 0)
+        & (flat_to >= 0)
+        & (flat_from < len(newx))
+        & (flat_to < len(newx))
+    )
+    if not np.any(valid):
+        raise ValueError("No valid edges available for soft-L plotting")
+
+    edge_idx = np.nonzero(valid)[0]
+    x1 = newx[flat_from[valid]]
+    y1 = newy[flat_from[valid]]
+    x2 = newx[flat_to[valid]]
+    y2 = newy[flat_to[valid]]
+    weights = np.clip(soft_l_weights[valid], 0.0, None)
+    weight_sum = weights.sum(axis=1, keepdims=True)
+    weights = np.where(weight_sum > 1e-12, weights / np.clip(weight_sum, 1e-12, None), 0.5)
+
+    is_diagonal = (np.abs(x1 - x2) >= 1e-6) & (np.abs(y1 - y2) >= 1e-6)
+    diag_idx = np.nonzero(is_diagonal)[0]
+    if diag_idx.size == 0:
+        raise ValueError("No diagonal edges available for soft-L plotting")
+
+    if diag_idx.size > max_diagonal_edges:
+        take = np.linspace(0, diag_idx.size - 1, max_diagonal_edges, dtype=int)
+        diag_idx = diag_idx[take]
+
+    diag_x1 = x1[diag_idx]
+    diag_y1 = y1[diag_idx]
+    diag_x2 = x2[diag_idx]
+    diag_y2 = y2[diag_idx]
+    diag_weights = weights[diag_idx]
+
+    full_diag_weights = weights[is_diagonal]
+    full_p_h = full_diag_weights[:, 0]
+    full_entropy = -np.sum(
+        np.where(full_diag_weights > 1e-12, full_diag_weights * np.log2(np.clip(full_diag_weights, 1e-12, None)), 0.0),
+        axis=1,
+    )
+
+    fig = plt.figure(figsize=(16, 10))
+    gs = fig.add_gridspec(2, 2, width_ratios=[3.2, 1.2], height_ratios=[1.0, 1.0])
+    ax_paths = fig.add_subplot(gs[:, 0])
+    ax_prob = fig.add_subplot(gs[0, 1])
+    ax_entropy = fig.add_subplot(gs[1, 1])
+
+    for i in range(diag_idx.size):
+        h_weight = float(diag_weights[i, 0])
+        v_weight = float(diag_weights[i, 1])
+        x1_i, y1_i = diag_x1[i], diag_y1[i]
+        x2_i, y2_i = diag_x2[i], diag_y2[i]
+
+        h_alpha = min(0.95, 0.05 + 0.90 * h_weight)
+        v_alpha = min(0.95, 0.05 + 0.90 * v_weight)
+        h_width = 0.4 + 1.4 * h_weight
+        v_width = 0.4 + 1.4 * v_weight
+
+        ax_paths.plot([x1_i, x2_i], [y1_i, y1_i], color="tab:red", alpha=h_alpha, linewidth=h_width)
+        ax_paths.plot([x2_i, x2_i], [y1_i, y2_i], color="tab:red", alpha=h_alpha, linewidth=h_width)
+
+        ax_paths.plot([x1_i, x1_i], [y1_i, y2_i], color="tab:purple", alpha=v_alpha, linewidth=v_width)
+        ax_paths.plot([x1_i, x2_i], [y2_i, y2_i], color="tab:purple", alpha=v_alpha, linewidth=v_width)
+
+    ax_paths.set_aspect("equal")
+    ax_paths.autoscale()
+    ax_paths.set_title(
+        f"Soft L Candidate Paths (sampled {diag_idx.size}/{np.count_nonzero(is_diagonal)} diagonal edges)"
+    )
+    ax_paths.set_xlabel("X")
+    ax_paths.set_ylabel("Y")
+    ax_paths.legend(
+        handles=[
+            Line2D([0], [0], color="tab:red", label="H-path candidate"),
+            Line2D([0], [0], color="tab:purple", label="V-path candidate"),
+        ],
+        loc="upper right",
+    )
+
+    ax_prob.hist(full_p_h, bins=20, color="tab:blue", alpha=0.85, edgecolor="black", linewidth=0.4)
+    ax_prob.axvline(0.5, color="black", linestyle="--", linewidth=0.8)
+    ax_prob.set_title("p(H-first) Distribution")
+    ax_prob.set_xlabel("p_H")
+    ax_prob.set_ylabel("Edge Count")
+
+    ax_entropy.hist(full_entropy, bins=20, color="tab:orange", alpha=0.85, edgecolor="black", linewidth=0.4)
+    ax_entropy.set_title("Soft-L Entropy")
+    ax_entropy.set_xlabel("Entropy (bits)")
+    ax_entropy.set_ylabel("Edge Count")
+    ambiguous_ratio = float(np.mean((full_p_h >= 0.4) & (full_p_h <= 0.6)))
+    decisive_ratio = float(np.mean((full_p_h <= 0.1) | (full_p_h >= 0.9)))
+    stats_text = "\n".join(
+        [
+            f"diagonal_edges = {int(np.count_nonzero(is_diagonal))}",
+            f"sampled_edges = {int(diag_idx.size)}",
+            f"mean_p_H = {float(full_p_h.mean()):.3f}",
+            f"mean_entropy = {float(full_entropy.mean()):.3f}",
+            f"ambiguous[0.4,0.6] = {ambiguous_ratio:.1%}",
+            f"decisive<=0.1|>=0.9 = {decisive_ratio:.1%}",
+        ]
+    )
+    ax_entropy.text(
+        0.98,
+        0.98,
+        stats_text,
+        transform=ax_entropy.transAxes,
+        ha="right",
+        va="top",
+        fontsize=9,
+        bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.8},
+    )
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    logger.info("Soft L intermediate plot saved to %s", output_path)
+
+
+def plot_soft_l_scoring_maps(soft_debug, output_path, title_prefix="Soft L Scoring"):
+    """Plot cached directional cost and hotspot maps used for soft-L scoring."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    required = ("cost_map_h", "cost_map_v", "hotspot_map_h", "hotspot_map_v")
+    missing = [key for key in required if key not in soft_debug]
+    if missing:
+        raise ValueError(f"Missing soft-L scoring maps: {missing}")
+
+    has_ggr_overflow = ("ggr_overflow_h" in soft_debug and isinstance(soft_debug["ggr_overflow_h"], torch.Tensor) and
+                        "ggr_overflow_v" in soft_debug and isinstance(soft_debug["ggr_overflow_v"], torch.Tensor))
+    nrows = 3 if has_ggr_overflow else 2
+    fig, axes = plt.subplots(nrows, 2, figsize=(12, 5 * nrows), constrained_layout=True)
+    plots = [
+        ("cost_map_h", "Horizontal-Leg Cost", "viridis"),
+        ("cost_map_v", "Vertical-Leg Cost", "viridis"),
+        ("hotspot_map_h", "Horizontal Hotspot Map", "magma"),
+        ("hotspot_map_v", "Vertical Hotspot Map", "magma"),
+    ]
+    if has_ggr_overflow:
+        plots.extend([
+            ("ggr_overflow_h", "GGR H Overflow Ratio", "plasma"),
+            ("ggr_overflow_v", "GGR V Overflow Ratio", "plasma"),
+        ])
+
+    for ax, (key, title, cmap) in zip(axes.flat, plots):
+        value = soft_debug[key]
+        if value.requires_grad:
+            value = value.detach()
+        if value.is_cuda:
+            value = value.cpu()
+        kwargs = {}
+        if key.startswith("ggr_overflow_"):
+            vmax = max(1e-6, float(np.percentile(value.numpy(), 99)))
+            kwargs = {"vmin": 0.0, "vmax": vmax}
+        im = ax.imshow(value.numpy().T, origin="lower", cmap=cmap, aspect="equal", **kwargs)
+        ax.set_title(title)
+        ax.set_xlabel("Bin X")
+        ax.set_ylabel("Bin Y")
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    extra = []
+    if "effective_hotspot_weight" in soft_debug:
+        extra.append(f"effective_hotspot_weight={soft_debug['effective_hotspot_weight']:.3f}")
+    if "overflow_ratio" in soft_debug:
+        extra.append(f"overflow_ratio={soft_debug['overflow_ratio']:.4f}")
+    fig.suptitle(f"{title_prefix}" + (f" ({', '.join(extra)})" if extra else ""))
+
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    logger.info("Soft L scoring map plot saved to %s", output_path)
 
 
 def plot_segment_density_map(density_map, output_path, title="Segment Density Map", colormap="hot"):

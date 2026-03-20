@@ -33,6 +33,7 @@ import math
 
 from dreamplace.ops.routability.egr_resample import (
     create_supply_and_demand_maps_from_egr,
+    create_directional_supply_and_demand_maps_from_egr,
 )
 
 
@@ -100,6 +101,47 @@ def _resample_xy_map(map_xy, target_x, target_y):
         align_corners=False,
     )
     return image_yx.squeeze(0).squeeze(0).t().contiguous()
+
+
+def _split_gpugr_maps_by_direction(placedb, capacity_map, demand_map):
+    """
+    Aggregate per-layer gpugr maps into horizontal / vertical 2D maps.
+    """
+    if capacity_map.dim() != 3 or demand_map.dim() != 3:
+        raise ValueError("Expected gpugr capacity/demand maps with shape [layers, x, y]")
+
+    raw_h_caps = getattr(placedb, "unit_horizontal_capacities", None)
+    raw_v_caps = getattr(placedb, "unit_vertical_capacities", None)
+    if raw_h_caps is None or raw_v_caps is None:
+        total_cap = capacity_map.sum(dim=0)
+        total_dmd = demand_map.sum(dim=0)
+        return total_cap, total_cap, total_dmd, total_dmd
+
+    num_layers = min(capacity_map.size(0), len(raw_h_caps), len(raw_v_caps))
+    if num_layers <= 0:
+        total_cap = capacity_map.sum(dim=0)
+        total_dmd = demand_map.sum(dim=0)
+        return total_cap, total_cap, total_dmd, total_dmd
+
+    capacity_map = capacity_map[:num_layers]
+    demand_map = demand_map[:num_layers]
+
+    h_caps = torch.as_tensor(raw_h_caps[:num_layers], device=capacity_map.device, dtype=capacity_map.dtype)
+    v_caps = torch.as_tensor(raw_v_caps[:num_layers], device=capacity_map.device, dtype=capacity_map.dtype)
+    h_mask = h_caps > v_caps
+    v_mask = v_caps > h_caps
+
+    if not h_mask.any() or not v_mask.any():
+        indices = torch.arange(num_layers, device=capacity_map.device)
+        first_is_h = bool((h_caps[0] >= v_caps[0]).item())
+        h_mask = (indices % 2 == 0) if first_is_h else (indices % 2 == 1)
+        v_mask = ~h_mask
+
+    supply_h_xy = capacity_map[h_mask].sum(dim=0) if h_mask.any() else torch.zeros_like(capacity_map[0])
+    supply_v_xy = capacity_map[v_mask].sum(dim=0) if v_mask.any() else torch.zeros_like(capacity_map[0])
+    demand_h_xy = demand_map[h_mask].sum(dim=0) if h_mask.any() else torch.zeros_like(demand_map[0])
+    demand_v_xy = demand_map[v_mask].sum(dim=0) if v_mask.any() else torch.zeros_like(demand_map[0])
+    return supply_h_xy, supply_v_xy, demand_h_xy, demand_v_xy
 
 
 def _sync_gpugr_route_grid_to_autodmp(params, placedb, model=None):
@@ -294,12 +336,23 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
     route_entries = result.get("route_entries", [])
     total_entries = sum(len(net.get("entries", [])) for net in route_entries)
 
-    supply_xy = maps["capacity_map"].sum(dim=0).detach().to(device=pos.device, dtype=pos.dtype)
-    demand_xy = (
-        maps["wire_demand_map"] + maps["via_demand_map"]
-    ).sum(dim=0).detach().to(device=pos.device, dtype=pos.dtype)
+    capacity_map = maps["capacity_map"].detach().to(device=pos.device, dtype=pos.dtype)
+    total_demand_map = (maps["wire_demand_map"] + maps["via_demand_map"]).detach().to(
+        device=pos.device, dtype=pos.dtype
+    )
+    supply_xy = capacity_map.sum(dim=0)
+    demand_xy = total_demand_map.sum(dim=0)
+    supply_h_xy, supply_v_xy, demand_h_xy, demand_v_xy = _split_gpugr_maps_by_direction(
+        placedb,
+        capacity_map,
+        total_demand_map,
+    )
     supply_map = _resample_xy_map(supply_xy, l_shape_num_bins_x, l_shape_num_bins_y)
     demand_map = _resample_xy_map(demand_xy, l_shape_num_bins_x, l_shape_num_bins_y)
+    supply_map_h = _resample_xy_map(supply_h_xy, l_shape_num_bins_x, l_shape_num_bins_y)
+    supply_map_v = _resample_xy_map(supply_v_xy, l_shape_num_bins_x, l_shape_num_bins_y)
+    demand_map_h = _resample_xy_map(demand_h_xy, l_shape_num_bins_x, l_shape_num_bins_y)
+    demand_map_v = _resample_xy_map(demand_v_xy, l_shape_num_bins_x, l_shape_num_bins_y)
     wire_width = _resolve_l_shape_wire_width(
         params,
         placedb,
@@ -329,6 +382,10 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
     return {
         "supply_map": supply_map,
         "demand_map": demand_map,
+        "supply_map_h": supply_map_h,
+        "supply_map_v": supply_map_v,
+        "demand_map_h": demand_map_h,
+        "demand_map_v": demand_map_v,
         "wire_width": wire_width,
         "route_entries": route_entries,
         "metrics": metrics,
@@ -417,6 +474,18 @@ def _prepare_l_shape_inputs_from_egr(params, placedb, pos, model):
         normalize_demand=False,
         return_wire_width=True,
     )
+    supply_map_h, supply_map_v, demand_map_h, demand_map_v, _ = create_directional_supply_and_demand_maps_from_egr(
+        egr_dir=egr_dir,
+        placedb=placedb,
+        params=params,
+        num_bins_x=l_shape_num_bins_x,
+        num_bins_y=l_shape_num_bins_y,
+        device=pos.device,
+        dtype=pos.dtype,
+        normalize_supply=False,
+        normalize_demand=False,
+        return_wire_width=True,
+    )
     wire_width = _resolve_l_shape_wire_width(
         params,
         placedb,
@@ -425,6 +494,10 @@ def _prepare_l_shape_inputs_from_egr(params, placedb, pos, model):
     return {
         "supply_map": supply_map,
         "demand_map": demand_map,
+        "supply_map_h": supply_map_h,
+        "supply_map_v": supply_map_v,
+        "demand_map_h": demand_map_h,
+        "demand_map_v": demand_map_v,
         "wire_width": wire_width,
         "num_bins_x": l_shape_num_bins_x,
         "num_bins_y": l_shape_num_bins_y,
@@ -1234,6 +1307,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             L_shape_num_bins_x = params.num_bins_x
                             L_shape_num_bins_y = params.num_bins_y
 
+                            gpugr_inputs = None
+                            l_shape_inputs = None
                             if getattr(params, "l_direction_use_gpugr", False):
                                 gpugr_inputs = _prepare_l_shape_inputs_from_gpugr(
                                     params,
@@ -1241,19 +1316,18 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     pos,
                                     model=model,
                                 )
-                                supply_map = gpugr_inputs["supply_map"]
-                                demand_map = gpugr_inputs["demand_map"]
-                                wire_width = gpugr_inputs["wire_width"]
+                                l_shape_inputs = gpugr_inputs
                             else:
-                                egr_inputs = _prepare_l_shape_inputs_from_egr(
+                                l_shape_inputs = _prepare_l_shape_inputs_from_egr(
                                     params,
                                     placedb,
                                     pos,
                                     model=model,
                                 )
-                                supply_map = egr_inputs["supply_map"]
-                                demand_map = egr_inputs["demand_map"]
-                                wire_width = egr_inputs["wire_width"]
+
+                            supply_map = l_shape_inputs["supply_map"]
+                            demand_map = l_shape_inputs["demand_map"]
+                            wire_width = l_shape_inputs["wire_width"]
 
                             # Step 4: 解析路由器输出的 L 方向
                             steiner_topo_op = self.op_collections.steiner_topo_op
@@ -1370,6 +1444,10 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 num_bins_y=L_shape_num_bins_y,
                                 target_density=supply_map,
                                 target_demand=demand_map,
+                                target_density_h=l_shape_inputs.get("supply_map_h"),
+                                target_density_v=l_shape_inputs.get("supply_map_v"),
+                                target_demand_h=l_shape_inputs.get("demand_map_h"),
+                                target_demand_v=l_shape_inputs.get("demand_map_v"),
                             )
                             # 初始化基于L-shape overflow的外环状态
                             model._l_shape_overflow_ema = None
@@ -1425,7 +1503,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             if params.l_shape_plot_flag:
                                 try:
                                     from dreamplace.ops.routability.l_shape_routability import (
-                                        plot_segment_density_map, plot_l_shape_segments
+                                        plot_segment_density_map, plot_l_shape_segments,
+                                        plot_soft_l_intermediate, plot_soft_l_scoring_maps
                                     )
                                     
                                     # 获取密度图
@@ -1444,15 +1523,39 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     # 绘制L形segments（使用cached_segments中保存的原始数据，确保一致性）
                                     if model.l_shape_routability_op is not None and \
                                        model.l_shape_routability_op.cached_segments is not None:
+                                        l_shape_op = model.l_shape_routability_op
                                         segments_plot_path = os.path.join(
                                             params.result_dir, f"l_shape_segments_iter{iteration}.png"
                                         )
                                         plot_l_shape_segments(
-                                            model.l_shape_routability_op.cached_segments,
+                                            l_shape_op.cached_segments,
                                             output_path=segments_plot_path,
                                             placedb=placedb, params=params
                                         )
                                         logging.info(f"L-shape segments plot saved to {segments_plot_path}")
+                                        if getattr(l_shape_op, "soft_l_assignment", False) and \
+                                           'soft_l_weights' in l_shape_op.cached_segments:
+                                            soft_plot_path = os.path.join(
+                                                params.result_dir, f"l_shape_soft_iter{iteration}.png"
+                                            )
+                                            plot_soft_l_intermediate(
+                                                l_shape_op.cached_segments,
+                                                output_path=soft_plot_path,
+                                            )
+                                            logging.info(f"Soft L-shape plot saved to {soft_plot_path}")
+                                            if getattr(l_shape_op, "cached_soft_debug", None) is not None:
+                                                soft_scoring_path = os.path.join(
+                                                    params.result_dir,
+                                                    f"l_shape_soft_scoring_iter{iteration}.png",
+                                                )
+                                                plot_soft_l_scoring_maps(
+                                                    l_shape_op.cached_soft_debug,
+                                                    output_path=soft_scoring_path,
+                                                    title_prefix=f"Soft L Scoring (iter={iteration})",
+                                                )
+                                                logging.info(
+                                                    f"Soft L-shape scoring plot saved to {soft_scoring_path}"
+                                                )
                                 except Exception as e:
                                     logging.warning(f"Failed to plot L-shape density/segments: {e}")
                                 
@@ -1517,6 +1620,10 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 model.l_shape_routability_op.update_targets(
                                     target_density=l_shape_inputs["supply_map"],
                                     target_demand=l_shape_inputs["demand_map"],
+                                    target_density_h=l_shape_inputs.get("supply_map_h"),
+                                    target_density_v=l_shape_inputs.get("supply_map_v"),
+                                    target_demand_h=l_shape_inputs.get("demand_map_h"),
+                                    target_demand_v=l_shape_inputs.get("demand_map_v"),
                                 )
                                 updated_wire_width = float(l_shape_inputs["wire_width"])
                                 current_wire_width = float(model.l_shape_routability_op.wire_width)
@@ -1848,7 +1955,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             if params.l_shape_plot_flag:
                                 try:
                                     from dreamplace.ops.routability.l_shape_routability import (
-                                        plot_segment_density_map, plot_l_shape_segments
+                                        plot_segment_density_map, plot_l_shape_segments,
+                                        plot_soft_l_intermediate, plot_soft_l_scoring_maps
                                     )
                                     
                                     if density_map is None:
@@ -1872,11 +1980,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     
                                     if model.l_shape_routability_op is not None and \
                                        model.l_shape_routability_op.cached_segments is not None:
+                                        l_shape_op = model.l_shape_routability_op
                                         segments_plot_path = os.path.join(
                                             params.result_dir, f"l_shape_segments_iter{iteration}.png"
                                         )
                                         plot_l_shape_segments(
-                                            model.l_shape_routability_op.cached_segments,
+                                            l_shape_op.cached_segments,
                                             newx, newy,
                                             steiner_topo_op.flat_pin_from,
                                             steiner_topo_op.flat_pin_to,
@@ -1884,6 +1993,25 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                             segments_plot_path,
                                             placedb=placedb, params=params
                                         )
+                                        if getattr(l_shape_op, "soft_l_assignment", False) and \
+                                           'soft_l_weights' in l_shape_op.cached_segments:
+                                            soft_plot_path = os.path.join(
+                                                params.result_dir, f"l_shape_soft_iter{iteration}.png"
+                                            )
+                                            plot_soft_l_intermediate(
+                                                l_shape_op.cached_segments,
+                                                output_path=soft_plot_path,
+                                            )
+                                            if getattr(l_shape_op, "cached_soft_debug", None) is not None:
+                                                soft_scoring_path = os.path.join(
+                                                    params.result_dir,
+                                                    f"l_shape_soft_scoring_iter{iteration}.png",
+                                                )
+                                                plot_soft_l_scoring_maps(
+                                                    l_shape_op.cached_soft_debug,
+                                                    output_path=soft_scoring_path,
+                                                    title_prefix=f"Soft L Scoring (iter={iteration})",
+                                                )
                                 except Exception as e:
                                     logging.warning(f"Failed to plot L-shape density/segments: {e}")
                     # ======================================================

@@ -69,6 +69,7 @@ class SegmentElectricPotentialFunction(Function):
         segment_size_x,
         segment_size_y,
         segment_is_horizontal,
+        segment_weight,
         segment_size_x_clamped,
         segment_size_y_clamped,
         offset_x,
@@ -121,9 +122,10 @@ class SegmentElectricPotentialFunction(Function):
                 seg_pos = torch.cat([seg_llx, seg_lly], dim=0)
                 seg_sx = segment_size_x[idx]
                 seg_sy = segment_size_y[idx]
-                return seg_pos, seg_sx, seg_sy
+                seg_sw = segment_weight[idx] if isinstance(segment_weight, torch.Tensor) else None
+                return seg_pos, seg_sx, seg_sy, seg_sw
 
-            def _prepare(seg_pos, seg_sx, seg_sy):
+            def _prepare(seg_pos, seg_sx, seg_sy, seg_sw):
                 sqrt2 = math.sqrt(2)
                 seg_sx_clamped = seg_sx
                 seg_sy_clamped = seg_sy
@@ -132,6 +134,8 @@ class SegmentElectricPotentialFunction(Function):
                 seg_area = seg_sx * seg_sy
                 seg_clamped_area = seg_sx_clamped * seg_sy_clamped
                 seg_ratio = seg_area / seg_clamped_area.clamp(min=1e-10)
+                if isinstance(seg_sw, torch.Tensor):
+                    seg_ratio = seg_ratio * seg_sw
                 sqrt2_bin_x = sqrt2 * bin_size_x
                 sqrt2_bin_y = sqrt2 * bin_size_y
                 if seg_sx.numel() > 0:
@@ -166,13 +170,13 @@ class SegmentElectricPotentialFunction(Function):
             density_map_v = torch.zeros_like(initial_density_map)
 
             if subset_h is not None:
-                h_pos, h_sx, h_sy = subset_h
+                h_pos, h_sx, h_sy, h_sw = subset_h
                 (
                     h_sx_clamped, h_sy_clamped,
                     h_off_x, h_off_y, h_ratio,
                     h_imp_x, h_imp_y,
                     h_sorted_map
-                ) = _prepare(h_pos, h_sx, h_sy)
+                ) = _prepare(h_pos, h_sx, h_sy, h_sw)
                 density_map_h = SegmentDensityMapFunction.forward(
                     h_pos,
                     h_sx,
@@ -199,13 +203,13 @@ class SegmentElectricPotentialFunction(Function):
                 )
 
             if subset_v is not None:
-                v_pos, v_sx, v_sy = subset_v
+                v_pos, v_sx, v_sy, v_sw = subset_v
                 (
                     v_sx_clamped, v_sy_clamped,
                     v_off_x, v_off_y, v_ratio,
                     v_imp_x, v_imp_y,
                     v_sorted_map
-                ) = _prepare(v_pos, v_sx, v_sy)
+                ) = _prepare(v_pos, v_sx, v_sy, v_sw)
                 density_map_v = SegmentDensityMapFunction.forward(
                     v_pos,
                     v_sx,
@@ -608,7 +612,7 @@ class SegmentElectricPotentialFunction(Function):
         logger.debug(f"Segment electric potential backward: {(time.time() - tt) * 1000:.2f} ms")
         
         # Return gradients (only for segment_pos, others are None)
-        return (output,) + (None,) * 39
+        return (output,) + (None,) * 40
 
 
 class LShapeElectricPotential(nn.Module):
@@ -880,7 +884,7 @@ class LShapeElectricPotential(nn.Module):
         self.wu_by_wu2_plus_wv2_half = wu.mul(self.inv_wu2_plus_wv2).mul_(0.5)
         self.wv_by_wu2_plus_wv2_half = wv.mul(self.inv_wu2_plus_wv2).mul_(0.5)
     
-    def _prepare_segment_data(self, segment_pos, segment_size_x, segment_size_y):
+    def _prepare_segment_data(self, segment_pos, segment_size_x, segment_size_y, segment_weight=None):
         """Prepare segment data for density computation."""
         sqrt2 = math.sqrt(2)
         
@@ -902,6 +906,8 @@ class LShapeElectricPotential(nn.Module):
         segment_area = segment_size_x * segment_size_y
         clamped_area = segment_size_x_clamped * segment_size_y_clamped
         ratio = segment_area / clamped_area.clamp(min=1e-10)
+        if isinstance(segment_weight, torch.Tensor):
+            ratio = ratio * segment_weight
         
         # Compute maximum impacted bins
         sqrt2_bin_x = sqrt2 * self.bin_size_x
@@ -937,7 +943,7 @@ class LShapeElectricPotential(nn.Module):
             sorted_segment_map
         )
     
-    def forward(self, segment_pos, segment_size_x, segment_size_y, segment_is_horizontal=None):
+    def forward(self, segment_pos, segment_size_x, segment_size_y, segment_is_horizontal=None, segment_weight=None):
         """
         Compute electric potential energy for routing segments.
         
@@ -971,10 +977,17 @@ class LShapeElectricPotential(nn.Module):
             num_impacted_bins_x,
             num_impacted_bins_y,
             sorted_segment_map
-        ) = self._prepare_segment_data(segment_pos, segment_size_x, segment_size_y)
+        ) = self._prepare_segment_data(
+            segment_pos,
+            segment_size_x,
+            segment_size_y,
+            segment_weight=segment_weight,
+        )
 
         if isinstance(segment_is_horizontal, torch.Tensor) and segment_is_horizontal.device != segment_pos.device:
             segment_is_horizontal = segment_is_horizontal.to(segment_pos.device)
+        if isinstance(segment_weight, torch.Tensor) and segment_weight.device != segment_pos.device:
+            segment_weight = segment_weight.to(segment_pos.device)
         
         # Compute electric potential
         energy = SegmentElectricPotentialFunction.apply(
@@ -982,6 +995,7 @@ class LShapeElectricPotential(nn.Module):
             segment_size_x,
             segment_size_y,
             segment_is_horizontal,
+            segment_weight,
             segment_size_x_clamped,
             segment_size_y_clamped,
             offset_x,

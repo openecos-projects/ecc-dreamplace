@@ -425,8 +425,18 @@ class PlaceObj(nn.Module):
         self.l_shape_weight_momentum = getattr(params, 'l_shape_weight_momentum', 0.1)
         # ==========================================
 
-    def init_l_shape_routability(self, wire_width, num_bins_x, num_bins_y, 
-                                 target_density=1.0, target_demand=None):
+    def init_l_shape_routability(
+        self,
+        wire_width,
+        num_bins_x,
+        num_bins_y,
+        target_density=1.0,
+        target_demand=None,
+        target_density_h=None,
+        target_density_v=None,
+        target_demand_h=None,
+        target_demand_v=None,
+    ):
         """
         初始化L形routability模块
         应在steiner_topo_op有L方向信息后调用
@@ -452,7 +462,11 @@ class PlaceObj(nn.Module):
             num_bins_x=num_bins_x,
             num_bins_y=num_bins_y,
             target_density=target_density,
-            target_demand=target_demand
+            target_demand=target_demand,
+            target_density_h=target_density_h,
+            target_density_v=target_density_v,
+            target_demand_h=target_demand_h,
+            target_demand_v=target_demand_v,
         )
         self.use_l_shape_routability = True
         

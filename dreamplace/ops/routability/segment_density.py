@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 def compute_segment_rudy_density(
     segment_pos, segment_size_x, segment_size_y,
+    segment_weight,
     xl, yl, xh, yh,
     bin_size_x, bin_size_y,
     num_bins_x, num_bins_y
@@ -58,6 +59,10 @@ def compute_segment_rudy_density(
     # 计算RUDY demand
     seg_area = segment_size_x * segment_size_y
     seg_demand = (segment_size_x + segment_size_y) / torch.clamp(seg_area, min=1e-8)
+    if isinstance(segment_weight, torch.Tensor):
+        if segment_weight.device != seg_demand.device:
+            segment_weight = segment_weight.to(seg_demand.device)
+        seg_demand = seg_demand * segment_weight
     
     # 预计算bin边界
     bin_xl_coords = torch.arange(num_bins_x, device=device, dtype=dtype) * bin_size_x + xl
@@ -188,6 +193,7 @@ class SegmentDensityFunction(Function):
         segment_pos,
         segment_size_x,
         segment_size_y,
+        segment_weight,
         xl, yl, xh, yh,
         bin_size_x, bin_size_y,
         num_bins_x, num_bins_y,
@@ -204,7 +210,7 @@ class SegmentDensityFunction(Function):
         
         # 计算密度图
         density_map = compute_segment_rudy_density(
-            segment_pos, segment_size_x, segment_size_y,
+            segment_pos, segment_size_x, segment_size_y, segment_weight,
             xl, yl, xh, yh,
             bin_size_x, bin_size_y,
             num_bins_x, num_bins_y
@@ -214,6 +220,7 @@ class SegmentDensityFunction(Function):
         ctx.save_for_tensor = segment_pos
         ctx.segment_size_x = segment_size_x
         ctx.segment_size_y = segment_size_y
+        ctx.segment_weight = segment_weight
         ctx.xl, ctx.yl = xl, yl
         ctx.xh, ctx.yh = xh, yh
         ctx.bin_size_x = bin_size_x
@@ -272,11 +279,11 @@ class SegmentDensityFunction(Function):
         
         num_segments = segment_size_x.numel()
         if num_segments == 0:
-            # forward有19个参数: segment_pos, segment_size_x, segment_size_y, 
+            # forward有20个参数: segment_pos, segment_size_x, segment_size_y, segment_weight,
             # xl, yl, xh, yh, bin_size_x, bin_size_y, num_bins_x, num_bins_y,
             # exact_expkM, exact_expkN, inv_wu2_plus_wv2, wu_by_wu2_plus_wv2_half,
             # wv_by_wu2_plus_wv2_half, dct2_op, idct_idxst_op, idxst_idct_op
-            return (torch.zeros_like(segment_pos),) + (None,) * 18
+            return (torch.zeros_like(segment_pos),) + (None,) * 19
         
         device = segment_pos.device
         dtype = segment_pos.dtype
@@ -294,14 +301,20 @@ class SegmentDensityFunction(Function):
         # 获取电场值
         grad_x = field_map_x[bin_x, bin_y]
         grad_y = field_map_y[bin_x, bin_y]
+        segment_weight = ctx.segment_weight
+        if isinstance(segment_weight, torch.Tensor):
+            if segment_weight.device != grad_x.device:
+                segment_weight = segment_weight.to(grad_x.device)
+            grad_x = grad_x * segment_weight
+            grad_y = grad_y * segment_weight
         
         # 组合梯度
         grad_pos = torch.cat([grad_x, grad_y]) * grad_output
         
         logger.debug(f"Segment density backward: {(time.time() - tt) * 1000:.2f} ms")
         
-        # forward有19个参数，返回19个梯度
-        return (grad_pos,) + (None,) * 18
+        # forward有20个参数，返回20个梯度
+        return (grad_pos,) + (None,) * 19
 
 
 class SegmentDensityOp(nn.Module):
@@ -364,7 +377,7 @@ class SegmentDensityOp(nn.Module):
         self.wu_by_wu2_plus_wv2_half = wu * self.inv_wu2_plus_wv2 * 0.5
         self.wv_by_wu2_plus_wv2_half = wv * self.inv_wu2_plus_wv2 * 0.5
     
-    def forward(self, segment_pos, segment_size_x, segment_size_y, mode="density"):
+    def forward(self, segment_pos, segment_size_x, segment_size_y, mode="density", segment_weight=None):
         """
         计算segment密度
         
@@ -389,7 +402,7 @@ class SegmentDensityOp(nn.Module):
         
         if mode == "density":
             return compute_segment_rudy_density(
-                segment_pos, segment_size_x, segment_size_y,
+                segment_pos, segment_size_x, segment_size_y, segment_weight,
                 self.xl, self.yl, self.xh, self.yh,
                 self.bin_size_x, self.bin_size_y,
                 self.num_bins_x, self.num_bins_y
@@ -400,7 +413,7 @@ class SegmentDensityOp(nn.Module):
                 self._init_dct(segment_pos.device, segment_pos.dtype)
             
             return SegmentDensityFunction.apply(
-                segment_pos, segment_size_x, segment_size_y,
+                segment_pos, segment_size_x, segment_size_y, segment_weight,
                 self.xl, self.yl, self.xh, self.yh,
                 self.bin_size_x, self.bin_size_y,
                 self.num_bins_x, self.num_bins_y,

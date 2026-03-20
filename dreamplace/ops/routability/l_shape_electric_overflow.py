@@ -234,7 +234,7 @@ class LShapeElectricOverflow(nn.Module):
             dtype=dtype, device=device
         )
     
-    def _prepare_segment_data(self, segment_pos, segment_size_x, segment_size_y):
+    def _prepare_segment_data(self, segment_pos, segment_size_x, segment_size_y, segment_weight=None):
         """
         Prepare segment data for density computation.
         
@@ -254,6 +254,8 @@ class LShapeElectricOverflow(nn.Module):
         segment_area = segment_size_x * segment_size_y
         clamped_area = segment_size_x_clamped * segment_size_y_clamped
         ratio = segment_area / clamped_area.clamp(min=1e-10)
+        if isinstance(segment_weight, torch.Tensor):
+            ratio = ratio * segment_weight
         
         # Compute maximum impacted bins
         sqrt2_bin_x = sqrt2 * self.bin_size_x
@@ -289,7 +291,7 @@ class LShapeElectricOverflow(nn.Module):
             sorted_segment_map
         )
     
-    def forward(self, segment_pos, segment_size_x, segment_size_y):
+    def forward(self, segment_pos, segment_size_x, segment_size_y, segment_weight=None):
         """
         Compute density overflow for routing segments.
         
@@ -324,7 +326,12 @@ class LShapeElectricOverflow(nn.Module):
             num_impacted_bins_x,
             num_impacted_bins_y,
             sorted_segment_map
-        ) = self._prepare_segment_data(segment_pos, segment_size_x, segment_size_y)
+        ) = self._prepare_segment_data(
+            segment_pos,
+            segment_size_x,
+            segment_size_y,
+            segment_weight=segment_weight,
+        )
         
         # Compute density map
         density_map = SegmentDensityMapFunction.forward(
@@ -361,7 +368,7 @@ class LShapeElectricOverflow(nn.Module):
         
         return density_cost, max_density
     
-    def compute_density_map(self, segment_pos, segment_size_x, segment_size_y):
+    def compute_density_map(self, segment_pos, segment_size_x, segment_size_y, segment_weight=None):
         """
         Compute density map without overflow calculation.
         
@@ -390,7 +397,12 @@ class LShapeElectricOverflow(nn.Module):
             num_impacted_bins_x,
             num_impacted_bins_y,
             sorted_segment_map
-        ) = self._prepare_segment_data(segment_pos, segment_size_x, segment_size_y)
+        ) = self._prepare_segment_data(
+            segment_pos,
+            segment_size_x,
+            segment_size_y,
+            segment_weight=segment_weight,
+        )
         
         # Compute density map
         density_map = SegmentDensityMapFunction.forward(

@@ -348,6 +348,13 @@ class LShapeRoutabilityOp(nn.Module):
             total_supply, total_demand, total_cached, device, dtype
         )
 
+        target_demand_supply_ratio = None
+        if total_demand is not None and total_supply is not None:
+            total_supply_sum = total_supply.sum().clamp_min(1e-6)
+            target_demand_supply_ratio = float(
+                (total_demand.sum() / total_supply_sum).detach().item()
+            )
+
         if supply_h is None and demand_h is None and cached_h is None:
             cost_map_h, hotspot_map_h, ratio_h = total_cost, total_hotspot, total_ratio
         else:
@@ -388,6 +395,7 @@ class LShapeRoutabilityOp(nn.Module):
             "ggr_overflow_v": ggr_overflow_v,
             "effective_hotspot_weight": effective_hotspot_weight,
             "overflow_ratio": float(overflow_ratio.detach().item()),
+            "target_demand_supply_ratio": target_demand_supply_ratio,
         }
 
         return cost_map_h, cost_map_v, hotspot_map_h, hotspot_map_v, effective_hotspot_weight

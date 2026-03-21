@@ -349,10 +349,17 @@ class SegmentElectricPotentialFunction(Function):
             )
 
         supply_map = target_density.to(device=segment_pos.device, dtype=segment_pos.dtype)
+        current_demand_supply_ratio = float(
+            (
+                density_map.sum()
+                / supply_map.sum().clamp(min=1e-6)
+            ).detach().item()
+        )
+        SegmentElectricPotentialFunction.last_demand_supply_ratio = current_demand_supply_ratio
         logger.info(
             f"[L-shape supply/demand] demand_sum={density_map.sum().item():.3e}, "
             f"supply_sum={supply_map.sum().item():.3e}, "
-            f"ratio={density_map.sum().item() / max(supply_map.sum().item(), 1e-9):.2f}"
+            f"ratio={current_demand_supply_ratio:.2f}"
         )
 
         total_density = density_map.sum()
@@ -712,6 +719,7 @@ class LShapeElectricPotential(nn.Module):
         self.num_bins_y = num_bins_y
         self.padding = padding
         self.deterministic_flag = deterministic_flag
+        self.last_demand_supply_ratio = None
         self.fast_mode = fast_mode
         
         if isinstance(target_density, torch.Tensor):
@@ -1131,6 +1139,11 @@ class LShapeElectricPotential(nn.Module):
             self.idct_idxst,
             self.idxst_idct,
             self.fast_mode
+        )
+        self.last_demand_supply_ratio = getattr(
+            SegmentElectricPotentialFunction,
+            "last_demand_supply_ratio",
+            None,
         )
         
         return energy

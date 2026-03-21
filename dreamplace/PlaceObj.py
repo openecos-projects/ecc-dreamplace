@@ -435,6 +435,12 @@ class PlaceObj(nn.Module):
         self._l_shape_auto_disable_state = {}
         # ==========================================
 
+    def reset_l_shape_weight_state(self):
+        self._l_shape_weight_initialized = False
+        self.l_shape_last_weight = None
+        self.l_shape_last_target_weight = None
+        self.l_shape_last_grad_ratio = None
+
     @staticmethod
     def _telemetry_scalar(value):
         if value is None:
@@ -474,7 +480,16 @@ class PlaceObj(nn.Module):
         from dreamplace.ops.routability.l_shape_routability import LShapeRoutabilityOp
         
         if self.l_shape_routability_op is not None:
-            logging.info("L-shape routability already initialized")
+            self.l_shape_routability_op.update_targets(
+                target_density=target_density,
+                target_demand=target_demand,
+                target_density_h=target_density_h,
+                target_density_v=target_density_v,
+                target_demand_h=target_demand_h,
+                target_demand_v=target_demand_v,
+            )
+            self.use_l_shape_routability = True
+            logging.info("L-shape routability already initialized; refreshed targets and re-enabled")
             return
         
         self.l_shape_routability_op = LShapeRoutabilityOp(
@@ -1873,8 +1888,15 @@ class PlaceObj(nn.Module):
                         "tau",
                         "effective_hotspot_weight",
                         "resolver_agreement_ratio",
+                        "target_demand_supply_ratio",
                     )
                 }
+                density_op = getattr(self.l_shape_routability_op, "density_op", None)
+                self.soft_l_last_summary["current_demand_supply_ratio"] = (
+                    self._telemetry_scalar(
+                        getattr(density_op, "last_demand_supply_ratio", None)
+                    )
+                )
             
             # self.check_gradient(pos)
         # ==========================================

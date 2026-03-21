@@ -1164,6 +1164,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         "soft_l_tau": "tau",
                         "soft_l_effective_hotspot_weight": "effective_hotspot_weight",
                         "soft_l_resolver_agreement_ratio": "resolver_agreement_ratio",
+                        "soft_l_target_demand_supply_ratio": "target_demand_supply_ratio",
+                        "soft_l_current_demand_supply_ratio": "current_demand_supply_ratio",
                     }
                     for metric_field, summary_field in soft_field_map.items():
                         value = soft_summary.get(summary_field)
@@ -1182,6 +1184,102 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         "rebound_streak": 0,
                         "plateau_streak": 0,
                     }
+
+                def reset_l_shape_reenable_state():
+                    base_threshold = float(
+                        getattr(params, "l_shape_overflow_threshold", 0.3)
+                    )
+                    model._l_shape_reenable_threshold_base = base_threshold
+                    model._l_shape_reenable_threshold = base_threshold
+                    model._l_shape_reenable_count = 0
+                    model._l_shape_reenable_last_overflow = None
+                    model._l_shape_reenable_descend_streak = 0
+                    model._l_shape_ratio_last = None
+                    model._l_shape_ratio_rise_streak = 0
+                    model._l_shape_ratio_guard_disabled = False
+
+                def disable_l_shape_for_recovery(
+                    iteration,
+                    reason,
+                    update_threshold=False,
+                    inflation_round=None,
+                    ratio_info=None,
+                ):
+                    if not getattr(model, "use_l_shape_routability", False):
+                        return
+
+                    model.use_l_shape_routability = False
+                    model.enable_l_shape_routability = False
+                    if hasattr(model, "reset_l_shape_weight_state"):
+                        model.reset_l_shape_weight_state()
+                    reset_l_shape_auto_disable_state()
+
+                    base_threshold = float(
+                        getattr(
+                            model,
+                            "_l_shape_reenable_threshold_base",
+                            getattr(params, "l_shape_overflow_threshold", 0.3),
+                        )
+                    )
+                    current_threshold = float(
+                        getattr(
+                            model,
+                            "_l_shape_reenable_threshold",
+                            base_threshold,
+                        )
+                    )
+                    reenable_count = int(
+                        getattr(model, "_l_shape_reenable_count", 0)
+                    )
+                    next_threshold = current_threshold
+                    if update_threshold:
+                        reenable_count += 1
+                        next_threshold = current_threshold * 0.7
+                        model._l_shape_reenable_count = reenable_count
+                        model._l_shape_reenable_threshold = next_threshold
+
+                    model._l_shape_reenable_last_overflow = None
+                    model._l_shape_reenable_descend_streak = 0
+                    model._l_shape_ratio_last = None
+                    model._l_shape_ratio_rise_streak = 0
+
+                    if reason == "inflation":
+                        logging.info(
+                            "L-shape disabled due to inflation (round %d), "
+                            "will re-enable when overflow drops below threshold again "
+                            "after 5 consecutive decreases "
+                            "(next_threshold=%.4f, base_threshold=%.4f, reenable_count=%d)",
+                            inflation_round,
+                            next_threshold,
+                            base_threshold,
+                            reenable_count,
+                        )
+                    elif reason == "demand_supply_ratio_limit":
+                        model._l_shape_ratio_guard_disabled = True
+                        logging.info(
+                            "L-shape disabled due to demand/supply ratio limit at iteration %d: "
+                            "ratio=%.4f > 0.6500; permanently disabled for the remaining placement "
+                            "(reenable_threshold=%.4f, reenable_count=%d)",
+                            iteration,
+                            float((ratio_info or {}).get("current_ratio", float("nan"))),
+                            current_threshold,
+                            reenable_count,
+                        )
+                    elif reason == "demand_supply_ratio_rise":
+                        model._l_shape_ratio_guard_disabled = True
+                        logging.info(
+                            "L-shape disabled due to demand/supply ratio surge at iteration %d: "
+                            "ratio %.4f -> %.4f (rise_streak=%d, rel_increase=%.2f%%, "
+                            "permanently disabled for the remaining placement; "
+                            "reenable_threshold=%.4f, reenable_count=%d)",
+                            iteration,
+                            float((ratio_info or {}).get("prev_ratio", float("nan"))),
+                            float((ratio_info or {}).get("current_ratio", float("nan"))),
+                            int((ratio_info or {}).get("rise_streak", 0)),
+                            float((ratio_info or {}).get("rel_increase_pct", 0.0)),
+                            current_threshold,
+                            reenable_count,
+                        )
 
                 def maybe_auto_disable_l_shape(iteration, outer_update=False):
                     if not getattr(params, "l_shape_auto_disable_flag", False):
@@ -1312,6 +1410,60 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         overshoot_margin,
                         state.get("last_ov_ema_improvement", float("nan")),
                     )
+
+                def maybe_disable_l_shape_by_ratio(iteration):
+                    if not getattr(model, "use_l_shape_routability", False):
+                        return
+                    if int(getattr(model, "_l_shape_reenable_count", 0)) <= 0:
+                        return
+
+                    soft_summary = getattr(model, "soft_l_last_summary", None) or {}
+                    current_ratio = soft_summary.get("current_demand_supply_ratio")
+                    if current_ratio is None:
+                        current_ratio = soft_summary.get("target_demand_supply_ratio")
+                    if current_ratio is None or not math.isfinite(float(current_ratio)):
+                        return
+                    current_ratio = float(current_ratio)
+
+                    absolute_limit = 0.65
+                    relative_rise_limit = 0.03
+                    prev_ratio = getattr(model, "_l_shape_ratio_last", None)
+                    rise_streak = int(getattr(model, "_l_shape_ratio_rise_streak", 0))
+
+                    rel_increase = None
+                    if prev_ratio is not None and math.isfinite(prev_ratio) and prev_ratio > 1e-9:
+                        rel_increase = (current_ratio - prev_ratio) / prev_ratio
+                        if current_ratio > prev_ratio and rel_increase > relative_rise_limit:
+                            rise_streak += 1
+                        else:
+                            rise_streak = 0
+                    else:
+                        rise_streak = 0
+
+                    model._l_shape_ratio_last = current_ratio
+                    model._l_shape_ratio_rise_streak = rise_streak
+
+                    if current_ratio > absolute_limit:
+                        disable_l_shape_for_recovery(
+                            iteration,
+                            reason="demand_supply_ratio_limit",
+                            update_threshold=False,
+                            ratio_info={"current_ratio": current_ratio},
+                        )
+                        return
+
+                    if rise_streak >= 2 and rel_increase is not None:
+                        disable_l_shape_for_recovery(
+                            iteration,
+                            reason="demand_supply_ratio_rise",
+                            update_threshold=False,
+                            ratio_info={
+                                "prev_ratio": prev_ratio,
+                                "current_ratio": current_ratio,
+                                "rise_streak": rise_streak,
+                                "rel_increase_pct": rel_increase * 100.0,
+                            },
+                        )
 
                 def Lsub_stop_criterion(Lgamma_step, Llambda_density_weight_step, Lsub_step, metrics):
                     with torch.no_grad():
@@ -1484,10 +1636,50 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         if (
                             not model.enable_l_shape_routability
                             and not getattr(model, "_l_shape_auto_disabled", False)
+                            and not getattr(model, "_l_shape_ratio_guard_disabled", False)
                         ):
-                            # 条件1: overflow足够小时启用
-                            if cur_metric.overflow[-1] < getattr(params, 'l_shape_overflow_threshold', 0.3):
-                                model.enable_l_shape_routability = True
+                            current_overflow = float(cur_metric.overflow[-1])
+                            overflow_threshold = float(
+                                getattr(
+                                    model,
+                                    "_l_shape_reenable_threshold",
+                                    getattr(params, "l_shape_overflow_threshold", 0.3),
+                                )
+                            )
+                            reenable_count = int(
+                                getattr(model, "_l_shape_reenable_count", 0)
+                            )
+                            if reenable_count <= 0:
+                                if current_overflow < overflow_threshold:
+                                    model.enable_l_shape_routability = True
+                            else:
+                                last_overflow = getattr(
+                                    model,
+                                    "_l_shape_reenable_last_overflow",
+                                    None,
+                                )
+                                descend_streak = int(
+                                    getattr(
+                                        model,
+                                        "_l_shape_reenable_descend_streak",
+                                        0,
+                                    )
+                                )
+                                if (
+                                    last_overflow is not None
+                                    and math.isfinite(last_overflow)
+                                    and current_overflow < last_overflow - 1e-6
+                                ):
+                                    descend_streak += 1
+                                else:
+                                    descend_streak = 0
+                                model._l_shape_reenable_last_overflow = current_overflow
+                                model._l_shape_reenable_descend_streak = descend_streak
+                                if (
+                                    descend_streak >= 5
+                                    and current_overflow < overflow_threshold
+                                ):
+                                    model.enable_l_shape_routability = True
                             
                             # # 条件2: 也可以根据iteration启用
                             # if iteration >= getattr(params, 'l_shape_start_iteration', 100):
@@ -1666,7 +1858,11 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             
                             logging.info(f"L-shape routability enabled at iteration {iteration}, "
                                         f"overflow={cur_metric.overflow[-1]:.4f}, "
+                                        f"threshold={float(getattr(model, '_l_shape_reenable_threshold', getattr(params, 'l_shape_overflow_threshold', 0.3))):.4f}, "
+                                        f"descend_streak={int(getattr(model, '_l_shape_reenable_descend_streak', 0))}, "
                                         f"init time={((time.time() - t_l_shape_init) * 1000):.2f}ms")
+                            model._l_shape_reenable_last_overflow = None
+                            model._l_shape_reenable_descend_streak = 0
                             
                             # ========== 梯度正确性检查 (可选) ==========
                             if getattr(params, 'l_shape_gradient_check', False):
@@ -2440,6 +2636,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         )
 
                     maybe_auto_disable_l_shape(iteration, outer_update=False)
+                    maybe_disable_l_shape_by_ratio(iteration)
                     attach_l_shape_telemetry(cur_metric)
                     # actually reports the metric before step
                     logging.info(cur_metric)
@@ -2558,6 +2755,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 # L-shape routability 状态初始化
                 model.enable_l_shape_routability = False
                 reset_l_shape_auto_disable_state()
+                reset_l_shape_reenable_state()
 
                 # preparation for self-adaptive divergence check
                 overflow_list = [1]
@@ -2771,6 +2969,16 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 # reset best metric
                                 best_metric[0] = None
                                 best_pos[0] = None
+
+                                # disable L-shape during inflation recovery;
+                                # it will re-enable when overflow drops below threshold again
+                                if getattr(model, "use_l_shape_routability", False):
+                                    disable_l_shape_for_recovery(
+                                        iteration,
+                                        reason="inflation",
+                                        update_threshold=True,
+                                        inflation_round=num_area_adjust,
+                                    )
 
                                 break
 

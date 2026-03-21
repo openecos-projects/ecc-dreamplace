@@ -76,6 +76,8 @@ class EvalMetrics(object):
         self.soft_l_tau = None
         self.soft_l_effective_hotspot_weight = None
         self.soft_l_resolver_agreement_ratio = None
+        self.soft_l_target_demand_supply_ratio = None
+        self.soft_l_current_demand_supply_ratio = None
 
     def __str__(self):
         """
@@ -180,6 +182,14 @@ class EvalMetrics(object):
         if self.soft_l_resolver_agreement_ratio is not None:
             content += ", SoftAgree %.4f" % (
                 self.soft_l_resolver_agreement_ratio
+            )
+        if self.soft_l_target_demand_supply_ratio is not None:
+            content += ", SoftDSRatio %.4f" % (
+                self.soft_l_target_demand_supply_ratio
+            )
+        if self.soft_l_current_demand_supply_ratio is not None:
+            content += ", SoftLoadRatio %.4f" % (
+                self.soft_l_current_demand_supply_ratio
             )
         if self.gamma is not None:
             content += ", gamma %.6E" % (self.gamma)

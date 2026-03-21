@@ -1715,6 +1715,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 try:
                                     from dreamplace.ops.routability.l_shape_routability import (
                                         plot_l_shape_electric_overflow_map,
+                                        plot_l_shape_electric_potential_map,
                                         plot_segment_density_map,
                                         plot_soft_l_intermediate,
                                         plot_soft_l_scoring_maps,
@@ -1746,6 +1747,15 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                             title_prefix=f"L-shape Electric Overflow (iter={iteration})",
                                         )
                                         logging.info(f"L-shape electric overflow plot saved to {overflow_plot_path}")
+                                        potential_plot_path = os.path.join(
+                                            params.result_dir, f"l_shape_potential_iter{iteration}.png"
+                                        )
+                                        plot_l_shape_electric_potential_map(
+                                            l_shape_op,
+                                            output_path=potential_plot_path,
+                                            title_prefix=f"L-shape Electric Potential (iter={iteration})",
+                                        )
+                                        logging.info(f"L-shape electric potential plot saved to {potential_plot_path}")
                                         if getattr(l_shape_op, "soft_l_assignment", False) and \
                                            'soft_l_weights' in l_shape_op.cached_segments:
                                             soft_plot_path = os.path.join(
@@ -1882,8 +1892,26 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                                 supply_map = getattr(
                                                     density_driver, "target_density", None
                                                 )
+                                                supply_map_h = getattr(
+                                                    density_driver, "target_density_h", None
+                                                )
+                                                supply_map_v = getattr(
+                                                    density_driver, "target_density_v", None
+                                                )
                                                 demand_map = getattr(
                                                     density_driver, "target_demand", None
+                                                )
+                                                demand_map_h = getattr(
+                                                    density_driver, "target_demand_h", None
+                                                )
+                                                demand_map_v = getattr(
+                                                    density_driver, "target_demand_v", None
+                                                )
+                                                density_map_h = getattr(
+                                                    l_shape_op, "cached_density_map_h", None
+                                                )
+                                                density_map_v = getattr(
+                                                    l_shape_op, "cached_density_map_v", None
                                                 )
                                                 area_per_track_buf = getattr(
                                                     density_driver, "area_per_track", None
@@ -1950,34 +1978,141 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                                             )
 
                                                     if calibrated_area_per_track is not None:
-                                                        demand_in_tracks = (
-                                                            density_map
-                                                            / calibrated_area_per_track
+                                                        split_available = (
+                                                            isinstance(density_map_h, torch.Tensor)
+                                                            and isinstance(density_map_v, torch.Tensor)
+                                                            and isinstance(supply_map_h, torch.Tensor)
+                                                            and isinstance(supply_map_v, torch.Tensor)
                                                         )
-                                                        overflow_in_tracks = (
-                                                            demand_in_tracks - supply_map
-                                                        ).clamp(min=0.0)
-                                                        utilization = demand_in_tracks / supply_map.clamp(
-                                                            min=1e-6
-                                                        )
-                                                        l_shape_overflow = float(
-                                                            (
-                                                                overflow_in_tracks
-                                                                * calibrated_area_per_track
+                                                        if split_available:
+                                                            density_map_h = density_map_h.to(
+                                                                density_map.device,
+                                                                dtype=density_map.dtype,
                                                             )
-                                                            .sum()
-                                                            .item()
-                                                        )
-                                                        overflow_ratio = float(
-                                                            (
-                                                                overflow_in_tracks.sum()
-                                                                / supply_map.sum().clamp(min=1e-12)
+                                                            density_map_v = density_map_v.to(
+                                                                density_map.device,
+                                                                dtype=density_map.dtype,
                                                             )
-                                                            .item()
-                                                        )
-                                                        l_shape_max_density = float(
-                                                            utilization.max().item()
-                                                        )
+                                                            supply_map_h = supply_map_h.to(
+                                                                density_map.device,
+                                                                dtype=density_map.dtype,
+                                                            )
+                                                            supply_map_v = supply_map_v.to(
+                                                                density_map.device,
+                                                                dtype=density_map.dtype,
+                                                            )
+                                                            if (
+                                                                isinstance(demand_map_h, torch.Tensor)
+                                                                and demand_map_h.dim() == 2
+                                                            ):
+                                                                demand_map_h = demand_map_h.to(
+                                                                    density_map.device,
+                                                                    dtype=density_map.dtype,
+                                                                )
+                                                            else:
+                                                                demand_map_h = None
+                                                            if (
+                                                                isinstance(demand_map_v, torch.Tensor)
+                                                                and demand_map_v.dim() == 2
+                                                            ):
+                                                                demand_map_v = demand_map_v.to(
+                                                                    density_map.device,
+                                                                    dtype=density_map.dtype,
+                                                                )
+                                                            else:
+                                                                demand_map_v = None
+
+                                                            calibrated_area_per_track_h = calibrated_area_per_track
+                                                            calibrated_area_per_track_v = calibrated_area_per_track
+                                                            if demand_map_h is not None:
+                                                                total_density_h = density_map_h.sum()
+                                                                total_demand_h = demand_map_h.sum()
+                                                                if total_density_h > 0 and total_demand_h > 0:
+                                                                    calibrated_area_per_track_h = (
+                                                                        total_density_h / total_demand_h
+                                                                    )
+                                                            if demand_map_v is not None:
+                                                                total_density_v = density_map_v.sum()
+                                                                total_demand_v = demand_map_v.sum()
+                                                                if total_density_v > 0 and total_demand_v > 0:
+                                                                    calibrated_area_per_track_v = (
+                                                                        total_density_v / total_demand_v
+                                                                    )
+
+                                                            demand_h_in_tracks = (
+                                                                density_map_h
+                                                                / calibrated_area_per_track_h
+                                                            )
+                                                            demand_v_in_tracks = (
+                                                                density_map_v
+                                                                / calibrated_area_per_track_v
+                                                            )
+                                                            overflow_h_in_tracks = (
+                                                                demand_h_in_tracks - supply_map_h
+                                                            ).clamp(min=0.0)
+                                                            overflow_v_in_tracks = (
+                                                                demand_v_in_tracks - supply_map_v
+                                                            ).clamp(min=0.0)
+                                                            utilization_h = demand_h_in_tracks / supply_map_h.clamp(
+                                                                min=1e-6
+                                                            )
+                                                            utilization_v = demand_v_in_tracks / supply_map_v.clamp(
+                                                                min=1e-6
+                                                            )
+                                                            overflow_area = (
+                                                                overflow_h_in_tracks
+                                                                * calibrated_area_per_track_h
+                                                                + overflow_v_in_tracks
+                                                                * calibrated_area_per_track_v
+                                                            )
+                                                            l_shape_overflow = float(
+                                                                overflow_area.sum().item()
+                                                            )
+                                                            overflow_ratio = float(
+                                                                (
+                                                                    overflow_h_in_tracks.sum()
+                                                                    + overflow_v_in_tracks.sum()
+                                                                )
+                                                                / (
+                                                                    supply_map_h.sum()
+                                                                    + supply_map_v.sum()
+                                                                ).clamp(min=1e-12)
+                                                            )
+                                                            l_shape_max_density = float(
+                                                                torch.maximum(
+                                                                    utilization_h.max(),
+                                                                    utilization_v.max(),
+                                                                ).item()
+                                                            )
+                                                        else:
+                                                            demand_in_tracks = (
+                                                                density_map
+                                                                / calibrated_area_per_track
+                                                            )
+                                                            overflow_in_tracks = (
+                                                                demand_in_tracks - supply_map
+                                                            ).clamp(min=0.0)
+                                                            utilization = demand_in_tracks / supply_map.clamp(
+                                                                min=1e-6
+                                                            )
+                                                            l_shape_overflow = float(
+                                                                (
+                                                                    overflow_in_tracks
+                                                                    * calibrated_area_per_track
+                                                                )
+                                                                .sum()
+                                                                .item()
+                                                            )
+                                                            overflow_ratio = float(
+                                                                (
+                                                                    overflow_in_tracks.sum()
+                                                                    / supply_map.sum().clamp(min=1e-12)
+                                                                )
+                                                                .item()
+                                                            )
+                                                            l_shape_max_density = float(
+                                                                utilization.max().item()
+                                                            )
 
                                             # 若potential口径不可用，退化为overflow_op口径
                                             if (
@@ -2181,6 +2316,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 try:
                                     from dreamplace.ops.routability.l_shape_routability import (
                                         plot_l_shape_electric_overflow_map,
+                                        plot_l_shape_electric_potential_map,
                                         plot_segment_density_map,
                                         plot_soft_l_intermediate,
                                         plot_soft_l_scoring_maps,
@@ -2211,6 +2347,14 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                             l_shape_op,
                                             output_path=overflow_plot_path,
                                             title_prefix=f"L-shape Electric Overflow (iter={iteration})",
+                                        )
+                                        potential_plot_path = os.path.join(
+                                            params.result_dir, f"l_shape_potential_iter{iteration}.png"
+                                        )
+                                        plot_l_shape_electric_potential_map(
+                                            l_shape_op,
+                                            output_path=potential_plot_path,
+                                            title_prefix=f"L-shape Electric Potential (iter={iteration})",
                                         )
                                         if getattr(l_shape_op, "soft_l_assignment", False) and \
                                            'soft_l_weights' in l_shape_op.cached_segments:

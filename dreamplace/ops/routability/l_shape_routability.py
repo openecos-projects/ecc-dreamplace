@@ -131,6 +131,10 @@ class LShapeRoutabilityOp(nn.Module):
                 num_bins_y=num_bins_y,
                 target_density=target_density,
                 target_demand=target_demand,
+                target_density_h=target_density_h,
+                target_density_v=target_density_v,
+                target_demand_h=target_demand_h,
+                target_demand_v=target_demand_v,
                 # padding=1,  # 边界填充
                 fast_mode=False
             )
@@ -206,6 +210,14 @@ class LShapeRoutabilityOp(nn.Module):
             updated = True
         if hasattr(self.density_op, "set_target_demand"):
             self.density_op.set_target_demand(target_demand)
+            updated = True
+        if hasattr(self.density_op, "set_directional_targets"):
+            self.density_op.set_directional_targets(
+                target_density_h=target_density_h,
+                target_density_v=target_density_v,
+                target_demand_h=target_demand_h,
+                target_demand_v=target_demand_v,
+            )
             updated = True
 
         if target_density_h is not None:
@@ -1369,14 +1381,71 @@ def plot_soft_l_scoring_maps(soft_debug, output_path, title_prefix="Soft L Scori
 
 
 def plot_l_shape_electric_overflow_map(l_shape_op, output_path, title_prefix="L-shape Electric Overflow"):
-    """Plot the aggregate overflow map that is fed into the electric-potential solver."""
+    """Plot the overflow map(s) fed into the electric-potential solver."""
     import matplotlib.pyplot as plt
     import numpy as np
 
+    overflow_map, overflow_map_h, overflow_map_v, split_available, _ = _build_l_shape_electric_plot_maps(
+        l_shape_op
+    )
+
+    def render_map(ax, map_tensor, title):
+        map_np = map_tensor.numpy()
+        has_negative = float(np.min(map_np)) < -1e-9
+        if has_negative:
+            vmax = max(1e-6, float(np.percentile(np.abs(map_np), 99)))
+            im = ax.imshow(
+                map_np.T,
+                origin="lower",
+                cmap="coolwarm",
+                aspect="equal",
+                vmin=-vmax,
+                vmax=vmax,
+            )
+        else:
+            vmax = max(1e-6, float(np.percentile(map_np, 99)))
+            im = ax.imshow(
+                map_np.T,
+                origin="lower",
+                cmap="plasma",
+                aspect="equal",
+                vmin=0.0,
+                vmax=vmax,
+            )
+        positive_ratio = float(np.mean(map_np > 0))
+        ax.set_title(
+            f"{title}\nmean={float(map_np.mean()):.4e} "
+            f"max={float(map_np.max()):.4e} pos={positive_ratio:.1%}"
+        )
+        ax.set_xlabel("Bin X")
+        ax.set_ylabel("Bin Y")
+        return im
+
+    if split_available and isinstance(overflow_map_h, torch.Tensor) and isinstance(overflow_map_v, torch.Tensor):
+        fig, axes = plt.subplots(1, 3, figsize=(24, 8), constrained_layout=True)
+        im_h = render_map(axes[0], overflow_map_h, f"{title_prefix} H")
+        im_v = render_map(axes[1], overflow_map_v, f"{title_prefix} V")
+        im_t = render_map(axes[2], overflow_map, f"{title_prefix} Total")
+        fig.colorbar(im_h, ax=axes[0], fraction=0.046, pad=0.04, label="Overflow (area units)")
+        fig.colorbar(im_v, ax=axes[1], fraction=0.046, pad=0.04, label="Overflow (area units)")
+        fig.colorbar(im_t, ax=axes[2], fraction=0.046, pad=0.04, label="Overflow (area units)")
+    else:
+        fig, ax = plt.subplots(figsize=(10, 10))
+        im = render_map(ax, overflow_map, title_prefix)
+        fig.colorbar(im, ax=ax, label="Overflow (area units)")
+
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    logger.info("L-shape electric overflow plot saved to %s", output_path)
+
+
+def _build_l_shape_electric_plot_maps(l_shape_op):
     density_map = getattr(l_shape_op, "cached_density_map", None)
+    density_map_h = getattr(l_shape_op, "cached_density_map_h", None)
+    density_map_v = getattr(l_shape_op, "cached_density_map_v", None)
     density_op = getattr(l_shape_op, "density_op", None)
     if density_map is None or density_op is None:
-        raise ValueError("Missing cached density map or density op for overflow plotting")
+        raise ValueError("Missing cached density map or density op for electric plotting")
 
     def prepare_tensor(value):
         if not isinstance(value, torch.Tensor):
@@ -1388,21 +1457,29 @@ def plot_l_shape_electric_overflow_map(l_shape_op, output_path, title_prefix="L-
         return value.to(dtype=torch.float32)
 
     density_map = prepare_tensor(density_map)
+    density_map_h = prepare_tensor(density_map_h)
+    density_map_v = prepare_tensor(density_map_v)
     target_density = prepare_tensor(getattr(density_op, "target_density", None))
     target_demand = prepare_tensor(getattr(density_op, "target_demand", None))
+    target_density_h = prepare_tensor(getattr(density_op, "target_density_h", None))
+    target_density_v = prepare_tensor(getattr(density_op, "target_density_v", None))
+    target_demand_h = prepare_tensor(getattr(density_op, "target_demand_h", None))
+    target_demand_v = prepare_tensor(getattr(density_op, "target_demand_v", None))
     area_per_track = prepare_tensor(getattr(density_op, "area_per_track", None))
 
     if not isinstance(target_density, torch.Tensor) or target_density.dim() != 2:
         raise TypeError(
-            "plot_l_shape_electric_overflow_map expects a 2D routing supply tensor in density_op.target_density"
+            "L-shape electric plotting expects a 2D routing supply tensor in density_op.target_density"
+        )
+    if not isinstance(target_demand, torch.Tensor) or target_demand.dim() != 2:
+        raise TypeError(
+            "L-shape electric plotting expects a 2D routing demand tensor in density_op.target_demand"
         )
 
     overflow_map = density_map.clone()
+    overflow_map_h = None
+    overflow_map_v = None
     supply_map = target_density
-    if not isinstance(target_demand, torch.Tensor) or target_demand.dim() != 2:
-        raise TypeError(
-            "plot_l_shape_electric_overflow_map expects a 2D routing demand tensor in density_op.target_demand"
-        )
 
     if isinstance(area_per_track, torch.Tensor) and area_per_track.numel() == 1 and float(area_per_track.item()) > 0:
         calibrated_area_per_track = float(area_per_track.item())
@@ -1413,48 +1490,132 @@ def plot_l_shape_electric_overflow_map(l_shape_op, output_path, title_prefix="L-
             total_density / total_demand if total_density > 0 and total_demand > 0 else 0.0
         )
 
-    if calibrated_area_per_track > 0:
-        demand_in_tracks = density_map / calibrated_area_per_track
-        overflow_in_tracks = torch.relu(demand_in_tracks - supply_map)
-        overflow_map = overflow_in_tracks * calibrated_area_per_track
-
-    overflow_np = overflow_map.numpy()
-    fig, ax = plt.subplots(figsize=(10, 10))
-
-    has_negative = float(np.min(overflow_np)) < -1e-9
-    if has_negative:
-        vmax = max(1e-6, float(np.percentile(np.abs(overflow_np), 99)))
-        im = ax.imshow(
-            overflow_np.T,
-            origin="lower",
-            cmap="coolwarm",
-            aspect="equal",
-            vmin=-vmax,
-            vmax=vmax,
-        )
-    else:
-        vmax = max(1e-6, float(np.percentile(overflow_np, 99)))
-        im = ax.imshow(
-            overflow_np.T,
-            origin="lower",
-            cmap="plasma",
-            aspect="equal",
-            vmin=0.0,
-            vmax=vmax,
-        )
-
-    positive_ratio = float(np.mean(overflow_np > 0))
-    ax.set_title(
-        f"{title_prefix} (mean={float(overflow_np.mean()):.4e}, "
-        f"max={float(overflow_np.max()):.4e}, pos={positive_ratio:.1%})"
+    split_available = (
+        isinstance(density_map_h, torch.Tensor)
+        and isinstance(density_map_v, torch.Tensor)
+        and isinstance(target_density_h, torch.Tensor)
+        and isinstance(target_density_v, torch.Tensor)
+        and density_map_h.shape == target_density_h.shape
+        and density_map_v.shape == target_density_v.shape
     )
-    ax.set_xlabel("Bin X")
-    ax.set_ylabel("Bin Y")
-    cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label("Overflow (area units)")
+
+    if calibrated_area_per_track > 0:
+        if split_available:
+            calibrated_area_per_track_h = calibrated_area_per_track
+            calibrated_area_per_track_v = calibrated_area_per_track
+            if isinstance(target_demand_h, torch.Tensor) and target_demand_h.dim() == 2:
+                total_density_h = float(density_map_h.sum().item())
+                total_demand_h = float(target_demand_h.sum().item())
+                if total_density_h > 0 and total_demand_h > 0:
+                    calibrated_area_per_track_h = total_density_h / total_demand_h
+            if isinstance(target_demand_v, torch.Tensor) and target_demand_v.dim() == 2:
+                total_density_v = float(density_map_v.sum().item())
+                total_demand_v = float(target_demand_v.sum().item())
+                if total_density_v > 0 and total_demand_v > 0:
+                    calibrated_area_per_track_v = total_density_v / total_demand_v
+
+            demand_h_in_tracks = density_map_h / calibrated_area_per_track_h
+            demand_v_in_tracks = density_map_v / calibrated_area_per_track_v
+            overflow_map_h = torch.relu(demand_h_in_tracks - target_density_h) * calibrated_area_per_track_h
+            overflow_map_v = torch.relu(demand_v_in_tracks - target_density_v) * calibrated_area_per_track_v
+            overflow_map = overflow_map_h + overflow_map_v
+        else:
+            demand_in_tracks = density_map / calibrated_area_per_track
+            overflow_in_tracks = torch.relu(demand_in_tracks - supply_map)
+            overflow_map = overflow_in_tracks * calibrated_area_per_track
+
+    return overflow_map, overflow_map_h, overflow_map_v, split_available, density_op
+
+
+def plot_l_shape_electric_potential_map(l_shape_op, output_path, title_prefix="L-shape Electric Potential"):
+    """Plot the potential map(s) reconstructed from the electric overflow maps."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    overflow_map, overflow_map_h, overflow_map_v, split_available, density_op = _build_l_shape_electric_plot_maps(
+        l_shape_op
+    )
+
+    ref_tensor = getattr(density_op, "bin_center_x", None)
+    if not isinstance(ref_tensor, torch.Tensor):
+        target_density = getattr(density_op, "target_density", None)
+        if not isinstance(target_density, torch.Tensor):
+            raise ValueError("L-shape electric potential plot requires density_op.target_density")
+        density_op._init_bins(target_density.device, target_density.dtype)
+        ref_tensor = getattr(density_op, "bin_center_x", None)
+    if not isinstance(ref_tensor, torch.Tensor):
+        raise ValueError("L-shape electric potential plot requires initialized density_op bin centers")
+
+    if (
+        getattr(density_op, "idct2", None) is None
+        or getattr(density_op, "dct2", None) is None
+        or getattr(density_op, "inv_wu2_plus_wv2", None) is None
+    ):
+        density_op._init_dct(ref_tensor.device, ref_tensor.dtype)
+    device = ref_tensor.device
+    dtype = ref_tensor.dtype
+    bin_area = float(density_op.bin_size_x * density_op.bin_size_y)
+
+    def compute_potential(map_tensor):
+        map_tensor = map_tensor.to(device=device, dtype=dtype)
+        overflow_map_normalized = map_tensor * (1.0 / bin_area)
+        auv = density_op.dct2.forward(overflow_map_normalized)
+        potential_map = density_op.idct2.forward(auv * density_op.inv_wu2_plus_wv2)
+        potential_map = potential_map * bin_area
+        return potential_map.detach().cpu().to(dtype=torch.float32)
+
+    def render_map(ax, map_tensor, title):
+        map_np = map_tensor.numpy()
+        has_negative = float(np.min(map_np)) < -1e-9
+        if has_negative:
+            vmax = max(1e-6, float(np.percentile(np.abs(map_np), 99)))
+            im = ax.imshow(
+                map_np.T,
+                origin="lower",
+                cmap="coolwarm",
+                aspect="equal",
+                vmin=-vmax,
+                vmax=vmax,
+            )
+        else:
+            vmin = float(np.percentile(map_np, 1))
+            vmax = max(vmin + 1e-6, float(np.percentile(map_np, 99)))
+            im = ax.imshow(
+                map_np.T,
+                origin="lower",
+                cmap="viridis",
+                aspect="equal",
+                vmin=vmin,
+                vmax=vmax,
+            )
+        ax.set_title(
+            f"{title}\nmean={float(map_np.mean()):.4e} "
+            f"max={float(map_np.max()):.4e} min={float(map_np.min()):.4e}"
+        )
+        ax.set_xlabel("Bin X")
+        ax.set_ylabel("Bin Y")
+        return im
+
+    if split_available and isinstance(overflow_map_h, torch.Tensor) and isinstance(overflow_map_v, torch.Tensor):
+        potential_map_h = compute_potential(overflow_map_h)
+        potential_map_v = compute_potential(overflow_map_v)
+        potential_map = potential_map_h + potential_map_v
+        fig, axes = plt.subplots(1, 3, figsize=(24, 8), constrained_layout=True)
+        im_h = render_map(axes[0], potential_map_h, f"{title_prefix} H")
+        im_v = render_map(axes[1], potential_map_v, f"{title_prefix} V")
+        im_t = render_map(axes[2], potential_map, f"{title_prefix} Total")
+        fig.colorbar(im_h, ax=axes[0], fraction=0.046, pad=0.04, label="Potential")
+        fig.colorbar(im_v, ax=axes[1], fraction=0.046, pad=0.04, label="Potential")
+        fig.colorbar(im_t, ax=axes[2], fraction=0.046, pad=0.04, label="Potential")
+    else:
+        potential_map = compute_potential(overflow_map)
+        fig, ax = plt.subplots(figsize=(10, 10))
+        im = render_map(ax, potential_map, title_prefix)
+        fig.colorbar(im, ax=ax, label="Potential")
+
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close()
-    logger.info("L-shape electric overflow plot saved to %s", output_path)
+    logger.info("L-shape electric potential plot saved to %s", output_path)
 
 
 def plot_segment_density_map(density_map, output_path, title="Segment Density Map", colormap="hot"):

@@ -70,6 +70,7 @@ class SegmentElectricPotentialFunction(Function):
         segment_size_y,
         segment_is_horizontal,
         segment_weight,
+        directional_targets,
         segment_size_x_clamped,
         segment_size_y_clamped,
         offset_x,
@@ -106,137 +107,174 @@ class SegmentElectricPotentialFunction(Function):
         Compute electric potential energy for segments.
         """
         tt = time.time()
-        
-        # Compute density map using C++/CUDA backend
+
+        def _prepare_optional_map(value):
+            if not isinstance(value, torch.Tensor):
+                return None
+            if value.dim() != 2:
+                return None
+            return value.to(device=segment_pos.device, dtype=segment_pos.dtype)
+
+        def _build_subset(mask):
+            if mask is None or mask.numel() == 0 or mask.sum().item() == 0:
+                return None
+            idx = torch.nonzero(mask, as_tuple=True)[0]
+            seg_llx = segment_pos[:num_segments][idx]
+            seg_lly = segment_pos[num_segments:][idx]
+            seg_pos = torch.cat([seg_llx, seg_lly], dim=0)
+            seg_sx = segment_size_x[idx]
+            seg_sy = segment_size_y[idx]
+            seg_sw = segment_weight[idx] if isinstance(segment_weight, torch.Tensor) else None
+
+            sqrt2 = math.sqrt(2)
+            seg_sx_clamped = seg_sx
+            seg_sy_clamped = seg_sy
+            seg_off_x = (seg_sx - seg_sx_clamped).mul(0.5)
+            seg_off_y = (seg_sy - seg_sy_clamped).mul(0.5)
+            seg_area = seg_sx * seg_sy
+            seg_clamped_area = seg_sx_clamped * seg_sy_clamped
+            seg_ratio = seg_area / seg_clamped_area.clamp(min=1e-10)
+            if isinstance(seg_sw, torch.Tensor):
+                seg_ratio = seg_ratio * seg_sw
+            sqrt2_bin_x = sqrt2 * bin_size_x
+            sqrt2_bin_y = sqrt2 * bin_size_y
+            seg_num_impacted_bins_x = 0
+            seg_num_impacted_bins_y = 0
+            if seg_sx.numel() > 0:
+                seg_num_impacted_bins_x = int(
+                    ((seg_sx.max() + 2 * sqrt2_bin_x) / bin_size_x)
+                    .ceil().clamp(max=num_bins_x).item()
+                )
+                seg_num_impacted_bins_y = int(
+                    ((seg_sy.max() + 2 * sqrt2_bin_y) / bin_size_y)
+                    .ceil().clamp(max=num_bins_y).item()
+                )
+                seg_sorted_map = torch.argsort(seg_sx).to(torch.int32)
+            else:
+                seg_sorted_map = torch.tensor([], dtype=torch.int32, device=seg_pos.device)
+            return {
+                "indices": idx,
+                "segment_pos": seg_pos,
+                "segment_size_x": seg_sx,
+                "segment_size_y": seg_sy,
+                "segment_size_x_clamped": seg_sx_clamped,
+                "segment_size_y_clamped": seg_sy_clamped,
+                "offset_x": seg_off_x,
+                "offset_y": seg_off_y,
+                "ratio": seg_ratio,
+                "num_impacted_bins_x": seg_num_impacted_bins_x,
+                "num_impacted_bins_y": seg_num_impacted_bins_y,
+                "sorted_segment_map": seg_sorted_map,
+                "num_segments": int(seg_sx.numel()),
+            }
+
+        def _compute_density_map(prepared):
+            if prepared is None or prepared["num_segments"] == 0:
+                return torch.zeros_like(initial_density_map)
+            return SegmentDensityMapFunction.forward(
+                prepared["segment_pos"],
+                prepared["segment_size_x"],
+                prepared["segment_size_y"],
+                prepared["segment_size_x_clamped"],
+                prepared["segment_size_y_clamped"],
+                prepared["offset_x"],
+                prepared["offset_y"],
+                prepared["ratio"],
+                bin_center_x,
+                bin_center_y,
+                initial_density_map,
+                target_density,
+                xl, yl, xh, yh,
+                bin_size_x, bin_size_y,
+                prepared["num_segments"],
+                padding,
+                padding_mask,
+                num_bins_x, num_bins_y,
+                prepared["num_impacted_bins_x"],
+                prepared["num_impacted_bins_y"],
+                deterministic_flag,
+                prepared["sorted_segment_map"],
+            )
+
+        def _calibrate_area_per_track(total_density, total_demand):
+            if total_demand > 0 and total_density > 0:
+                if isinstance(area_per_track, torch.Tensor) and area_per_track.numel() == 1:
+                    if (area_per_track <= 0).all():
+                        area_per_track.fill_(total_density / total_demand)
+                    return area_per_track.to(device=segment_pos.device, dtype=segment_pos.dtype)
+                return total_density / total_demand
+            return None
+
+        def _calibrate_branch_area_per_track(density_map_local, demand_map_local, fallback=None):
+            if isinstance(demand_map_local, torch.Tensor) and demand_map_local.dim() == 2:
+                total_density_local = density_map_local.sum()
+                total_demand_local = demand_map_local.sum()
+                calibrated_local = _calibrate_area_per_track(total_density_local, total_demand_local)
+                if calibrated_local is not None:
+                    return calibrated_local
+            return fallback
+
+        def _compute_overflow_components(density_map_local, supply_map_local, calibrated_area_per_track):
+            demand_in_tracks = density_map_local / calibrated_area_per_track
+            utilization = demand_in_tracks / supply_map_local.clamp(min=1e-6)
+            overflow_in_tracks = (demand_in_tracks - supply_map_local).clamp(min=0)
+            overflow_map_local = overflow_in_tracks * calibrated_area_per_track
+            return overflow_map_local, utilization
+
+        def _compute_field_and_energy(overflow_map_local):
+            overflow_map_normalized_local = overflow_map_local.clone()
+            overflow_map_normalized_local.mul_(1.0 / bin_area)
+            auv_local = dct2.forward(overflow_map_normalized_local)
+            field_map_x_local = idxst_idct.forward(
+                auv_local.mul(wu_by_wu2_plus_wv2_half)
+            )
+            field_map_y_local = idct_idxst.forward(
+                auv_local.mul(wv_by_wu2_plus_wv2_half)
+            )
+            if fast_mode:
+                energy_local = torch.zeros(1, dtype=segment_pos.dtype, device=segment_pos.device)
+            else:
+                potential_map_local = idct2.forward(auv_local.mul(inv_wu2_plus_wv2))
+                potential_map_local.mul_(bin_area)
+                energy_local = potential_map_local.mul(overflow_map_normalized_local).sum()
+            return overflow_map_normalized_local, field_map_x_local, field_map_y_local, energy_local
+
+        target_density_h = None
+        target_density_v = None
+        target_demand_h = None
+        target_demand_v = None
+        if isinstance(directional_targets, (tuple, list)) and len(directional_targets) == 4:
+            target_density_h = _prepare_optional_map(directional_targets[0])
+            target_density_v = _prepare_optional_map(directional_targets[1])
+            target_demand_h = _prepare_optional_map(directional_targets[2])
+            target_demand_v = _prepare_optional_map(directional_targets[3])
+
         density_map_h = None
         density_map_v = None
+        ctx.hv_split_active = False
+        ctx.h_split_data = None
+        ctx.v_split_data = None
+
         hv_split = isinstance(segment_is_horizontal, torch.Tensor) and segment_is_horizontal.numel() == num_segments
+        directional_split = (
+            hv_split
+            and isinstance(target_density_h, torch.Tensor)
+            and target_density_h.dim() == 2
+            and isinstance(target_density_v, torch.Tensor)
+            and target_density_v.dim() == 2
+        )
+
         if hv_split:
-            # Split demand into H/V components
-            def _build_subset(mask):
-                if mask is None or mask.numel() == 0 or mask.sum().item() == 0:
-                    return None
-                idx = torch.nonzero(mask, as_tuple=True)[0]
-                seg_llx = segment_pos[:num_segments][idx]
-                seg_lly = segment_pos[num_segments:][idx]
-                seg_pos = torch.cat([seg_llx, seg_lly], dim=0)
-                seg_sx = segment_size_x[idx]
-                seg_sy = segment_size_y[idx]
-                seg_sw = segment_weight[idx] if isinstance(segment_weight, torch.Tensor) else None
-                return seg_pos, seg_sx, seg_sy, seg_sw
-
-            def _prepare(seg_pos, seg_sx, seg_sy, seg_sw):
-                sqrt2 = math.sqrt(2)
-                seg_sx_clamped = seg_sx
-                seg_sy_clamped = seg_sy
-                seg_off_x = (seg_sx - seg_sx_clamped).mul(0.5)
-                seg_off_y = (seg_sy - seg_sy_clamped).mul(0.5)
-                seg_area = seg_sx * seg_sy
-                seg_clamped_area = seg_sx_clamped * seg_sy_clamped
-                seg_ratio = seg_area / seg_clamped_area.clamp(min=1e-10)
-                if isinstance(seg_sw, torch.Tensor):
-                    seg_ratio = seg_ratio * seg_sw
-                sqrt2_bin_x = sqrt2 * bin_size_x
-                sqrt2_bin_y = sqrt2 * bin_size_y
-                if seg_sx.numel() > 0:
-                    seg_num_impacted_bins_x = int(
-                        ((seg_sx.max() + 2 * sqrt2_bin_x) / bin_size_x)
-                        .ceil().clamp(max=num_bins_x).item()
-                    )
-                    seg_num_impacted_bins_y = int(
-                        ((seg_sy.max() + 2 * sqrt2_bin_y) / bin_size_y)
-                        .ceil().clamp(max=num_bins_y).item()
-                    )
-                else:
-                    seg_num_impacted_bins_x = 0
-                    seg_num_impacted_bins_y = 0
-                if seg_sx.numel() > 0:
-                    seg_sorted_map = torch.argsort(seg_sx).to(torch.int32)
-                else:
-                    seg_sorted_map = torch.tensor([], dtype=torch.int32, device=seg_pos.device)
-                return (
-                    seg_sx_clamped, seg_sy_clamped,
-                    seg_off_x, seg_off_y, seg_ratio,
-                    seg_num_impacted_bins_x, seg_num_impacted_bins_y,
-                    seg_sorted_map
-                )
-
             mask_h = segment_is_horizontal.to(torch.bool)
             mask_v = ~mask_h
-            subset_h = _build_subset(mask_h)
-            subset_v = _build_subset(mask_v)
-
-            density_map_h = torch.zeros_like(initial_density_map)
-            density_map_v = torch.zeros_like(initial_density_map)
-
-            if subset_h is not None:
-                h_pos, h_sx, h_sy, h_sw = subset_h
-                (
-                    h_sx_clamped, h_sy_clamped,
-                    h_off_x, h_off_y, h_ratio,
-                    h_imp_x, h_imp_y,
-                    h_sorted_map
-                ) = _prepare(h_pos, h_sx, h_sy, h_sw)
-                density_map_h = SegmentDensityMapFunction.forward(
-                    h_pos,
-                    h_sx,
-                    h_sy,
-                    h_sx_clamped,
-                    h_sy_clamped,
-                    h_off_x,
-                    h_off_y,
-                    h_ratio,
-                    bin_center_x,
-                    bin_center_y,
-                    initial_density_map,
-                    target_density,
-                    xl, yl, xh, yh,
-                    bin_size_x, bin_size_y,
-                    h_sx.numel(),
-                    padding,
-                    padding_mask,
-                    num_bins_x, num_bins_y,
-                    h_imp_x,
-                    h_imp_y,
-                    deterministic_flag,
-                    h_sorted_map
-                )
-
-            if subset_v is not None:
-                v_pos, v_sx, v_sy, v_sw = subset_v
-                (
-                    v_sx_clamped, v_sy_clamped,
-                    v_off_x, v_off_y, v_ratio,
-                    v_imp_x, v_imp_y,
-                    v_sorted_map
-                ) = _prepare(v_pos, v_sx, v_sy, v_sw)
-                density_map_v = SegmentDensityMapFunction.forward(
-                    v_pos,
-                    v_sx,
-                    v_sy,
-                    v_sx_clamped,
-                    v_sy_clamped,
-                    v_off_x,
-                    v_off_y,
-                    v_ratio,
-                    bin_center_x,
-                    bin_center_y,
-                    initial_density_map,
-                    target_density,
-                    xl, yl, xh, yh,
-                    bin_size_x, bin_size_y,
-                    v_sx.numel(),
-                    padding,
-                    padding_mask,
-                    num_bins_x, num_bins_y,
-                    v_imp_x,
-                    v_imp_y,
-                    deterministic_flag,
-                    v_sorted_map
-                )
-
+            prepared_h = _build_subset(mask_h)
+            prepared_v = _build_subset(mask_v)
+            density_map_h = _compute_density_map(prepared_h)
+            density_map_v = _compute_density_map(prepared_v)
             density_map = density_map_h + density_map_v
         else:
+            prepared_h = None
+            prepared_v = None
             density_map = SegmentDensityMapFunction.forward(
                 segment_pos,
                 segment_size_x,
@@ -310,7 +348,7 @@ class SegmentElectricPotentialFunction(Function):
                 "L-shape electric potential requires target_demand to be a 2D routing demand map tensor"
             )
 
-        supply_map = target_density
+        supply_map = target_density.to(device=segment_pos.device, dtype=segment_pos.dtype)
         logger.info(
             f"[L-shape supply/demand] demand_sum={density_map.sum().item():.3e}, "
             f"supply_sum={supply_map.sum().item():.3e}, "
@@ -318,64 +356,70 @@ class SegmentElectricPotentialFunction(Function):
         )
 
         total_density = density_map.sum()
-        total_demand = target_demand.sum()
+        total_demand = target_demand.to(device=segment_pos.device, dtype=segment_pos.dtype).sum()
 
-        if total_demand > 0 and total_density > 0:
-            if isinstance(area_per_track, torch.Tensor) and area_per_track.numel() == 1:
-                if (area_per_track <= 0).all():
-                    area_per_track.fill_(total_density / total_demand)
-                calibrated_area_per_track = area_per_track
-            else:
-                calibrated_area_per_track = total_density / total_demand
+        calibrated_area_per_track = _calibrate_area_per_track(total_density, total_demand)
+        if calibrated_area_per_track is None:
+            overflow_map = density_map
+            overflow_map_normalized, field_map_x, field_map_y, energy = _compute_field_and_energy(overflow_map)
+            ctx.field_map_x = field_map_x
+            ctx.field_map_y = field_map_y
+            logger.debug("Fallback: using density map directly (net_map or density is zero)")
+        elif directional_split:
+            calibrated_area_per_track_h = _calibrate_branch_area_per_track(
+                density_map_h, target_demand_h, fallback=calibrated_area_per_track
+            )
+            calibrated_area_per_track_v = _calibrate_branch_area_per_track(
+                density_map_v, target_demand_v, fallback=calibrated_area_per_track
+            )
 
-            demand_in_tracks = density_map / calibrated_area_per_track
-            utilization = demand_in_tracks / supply_map.clamp(min=1e-6)
-            overflow_in_tracks = (demand_in_tracks - supply_map).clamp(min=0)
-            overflow_map = overflow_in_tracks * calibrated_area_per_track
+            overflow_map_h, utilization_h = _compute_overflow_components(
+                density_map_h, target_density_h, calibrated_area_per_track_h
+            )
+            overflow_map_v, utilization_v = _compute_overflow_components(
+                density_map_v, target_density_v, calibrated_area_per_track_v
+            )
+
+            _, field_map_x_h, field_map_y_h, energy_h = _compute_field_and_energy(overflow_map_h)
+            _, field_map_x_v, field_map_y_v, energy_v = _compute_field_and_energy(overflow_map_v)
+
+            ctx.hv_split_active = True
+            ctx.h_split_data = prepared_h
+            ctx.v_split_data = prepared_v
+            ctx.h_field_map_x = field_map_x_h
+            ctx.h_field_map_y = field_map_y_h
+            ctx.v_field_map_x = field_map_x_v
+            ctx.v_field_map_y = field_map_y_v
+            ctx.field_map_x = None
+            ctx.field_map_y = None
+
+            energy = energy_h + energy_v
+            overflow_map = overflow_map_h + overflow_map_v
+
+            logger.debug(
+                "Calibration(split): area_per_track_h=%.3f area_per_track_v=%.3f util_h_max=%.2f util_v_max=%.2f overflow_bins_h=%d/%d overflow_bins_v=%d/%d",
+                float(calibrated_area_per_track_h.item()) if isinstance(calibrated_area_per_track_h, torch.Tensor) else float(calibrated_area_per_track_h),
+                float(calibrated_area_per_track_v.item()) if isinstance(calibrated_area_per_track_v, torch.Tensor) else float(calibrated_area_per_track_v),
+                float(utilization_h.max().item()) if utilization_h.numel() > 0 else 0.0,
+                float(utilization_v.max().item()) if utilization_v.numel() > 0 else 0.0,
+                int((overflow_map_h > 0).sum().item()),
+                int(overflow_map_h.numel()),
+                int((overflow_map_v > 0).sum().item()),
+                int(overflow_map_v.numel()),
+            )
+        else:
+            overflow_map, utilization = _compute_overflow_components(
+                density_map, supply_map, calibrated_area_per_track
+            )
+            overflow_map_normalized, field_map_x, field_map_y, energy = _compute_field_and_energy(overflow_map)
+            ctx.field_map_x = field_map_x
+            ctx.field_map_y = field_map_y
 
             logger.debug(
                 f"Calibration(net_map): area_per_track={calibrated_area_per_track:.3f}, "
                 f"utilization: mean={utilization.mean():.2f}, max={utilization.max():.2f}, "
-                f"overflow_bins={(overflow_in_tracks > 0).sum().item()}/{overflow_map.numel()}"
+                f"overflow_bins={(overflow_map > 0).sum().item()}/{overflow_map.numel()}"
             )
-        else:
-            overflow_map = density_map
-            logger.debug("Fallback: using density map directly (net_map or density is zero)")
-        
-        # Normalize for DCT
-        overflow_map_normalized = overflow_map.clone()
-        overflow_map_normalized.mul_(1.0 / bin_area)
-        
-        # DCT transform on overflow map
-        auv = dct2.forward(overflow_map_normalized)
-        
-        # Compute electric field (gradient of potential)
-        auv_by_wu2_plus_wv2_wu = auv.mul(wu_by_wu2_plus_wv2_half)
-        auv_by_wu2_plus_wv2_wv = auv.mul(wv_by_wu2_plus_wv2_half)
-        
-        # IDCT/IDXST to get field maps
-        ctx.field_map_x = idxst_idct.forward(auv_by_wu2_plus_wv2_wu)
-        ctx.field_map_y = idct_idxst.forward(auv_by_wu2_plus_wv2_wv)
-        
-
-        # Compute energy
-        if fast_mode:
-            # Dummy energy for gradient computation
-            energy = torch.zeros(1, dtype=segment_pos.dtype, device=segment_pos.device)
-        else:
-            # Compute potential: phi = IDCT(auv / (wu^2 + wv^2))
-            auv_by_wu2_plus_wv2 = auv.mul(inv_wu2_plus_wv2)
-            potential_map = idct2.forward(auv_by_wu2_plus_wv2)
-            
-            # Scale potential map by bin area to approximate continuous potential
-            # This makes the values physical and independent of bin count.
-            # We apply this in-place so it is reflected in the plot and energy.
-            potential_map.mul_(bin_size_x * bin_size_y)
-
-            # Energy = sum(overflow * potential)
-            # Only overflow (demand - supply) contributes to energy
-            # This encourages the optimizer to reduce overflow in congested regions
-            energy = potential_map.mul(overflow_map_normalized).sum()
         
 
         # plot overflow map
@@ -486,15 +530,6 @@ class SegmentElectricPotentialFunction(Function):
         # #     title="EGR Supply Map (ORIGINAL from CSV)", 
         # #     save_path=f"{plot_root}/egr_supply_original/egr_supply_original_iter{iter}.png")
         
-        # # plot potential map
-        # plot_potential_map(potential_map, 
-        #     title="Potential Map", 
-        #     save_path=f"{plot_root}/potential/potential_map_iter{iter}.png",
-        #     vmin_p=0,
-        #     vmax_p=100
-        # )
-        # exit(0)
-
         if segment_pos.is_cuda:
             torch.cuda.synchronize()
         logger.debug(f"Segment electric potential forward: {(time.time() - tt) * 1000:.2f} ms")
@@ -507,60 +542,121 @@ class SegmentElectricPotentialFunction(Function):
         Compute gradients using electric force.
         """
         tt = time.time()
-        
-        # Use C++/CUDA backend for force computation
-        num_movable_nodes = ctx.num_segments
-        num_filler_nodes = 0
-        
-        if grad_output.is_cuda:
-            output = -electric_potential_cuda.electric_force(
+
+        def _electric_force_subset(field_map_x, field_map_y, split_data):
+            if split_data is None or split_data["num_segments"] == 0:
+                return None
+            num_movable_nodes = split_data["num_segments"]
+            num_filler_nodes = 0
+            if grad_output.is_cuda:
+                return -electric_potential_cuda.electric_force(
+                    grad_output,
+                    ctx.num_bins_x, ctx.num_bins_y,
+                    split_data["num_impacted_bins_x"], split_data["num_impacted_bins_y"],
+                    0, 0,
+                    field_map_x.view([-1]),
+                    field_map_y.view([-1]),
+                    split_data["segment_pos"],
+                    split_data["segment_size_x_clamped"],
+                    split_data["segment_size_y_clamped"],
+                    split_data["offset_x"],
+                    split_data["offset_y"],
+                    split_data["ratio"],
+                    ctx.bin_center_x,
+                    ctx.bin_center_y,
+                    ctx.xl, ctx.yl, ctx.xh, ctx.yh,
+                    ctx.bin_size_x, ctx.bin_size_y,
+                    num_movable_nodes, num_filler_nodes,
+                    ctx.deterministic_flag,
+                    split_data["sorted_segment_map"],
+                )
+            return -electric_potential_cpp.electric_force(
                 grad_output,
                 ctx.num_bins_x, ctx.num_bins_y,
-                ctx.num_impacted_bins_x, ctx.num_impacted_bins_y,
-                0, 0,  # filler impacted bins
-                ctx.field_map_x.view([-1]),
-                ctx.field_map_y.view([-1]),
-                ctx.segment_pos,
-                ctx.segment_size_x_clamped,
-                ctx.segment_size_y_clamped,
-                ctx.offset_x,
-                ctx.offset_y,
-                ctx.ratio,
+                split_data["num_impacted_bins_x"], split_data["num_impacted_bins_y"],
+                0, 0,
+                field_map_x.view([-1]),
+                field_map_y.view([-1]),
+                split_data["segment_pos"],
+                split_data["segment_size_x_clamped"],
+                split_data["segment_size_y_clamped"],
+                split_data["offset_x"],
+                split_data["offset_y"],
+                split_data["ratio"],
                 ctx.bin_center_x,
                 ctx.bin_center_y,
                 ctx.xl, ctx.yl, ctx.xh, ctx.yh,
                 ctx.bin_size_x, ctx.bin_size_y,
                 num_movable_nodes, num_filler_nodes,
-                ctx.deterministic_flag,
-                ctx.sorted_segment_map
             )
+
+        if getattr(ctx, "hv_split_active", False):
+            output = torch.zeros_like(ctx.segment_pos)
+
+            for split_data, field_map_x, field_map_y in (
+                (ctx.h_split_data, getattr(ctx, "h_field_map_x", None), getattr(ctx, "h_field_map_y", None)),
+                (ctx.v_split_data, getattr(ctx, "v_field_map_x", None), getattr(ctx, "v_field_map_y", None)),
+            ):
+                branch_output = _electric_force_subset(field_map_x, field_map_y, split_data)
+                if branch_output is None:
+                    continue
+                indices = split_data["indices"]
+                num_branch = split_data["num_segments"]
+                output[indices] = branch_output[:num_branch]
+                output[indices + ctx.num_segments] = branch_output[num_branch:]
         else:
-            output = -electric_potential_cpp.electric_force(
-                grad_output,
-                ctx.num_bins_x, ctx.num_bins_y,
-                ctx.num_impacted_bins_x, ctx.num_impacted_bins_y,
-                0, 0,  # filler impacted bins
-                ctx.field_map_x.view([-1]),
-                ctx.field_map_y.view([-1]),
-                ctx.segment_pos,
-                ctx.segment_size_x_clamped,
-                ctx.segment_size_y_clamped,
-                ctx.offset_x,
-                ctx.offset_y,
-                ctx.ratio,
-                ctx.bin_center_x,
-                ctx.bin_center_y,
-                ctx.xl, ctx.yl, ctx.xh, ctx.yh,
-                ctx.bin_size_x, ctx.bin_size_y,
-                num_movable_nodes, num_filler_nodes
-            )
+            num_movable_nodes = ctx.num_segments
+            num_filler_nodes = 0
+
+            if grad_output.is_cuda:
+                output = -electric_potential_cuda.electric_force(
+                    grad_output,
+                    ctx.num_bins_x, ctx.num_bins_y,
+                    ctx.num_impacted_bins_x, ctx.num_impacted_bins_y,
+                    0, 0,  # filler impacted bins
+                    ctx.field_map_x.view([-1]),
+                    ctx.field_map_y.view([-1]),
+                    ctx.segment_pos,
+                    ctx.segment_size_x_clamped,
+                    ctx.segment_size_y_clamped,
+                    ctx.offset_x,
+                    ctx.offset_y,
+                    ctx.ratio,
+                    ctx.bin_center_x,
+                    ctx.bin_center_y,
+                    ctx.xl, ctx.yl, ctx.xh, ctx.yh,
+                    ctx.bin_size_x, ctx.bin_size_y,
+                    num_movable_nodes, num_filler_nodes,
+                    ctx.deterministic_flag,
+                    ctx.sorted_segment_map
+                )
+            else:
+                output = -electric_potential_cpp.electric_force(
+                    grad_output,
+                    ctx.num_bins_x, ctx.num_bins_y,
+                    ctx.num_impacted_bins_x, ctx.num_impacted_bins_y,
+                    0, 0,  # filler impacted bins
+                    ctx.field_map_x.view([-1]),
+                    ctx.field_map_y.view([-1]),
+                    ctx.segment_pos,
+                    ctx.segment_size_x_clamped,
+                    ctx.segment_size_y_clamped,
+                    ctx.offset_x,
+                    ctx.offset_y,
+                    ctx.ratio,
+                    ctx.bin_center_x,
+                    ctx.bin_center_y,
+                    ctx.xl, ctx.yl, ctx.xh, ctx.yh,
+                    ctx.bin_size_x, ctx.bin_size_y,
+                    num_movable_nodes, num_filler_nodes
+                )
         
         if grad_output.is_cuda:
             torch.cuda.synchronize()
         logger.debug(f"Segment electric potential backward: {(time.time() - tt) * 1000:.2f} ms")
         
         # Return gradients (only for segment_pos, others are None)
-        return (output,) + (None,) * 40
+        return (output,) + (None,) * 41
 
 
 class LShapeElectricPotential(nn.Module):
@@ -583,6 +679,10 @@ class LShapeElectricPotential(nn.Module):
         num_bins_x, num_bins_y,
         target_density=None,
         target_demand=None,
+        target_density_h=None,
+        target_density_v=None,
+        target_demand_h=None,
+        target_demand_v=None,
         padding=0,
         deterministic_flag=True,
         fast_mode=False
@@ -628,6 +728,23 @@ class LShapeElectricPotential(nn.Module):
             raise TypeError(
                 "LShapeElectricPotential requires target_demand to be a 2D routing demand tensor"
             )
+
+        self.register_buffer(
+            'target_density_h',
+            target_density_h if isinstance(target_density_h, torch.Tensor) else None,
+        )
+        self.register_buffer(
+            'target_density_v',
+            target_density_v if isinstance(target_density_v, torch.Tensor) else None,
+        )
+        self.register_buffer(
+            'target_demand_h',
+            target_demand_h if isinstance(target_demand_h, torch.Tensor) else None,
+        )
+        self.register_buffer(
+            'target_demand_v',
+            target_demand_v if isinstance(target_demand_v, torch.Tensor) else None,
+        )
 
         # Persistent calibration factor (area per track), initialized on first forward
         self.register_buffer('area_per_track', torch.tensor(0.0))
@@ -685,6 +802,10 @@ class LShapeElectricPotential(nn.Module):
         # Ensure target_density is properly initialized as tensor
         self._init_target_density(device, dtype)
         self._init_target_demand(device, dtype)
+        self._init_optional_target_map('target_density_h', device, dtype)
+        self._init_optional_target_map('target_density_v', device, dtype)
+        self._init_optional_target_map('target_demand_h', device, dtype)
+        self._init_optional_target_map('target_demand_v', device, dtype)
         self.area_per_track = self.area_per_track.to(device=device, dtype=dtype)
     
     def _init_target_density(self, device, dtype):
@@ -721,6 +842,25 @@ class LShapeElectricPotential(nn.Module):
             raise TypeError(
                 "LShapeElectricPotential requires target_demand to be a 2D routing demand tensor"
             )
+
+    def _init_optional_target_map(self, name, device, dtype):
+        target_map = getattr(self, name, None)
+        if target_map is None:
+            return
+        if not isinstance(target_map, torch.Tensor):
+            raise TypeError(f"{name} must be a 2D routing tensor or None")
+        if target_map.shape != (self.num_bins_x, self.num_bins_y):
+            logger.warning(
+                "%s shape %s != expected (%d, %d), resizing...",
+                name,
+                tuple(target_map.shape),
+                self.num_bins_x,
+                self.num_bins_y,
+            )
+            td = target_map.unsqueeze(0).unsqueeze(0)
+            td = F.interpolate(td, size=(self.num_bins_x, self.num_bins_y), mode='bilinear', align_corners=False)
+            target_map = td.squeeze(0).squeeze(0)
+        setattr(self, name, target_map.to(device=device, dtype=dtype))
     
     def set_target_density(self, target_density):
         """
@@ -780,6 +920,35 @@ class LShapeElectricPotential(nn.Module):
             raise TypeError(
                 "LShapeElectricPotential requires target_demand to be a 2D routing demand tensor"
             )
+
+    def set_directional_targets(
+        self,
+        target_density_h=None,
+        target_density_v=None,
+        target_demand_h=None,
+        target_demand_v=None,
+    ):
+        updates = {
+            "target_density_h": target_density_h,
+            "target_density_v": target_density_v,
+            "target_demand_h": target_demand_h,
+            "target_demand_v": target_demand_v,
+        }
+        for name, value in updates.items():
+            if value is None:
+                continue
+            if not isinstance(value, torch.Tensor):
+                raise TypeError(f"{name} must be a 2D routing tensor")
+            if value.shape != (self.num_bins_x, self.num_bins_y):
+                td = value.unsqueeze(0).unsqueeze(0)
+                td = F.interpolate(td, size=(self.num_bins_x, self.num_bins_y), mode='bilinear', align_corners=False)
+                value = td.squeeze(0).squeeze(0)
+            if self.bin_center_x is not None:
+                value = value.to(
+                    device=self.bin_center_x.device,
+                    dtype=self.bin_center_x.dtype,
+                )
+            setattr(self, name, value)
     
     def _init_dct(self, device, dtype):
         """Initialize DCT related parameters."""
@@ -925,6 +1094,12 @@ class LShapeElectricPotential(nn.Module):
             segment_size_y,
             segment_is_horizontal,
             segment_weight,
+            (
+                self.target_density_h,
+                self.target_density_v,
+                self.target_demand_h,
+                self.target_demand_v,
+            ),
             segment_size_x_clamped,
             segment_size_y_clamped,
             offset_x,
@@ -1092,6 +1267,10 @@ def create_l_shape_electric_potential(
     num_bins_y=64,
     target_density=None,
     target_demand=None,
+    target_density_h=None,
+    target_density_v=None,
+    target_demand_h=None,
+    target_demand_v=None,
     padding=0,
     deterministic_flag=True,
     fast_mode=False
@@ -1125,6 +1304,10 @@ def create_l_shape_electric_potential(
         num_bins_y=num_bins_y,
         target_density=target_density,
         target_demand=target_demand,
+        target_density_h=target_density_h,
+        target_density_v=target_density_v,
+        target_demand_h=target_demand_h,
+        target_demand_v=target_demand_v,
         padding=padding,
         deterministic_flag=deterministic_flag,
         fast_mode=fast_mode

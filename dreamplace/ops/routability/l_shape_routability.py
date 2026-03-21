@@ -97,7 +97,9 @@ class LShapeRoutabilityOp(nn.Module):
         self.soft_l_self_overflow_weight = max(float(getattr(params, "soft_l_self_overflow_weight", 0.5)), 0.0)
         self.soft_l_hotspot_weight = max(float(getattr(params, "soft_l_hotspot_weight", 2.0)), 0.0)
         self.soft_l_hotspot_ramp_ratio = max(float(getattr(params, "soft_l_hotspot_ramp_ratio", 0.03)), 0.0)
-        
+        self.soft_l_adaptive_tau = bool(getattr(params, "soft_l_adaptive_tau", False))
+        self.soft_l_adaptive_scale = max(float(getattr(params, "soft_l_adaptive_scale", 1.0)), 1e-6)
+
         # L形segment构建器
         self.segment_builder = LShapeSegmentOp(
             wire_width=wire_width,
@@ -106,8 +108,10 @@ class LShapeRoutabilityOp(nn.Module):
         )
         if self.soft_l_assignment:
             logger.info(
-                "Soft L-assignment enabled: tau=%.3f prior=%s bias=%.3f min_weight=%.3f tie_delta=%.3f bg=%.3f self_ov=%.3f hotspot=%.3f hotspot_ramp=%.3f",
+                "Soft L-assignment enabled: tau=%.3f adaptive_tau=%s adaptive_scale=%.3f prior=%s bias=%.3f min_weight=%.3f tie_delta=%.3f bg=%.3f self_ov=%.3f hotspot=%.3f hotspot_ramp=%.3f",
                 self.soft_l_temperature,
+                self.soft_l_adaptive_tau,
+                self.soft_l_adaptive_scale,
                 self.soft_l_use_resolver_prior,
                 self.soft_l_prior_bias,
                 self.soft_l_min_weight,
@@ -452,6 +456,7 @@ class LShapeRoutabilityOp(nn.Module):
             y1_idx = self._coord_to_bin_index(dy1, self.yl, self.bin_size_y, self.num_bins_y)
             x2_idx = self._coord_to_bin_index(dx2, self.xl, self.bin_size_x, self.num_bins_x)
             y2_idx = self._coord_to_bin_index(dy2, self.yl, self.bin_size_y, self.num_bins_y)
+            diag_l_dir = valid_l_dir[is_diagonal]
 
             cost_h = self._horizontal_cost(prefix_x_h, y1_idx, x1_idx, x2_idx) + self._vertical_cost(prefix_y_v, x2_idx, y1_idx, y2_idx)
             cost_v = self._vertical_cost(prefix_y_v, x1_idx, y1_idx, y2_idx) + self._horizontal_cost(prefix_x_h, y2_idx, x1_idx, x2_idx)
@@ -466,22 +471,73 @@ class LShapeRoutabilityOp(nn.Module):
                 cost_h = cost_h + effective_hotspot_weight * hotspot_h
                 cost_v = cost_v + effective_hotspot_weight * hotspot_v
 
+            raw_cost_h = cost_h
+            raw_cost_v = cost_v
             if self.soft_l_use_resolver_prior:
-                diag_l_dir = valid_l_dir[is_diagonal]
                 cost_h = cost_h - self.soft_l_prior_bias * (diag_l_dir == H_FIRST).to(dtype)
                 cost_v = cost_v - self.soft_l_prior_bias * (diag_l_dir == V_FIRST).to(dtype)
 
-            logits = torch.stack((-cost_h / self.soft_l_temperature, -cost_v / self.soft_l_temperature), dim=1)
+            raw_cost_gap = (raw_cost_h - raw_cost_v).abs()
+            biased_cost_gap = (cost_h - cost_v).abs()
+            tau_source_gap = None
+            if self.soft_l_adaptive_tau:
+                if raw_cost_gap.numel() == 0:
+                    tau = torch.tensor(
+                        self.soft_l_temperature, dtype=dtype, device=device
+                    )
+                else:
+                    tau_source_gap = torch.quantile(raw_cost_gap, 0.5).clamp(min=1e-6)
+                    tau = self.soft_l_adaptive_scale * tau_source_gap
+            else:
+                tau = self.soft_l_temperature
+
+            logits = torch.stack((-cost_h / tau, -cost_v / tau), dim=1)
             diag_weights = torch.softmax(logits, dim=1)
+            max_prob = diag_weights.max(dim=1).values
+            near_tie_ratio = None
             if self.soft_l_tie_break_delta > 0.0:
-                max_prob, _ = diag_weights.max(dim=1)
                 near_tie = max_prob <= (0.5 + self.soft_l_tie_break_delta)
+                near_tie_ratio = float(near_tie.to(dtype).mean().item())
                 if near_tie.any():
                     choose_h = cost_h <= cost_v
                     tie_weights = torch.stack(
                         [choose_h.to(dtype=dtype), (~choose_h).to(dtype=dtype)], dim=1
                     )
                     diag_weights = torch.where(near_tie.unsqueeze(1), tie_weights, diag_weights)
+            safe_weights = diag_weights.clamp_min(1e-12)
+            entropy = -(safe_weights * safe_weights.log()).sum(dim=1)
+            pred_dir = torch.where(
+                diag_weights[:, 0] >= diag_weights[:, 1],
+                torch.full_like(diag_l_dir, H_FIRST),
+                torch.full_like(diag_l_dir, V_FIRST),
+            )
+            known_resolver = (diag_l_dir == H_FIRST) | (diag_l_dir == V_FIRST)
+            resolver_agreement_ratio = None
+            if known_resolver.any():
+                resolver_agreement_ratio = float(
+                    (pred_dir[known_resolver] == diag_l_dir[known_resolver])
+                    .to(dtype)
+                    .mean()
+                    .item()
+                )
+            if isinstance(self.cached_soft_debug, dict):
+                self.cached_soft_debug.update(
+                    {
+                        "diag_edge_count": int(is_diagonal.sum().item()),
+                        "mean_cost_gap": float(biased_cost_gap.mean().item()),
+                        "raw_cost_gap_p50": float(torch.quantile(raw_cost_gap, 0.5).item()),
+                        "biased_cost_gap_p50": float(torch.quantile(biased_cost_gap, 0.5).item()),
+                        "tau_source_gap": None
+                        if tau_source_gap is None
+                        else float(tau_source_gap.item()),
+                        "mean_max_prob": float(max_prob.mean().item()),
+                        "mean_entropy": float(entropy.mean().item()),
+                        "near_tie_ratio": near_tie_ratio,
+                        "resolver_agreement_ratio": resolver_agreement_ratio,
+                        "tau": float(tau) if isinstance(tau, (int, float)) else float(tau.item()),
+                        "adaptive_tau": self.soft_l_adaptive_tau,
+                    }
+                )
             valid_weights[is_diagonal] = diag_weights
 
         weights[valid_mask] = valid_weights

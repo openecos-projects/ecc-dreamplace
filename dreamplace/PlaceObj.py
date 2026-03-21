@@ -423,7 +423,31 @@ class PlaceObj(nn.Module):
         self.l_shape_grad_target_ratio = getattr(params, 'l_shape_grad_target_ratio', 0.3) 
         # 权重调整的平滑因子 (0~1, 越小越平滑)
         self.l_shape_weight_momentum = getattr(params, 'l_shape_weight_momentum', 0.1)
+        self.l_shape_last_cost = None
+        self.l_shape_last_weighted_cost = None
+        self.l_shape_last_weight = None
+        self.l_shape_last_target_weight = None
+        self.l_shape_last_base_grad_norm = None
+        self.l_shape_last_grad_norm = None
+        self.l_shape_last_grad_ratio = None
+        self.soft_l_last_summary = {}
+        self._l_shape_auto_disabled = False
+        self._l_shape_auto_disable_state = {}
         # ==========================================
+
+    @staticmethod
+    def _telemetry_scalar(value):
+        if value is None:
+            return None
+        if isinstance(value, torch.Tensor):
+            if value.numel() != 1:
+                return None
+            return float(value.detach().cpu().item())
+        if isinstance(value, (np.integer, int)):
+            return int(value)
+        if isinstance(value, (np.floating, float)):
+            return float(value)
+        return value
 
     def init_l_shape_routability(
         self,
@@ -1755,12 +1779,21 @@ class PlaceObj(nn.Module):
         self.op_collections.precondition_op(
             pos.grad, self.density_weight, self.update_mask, self.fix_nodes_mask
         )
+        self.l_shape_last_cost = None
+        self.l_shape_last_weighted_cost = None
+        self.l_shape_last_weight = None
+        self.l_shape_last_target_weight = None
+        self.l_shape_last_base_grad_norm = None
+        self.l_shape_last_grad_norm = None
+        self.l_shape_last_grad_ratio = None
+        self.soft_l_last_summary = {}
         
         # ========== L形Routability梯度 ==========
         if self.use_l_shape_routability and self.l_shape_routability_op is not None:
             # 保存 wirelength + density 的梯度
             base_grad = pos.grad.data.clone()
             base_grad_norm = base_grad.norm(p=2)
+            base_grad_norm_value = float(base_grad_norm.item())
             
             pos.grad.zero_()
             
@@ -1771,11 +1804,14 @@ class PlaceObj(nn.Module):
             # 获取原始 L-shape 梯度范数
             l_shape_grad_raw = pos.grad.data.clone()
             l_shape_grad_norm = l_shape_grad_raw.norm(p=2)
+            l_shape_grad_norm_value = float(l_shape_grad_norm.item())
+            target_weight_value = None
             
             # 自适应调整权重
             # 目标: l_shape_grad_norm * weight ≈ target_ratio * base_grad_norm
             if l_shape_grad_norm > 1e-10 and base_grad_norm > 1e-10:
                 target_weight = (self.l_shape_grad_target_ratio * base_grad_norm / l_shape_grad_norm).item()
+                target_weight_value = float(target_weight)
                 
                 # 使用动量平滑更新权重
                 old_weight = self.l_shape_routability_weight.item()
@@ -1807,9 +1843,40 @@ class PlaceObj(nn.Module):
                 pos.grad.data.mul_(self.l_shape_routability_weight.item())
             
             l_shape_weighted = l_shape_cost * self.l_shape_routability_weight.item()
+            current_weight = float(self.l_shape_routability_weight.item())
+            grad_ratio_value = None
+            if l_shape_grad_norm_value > 1e-10 and base_grad_norm_value > 1e-10:
+                grad_ratio_value = (
+                    current_weight * l_shape_grad_norm_value / (base_grad_norm_value + 1e-12)
+                )
             obj = obj + l_shape_weighted
             pos.grad.data.add_(base_grad)
             self._apply_gradient_masks_only(pos.grad.data)
+            self.l_shape_last_cost = float(l_shape_cost.item())
+            self.l_shape_last_weighted_cost = float(l_shape_weighted.item())
+            self.l_shape_last_weight = current_weight
+            self.l_shape_last_target_weight = target_weight_value
+            self.l_shape_last_base_grad_norm = base_grad_norm_value
+            self.l_shape_last_grad_norm = l_shape_grad_norm_value
+            self.l_shape_last_grad_ratio = grad_ratio_value
+            soft_debug = getattr(self.l_shape_routability_op, "cached_soft_debug", None)
+            if isinstance(soft_debug, dict):
+                self.soft_l_last_summary = {
+                    key: self._telemetry_scalar(soft_debug.get(key))
+                    for key in (
+                        "diag_edge_count",
+                        "mean_cost_gap",
+                        "raw_cost_gap_p50",
+                        "biased_cost_gap_p50",
+                        "tau_source_gap",
+                        "mean_max_prob",
+                        "mean_entropy",
+                        "near_tie_ratio",
+                        "tau",
+                        "effective_hotspot_weight",
+                        "resolver_agreement_ratio",
+                    )
+                }
             
             # self.check_gradient(pos)
         # ==========================================

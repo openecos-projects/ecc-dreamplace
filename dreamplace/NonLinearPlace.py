@@ -1118,6 +1118,195 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 #             window1
                 moving_avg_window = max(min(model.Lsub_iteration // 2, 3), 1)
 
+                def attach_l_shape_telemetry(cur_metric):
+                    field_map = {
+                        "l_shape_cost": "l_shape_last_cost",
+                        "l_shape_weighted_cost": "l_shape_last_weighted_cost",
+                        "l_shape_weight": "l_shape_last_weight",
+                        "l_shape_target_weight": "l_shape_last_target_weight",
+                        "l_shape_base_grad_norm": "l_shape_last_base_grad_norm",
+                        "l_shape_grad_norm": "l_shape_last_grad_norm",
+                        "l_shape_grad_ratio": "l_shape_last_grad_ratio",
+                    }
+                    for metric_field, model_field in field_map.items():
+                        value = getattr(model, model_field, None)
+                        if value is not None:
+                            setattr(cur_metric, metric_field, value)
+
+                    if (
+                        getattr(model, "use_l_shape_routability", False)
+                        or getattr(model, "l_shape_last_cost", None) is not None
+                    ):
+                        cur_metric.l_shape_target_ratio = float(
+                            model.l_shape_grad_target_ratio
+                        )
+
+                    overflow_ema = getattr(model, "_l_shape_overflow_ema", None)
+                    if overflow_ema is not None:
+                        cur_metric.l_shape_overflow_ema = float(overflow_ema)
+
+                    soft_summary = getattr(model, "soft_l_last_summary", None) or {}
+                    soft_field_map = {
+                        "soft_l_diag_count": "diag_edge_count",
+                        "soft_l_mean_cost_gap": "mean_cost_gap",
+                        "soft_l_raw_cost_gap_p50": "raw_cost_gap_p50",
+                        "soft_l_biased_cost_gap_p50": "biased_cost_gap_p50",
+                        "soft_l_tau_source_gap": "tau_source_gap",
+                        "soft_l_mean_max_prob": "mean_max_prob",
+                        "soft_l_mean_entropy": "mean_entropy",
+                        "soft_l_near_tie_ratio": "near_tie_ratio",
+                        "soft_l_tau": "tau",
+                        "soft_l_effective_hotspot_weight": "effective_hotspot_weight",
+                        "soft_l_resolver_agreement_ratio": "resolver_agreement_ratio",
+                    }
+                    for metric_field, summary_field in soft_field_map.items():
+                        value = soft_summary.get(summary_field)
+                        if value is not None:
+                            setattr(cur_metric, metric_field, value)
+
+                def reset_l_shape_auto_disable_state():
+                    model._l_shape_auto_disabled = False
+                    model._l_shape_auto_disable_state = {
+                        "update_count": 0,
+                        "best_lcost": None,
+                        "best_iteration": None,
+                        "prev_ov_ema": None,
+                        "last_ov_ema_improvement": None,
+                        "overshoot_streak": 0,
+                        "rebound_streak": 0,
+                        "plateau_streak": 0,
+                    }
+
+                def maybe_auto_disable_l_shape(iteration, outer_update=False):
+                    if not getattr(params, "l_shape_auto_disable_flag", False):
+                        return
+                    if not getattr(model, "use_l_shape_routability", False):
+                        return
+                    if getattr(model, "_l_shape_auto_disabled", False):
+                        return
+
+                    l_shape_op = getattr(model, "l_shape_routability_op", None)
+                    if l_shape_op is None or not getattr(l_shape_op, "soft_l_assignment", False):
+                        return
+
+                    current_cost = getattr(model, "l_shape_last_cost", None)
+                    current_grad_ratio = getattr(model, "l_shape_last_grad_ratio", None)
+                    current_ov_ema = getattr(model, "_l_shape_overflow_ema", None)
+                    if current_cost is None or current_grad_ratio is None or current_ov_ema is None:
+                        return
+                    if not math.isfinite(current_cost) or not math.isfinite(current_grad_ratio):
+                        return
+
+                    state = getattr(model, "_l_shape_auto_disable_state", None)
+                    if not isinstance(state, dict):
+                        reset_l_shape_auto_disable_state()
+                        state = model._l_shape_auto_disable_state
+
+                    if outer_update:
+                        state["update_count"] += 1
+
+                    best_cost = state.get("best_lcost")
+                    if best_cost is None or current_cost < best_cost:
+                        state["best_lcost"] = current_cost
+                        state["best_iteration"] = iteration
+                        state["rebound_streak"] = 0
+                    else:
+                        rebound_ratio = float(
+                            getattr(
+                                params,
+                                "l_shape_auto_disable_lcost_rebound_ratio",
+                                0.05,
+                            )
+                        )
+                        rebound_threshold = best_cost * (1.0 + rebound_ratio)
+                        if current_cost > rebound_threshold:
+                            state["rebound_streak"] += 1
+                        else:
+                            state["rebound_streak"] = 0
+
+                    target_ratio = float(model.l_shape_grad_target_ratio)
+                    overshoot_margin = float(
+                        getattr(
+                            params,
+                            "l_shape_auto_disable_grad_overshoot_margin",
+                            0.01,
+                        )
+                    )
+                    if current_grad_ratio > target_ratio + overshoot_margin:
+                        state["overshoot_streak"] += 1
+                    else:
+                        state["overshoot_streak"] = 0
+
+                    prev_ov_ema = state.get("prev_ov_ema")
+                    ema_improvement = None
+                    if outer_update:
+                        if prev_ov_ema is not None and math.isfinite(prev_ov_ema):
+                            plateau_eps = float(
+                                getattr(
+                                    params,
+                                    "l_shape_auto_disable_ov_ema_plateau_eps",
+                                    1e-3,
+                                )
+                            )
+                            ema_improvement = prev_ov_ema - current_ov_ema
+                            if ema_improvement <= plateau_eps:
+                                state["plateau_streak"] += 1
+                            else:
+                                state["plateau_streak"] = 0
+                            state["last_ov_ema_improvement"] = ema_improvement
+                        state["prev_ov_ema"] = float(current_ov_ema)
+
+                    warmup_updates = max(
+                        0,
+                        int(
+                            getattr(
+                                params,
+                                "l_shape_auto_disable_warmup_updates",
+                                3,
+                            )
+                        ),
+                    )
+                    patience = max(
+                        1,
+                        int(getattr(params, "l_shape_auto_disable_patience", 2)),
+                    )
+                    if state["update_count"] <= warmup_updates:
+                        return
+                    if state["overshoot_streak"] < patience:
+                        return
+                    if state["rebound_streak"] < patience:
+                        return
+                    if state["plateau_streak"] < patience:
+                        return
+
+                    model.use_l_shape_routability = False
+                    model.enable_l_shape_routability = False
+                    model._l_shape_auto_disabled = True
+                    state["disabled_at"] = iteration
+
+                    rebound_pct = 0.0
+                    if state.get("best_lcost"):
+                        rebound_pct = (
+                            (current_cost - state["best_lcost"])
+                            / max(state["best_lcost"], 1e-12)
+                            * 100.0
+                        )
+                    logging.info(
+                        "L-shape auto-disabled at iteration %d: "
+                        "LCost %.6e rebounded from best %.6e@iter=%s by %.2f%%, "
+                        "LGradRatio %.4f > LTargetRatio %.4f + %.4f, "
+                        "ov_ema improvement %.3e.",
+                        iteration,
+                        current_cost,
+                        state.get("best_lcost", float("nan")),
+                        state.get("best_iteration"),
+                        rebound_pct,
+                        current_grad_ratio,
+                        target_ratio,
+                        overshoot_margin,
+                        state.get("last_ov_ema_improvement", float("nan")),
+                    )
+
                 def Lsub_stop_criterion(Lgamma_step, Llambda_density_weight_step, Lsub_step, metrics):
                     with torch.no_grad():
                         if len(metrics) >= moving_avg_window * 2:
@@ -1280,9 +1469,16 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
                     # ========== L形Routability Density Objective ==========
                     # 根据overflow条件启用L形routability
-                    if params.l_shape_routability_flag == True:
+                    l_shape_routability_enabled = (
+                        params.routability_opt_flag
+                        and params.l_shape_routability_flag
+                    )
+                    if l_shape_routability_enabled:
                         
-                        if not model.enable_l_shape_routability:
+                        if (
+                            not model.enable_l_shape_routability
+                            and not getattr(model, "_l_shape_auto_disabled", False)
+                        ):
                             # 条件1: overflow足够小时启用
                             if cur_metric.overflow[-1] < getattr(params, 'l_shape_overflow_threshold', 0.3):
                                 model.enable_l_shape_routability = True
@@ -1943,6 +2139,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                                         deadband,
                                                         model.l_shape_grad_target_ratio,
                                                     )
+                                            maybe_auto_disable_l_shape(
+                                                iteration, outer_update=True
+                                            )
                                 except Exception as e:
                                     logging.warning(
                                         f"L-shape overflow outer-loop update failed at iter {iteration}: {e}"
@@ -2076,6 +2275,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         cur_metric.objective = optimizer.param_groups[0]["obj_k_1"][0].data.clone(
                         )
 
+                    maybe_auto_disable_l_shape(iteration, outer_update=False)
+                    attach_l_shape_telemetry(cur_metric)
                     # actually reports the metric before step
                     logging.info(cur_metric)
                     # record the best outer cell overflow
@@ -2192,6 +2393,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
                 # L-shape routability 状态初始化
                 model.enable_l_shape_routability = False
+                reset_l_shape_auto_disable_state()
 
                 # preparation for self-adaptive divergence check
                 overflow_list = [1]
@@ -2565,6 +2767,50 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 "overflow": overflows,
                 "density": densities,
             }
+            optional_metric_fields = [
+                "l_shape_cost",
+                "l_shape_weighted_cost",
+                "l_shape_weight",
+                "l_shape_target_weight",
+                "l_shape_base_grad_norm",
+                "l_shape_grad_norm",
+                "l_shape_grad_ratio",
+                "l_shape_target_ratio",
+                "l_shape_overflow",
+                "l_shape_overflow_ratio",
+                "l_shape_overflow_ema",
+                "l_shape_overflow_max_density",
+                "soft_l_diag_count",
+                "soft_l_mean_cost_gap",
+                "soft_l_raw_cost_gap_p50",
+                "soft_l_biased_cost_gap_p50",
+                "soft_l_tau_source_gap",
+                "soft_l_mean_max_prob",
+                "soft_l_mean_entropy",
+                "soft_l_near_tie_ratio",
+                "soft_l_tau",
+                "soft_l_effective_hotspot_weight",
+                "soft_l_resolver_agreement_ratio",
+            ]
+
+            def scalarize_metric_value(value):
+                if value is None:
+                    return None
+                if torch.is_tensor(value):
+                    if value.numel() == 1:
+                        return value.detach().cpu().item()
+                    return value.detach().cpu().view(-1).tolist()
+                if isinstance(value, np.generic):
+                    return value.item()
+                return value
+
+            for field_name in optional_metric_fields:
+                series = [
+                    scalarize_metric_value(getattr(metric, field_name, None))
+                    for metric in metrics
+                ]
+                if any(value is not None for value in series):
+                    processed_metrics[field_name] = series
 
             # plot placement
             if params.plot_flag:

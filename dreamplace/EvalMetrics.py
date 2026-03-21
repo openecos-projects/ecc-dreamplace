@@ -53,6 +53,29 @@ class EvalMetrics(object):
         self.weight_hpwl = None
         self.macro_overlap = None
         self.macro_overlap_weight = None
+        self.l_shape_cost = None
+        self.l_shape_weighted_cost = None
+        self.l_shape_weight = None
+        self.l_shape_target_weight = None
+        self.l_shape_base_grad_norm = None
+        self.l_shape_grad_norm = None
+        self.l_shape_grad_ratio = None
+        self.l_shape_target_ratio = None
+        self.l_shape_overflow = None
+        self.l_shape_overflow_ratio = None
+        self.l_shape_overflow_ema = None
+        self.l_shape_overflow_max_density = None
+        self.soft_l_diag_count = None
+        self.soft_l_mean_cost_gap = None
+        self.soft_l_raw_cost_gap_p50 = None
+        self.soft_l_biased_cost_gap_p50 = None
+        self.soft_l_tau_source_gap = None
+        self.soft_l_mean_max_prob = None
+        self.soft_l_mean_entropy = None
+        self.soft_l_near_tie_ratio = None
+        self.soft_l_tau = None
+        self.soft_l_effective_hotspot_weight = None
+        self.soft_l_resolver_agreement_ratio = None
 
     def __str__(self):
         """
@@ -116,6 +139,48 @@ class EvalMetrics(object):
         if self.macro_overlap_weight is not None:
             content += ", MacroOverlapWeight %.6E" % (
                 self.macro_overlap_weight)
+        if self.l_shape_cost is not None:
+            content += ", LCost %.6E" % (self.l_shape_cost)
+        if self.l_shape_weighted_cost is not None:
+            content += ", LWCost %.6E" % (self.l_shape_weighted_cost)
+        if self.l_shape_weight is not None:
+            content += ", LWeight %.6E" % (self.l_shape_weight)
+        if self.l_shape_grad_ratio is not None:
+            content += ", LGradRatio %.4f" % (self.l_shape_grad_ratio)
+        if self.l_shape_target_ratio is not None:
+            content += ", LTargetRatio %.4f" % (self.l_shape_target_ratio)
+        if self.l_shape_overflow is not None:
+            content += ", LOvRaw %.6E" % (self.l_shape_overflow)
+        if self.l_shape_overflow_ratio is not None:
+            content += ", LOvRatio %.6E" % (self.l_shape_overflow_ratio)
+        if self.l_shape_overflow_ema is not None:
+            content += ", LOvEma %.6E" % (self.l_shape_overflow_ema)
+        if self.l_shape_overflow_max_density is not None:
+            content += ", LMaxDen %.6E" % (self.l_shape_overflow_max_density)
+        if self.soft_l_diag_count is not None:
+            content += ", SoftDiag %d" % (self.soft_l_diag_count)
+        if self.soft_l_mean_cost_gap is not None:
+            content += ", SoftGapMean %.4f" % (self.soft_l_mean_cost_gap)
+        if self.soft_l_raw_cost_gap_p50 is not None:
+            content += ", SoftGapP50Raw %.8f" % (self.soft_l_raw_cost_gap_p50)
+        if self.soft_l_biased_cost_gap_p50 is not None:
+            content += ", SoftGapP50Bias %.8f" % (self.soft_l_biased_cost_gap_p50)
+        if self.soft_l_tau_source_gap is not None:
+            content += ", SoftTauSrc %.8f" % (self.soft_l_tau_source_gap)
+        if self.soft_l_mean_max_prob is not None:
+            content += ", SoftConf %.4f" % (self.soft_l_mean_max_prob)
+        if self.soft_l_mean_entropy is not None:
+            content += ", SoftEnt %.4f" % (self.soft_l_mean_entropy)
+        if self.soft_l_near_tie_ratio is not None:
+            content += ", SoftTie %.4f" % (self.soft_l_near_tie_ratio)
+        if self.soft_l_tau is not None:
+            content += ", SoftTau %.8f" % (self.soft_l_tau)
+        if self.soft_l_effective_hotspot_weight is not None:
+            content += ", SoftHot %.4f" % (self.soft_l_effective_hotspot_weight)
+        if self.soft_l_resolver_agreement_ratio is not None:
+            content += ", SoftAgree %.4f" % (
+                self.soft_l_resolver_agreement_ratio
+            )
         if self.gamma is not None:
             content += ", gamma %.6E" % (self.gamma)
         if self.eval_time is not None:

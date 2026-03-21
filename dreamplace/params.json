@@ -291,6 +291,38 @@
         "description": "effective segment width mode for L-shape routability: min_width, cap_weighted_width, or cap_weighted_footprint",
         "default": "cap_weighted_width"
     },
+    "soft_l_adaptive_tau": {
+        "description": "whether adapt soft-L temperature from the current batch median absolute H/V cost gap",
+        "default": 0
+    },
+    "soft_l_adaptive_scale": {
+        "description": "scale factor multiplied onto the median absolute H/V cost gap when soft_l_adaptive_tau is enabled",
+        "default": 1.0
+    },
+    "l_shape_auto_disable_flag": {
+        "description": "whether auto-disable soft L-shape when telemetry indicates late-stage overshoot in diff-style runs",
+        "default": 0
+    },
+    "l_shape_auto_disable_warmup_updates": {
+        "description": "number of L-shape outer-loop updates to observe before considering auto-disable",
+        "default": 3
+    },
+    "l_shape_auto_disable_patience": {
+        "description": "number of consecutive qualifying outer-loop updates required before auto-disabling soft L-shape",
+        "default": 2
+    },
+    "l_shape_auto_disable_grad_overshoot_margin": {
+        "description": "minimum LGradRatio overshoot above LTargetRatio to count toward soft L-shape auto-disable",
+        "default": 0.01
+    },
+    "l_shape_auto_disable_lcost_rebound_ratio": {
+        "description": "fractional rebound above the best observed L-shape cost required to count toward auto-disable",
+        "default": 0.05
+    },
+    "l_shape_auto_disable_ov_ema_plateau_eps": {
+        "description": "maximum L-shape overflow EMA improvement treated as a plateau for auto-disable",
+        "default": 0.001
+    },
     "adjust_nctugr_area_flag": {
         "description": "whether use NCTUgr congestion map to guide area adjustment",
         "default": 0

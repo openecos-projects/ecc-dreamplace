@@ -293,7 +293,7 @@
     },
     "soft_l_adaptive_tau": {
         "description": "whether adapt soft-L temperature from the current batch median absolute H/V cost gap",
-        "default": 0
+        "default": 1
     },
     "soft_l_adaptive_scale": {
         "description": "scale factor multiplied onto the median absolute H/V cost gap when soft_l_adaptive_tau is enabled",

@@ -1714,8 +1714,10 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             if params.l_shape_plot_flag:
                                 try:
                                     from dreamplace.ops.routability.l_shape_routability import (
-                                        plot_segment_density_map, plot_l_shape_segments,
-                                        plot_soft_l_intermediate, plot_soft_l_scoring_maps
+                                        plot_l_shape_electric_overflow_map,
+                                        plot_segment_density_map,
+                                        plot_soft_l_intermediate,
+                                        plot_soft_l_scoring_maps,
                                     )
                                     
                                     # 获取密度图
@@ -1731,19 +1733,19 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                         )
                                         logging.info(f"L-shape density plot saved to {density_plot_path}")
                                     
-                                    # 绘制L形segments（使用cached_segments中保存的原始数据，确保一致性）
+                                    # 绘制基于 electric potential 的 overflow map
                                     if model.l_shape_routability_op is not None and \
                                        model.l_shape_routability_op.cached_segments is not None:
                                         l_shape_op = model.l_shape_routability_op
-                                        segments_plot_path = os.path.join(
-                                            params.result_dir, f"l_shape_segments_iter{iteration}.png"
+                                        overflow_plot_path = os.path.join(
+                                            params.result_dir, f"l_shape_overflow_iter{iteration}.png"
                                         )
-                                        plot_l_shape_segments(
-                                            l_shape_op.cached_segments,
-                                            output_path=segments_plot_path,
-                                            placedb=placedb, params=params
+                                        plot_l_shape_electric_overflow_map(
+                                            l_shape_op,
+                                            output_path=overflow_plot_path,
+                                            title_prefix=f"L-shape Electric Overflow (iter={iteration})",
                                         )
-                                        logging.info(f"L-shape segments plot saved to {segments_plot_path}")
+                                        logging.info(f"L-shape electric overflow plot saved to {overflow_plot_path}")
                                         if getattr(l_shape_op, "soft_l_assignment", False) and \
                                            'soft_l_weights' in l_shape_op.cached_segments:
                                             soft_plot_path = os.path.join(
@@ -2178,8 +2180,10 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             if params.l_shape_plot_flag:
                                 try:
                                     from dreamplace.ops.routability.l_shape_routability import (
-                                        plot_segment_density_map, plot_l_shape_segments,
-                                        plot_soft_l_intermediate, plot_soft_l_scoring_maps
+                                        plot_l_shape_electric_overflow_map,
+                                        plot_segment_density_map,
+                                        plot_soft_l_intermediate,
+                                        plot_soft_l_scoring_maps,
                                     )
                                     
                                     if density_map is None:
@@ -2196,25 +2200,17 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                             colormap="binary"
                                         )
                                     
-                                    # 绘制L形segments
-                                    pin_pos = self.op_collections.pin_pos_op(pos)
-                                    pin_pos_cpu = pin_pos.cpu() if pin_pos.is_cuda else pin_pos
-                                    newx, newy = steiner_topo_op(pin_pos_cpu)
-                                    
+                                    # 绘制基于 electric potential 的 overflow map
                                     if model.l_shape_routability_op is not None and \
                                        model.l_shape_routability_op.cached_segments is not None:
                                         l_shape_op = model.l_shape_routability_op
-                                        segments_plot_path = os.path.join(
-                                            params.result_dir, f"l_shape_segments_iter{iteration}.png"
+                                        overflow_plot_path = os.path.join(
+                                            params.result_dir, f"l_shape_overflow_iter{iteration}.png"
                                         )
-                                        plot_l_shape_segments(
-                                            l_shape_op.cached_segments,
-                                            newx, newy,
-                                            steiner_topo_op.flat_pin_from,
-                                            steiner_topo_op.flat_pin_to,
-                                            steiner_topo_op.edge_l_directions,
-                                            segments_plot_path,
-                                            placedb=placedb, params=params
+                                        plot_l_shape_electric_overflow_map(
+                                            l_shape_op,
+                                            output_path=overflow_plot_path,
+                                            title_prefix=f"L-shape Electric Overflow (iter={iteration})",
                                         )
                                         if getattr(l_shape_op, "soft_l_assignment", False) and \
                                            'soft_l_weights' in l_shape_op.cached_segments:

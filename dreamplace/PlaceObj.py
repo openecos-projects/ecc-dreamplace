@@ -468,10 +468,8 @@ class PlaceObj(nn.Module):
         Args:
             wire_width: segment线宽
             num_bins_x, num_bins_y: 密度计算的bin数量
-            target_density: 目标密度，可以是标量或2D张量(routing supply map)
-            target_demand: 目标需求(2D张量, routing demand map)，用于标定L-shape密度单位
-                - 标量: 所有bin使用相同的target density
-                - 2D张量: 每个bin有不同的target density (来自外部router supply map)
+            target_density: 2D routing supply map
+            target_demand: 2D routing demand map，用于标定L-shape密度单位
         """
         from dreamplace.ops.routability.l_shape_routability import LShapeRoutabilityOp
         
@@ -507,7 +505,7 @@ class PlaceObj(nn.Module):
                             f"init_weight={self.l_shape_routability_weight.item():.2e}, "
                             f"target_grad_ratio={self.l_shape_grad_target_ratio}")
         else:
-            logging.info(f"L-shape routability initialized with uniform target_density={target_density}, "
+            logging.info(f"L-shape routability initialized without a valid routing supply tensor, "
                         f"init_weight={self.l_shape_routability_weight.item():.2e}, "
                         f"target_grad_ratio={self.l_shape_grad_target_ratio}")
     

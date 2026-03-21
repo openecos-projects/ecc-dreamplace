@@ -59,7 +59,7 @@ class SegmentDensityMapFunction(Function):
         Args:
             segment_pos: [num_segments * 2] positions (llx then lly)
             segment_size_x/y: [num_segments] segment sizes
-            target_density: can be scalar or 2D tensor (only scalar passed to C++)
+            target_density: 2D routing supply tensor (used only for padding semantics)
             Others: similar to ElectricDensityMapFunction
             
         Returns:
@@ -68,13 +68,14 @@ class SegmentDensityMapFunction(Function):
         num_movable_nodes = num_segments
         num_filler_nodes = 0
         
-        # C++ backend expects scalar target_density
-        # If we have a 2D supply map, use 1.0 for raw density computation
-        # The supply-aware overflow is computed at a higher level
-        if isinstance(target_density, torch.Tensor) and target_density.dim() == 2:
-            cpp_target_density = 1.0
-        else:
-            cpp_target_density = float(target_density)
+        if not isinstance(target_density, torch.Tensor) or target_density.dim() != 2:
+            raise TypeError(
+                "SegmentDensityMapFunction expects target_density to be a 2D routing supply tensor"
+            )
+
+        # The density-map backend only needs a scalar padding density.
+        # Supply-aware overflow is handled outside this raw density kernel.
+        cpp_target_density = 1.0
         
         if segment_pos.is_cuda:
             output = electric_potential_cuda.density_map(
@@ -116,7 +117,7 @@ class SegmentDensityMapFunction(Function):
         
         density_map = output.view([num_bins_x, num_bins_y])
         
-        # Set padding density (use scalar for consistency)
+        # Set padding density (scalar padding only; supply-aware handling is external)
         if padding > 0:
             density_map.masked_fill_(padding_mask, cpp_target_density * bin_size_x * bin_size_y)
         
@@ -136,7 +137,7 @@ class LShapeElectricOverflow(nn.Module):
         xl, yl, xh, yh,
         bin_size_x, bin_size_y,
         num_bins_x, num_bins_y,
-        target_density=1.0,
+        target_density=None,
         padding=0,
         deterministic_flag=False
     ):
@@ -147,11 +148,16 @@ class LShapeElectricOverflow(nn.Module):
             xl, yl, xh, yh: die boundaries
             bin_size_x, bin_size_y: bin sizes
             num_bins_x, num_bins_y: number of bins
-            target_density: target routing density
+            target_density: 2D routing supply tensor
             padding: bin padding
             deterministic_flag: whether to use deterministic routine
         """
         super(LShapeElectricOverflow, self).__init__()
+
+        if not isinstance(target_density, torch.Tensor):
+            raise TypeError(
+                "LShapeElectricOverflow requires target_density to be a 2D routing supply tensor"
+            )
         
         self.xl = xl
         self.yl = yl
@@ -176,30 +182,30 @@ class LShapeElectricOverflow(nn.Module):
         Update target density (routing supply map) used by overflow estimation.
 
         Args:
-            target_density: scalar or 2D tensor (num_bins_x, num_bins_y)
+            target_density: 2D tensor (num_bins_x, num_bins_y)
         """
-        if isinstance(target_density, torch.Tensor):
-            if target_density.shape != (self.num_bins_x, self.num_bins_y):
-                from torch.nn.functional import interpolate
-                td = target_density.unsqueeze(0).unsqueeze(0)
-                td = interpolate(td, size=(self.num_bins_x, self.num_bins_y), mode='bilinear', align_corners=False)
-                target_density = td.squeeze(0).squeeze(0)
-
-            if self.bin_center_x is not None:
-                target_density = target_density.to(
-                    device=self.bin_center_x.device,
-                    dtype=self.bin_center_x.dtype,
-                )
-            self.target_density = target_density
-            logger.info(
-                "Set overflow target_density: min=%.3f, max=%.3f, mean=%.3f",
-                target_density.min().item(),
-                target_density.max().item(),
-                target_density.mean().item(),
+        if not isinstance(target_density, torch.Tensor):
+            raise TypeError(
+                "LShapeElectricOverflow requires target_density to be a 2D routing supply tensor"
             )
-        else:
-            self.target_density = target_density
-            logger.info(f"Set overflow scalar target_density: {target_density}")
+        if target_density.shape != (self.num_bins_x, self.num_bins_y):
+            from torch.nn.functional import interpolate
+            td = target_density.unsqueeze(0).unsqueeze(0)
+            td = interpolate(td, size=(self.num_bins_x, self.num_bins_y), mode='bilinear', align_corners=False)
+            target_density = td.squeeze(0).squeeze(0)
+
+        if self.bin_center_x is not None:
+            target_density = target_density.to(
+                device=self.bin_center_x.device,
+                dtype=self.bin_center_x.dtype,
+            )
+        self.target_density = target_density
+        logger.info(
+            "Set overflow target_density: min=%.3f, max=%.3f, mean=%.3f",
+            target_density.min().item(),
+            target_density.max().item(),
+            target_density.mean().item(),
+        )
     
     def _init_bins(self, device, dtype):
         """Initialize bin centers and padding mask."""
@@ -437,7 +443,7 @@ def create_l_shape_electric_overflow(
     placedb,
     num_bins_x=64,
     num_bins_y=64,
-    target_density=1.0,
+    target_density=None,
     padding=0,
     deterministic_flag=False
 ):
@@ -447,7 +453,7 @@ def create_l_shape_electric_overflow(
     Args:
         placedb: placement database
         num_bins_x, num_bins_y: number of bins
-        target_density: target routing density
+        target_density: 2D target routing supply tensor
         padding: bin padding
         deterministic_flag: whether to use deterministic routine
         

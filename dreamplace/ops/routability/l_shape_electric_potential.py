@@ -298,101 +298,49 @@ class SegmentElectricPotentialFunction(Function):
         M = num_bins_x
         N = num_bins_y
         
-        # Compute overflow map based on supply-demand relationship
-        # target_density is the supply map (2D tensor from EGR, or scalar for uniform)
+        # Compute overflow map based on supply-demand relationship.
+        # The current implementation only supports 2D routing supply maps.
         bin_area = bin_size_x * bin_size_y
-        
-        if isinstance(target_density, torch.Tensor) and target_density.dim() == 2:
-
-            supply_map = target_density  
-            logger.info(
-                f"[L-shape supply/demand] demand_sum={density_map.sum().item():.3e}, "
-                f"supply_sum={supply_map.sum().item():.3e}, "
-                f"ratio={density_map.sum().item() / max(supply_map.sum().item(), 1e-9):.2f}"
+        if not isinstance(target_density, torch.Tensor) or target_density.dim() != 2:
+            raise TypeError(
+                "L-shape electric potential requires target_density to be a 2D routing supply map tensor"
             )
-            
-            if isinstance(target_demand, torch.Tensor) and target_demand.dim() == 2:
-                # Scheme 3: Calibrate area_per_track once using EGR net_map (demand map)
-                total_density = density_map.sum()
-                total_demand = target_demand.sum()
-                
-                if total_demand > 0 and total_density > 0:
-                    # Initialize area_per_track once (persistent buffer)
-                    if isinstance(area_per_track, torch.Tensor) and area_per_track.numel() == 1:
-                        if (area_per_track <= 0).all():
-                            area_per_track.fill_(total_density / total_demand)
-                        calibrated_area_per_track = area_per_track
-                    else:
-                        calibrated_area_per_track = total_density / total_demand
-                    
-                    # Convert density (area) to demand (track equivalents)
-                    demand_in_tracks = density_map / calibrated_area_per_track
-                    # Compute utilization per bin for debugging
-                    utilization = demand_in_tracks / supply_map.clamp(min=1e-6)
-                    # Overflow in track units: positive means congestion (utilization > 1)
-                    overflow_in_tracks = (demand_in_tracks - supply_map).clamp(min=0)
-                
-                    # Convert back to area units for gradient consistency
-                    overflow_map = overflow_in_tracks * calibrated_area_per_track
-                    
-                    # Debug logging
-                    logger.debug(f"Calibration(net_map): area_per_track={calibrated_area_per_track:.3f}, "
-                                f"utilization: mean={utilization.mean():.2f}, max={utilization.max():.2f}, "
-                                f"overflow_bins={(overflow_in_tracks > 0).sum().item()}/{overflow_map.numel()}")
-                else:
-                    # Fallback: use density map directly
-                    overflow_map = density_map
-                    logger.debug("Fallback: using density map directly (net_map or density is zero)")
+        if not isinstance(target_demand, torch.Tensor) or target_demand.dim() != 2:
+            raise TypeError(
+                "L-shape electric potential requires target_demand to be a 2D routing demand map tensor"
+            )
+
+        supply_map = target_density
+        logger.info(
+            f"[L-shape supply/demand] demand_sum={density_map.sum().item():.3e}, "
+            f"supply_sum={supply_map.sum().item():.3e}, "
+            f"ratio={density_map.sum().item() / max(supply_map.sum().item(), 1e-9):.2f}"
+        )
+
+        total_density = density_map.sum()
+        total_demand = target_demand.sum()
+
+        if total_demand > 0 and total_density > 0:
+            if isinstance(area_per_track, torch.Tensor) and area_per_track.numel() == 1:
+                if (area_per_track <= 0).all():
+                    area_per_track.fill_(total_density / total_demand)
+                calibrated_area_per_track = area_per_track
             else:
-                # Fallback to utilization-based calibration (legacy)
-                # Target utilization: what fraction of supply should demand use on average
-                # Lower value = more aggressive spreading (easier to trigger overflow)
-                target_utilization = 0.8  # TODO: make this configurable
-                
-                # Compute calibration factor
-                total_density = density_map.sum()
-                total_supply = supply_map.sum()
-                
-                if total_supply > 0 and total_density > 0:
-                    # area_per_track: how much segment area corresponds to 1 track
-                    # At target_utilization, total demand_in_tracks = target_utilization * total_supply
-                    # So: total_density / k = target_utilization * total_supply
-                    # => k = total_density / (target_utilization * total_supply)
-                    calibrated_area_per_track = total_density / (target_utilization * total_supply)
-                    
-                    # Convert density (area) to demand (track equivalents)
-                    if hv_split and density_map_h is not None and density_map_v is not None:
-                        demand_in_tracks_h = density_map_h / calibrated_area_per_track
-                        demand_in_tracks_v = density_map_v / calibrated_area_per_track
-                        supply_h = supply_map * 0.5
-                        supply_v = supply_map * 0.5
-                        overflow_in_tracks_h = (demand_in_tracks_h - supply_h)
-                        overflow_in_tracks_v = (demand_in_tracks_v - supply_v)
-                        overflow_in_tracks = overflow_in_tracks_h + overflow_in_tracks_v
-                        utilization = (demand_in_tracks_h + demand_in_tracks_v) / supply_map.clamp(min=1e-6)
-                    else:
-                        demand_in_tracks = density_map / calibrated_area_per_track
-                        # Compute utilization per bin for debugging
-                        utilization = demand_in_tracks / supply_map.clamp(min=1e-6)
-                        # Overflow in track units: positive means congestion (utilization > 1)
-                        overflow_in_tracks = (demand_in_tracks - supply_map)
-                    
-                    # Convert back to area units for gradient consistency
-                    overflow_map = overflow_in_tracks * calibrated_area_per_track
-                    
-                    # Debug logging
-                    logger.debug(f"Calibration(legacy): area_per_track={calibrated_area_per_track:.3f}, "
-                                f"target_util={target_utilization}, "
-                                f"utilization: mean={utilization.mean():.2f}, max={utilization.max():.2f}, "
-                                f"overflow_bins={(overflow_in_tracks > 0).sum().item()}/{overflow_map.numel()}")
-                else:
-                    # Fallback: use density map directly
-                    overflow_map = density_map
-                    logger.debug("Fallback: using density map directly (supply or density is zero)")
+                calibrated_area_per_track = total_density / total_demand
+
+            demand_in_tracks = density_map / calibrated_area_per_track
+            utilization = demand_in_tracks / supply_map.clamp(min=1e-6)
+            overflow_in_tracks = (demand_in_tracks - supply_map).clamp(min=0)
+            overflow_map = overflow_in_tracks * calibrated_area_per_track
+
+            logger.debug(
+                f"Calibration(net_map): area_per_track={calibrated_area_per_track:.3f}, "
+                f"utilization: mean={utilization.mean():.2f}, max={utilization.max():.2f}, "
+                f"overflow_bins={(overflow_in_tracks > 0).sum().item()}/{overflow_map.numel()}"
+            )
         else:
-            # Uniform target_density (scalar): use original density map
-            # This is the standard electric potential without supply-aware adjustment
             overflow_map = density_map
+            logger.debug("Fallback: using density map directly (net_map or density is zero)")
         
         # Normalize for DCT
         overflow_map_normalized = overflow_map.clone()
@@ -624,11 +572,8 @@ class LShapeElectricPotential(nn.Module):
     2. Solves Poisson equation using DCT
     3. Computes gradients using electric force with C++/CUDA
     
-    The target_density can be:
-    - A scalar (uniform target for all bins)
-    - A 2D tensor (per-bin target, e.g., from EGR supply map)
-    The target_demand (optional) can be:
-    - A 2D tensor (per-bin demand, e.g., from EGR net map)
+    The target_density must be a 2D per-bin routing supply tensor.
+    The target_demand (optional) must be a 2D per-bin routing demand tensor.
     """
     
     def __init__(
@@ -636,7 +581,7 @@ class LShapeElectricPotential(nn.Module):
         xl, yl, xh, yh,
         bin_size_x, bin_size_y,
         num_bins_x, num_bins_y,
-        target_density=1.0,
+        target_density=None,
         target_demand=None,
         padding=0,
         deterministic_flag=True,
@@ -649,10 +594,8 @@ class LShapeElectricPotential(nn.Module):
             xl, yl, xh, yh: die boundaries
             bin_size_x, bin_size_y: bin sizes
             num_bins_x, num_bins_y: number of bins
-            target_density: target routing density (scalar or 2D tensor)
-                - If scalar: uniform target for all bins
-                - If 2D tensor: per-bin target from EGR supply map
-            target_demand: target routing demand (2D tensor from EGR net map)
+            target_density: 2D target routing supply tensor from EGR
+            target_demand: optional 2D target routing demand tensor from EGR net map
             padding: bin padding
             deterministic_flag: whether to use deterministic routine
             fast_mode: if True, skip energy computation (only gradients)
@@ -671,19 +614,20 @@ class LShapeElectricPotential(nn.Module):
         self.deterministic_flag = deterministic_flag
         self.fast_mode = fast_mode
         
-        # Store target_density (scalar or 2D tensor)
         if isinstance(target_density, torch.Tensor):
-            # EGR supply map: shape (num_bins_x, num_bins_y)
             self.register_buffer('target_density', target_density)
         else:
-            # Scalar: will be expanded to tensor on first forward
-            self.target_density = target_density
+            raise TypeError(
+                "LShapeElectricPotential requires target_density to be a 2D routing supply tensor"
+            )
 
-        # Store target_demand (2D tensor from EGR net map) or None
+        # Store target_demand (2D tensor from EGR net map)
         if isinstance(target_demand, torch.Tensor):
             self.register_buffer('target_demand', target_demand)
         else:
-            self.target_demand = target_demand
+            raise TypeError(
+                "LShapeElectricPotential requires target_demand to be a 2D routing demand tensor"
+            )
 
         # Persistent calibration factor (area per track), initialized on first forward
         self.register_buffer('area_per_track', torch.tensor(0.0))
@@ -745,25 +689,21 @@ class LShapeElectricPotential(nn.Module):
     
     def _init_target_density(self, device, dtype):
         """Initialize or convert target_density to proper tensor format."""
-        if isinstance(self.target_density, torch.Tensor):
-            # Already a tensor (e.g., EGR supply map)
-            if self.target_density.shape != (self.num_bins_x, self.num_bins_y):
-                logger.warning(f"target_density shape {self.target_density.shape} != "
-                              f"expected ({self.num_bins_x}, {self.num_bins_y}), resizing...")
-                # Resize using interpolation
-                from torch.nn.functional import interpolate
-                td = self.target_density.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
-                td = interpolate(td, size=(self.num_bins_x, self.num_bins_y), mode='bilinear', align_corners=False)
-                self.target_density = td.squeeze(0).squeeze(0).to(device=device, dtype=dtype)
-            else:
-                self.target_density = self.target_density.to(device=device, dtype=dtype)
-        else:
-            # Scalar: create uniform tensor
-            self.target_density = torch.full(
-                (self.num_bins_x, self.num_bins_y),
-                self.target_density,
-                dtype=dtype, device=device
+        if not isinstance(self.target_density, torch.Tensor):
+            raise TypeError(
+                "LShapeElectricPotential requires target_density to be a 2D routing supply tensor"
             )
+        if self.target_density.shape != (self.num_bins_x, self.num_bins_y):
+            logger.warning(
+                f"target_density shape {self.target_density.shape} != "
+                f"expected ({self.num_bins_x}, {self.num_bins_y}), resizing..."
+            )
+            from torch.nn.functional import interpolate
+            td = self.target_density.unsqueeze(0).unsqueeze(0)
+            td = interpolate(td, size=(self.num_bins_x, self.num_bins_y), mode='bilinear', align_corners=False)
+            self.target_density = td.squeeze(0).squeeze(0).to(device=device, dtype=dtype)
+        else:
+            self.target_density = self.target_density.to(device=device, dtype=dtype)
 
     def _init_target_demand(self, device, dtype):
         """Initialize or convert target_demand to proper tensor format."""
@@ -778,48 +718,38 @@ class LShapeElectricPotential(nn.Module):
             else:
                 self.target_demand = self.target_demand.to(device=device, dtype=dtype)
         else:
-            self.target_demand = None
+            raise TypeError(
+                "LShapeElectricPotential requires target_demand to be a 2D routing demand tensor"
+            )
     
     def set_target_density(self, target_density):
         """
         Set target density (supply map) from EGR.
-        
+
         Args:
-            target_density: scalar or 2D tensor (num_bins_x, num_bins_y)
-                Values should be normalized to [0, 1] where:
-                - 1.0 = full routing capacity
-                - 0.0 = no routing capacity (blockage)
+            target_density: 2D tensor (num_bins_x, num_bins_y)
         """
-        if isinstance(target_density, torch.Tensor):
-            # Ensure correct shape
-            if target_density.shape != (self.num_bins_x, self.num_bins_y):
-                from torch.nn.functional import interpolate
-                td = target_density.unsqueeze(0).unsqueeze(0)
-                td = interpolate(td, size=(self.num_bins_x, self.num_bins_y), mode='bilinear', align_corners=False)
-                target_density = td.squeeze(0).squeeze(0)
-            
-            # Move to correct device/dtype if bin_center_x is initialized
-            if self.bin_center_x is not None:
-                target_density = target_density.to(
-                    device=self.bin_center_x.device, 
-                    dtype=self.bin_center_x.dtype
-                )
-            self.target_density = target_density
-            logger.info(f"Set target_density from EGR supply map: "
-                       f"min={target_density.min():.3f}, max={target_density.max():.3f}, "
-                       f"mean={target_density.mean():.3f}")
-        else:
-            # Scalar
-            if self.bin_center_x is not None:
-                self.target_density = torch.full(
-                    (self.num_bins_x, self.num_bins_y),
-                    target_density,
-                    dtype=self.bin_center_x.dtype,
-                    device=self.bin_center_x.device
-                )
-            else:
-                self.target_density = target_density
-            logger.info(f"Set uniform target_density: {target_density}")
+        if not isinstance(target_density, torch.Tensor):
+            raise TypeError(
+                "LShapeElectricPotential requires target_density to be a 2D routing supply tensor"
+            )
+        if target_density.shape != (self.num_bins_x, self.num_bins_y):
+            from torch.nn.functional import interpolate
+            td = target_density.unsqueeze(0).unsqueeze(0)
+            td = interpolate(td, size=(self.num_bins_x, self.num_bins_y), mode='bilinear', align_corners=False)
+            target_density = td.squeeze(0).squeeze(0)
+
+        if self.bin_center_x is not None:
+            target_density = target_density.to(
+                device=self.bin_center_x.device,
+                dtype=self.bin_center_x.dtype
+            )
+        self.target_density = target_density
+        logger.info(
+            f"Set target_density from EGR supply map: "
+            f"min={target_density.min():.3f}, max={target_density.max():.3f}, "
+            f"mean={target_density.mean():.3f}"
+        )
 
     def set_target_demand(self, target_demand):
         """
@@ -847,10 +777,9 @@ class LShapeElectricPotential(nn.Module):
                        f"min={target_demand.min():.3f}, max={target_demand.max():.3f}, "
                        f"mean={target_demand.mean():.3f}")
         else:
-            self.target_demand = None
-            if isinstance(self.area_per_track, torch.Tensor):
-                self.area_per_track.zero_()
-            logger.info("Cleared target_demand")
+            raise TypeError(
+                "LShapeElectricPotential requires target_demand to be a 2D routing demand tensor"
+            )
     
     def _init_dct(self, device, dtype):
         """Initialize DCT related parameters."""
@@ -1050,7 +979,7 @@ class LShapeRoutabilityPotentialOp(nn.Module):
         l_direction_resolver,
         num_bins_x=64,
         num_bins_y=64,
-        target_density=1.0,
+        target_density=None,
         target_demand=None,
         wire_width=0.0
     ):
@@ -1063,8 +992,8 @@ class LShapeRoutabilityPotentialOp(nn.Module):
             steiner_topo_op: Steiner topology operator
             l_direction_resolver: L-direction resolver
             num_bins_x, num_bins_y: number of bins
-            target_density: target routing density
-            target_demand: target routing demand (EGR net map)
+            target_density: 2D target routing supply tensor
+            target_demand: optional 2D target routing demand tensor (EGR net map)
             wire_width: wire width for segments
         """
         super(LShapeRoutabilityPotentialOp, self).__init__()
@@ -1161,7 +1090,7 @@ def create_l_shape_electric_potential(
     placedb,
     num_bins_x=64,
     num_bins_y=64,
-    target_density=1.0,
+    target_density=None,
     target_demand=None,
     padding=0,
     deterministic_flag=True,
@@ -1173,8 +1102,8 @@ def create_l_shape_electric_potential(
     Args:
         placedb: placement database
         num_bins_x, num_bins_y: number of bins
-        target_density: target routing density
-        target_demand: target routing demand (EGR net map)
+        target_density: 2D target routing supply tensor
+        target_demand: optional 2D target routing demand tensor (EGR net map)
         padding: bin padding
         deterministic_flag: whether to use deterministic routine
         fast_mode: if True, skip energy computation

@@ -715,12 +715,15 @@ class LShapeRoutabilityOp(nn.Module):
                 l_directions = l_directions.cpu()
             logger.debug(f"Using EGR L-directions: {len(l_directions)} edges")
         else:
-            # 没有L方向信息时，显式使用 H_FIRST fallback，而不是残余 UNKNOWN。
+            fallback_direction = UNKNOWN if self.soft_l_assignment else H_FIRST
             l_directions = torch.full(
-                (flat_pin_from.numel(),), H_FIRST,
+                (flat_pin_from.numel(),), fallback_direction,
                 dtype=torch.int32, device=newx.device  # CPU
             )
-            logger.debug("No L-direction info, using default H_FIRST")
+            logger.debug(
+                "No L-direction info, using default %s",
+                "UNKNOWN" if fallback_direction == UNKNOWN else "H_FIRST",
+            )
         
         soft_l_weights = None
         if self.soft_l_assignment:
@@ -865,8 +868,9 @@ class LShapeRoutabilityOp(nn.Module):
             if l_directions.device != device:
                 l_directions = l_directions.to(device)
         else:
+            fallback_direction = UNKNOWN if self.soft_l_assignment else H_FIRST
             l_directions = torch.full(
-                (flat_pin_from.numel(),), H_FIRST,
+                (flat_pin_from.numel(),), fallback_direction,
                 dtype=torch.int32, device=device
             )
         

@@ -554,6 +554,12 @@ def _get_default_egr_guide_path(params):
     )
 
 
+def _should_skip_resolver_l_direction_for_soft(params):
+    return bool(getattr(params, "soft_l_assignment", False)) and not bool(
+        getattr(params, "soft_l_use_resolver_prior", True)
+    )
+
+
 def _resolve_l_directions_for_l_shape(
     params,
     placedb,
@@ -1527,27 +1533,36 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
                             # Step 4: 解析路由器输出的 L 方向
                             steiner_topo_op = self.op_collections.steiner_topo_op
-                            l_directions = _resolve_l_directions_for_l_shape(
-                                params,
-                                placedb,
-                                pos,
-                                steiner_topo_op,
-                                gpugr_route_entries=(
-                                    gpugr_inputs["route_entries"]
-                                    if getattr(params, "l_direction_use_gpugr", False)
-                                    else None
-                                ),
-                                gpugr_metrics=(
-                                    gpugr_inputs["metrics"]
-                                    if getattr(params, "l_direction_use_gpugr", False)
-                                    else None
-                                ),
-                                gpugr_route_grid=(
-                                    (gpugr_inputs["route_xsize"], gpugr_inputs["route_ysize"])
-                                    if getattr(params, "l_direction_use_gpugr", False)
-                                    else None
-                                ),
-                            )
+                            if _should_skip_resolver_l_direction_for_soft(params):
+                                steiner_topo_op.edge_l_directions = None
+                                l_directions = None
+                                logging.info(
+                                    "Skip resolver L-direction parsing because soft_l_assignment is enabled "
+                                    "and soft_l_use_resolver_prior is disabled; only routing supply/demand maps "
+                                    "will be refreshed."
+                                )
+                            else:
+                                l_directions = _resolve_l_directions_for_l_shape(
+                                    params,
+                                    placedb,
+                                    pos,
+                                    steiner_topo_op,
+                                    gpugr_route_entries=(
+                                        gpugr_inputs["route_entries"]
+                                        if getattr(params, "l_direction_use_gpugr", False)
+                                        else None
+                                    ),
+                                    gpugr_metrics=(
+                                        gpugr_inputs["metrics"]
+                                        if getattr(params, "l_direction_use_gpugr", False)
+                                        else None
+                                    ),
+                                    gpugr_route_grid=(
+                                        (gpugr_inputs["route_xsize"], gpugr_inputs["route_ysize"])
+                                        if getattr(params, "l_direction_use_gpugr", False)
+                                        else None
+                                    ),
+                                )
 
                             # # ========== Plot edges with L-shape by l_direction ==========
                             # import matplotlib.pyplot as plt
@@ -1791,27 +1806,36 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 l_shape_inputs = gpugr_inputs
 
                             steiner_topo_op = self.op_collections.steiner_topo_op
-                            l_directions = _resolve_l_directions_for_l_shape(
-                                params,
-                                placedb,
-                                pos,
-                                steiner_topo_op,
-                                gpugr_route_entries=(
-                                    gpugr_inputs["route_entries"]
-                                    if gpugr_inputs is not None
-                                    else None
-                                ),
-                                gpugr_metrics=(
-                                    gpugr_inputs["metrics"]
-                                    if gpugr_inputs is not None
-                                    else None
-                                ),
-                                gpugr_route_grid=(
-                                    (gpugr_inputs["route_xsize"], gpugr_inputs["route_ysize"])
-                                    if gpugr_inputs is not None
-                                    else None
-                                ),
-                            )
+                            if _should_skip_resolver_l_direction_for_soft(params):
+                                steiner_topo_op.edge_l_directions = None
+                                l_directions = None
+                                logging.info(
+                                    "Skip resolver L-direction parsing because soft_l_assignment is enabled "
+                                    "and soft_l_use_resolver_prior is disabled; only routing supply/demand maps "
+                                    "will be refreshed."
+                                )
+                            else:
+                                l_directions = _resolve_l_directions_for_l_shape(
+                                    params,
+                                    placedb,
+                                    pos,
+                                    steiner_topo_op,
+                                    gpugr_route_entries=(
+                                        gpugr_inputs["route_entries"]
+                                        if gpugr_inputs is not None
+                                        else None
+                                    ),
+                                    gpugr_metrics=(
+                                        gpugr_inputs["metrics"]
+                                        if gpugr_inputs is not None
+                                        else None
+                                    ),
+                                    gpugr_route_grid=(
+                                        (gpugr_inputs["route_xsize"], gpugr_inputs["route_ysize"])
+                                        if gpugr_inputs is not None
+                                        else None
+                                    ),
+                                )
                             if model.l_shape_routability_op is not None and l_shape_inputs is not None:
                                 model.l_shape_routability_op.update_targets(
                                     target_density=l_shape_inputs["supply_map"],

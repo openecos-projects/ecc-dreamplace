@@ -15,6 +15,9 @@ class GPUGR(object):
         self.params = params
         self.placedb = placedb
         self._gpugr_op = None
+        self.last_result = None
+        self.last_metrics = None
+        self.last_route_grid = None
 
     def __call__(self, pos):
         return self.forward(pos)
@@ -81,6 +84,8 @@ class GPUGR(object):
             keep_temp_def=bool(getattr(self.params, "gpugr_area_adjust_keep_temp_def", 0)),
             save_artifacts=bool(getattr(self.params, "gpugr_area_adjust_save_artifacts", 0)),
         )
+        self.last_result = result
+        self.last_route_grid = (route_xsize, route_ysize)
 
         overflow_xy = result["maps"]["cg_map_union_overflow"].detach().to(
             device=pos.device,
@@ -90,6 +95,7 @@ class GPUGR(object):
         route_utilization_map = (overflow_xy + 1.0).contiguous()
 
         metrics = result["metrics"]
+        self.last_metrics = dict(metrics)
         logger.info(
             "gpugr congestion map for inflation: grid=%dx%d ovfl_max=%.4f ovfl_mean=%.4f #OvflNets=%d EstShorts=%.0f",
             route_xsize,

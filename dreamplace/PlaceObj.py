@@ -3341,6 +3341,7 @@ class PlaceObj(nn.Module):
                 pin_utilization_map,
             )
 
+        build_adjust_node_area_op._xplace_adjust_node_area_impl = adjust_node_area_op
         return build_adjust_node_area_op
 
     def build_fence_region_density_op(self, fence_region_list, node2fence_region_map):

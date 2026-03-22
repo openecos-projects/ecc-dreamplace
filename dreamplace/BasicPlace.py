@@ -123,8 +123,30 @@ class PlaceDataCollection(object):
             self.target_density = torch.empty(
                 1, dtype=self.pos[0].dtype, device=device)
             self.target_density.data.fill_(params.target_density)
+            self.inflation_state = None
+            if params.routability_opt_flag:
+                self.original_target_density = self.target_density.clone()
+                self.original_num_filler_nodes = int(placedb.num_filler_nodes)
 
             self.node_areas = self.node_size_x * self.node_size_y
+            if params.routability_opt_flag:
+                self.original_total_movable_area = float(
+                    self.node_areas[: placedb.num_movable_nodes].sum().item()
+                )
+                if placedb.num_filler_nodes > 0:
+                    self.original_total_filler_area = float(
+                        self.node_areas[-placedb.num_filler_nodes :].sum().item()
+                    )
+                else:
+                    self.original_total_filler_area = 0.0
+                original_target_density = max(float(self.original_target_density.item()), 1e-12)
+                self.original_total_place_area = (
+                    self.original_total_movable_area + self.original_total_filler_area
+                ) / original_target_density
+                self.original_total_whitespace_area = (
+                    self.original_total_place_area - self.original_total_movable_area
+                )
+
             self.movable_macro_mask = torch.from_numpy(placedb.movable_macro_mask).to(
                 device
             )

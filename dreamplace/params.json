@@ -203,6 +203,46 @@
         "description": "maximum times to adjust node area",
         "default": 3
     },
+    "xplace_style_inflation_flag": {
+        "description": "whether enable the Xplace-style outer-loop inflation controller skeleton",
+        "default": 0
+    },
+    "xplace_inflation_max_rounds": {
+        "description": "maximum number of Xplace-style inflation rounds",
+        "default": 5
+    },
+    "xplace_inflation_min_area_inc": {
+        "description": "minimum relative area increment ratio to keep an Xplace-style inflation round",
+        "default": 0.01
+    },
+    "xplace_inflation_use_target_area": {
+        "description": "whether track an explicit target area budget in the Xplace-style inflation controller",
+        "default": 1
+    },
+    "xplace_inflation_dynamic_target_density_flag": {
+        "description": "whether allow the Xplace-style inflation controller to lower target density between rounds",
+        "default": 1
+    },
+    "xplace_inflation_low_util_filler_ratio": {
+        "description": "low-utilization filler ratio threshold used by the Xplace-style inflation controller",
+        "default": 1.10
+    },
+    "xplace_inflation_low_util_overflow_ratio": {
+        "description": "overflow threshold used to trigger low-utilization filler handling in the Xplace-style inflation controller",
+        "default": 0.04
+    },
+    "xplace_inflation_target_density_decay": {
+        "description": "per-round target density decay used by the Xplace-style inflation controller",
+        "default": 0.85
+    },
+    "xplace_inflation_target_density_floor": {
+        "description": "minimum target density allowed by the Xplace-style inflation controller",
+        "default": 0.4762
+    },
+    "xplace_inflation_select_metric": {
+        "description": "metric name used to select the best Xplace-style inflation round",
+        "default": "est_shorts"
+    },
     "gpugr_first_inflation_exit": {
         "description": "run the external gpugr operator before the first routability area-adjust round, then exit immediately",
         "default": 0

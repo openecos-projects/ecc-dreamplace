@@ -35,6 +35,7 @@ from dreamplace.ops.routability.egr_resample import (
     create_supply_and_demand_maps_from_egr,
     create_directional_supply_and_demand_maps_from_egr,
 )
+from dreamplace.ops.routability import xplace_inflation_controller
 
 
 def _write_back_autodmp_pos_to_ieda(pos, params, placedb):
@@ -959,6 +960,23 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     global_place_params,
                 ).to(self.data_collections.pos[0].device)
                 model.compile()
+                if params.routability_opt_flag:
+                    inflation_state = xplace_inflation_controller.ensure_inflation_state(
+                        params,
+                        placedb,
+                        self.data_collections,
+                        stage_idx=cur_stage,
+                    )
+                    model.inflation_state = inflation_state
+                    if getattr(params, "xplace_style_inflation_flag", False):
+                        logging.info(
+                            "Initialized Xplace-style inflation controller for stage %d; "
+                            "the trigger still reuses the legacy routability checkpoint, but "
+                            "inflation rounds now restore best_pos before gpugr/area-adjust.",
+                            cur_stage,
+                        )
+                else:
+                    model.inflation_state = None
 
                 if params.macro_place_flag and macro_placed:
                     movable_macro_mask = self.data_collections.movable_macro_mask
@@ -1197,6 +1215,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     model._l_shape_ratio_last = None
                     model._l_shape_ratio_rise_streak = 0
                     model._l_shape_ratio_guard_disabled = False
+                    model._l_shape_inflation_guard_disabled = False
 
                 def disable_l_shape_for_recovery(
                     iteration,
@@ -1244,10 +1263,10 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     model._l_shape_ratio_rise_streak = 0
 
                     if reason == "inflation":
+                        model._l_shape_inflation_guard_disabled = True
                         logging.info(
-                            "L-shape disabled due to inflation (round %d), "
-                            "will re-enable when overflow drops below threshold again "
-                            "after 5 consecutive decreases "
+                            "L-shape disabled due to inflation (round %d) and permanently disabled "
+                            "for the remaining placement "
                             "(next_threshold=%.4f, base_threshold=%.4f, reenable_count=%d)",
                             inflation_round,
                             next_threshold,
@@ -1637,6 +1656,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             not model.enable_l_shape_routability
                             and not getattr(model, "_l_shape_auto_disabled", False)
                             and not getattr(model, "_l_shape_ratio_guard_disabled", False)
+                            and not getattr(model, "_l_shape_inflation_guard_disabled", False)
                         ):
                             current_overflow = float(cur_metric.overflow[-1])
                             overflow_threshold = float(
@@ -2749,6 +2769,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     )
                     adjust_pin_area_flag = params.adjust_pin_area_flag
                     num_area_adjust = 0
+                    max_area_adjust_rounds = xplace_inflation_controller.get_inflation_round_limit(params)
+                    if getattr(model, "inflation_state", None) is not None:
+                        model.inflation_state.num_area_adjust = 0
 
                 Llambda_flat_iteration = 0
 
@@ -2863,7 +2886,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         # for routability optimization
                         if (
                             params.routability_opt_flag
-                            and num_area_adjust < params.max_num_area_adjust
+                            and num_area_adjust < max_area_adjust_rounds
                             and Llambda_metrics[-1][-1].overflow < params.node_area_adjust_overflow
                         ):
                             content = (
@@ -2876,6 +2899,50 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 )
                             )
                             pos = model.data_collections.pos[0]
+                            use_best_pos_for_inflation = xplace_inflation_controller.is_xplace_outer_loop_enabled(
+                                params
+                            )
+                            if use_best_pos_for_inflation and best_pos[0] is not None:
+                                pos.data.copy_(best_pos[0].data)
+                                content = (
+                                    "xplace-style inflation round %d: restore best_pos snapshot before gpugr/area-adjust | "
+                                    % num_area_adjust
+                                ) + content
+                                logging.info(
+                                    "Xplace-style inflation round %d uses best_pos snapshot with best overflow %.6f at iter %d",
+                                    num_area_adjust,
+                                    float(best_metric[0].overflow[-1]) if best_metric[0] is not None else float("nan"),
+                                    int(best_metric[0].iteration) if best_metric[0] is not None else -1,
+                                )
+                            route_map_source = "none"
+                            if adjust_route_area_flag:
+                                if getattr(params, "adjust_gpugr_area_flag", False):
+                                    route_map_source = "gpugr"
+                                elif params.adjust_nctugr_area_flag:
+                                    route_map_source = "irt_egr"
+                                else:
+                                    route_map_source = "rudy"
+                            legacy_inflation_round = None
+                            if getattr(model, "inflation_state", None) is not None:
+                                legacy_inflation_round = xplace_inflation_controller.begin_inflation_round(
+                                    model.inflation_state,
+                                    self.data_collections,
+                                    placedb,
+                                    pos=pos,
+                                    round_idx=num_area_adjust,
+                                    stage_idx=cur_stage,
+                                    iteration=iteration,
+                                    overflow=Llambda_metrics[-1][-1].overflow,
+                                    route_map_source=route_map_source,
+                                    adjust_area_flag=adjust_area_flag,
+                                    adjust_route_area_flag=adjust_route_area_flag,
+                                    adjust_pin_area_flag=adjust_pin_area_flag,
+                                    notes=(
+                                        "Current Xplace-style path still reuses the legacy routability "
+                                        "checkpoint, but restores best_pos and records gpugr-backed "
+                                        "inflation round metadata."
+                                    ),
+                                )
                             _run_gpugr_before_first_area_adjust_and_exit(
                                 params,
                                 placedb,
@@ -2886,6 +2953,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
                             route_utilization_map = None
                             pin_utilization_map = None
+                            gpugr_metrics = {}
+                            low_util_context = None
                             if adjust_route_area_flag:
                                 if getattr(params, "adjust_gpugr_area_flag", False):
                                     _sync_gpugr_route_grid_to_autodmp(
@@ -2896,6 +2965,11 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     route_utilization_map = model.op_collections.gpugr_congestion_map_op(
                                         pos
                                     )
+                                    gpugr_metrics = getattr(
+                                        model.op_collections.gpugr_congestion_map_op,
+                                        "last_metrics",
+                                        {},
+                                    ) or {}
                                 elif params.adjust_nctugr_area_flag:
                                     route_utilization_map = model.op_collections.irt_egr_congestion_map_op(
                                         pos, stage="egr3D", resolve_congestion="high")
@@ -2934,6 +3008,15 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     plt.imsave(
                                         figname, pin_utilization_map.data.cpu().numpy().T, origin="lower"
                                     )
+                            if getattr(model, "inflation_state", None) is not None:
+                                low_util_context = xplace_inflation_controller.prepare_low_util_inflation(
+                                    params,
+                                    model.inflation_state,
+                                    placedb,
+                                    self.data_collections,
+                                    model.op_collections.adjust_node_area_op,
+                                    gpugr_metrics,
+                                )
                             (
                                 adjust_area_flag,
                                 adjust_route_area_flag,
@@ -2941,14 +3024,65 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             ) = model.op_collections.adjust_node_area_op(
                                 pos, route_utilization_map, pin_utilization_map
                             )
+                            xplace_inflation_controller.restore_low_util_inflation(
+                                model.op_collections.adjust_node_area_op,
+                                low_util_context,
+                            )
+                            low_util_metrics = {}
+                            if adjust_area_flag:
+                                low_util_metrics = xplace_inflation_controller.apply_low_util_target_density(
+                                    params,
+                                    getattr(model, "inflation_state", None),
+                                    self.data_collections,
+                                    placedb,
+                                    pos,
+                                    low_util_context,
+                                )
                             content += " -> (%d, %d, %d)" % (
                                 adjust_area_flag,
                                 adjust_route_area_flag,
                                 adjust_pin_area_flag,
                             )
                             logging.info(content)
+                            if legacy_inflation_round is not None:
+                                round_status = "applied" if adjust_area_flag else "stopped"
+                                xplace_inflation_controller.finish_inflation_round(
+                                    model.inflation_state,
+                                    self.data_collections,
+                                    placedb,
+                                    adjust_area_flag=adjust_area_flag,
+                                    adjust_route_area_flag=adjust_route_area_flag,
+                                    adjust_pin_area_flag=adjust_pin_area_flag,
+                                    status=round_status,
+                                    gr_metrics=dict(
+                                        {
+                                            "placement_overflow": Llambda_metrics[-1][-1].overflow,
+                                        },
+                                        **low_util_metrics,
+                                        **gpugr_metrics,
+                                    ),
+                                )
+                                selected_metric_name = getattr(
+                                    params,
+                                    "xplace_inflation_select_metric",
+                                    "est_shorts",
+                                )
+                                round_metric_value = xplace_inflation_controller.get_round_metric(
+                                    model.inflation_state.round_records[-1],
+                                    selected_metric_name,
+                                )
+                                if round_metric_value is not None:
+                                    logging.info(
+                                        "Recorded Xplace-style inflation round %d: %s=%.4f trigger_overflow=%.6f",
+                                        num_area_adjust,
+                                        selected_metric_name,
+                                        round_metric_value,
+                                        float(Llambda_metrics[-1][-1].overflow),
+                                    )
                             if adjust_area_flag:
                                 num_area_adjust += 1
+                                if getattr(model, "inflation_state", None) is not None:
+                                    model.inflation_state.num_area_adjust = num_area_adjust
                                 # restart Llambda
                                 model.op_collections.density_op.reset()
                                 model.op_collections.density_overflow_op.reset()
@@ -2981,6 +3115,16 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     )
 
                                 break
+                            else:
+                                num_area_adjust = max_area_adjust_rounds
+                                if getattr(model, "inflation_state", None) is not None:
+                                    model.inflation_state.num_area_adjust = num_area_adjust
+                                logging.info(
+                                    "Terminate routability inflation after round %d because adjust_node_area reported no further area change",
+                                    legacy_inflation_round.round_idx
+                                    if legacy_inflation_round is not None
+                                    else num_area_adjust,
+                                )
 
                     # gradually reduce gamma to tradeoff smoothness and accuracy
                     if len(placedb.regions) > 0 and Llambda_metrics[-1][-1].goverflow is not None:
@@ -3075,6 +3219,16 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
             # recover node size and pin offset for legalization, since node size is adjusted in global placement
             if params.routability_opt_flag:
+                selected_inflation_round = None
+                if xplace_inflation_controller.is_xplace_outer_loop_enabled(params):
+                    selected_inflation_round = xplace_inflation_controller.select_best_gr_solution(
+                        getattr(self.data_collections, "inflation_state", None),
+                        metric_name=getattr(
+                            params,
+                            "xplace_inflation_select_metric",
+                            "est_shorts",
+                        ),
+                    )
                 with torch.no_grad():
                     # convert lower left to centers
                     self.pos[0][: placedb.num_movable_nodes].add_(
@@ -3102,6 +3256,37 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         self.data_collections.original_pin_offset_x)
                     self.data_collections.pin_offset_y.copy_(
                         self.data_collections.original_pin_offset_y)
+                    xplace_inflation_controller.rollback_inflation_state(
+                        self.data_collections
+                    )
+                if selected_inflation_round is not None:
+                    with torch.no_grad():
+                        self.pos[0].data.copy_(
+                            selected_inflation_round.position_snapshot.data.to(
+                                device=self.pos[0].device,
+                                dtype=self.pos[0].dtype,
+                            )
+                        )
+                    selected_metric_name = getattr(
+                        params,
+                        "xplace_inflation_select_metric",
+                        "est_shorts",
+                    )
+                    selected_metric_value = xplace_inflation_controller.get_round_metric(
+                        selected_inflation_round,
+                        selected_metric_name,
+                    )
+                    logging.info(
+                        "Replay Xplace-style best inflation round %d after rollback using %s=%.4f (trigger_overflow=%.6f, stage=%d, iter=%d)",
+                        selected_inflation_round.round_idx,
+                        selected_metric_name,
+                        float(selected_metric_value)
+                        if selected_metric_value is not None
+                        else float("nan"),
+                        selected_inflation_round.trigger_overflow,
+                        selected_inflation_round.stage_idx,
+                        selected_inflation_round.iteration,
+                    )
 
         else:
             cur_metric = EvalMetrics.EvalMetrics(iteration)

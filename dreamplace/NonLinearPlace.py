@@ -3220,7 +3220,13 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             # recover node size and pin offset for legalization, since node size is adjusted in global placement
             if params.routability_opt_flag:
                 selected_inflation_round = None
-                if xplace_inflation_controller.is_xplace_outer_loop_enabled(params):
+                replay_best_inflation_round = bool(
+                    getattr(params, "xplace_inflation_replay_best_round_flag", False)
+                )
+                if (
+                    replay_best_inflation_round
+                    and xplace_inflation_controller.is_xplace_outer_loop_enabled(params)
+                ):
                     selected_inflation_round = xplace_inflation_controller.select_best_gr_solution(
                         getattr(self.data_collections, "inflation_state", None),
                         metric_name=getattr(
@@ -3286,6 +3292,17 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         selected_inflation_round.trigger_overflow,
                         selected_inflation_round.stage_idx,
                         selected_inflation_round.iteration,
+                    )
+                elif (
+                    not replay_best_inflation_round
+                    and xplace_inflation_controller.is_xplace_outer_loop_enabled(params)
+                ):
+                    logging.info(
+                        "Skip Xplace-style best-round replay after rollback because xplace_inflation_replay_best_round_flag is disabled"
+                    )
+                elif replay_best_inflation_round and xplace_inflation_controller.is_xplace_outer_loop_enabled(params):
+                    logging.info(
+                        "Skip Xplace-style best-round replay after rollback because no eligible inflation round was recorded"
                     )
 
         else:

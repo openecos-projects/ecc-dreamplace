@@ -239,6 +239,10 @@
         "description": "minimum target density allowed by the Xplace-style inflation controller",
         "default": 0.4762
     },
+    "xplace_inflation_replay_best_round_flag": {
+        "description": "whether replay the best recorded Xplace-style inflation round after rolling back inflated geometry",
+        "default": 0
+    },
     "xplace_inflation_select_metric": {
         "description": "metric name used to select the best Xplace-style inflation round",
         "default": "est_shorts"

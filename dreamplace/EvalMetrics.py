@@ -78,6 +78,15 @@ class EvalMetrics(object):
         self.soft_l_resolver_agreement_ratio = None
         self.soft_l_target_demand_supply_ratio = None
         self.soft_l_current_demand_supply_ratio = None
+        self.soft_l_same_net_topo_nets = None
+        self.soft_l_same_net_topo_segments_h = None
+        self.soft_l_same_net_topo_segments_v = None
+        self.soft_l_same_net_topo_diag_edges = None
+        self.soft_l_same_net_topo_edges_with_topology = None
+        self.soft_l_same_net_topo_edges_with_observed_intervals = None
+        self.soft_l_same_net_topo_leg_fallback_ratio = None
+        self.soft_l_same_net_topo_mean_gap = None
+        self.soft_l_same_net_topo_tie_ratio = None
 
     def __str__(self):
         """
@@ -191,6 +200,26 @@ class EvalMetrics(object):
             content += ", SoftLoadRatio %.4f" % (
                 self.soft_l_current_demand_supply_ratio
             )
+        if self.soft_l_same_net_topo_nets is not None:
+            content += ", TopoNets %d" % (self.soft_l_same_net_topo_nets)
+        if self.soft_l_same_net_topo_diag_edges is not None:
+            content += ", TopoDiag %d" % (self.soft_l_same_net_topo_diag_edges)
+        if self.soft_l_same_net_topo_edges_with_topology is not None:
+            content += ", TopoHit %d" % (
+                self.soft_l_same_net_topo_edges_with_topology
+            )
+        if self.soft_l_same_net_topo_edges_with_observed_intervals is not None:
+            content += ", TopoObs %d" % (
+                self.soft_l_same_net_topo_edges_with_observed_intervals
+            )
+        if self.soft_l_same_net_topo_leg_fallback_ratio is not None:
+            content += ", TopoFb %.4f" % (
+                self.soft_l_same_net_topo_leg_fallback_ratio
+            )
+        if self.soft_l_same_net_topo_mean_gap is not None:
+            content += ", TopoGap %.4f" % (self.soft_l_same_net_topo_mean_gap)
+        if self.soft_l_same_net_topo_tie_ratio is not None:
+            content += ", TopoTie %.4f" % (self.soft_l_same_net_topo_tie_ratio)
         if self.gamma is not None:
             content += ", gamma %.6E" % (self.gamma)
         if self.eval_time is not None:

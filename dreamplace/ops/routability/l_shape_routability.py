@@ -29,6 +29,9 @@ from dreamplace.ops.routability.l_shape_electric_overflow import (
     LShapeElectricOverflow,
     create_l_shape_electric_overflow
 )
+from dreamplace.ops.routability.same_net_topo_scoring import (
+    compute_same_net_topology_scores,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +102,25 @@ class LShapeRoutabilityOp(nn.Module):
         self.soft_l_hotspot_ramp_ratio = max(float(getattr(params, "soft_l_hotspot_ramp_ratio", 0.03)), 0.0)
         self.soft_l_adaptive_tau = bool(getattr(params, "soft_l_adaptive_tau", False))
         self.soft_l_adaptive_scale = max(float(getattr(params, "soft_l_adaptive_scale", 1.0)), 1e-6)
+        self.soft_l_use_same_net_topo_scoring = bool(
+            getattr(params, "soft_l_use_same_net_topo_scoring", False)
+        )
+        self.soft_l_same_net_topo_weight = float(
+            getattr(params, "soft_l_same_net_topo_weight", 1.0)
+        )
+        self.soft_l_same_net_topo_only_mode = bool(
+            getattr(params, "soft_l_same_net_topo_only_mode", False)
+        )
+        self.soft_l_topo_stage = str(getattr(params, "soft_l_topo_stage", "stage_a"))
+        self.soft_l_topo_max_row_offset = max(
+            int(getattr(params, "soft_l_topo_max_row_offset", 0)), 0
+        )
+        self.soft_l_topo_max_col_offset = max(
+            int(getattr(params, "soft_l_topo_max_col_offset", 0)), 0
+        )
+        self.soft_l_topo_tie_delta = max(
+            float(getattr(params, "soft_l_topo_tie_delta", 0.0)), 0.0
+        )
 
         # L形segment构建器
         self.segment_builder = LShapeSegmentOp(
@@ -120,6 +142,16 @@ class LShapeRoutabilityOp(nn.Module):
                 self.soft_l_self_overflow_weight,
                 self.soft_l_hotspot_weight,
                 self.soft_l_hotspot_ramp_ratio,
+            )
+        if self.soft_l_use_same_net_topo_scoring:
+            logger.info(
+                "Same-net topo scoring enabled: stage=%s weight=%.3f topo_only=%s row_offset=%d col_offset=%d tie_delta=%.4f",
+                self.soft_l_topo_stage,
+                self.soft_l_same_net_topo_weight,
+                self.soft_l_same_net_topo_only_mode,
+                self.soft_l_topo_max_row_offset,
+                self.soft_l_topo_max_col_offset,
+                self.soft_l_topo_tie_delta,
             )
         
         # 根据模式选择密度计算器
@@ -176,6 +208,8 @@ class LShapeRoutabilityOp(nn.Module):
         self.cached_density_map = None
         self.cached_density_map_h = None
         self.cached_density_map_v = None
+        self.same_net_topo_cache = None
+        self.same_net_topo_stats = None
         self.target_density_h = target_density_h
         self.target_density_v = target_density_v
         self.target_demand_h = target_demand_h
@@ -248,6 +282,29 @@ class LShapeRoutabilityOp(nn.Module):
                 "set" if target_demand_v is not None else "keep",
             )
 
+    def update_same_net_topology(self, topo_cache=None, topo_stats=None):
+        self.same_net_topo_cache = topo_cache
+        self.same_net_topo_stats = topo_stats
+        if isinstance(self.cached_soft_debug, dict):
+            self.cached_soft_debug.update(
+                {
+                    "same_net_topo_cache_present": topo_cache is not None,
+                    "same_net_topo_nets": None if topo_stats is None else int(topo_stats.get("num_nets_with_topology", 0)),
+                    "same_net_topo_segments_h": None if topo_stats is None else int(topo_stats.get("num_segments_h", 0)),
+                    "same_net_topo_segments_v": None if topo_stats is None else int(topo_stats.get("num_segments_v", 0)),
+                }
+            )
+        if topo_stats is None:
+            logger.info("Cleared same-net topology cache for L-shape routability op.")
+            return
+        logger.info(
+            "Updated same-net topo cache for L-shape routability op: nets=%d segments_h=%d segments_v=%d invalid_wires=%d",
+            int(topo_stats.get("num_nets_with_topology", 0)),
+            int(topo_stats.get("num_segments_h", 0)),
+            int(topo_stats.get("num_segments_v", 0)),
+            int(topo_stats.get("invalid_wire_count", 0)),
+        )
+
     def _build_vertex_to_net(self, steiner_topo_op, num_vertices):
         """Build vertex->net mapping for pins and Steiner points."""
         vertex_to_net = torch.full((num_vertices,), -1, dtype=torch.int32)
@@ -269,6 +326,26 @@ class LShapeRoutabilityOp(nn.Module):
                     if s < e and s < num_vertices:
                         vertex_to_net[s:min(e, num_vertices)] = net_id
         return vertex_to_net
+
+    def _build_edge_net_ids(self, steiner_topo_op, flat_pin_from, flat_pin_to, num_vertices):
+        vertex_to_net = self._build_vertex_to_net(steiner_topo_op, num_vertices)
+        flat_pin_from_cpu = flat_pin_from.cpu() if isinstance(flat_pin_from, torch.Tensor) and flat_pin_from.device.type != "cpu" else flat_pin_from
+        flat_pin_to_cpu = flat_pin_to.cpu() if isinstance(flat_pin_to, torch.Tensor) and flat_pin_to.device.type != "cpu" else flat_pin_to
+        edge_net_ids = torch.full((flat_pin_from_cpu.numel(),), -1, dtype=torch.int32)
+        valid_mask = (
+            (flat_pin_from_cpu >= 0)
+            & (flat_pin_to_cpu >= 0)
+            & (flat_pin_from_cpu < num_vertices)
+            & (flat_pin_to_cpu < num_vertices)
+        )
+        if not valid_mask.any():
+            return edge_net_ids
+
+        net_from = vertex_to_net[flat_pin_from_cpu[valid_mask]]
+        net_to = vertex_to_net[flat_pin_to_cpu[valid_mask]]
+        chosen_net = torch.where(net_from >= 0, net_from, net_to)
+        edge_net_ids[valid_mask] = chosen_net
+        return edge_net_ids
 
     def _prepare_soft_map(self, candidate, device, dtype):
         if not isinstance(candidate, torch.Tensor):
@@ -418,7 +495,7 @@ class LShapeRoutabilityOp(nn.Module):
         lo = torch.where(y_lo > 0, prefix_y[x_idx, y_lo - 1], torch.zeros_like(hi))
         return hi - lo
 
-    def _compute_soft_l_weights(self, newx, newy, flat_pin_from, flat_pin_to, l_directions):
+    def _compute_soft_l_weights(self, newx, newy, flat_pin_from, flat_pin_to, l_directions, edge_net_ids=None):
         """
         Build soft H/V weights for each edge.
 
@@ -446,6 +523,11 @@ class LShapeRoutabilityOp(nn.Module):
         valid_from = flat_pin_from[valid_mask]
         valid_to = flat_pin_to[valid_mask]
         valid_l_dir = l_directions[valid_mask]
+        valid_edge_net_ids = None
+        if isinstance(edge_net_ids, torch.Tensor):
+            valid_mask_cpu = valid_mask.cpu() if valid_mask.device.type != "cpu" else valid_mask
+            edge_net_ids_cpu = edge_net_ids.cpu() if edge_net_ids.device.type != "cpu" else edge_net_ids
+            valid_edge_net_ids = edge_net_ids_cpu[valid_mask_cpu]
 
         x1 = newx[valid_from]
         y1 = newy[valid_from]
@@ -490,6 +572,51 @@ class LShapeRoutabilityOp(nn.Module):
                 )
                 cost_h = cost_h + effective_hotspot_weight * hotspot_h
                 cost_v = cost_v + effective_hotspot_weight * hotspot_v
+
+            topo_debug_stats = None
+            if (
+                self.soft_l_use_same_net_topo_scoring
+                and isinstance(self.same_net_topo_cache, dict)
+                and valid_edge_net_ids is not None
+            ):
+                route_grid_shape = self.same_net_topo_cache.get("route_grid_shape", None)
+                if route_grid_shape is None:
+                    route_num_bins_x = int(getattr(self.placedb, "num_routing_grids_x", self.num_bins_x))
+                    route_num_bins_y = int(getattr(self.placedb, "num_routing_grids_y", self.num_bins_y))
+                else:
+                    route_num_bins_x = int(route_grid_shape[0])
+                    route_num_bins_y = int(route_grid_shape[1])
+                route_num_bins_x = max(route_num_bins_x, 1)
+                route_num_bins_y = max(route_num_bins_y, 1)
+                route_bin_size_x = (self.xh - self.xl) / float(route_num_bins_x)
+                route_bin_size_y = (self.yh - self.yl) / float(route_num_bins_y)
+
+                topo_x1_idx = self._coord_to_bin_index(dx1, self.xl, route_bin_size_x, route_num_bins_x)
+                topo_y1_idx = self._coord_to_bin_index(dy1, self.yl, route_bin_size_y, route_num_bins_y)
+                topo_x2_idx = self._coord_to_bin_index(dx2, self.xl, route_bin_size_x, route_num_bins_x)
+                topo_y2_idx = self._coord_to_bin_index(dy2, self.yl, route_bin_size_y, route_num_bins_y)
+
+                diag_mask_cpu = is_diagonal.cpu() if is_diagonal.device.type != "cpu" else is_diagonal
+                topo_cost_h, topo_cost_v, topo_observed_mask, topo_debug_stats = compute_same_net_topology_scores(
+                    edge_net_ids=valid_edge_net_ids[diag_mask_cpu],
+                    x1_idx=topo_x1_idx.cpu(),
+                    y1_idx=topo_y1_idx.cpu(),
+                    x2_idx=topo_x2_idx.cpu(),
+                    y2_idx=topo_y2_idx.cpu(),
+                    topo_cache=self.same_net_topo_cache,
+                    max_row_offset=self.soft_l_topo_max_row_offset,
+                    max_col_offset=self.soft_l_topo_max_col_offset,
+                    missing_dir_penalty=0.0,
+                    tie_delta=self.soft_l_topo_tie_delta,
+                    device=device,
+                    dtype=dtype,
+                )
+                if self.soft_l_same_net_topo_only_mode:
+                    cost_h = torch.where(topo_observed_mask, topo_cost_h, cost_h)
+                    cost_v = torch.where(topo_observed_mask, topo_cost_v, cost_v)
+                else:
+                    cost_h = cost_h + self.soft_l_same_net_topo_weight * topo_cost_h
+                    cost_v = cost_v + self.soft_l_same_net_topo_weight * topo_cost_v
 
             raw_cost_h = cost_h
             raw_cost_v = cost_v
@@ -556,8 +683,34 @@ class LShapeRoutabilityOp(nn.Module):
                         "resolver_agreement_ratio": resolver_agreement_ratio,
                         "tau": float(tau) if isinstance(tau, (int, float)) else float(tau.item()),
                         "adaptive_tau": self.soft_l_adaptive_tau,
+                        "same_net_topo_scoring_enabled": self.soft_l_use_same_net_topo_scoring,
+                        "same_net_topo_only_mode": self.soft_l_same_net_topo_only_mode,
+                        "same_net_topo_weight": self.soft_l_same_net_topo_weight,
+                        "same_net_topo_stage": self.soft_l_topo_stage,
+                        "same_net_topo_tie_delta": self.soft_l_topo_tie_delta,
                     }
                 )
+                if topo_debug_stats is not None:
+                    self.cached_soft_debug.update(
+                        {
+                            "same_net_topo_diag_edges": int(topo_debug_stats.get("diag_edges", 0)),
+                            "same_net_topo_edges_with_topology": int(topo_debug_stats.get("edges_with_topology", 0)),
+                            "same_net_topo_edges_with_observed_intervals": int(
+                                topo_debug_stats.get("edges_with_observed_intervals", 0)
+                            ),
+                            "same_net_topo_leg_fallback_ratio": float(
+                                topo_debug_stats.get("leg_fallback_ratio", 0.0)
+                            ),
+                            "same_net_topo_mean_gap": float(topo_debug_stats.get("mean_gap", 0.0)),
+                            "same_net_topo_tie_ratio": float(topo_debug_stats.get("tie_ratio", 0.0)),
+                            "same_net_topo_row_offset": int(
+                                topo_debug_stats.get("max_row_offset", self.soft_l_topo_max_row_offset)
+                            ),
+                            "same_net_topo_col_offset": int(
+                                topo_debug_stats.get("max_col_offset", self.soft_l_topo_max_col_offset)
+                            ),
+                        }
+                    )
             valid_weights[is_diagonal] = diag_weights
 
         weights[valid_mask] = valid_weights
@@ -747,8 +900,16 @@ class LShapeRoutabilityOp(nn.Module):
         
         soft_l_weights = None
         if self.soft_l_assignment:
+            edge_net_ids = None
+            if self.soft_l_use_same_net_topo_scoring and isinstance(self.same_net_topo_cache, dict):
+                edge_net_ids = self._build_edge_net_ids(
+                    steiner_topo_op,
+                    flat_pin_from,
+                    flat_pin_to,
+                    newx.numel(),
+                )
             soft_l_weights = self._compute_soft_l_weights(
-                newx, newy, flat_pin_from, flat_pin_to, l_directions
+                newx, newy, flat_pin_from, flat_pin_to, l_directions, edge_net_ids=edge_net_ids
             )
         else:
             self.cached_soft_debug = None
@@ -896,8 +1057,16 @@ class LShapeRoutabilityOp(nn.Module):
         
         soft_l_weights = None
         if self.soft_l_assignment:
+            edge_net_ids = None
+            if self.soft_l_use_same_net_topo_scoring and isinstance(self.same_net_topo_cache, dict):
+                edge_net_ids = self._build_edge_net_ids(
+                    steiner_topo_op,
+                    flat_pin_from,
+                    flat_pin_to,
+                    newx.numel(),
+                )
             soft_l_weights = self._compute_soft_l_weights(
-                newx, newy, flat_pin_from, flat_pin_to, l_directions
+                newx, newy, flat_pin_from, flat_pin_to, l_directions, edge_net_ids=edge_net_ids
             )
         else:
             self.cached_soft_debug = None

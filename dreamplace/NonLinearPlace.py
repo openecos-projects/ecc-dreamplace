@@ -35,6 +35,9 @@ from dreamplace.ops.routability.egr_resample import (
     create_supply_and_demand_maps_from_egr,
     create_directional_supply_and_demand_maps_from_egr,
 )
+from dreamplace.ops.routability.same_net_topo_scoring import (
+    build_same_net_topology_cache,
+)
 from dreamplace.ops.routability import xplace_inflation_controller
 
 
@@ -336,6 +339,10 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
     metrics = result["metrics"]
     route_entries = result.get("route_entries", [])
     total_entries = sum(len(net.get("entries", [])) for net in route_entries)
+    same_net_topo_cache, same_net_topo_stats = build_same_net_topology_cache(
+        route_entries,
+        placedb,
+    )
 
     capacity_map = maps["capacity_map"].detach().to(device=pos.device, dtype=pos.dtype)
     total_demand_map = (maps["wire_demand_map"] + maps["via_demand_map"]).detach().to(
@@ -394,6 +401,8 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
         "route_ysize": route_ysize,
         "num_bins_x": l_shape_num_bins_x,
         "num_bins_y": l_shape_num_bins_y,
+        "same_net_topo_cache": same_net_topo_cache,
+        "same_net_topo_stats": same_net_topo_stats,
     }
 
 
@@ -1184,6 +1193,15 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         "soft_l_resolver_agreement_ratio": "resolver_agreement_ratio",
                         "soft_l_target_demand_supply_ratio": "target_demand_supply_ratio",
                         "soft_l_current_demand_supply_ratio": "current_demand_supply_ratio",
+                        "soft_l_same_net_topo_nets": "same_net_topo_nets",
+                        "soft_l_same_net_topo_segments_h": "same_net_topo_segments_h",
+                        "soft_l_same_net_topo_segments_v": "same_net_topo_segments_v",
+                        "soft_l_same_net_topo_diag_edges": "same_net_topo_diag_edges",
+                        "soft_l_same_net_topo_edges_with_topology": "same_net_topo_edges_with_topology",
+                        "soft_l_same_net_topo_edges_with_observed_intervals": "same_net_topo_edges_with_observed_intervals",
+                        "soft_l_same_net_topo_leg_fallback_ratio": "same_net_topo_leg_fallback_ratio",
+                        "soft_l_same_net_topo_mean_gap": "same_net_topo_mean_gap",
+                        "soft_l_same_net_topo_tie_ratio": "same_net_topo_tie_ratio",
                     }
                     for metric_field, summary_field in soft_field_map.items():
                         value = soft_summary.get(summary_field)
@@ -1872,6 +1890,11 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 target_demand_h=l_shape_inputs.get("demand_map_h"),
                                 target_demand_v=l_shape_inputs.get("demand_map_v"),
                             )
+                            if model.l_shape_routability_op is not None:
+                                model.l_shape_routability_op.update_same_net_topology(
+                                    topo_cache=l_shape_inputs.get("same_net_topo_cache"),
+                                    topo_stats=l_shape_inputs.get("same_net_topo_stats"),
+                                )
                             # 初始化基于L-shape overflow的外环状态
                             model._l_shape_overflow_ema = None
                             model._l_shape_overflow_last = None
@@ -2072,6 +2095,10 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     target_density_v=l_shape_inputs.get("supply_map_v"),
                                     target_demand_h=l_shape_inputs.get("demand_map_h"),
                                     target_demand_v=l_shape_inputs.get("demand_map_v"),
+                                )
+                                model.l_shape_routability_op.update_same_net_topology(
+                                    topo_cache=l_shape_inputs.get("same_net_topo_cache"),
+                                    topo_stats=l_shape_inputs.get("same_net_topo_stats"),
                                 )
                                 updated_wire_width = float(l_shape_inputs["wire_width"])
                                 current_wire_width = float(model.l_shape_routability_op.wire_width)
@@ -3429,6 +3456,15 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 "soft_l_tau",
                 "soft_l_effective_hotspot_weight",
                 "soft_l_resolver_agreement_ratio",
+                "soft_l_same_net_topo_nets",
+                "soft_l_same_net_topo_segments_h",
+                "soft_l_same_net_topo_segments_v",
+                "soft_l_same_net_topo_diag_edges",
+                "soft_l_same_net_topo_edges_with_topology",
+                "soft_l_same_net_topo_edges_with_observed_intervals",
+                "soft_l_same_net_topo_leg_fallback_ratio",
+                "soft_l_same_net_topo_mean_gap",
+                "soft_l_same_net_topo_tie_ratio",
             ]
 
             def scalarize_metric_value(value):

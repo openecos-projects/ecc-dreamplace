@@ -255,6 +255,38 @@ void legalizeBinCPU(
     }
 }
 
+template void legalizeBinCPU<float>(
+        const float* init_x, const float* init_y,
+        const float* node_size_x, const float* node_size_y,
+        std::vector<std::vector<Blank<float> > >& bin_blanks,
+        std::vector<std::vector<int> >& bin_cells,
+        float* x, float* y,
+        int num_bins_x, int num_bins_y, int blank_num_bins_y,
+        float bin_size_x, float bin_size_y, float blank_bin_size_y,
+        float site_width, float row_height,
+        float xl, float yl, float xh, float yh,
+        float alpha,
+        float beta,
+        bool lr_flag,
+        int* num_unplaced_cells
+        );
+
+template void legalizeBinCPU<double>(
+        const double* init_x, const double* init_y,
+        const double* node_size_x, const double* node_size_y,
+        std::vector<std::vector<Blank<double> > >& bin_blanks,
+        std::vector<std::vector<int> >& bin_cells,
+        double* x, double* y,
+        int num_bins_x, int num_bins_y, int blank_num_bins_y,
+        double bin_size_x, double bin_size_y, double blank_bin_size_y,
+        double site_width, double row_height,
+        double xl, double yl, double xh, double yh,
+        double alpha,
+        double beta,
+        bool lr_flag,
+        int* num_unplaced_cells
+        );
+
 void instantiateLegalizeBinCPU(
         const float* init_x, const float* init_y, 
         const float* node_size_x, const float* node_size_y, 

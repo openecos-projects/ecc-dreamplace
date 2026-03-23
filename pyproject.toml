@@ -1,9 +1,9 @@
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+requires = ["uv_build>=0.10.9,<0.11.0"]
+build-backend = "uv_build"
 
 [project]
-name = "dreamplace"
+name = "ecc-dreamplace"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
@@ -26,9 +26,9 @@ dependencies = [
   "xgboost>=1.5.1",
 ]
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["dreamplace*"]
+[tool.uv.build-backend]
+module-name = "dreamplace"
+module-root = ""
 
 [tool.black]
 line-length = 88
@@ -48,3 +48,11 @@ line_length = 88
 multi_line_output = 3
 include_trailing_comma = true
 # known_first_party = "your_package_name"
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }

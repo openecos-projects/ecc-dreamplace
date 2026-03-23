@@ -54,6 +54,11 @@ class InflationRoundRecord:
     status: str = "pending"
     notes: str = ""
     position_snapshot: Optional[torch.Tensor] = None
+    trigger_position_snapshot: Optional[torch.Tensor] = None
+    inflated_position_snapshot: Optional[torch.Tensor] = None
+    geometry_backup: Optional[Dict[str, Any]] = None
+    movable_area_increment_ratio: Optional[float] = None
+    min_area_increment_threshold: Optional[float] = None
 
 
 @dataclass
@@ -72,6 +77,9 @@ class InflationState:
     selected_round_idx: Optional[int] = None
     selected_metric_name: Optional[str] = None
     selected_metric_value: Optional[float] = None
+    original_model_init_density: Optional[torch.Tensor] = None
+    original_density_weight_grad_precond: Optional[torch.Tensor] = None
+    original_quad_penalty_coeff: Optional[torch.Tensor] = None
 
 
 def is_xplace_outer_loop_enabled(params) -> bool:
@@ -118,6 +126,62 @@ def capture_inflation_snapshot(data_collections, placedb) -> InflationGeometrySn
             whitespace_area=whitespace_area,
             num_filler_nodes=int(placedb.num_filler_nodes),
         )
+
+
+def capture_inflation_geometry_backup(
+    state: Optional[InflationState],
+    data_collections,
+) -> Dict[str, Any]:
+    target_density = getattr(data_collections, "target_density", None)
+    return {
+        "node_size_x": data_collections.node_size_x.detach().clone(),
+        "node_size_y": data_collections.node_size_y.detach().clone(),
+        "pin_offset_x": data_collections.pin_offset_x.detach().clone(),
+        "pin_offset_y": data_collections.pin_offset_y.detach().clone(),
+        "target_density": (
+            target_density.detach().clone()
+            if isinstance(target_density, torch.Tensor)
+            else None
+        ),
+        "target_area": (
+            None
+            if state is None or state.target_area is None
+            else float(state.target_area)
+        ),
+    }
+
+
+def maybe_capture_model_density_state(state: Optional[InflationState], model) -> None:
+    if state is None or model is None:
+        return
+    init_density = getattr(model, "init_density", None)
+    density_weight_grad_precond = getattr(model, "density_weight_grad_precond", None)
+    quad_penalty_coeff = getattr(model, "quad_penalty_coeff", None)
+    if state.original_model_init_density is None and isinstance(init_density, torch.Tensor):
+        state.original_model_init_density = init_density.detach().clone()
+    if state.original_density_weight_grad_precond is None and isinstance(
+        density_weight_grad_precond, torch.Tensor
+    ):
+        state.original_density_weight_grad_precond = density_weight_grad_precond.detach().clone()
+    if state.original_quad_penalty_coeff is None and isinstance(quad_penalty_coeff, torch.Tensor):
+        state.original_quad_penalty_coeff = quad_penalty_coeff.detach().clone()
+
+
+def restore_model_density_state(state: Optional[InflationState], model) -> None:
+    if state is None or model is None:
+        return
+    init_density = state.original_model_init_density
+    density_weight_grad_precond = state.original_density_weight_grad_precond
+    quad_penalty_coeff = state.original_quad_penalty_coeff
+    model.init_density = None if init_density is None else init_density.detach().clone()
+    model.density_weight_grad_precond = (
+        None
+        if density_weight_grad_precond is None
+        else density_weight_grad_precond.detach().clone()
+    )
+    model.quad_penalty_coeff = (
+        None if quad_penalty_coeff is None else quad_penalty_coeff.detach().clone()
+    )
 
 
 def create_inflation_state(params, placedb, data_collections) -> InflationState:
@@ -172,6 +236,7 @@ def begin_inflation_round(
     adjust_pin_area_flag: bool,
     notes: str = "",
 ) -> InflationRoundRecord:
+    trigger_position_snapshot = pos.detach().clone() if pos is not None else None
     record = InflationRoundRecord(
         round_idx=int(round_idx),
         stage_idx=int(stage_idx),
@@ -183,7 +248,9 @@ def begin_inflation_round(
         adjust_pin_area_flag_before=bool(adjust_pin_area_flag),
         before=capture_inflation_snapshot(data_collections, placedb),
         notes=notes,
-        position_snapshot=pos.detach().clone() if pos is not None else None,
+        position_snapshot=trigger_position_snapshot,
+        trigger_position_snapshot=trigger_position_snapshot,
+        geometry_backup=capture_inflation_geometry_backup(state, data_collections),
     )
     state.current_round = record
     state.current_snapshot = record.before
@@ -200,12 +267,15 @@ def finish_inflation_round(
     adjust_pin_area_flag: bool,
     status: str,
     gr_metrics: Optional[Dict[str, Any]] = None,
+    pos: Optional[torch.Tensor] = None,
 ) -> Optional[InflationRoundRecord]:
     record = state.current_round
     if record is None:
         return None
 
     record.after = capture_inflation_snapshot(data_collections, placedb)
+    if pos is not None:
+        record.inflated_position_snapshot = pos.detach().clone()
     record.adjust_area_flag_after = bool(adjust_area_flag)
     record.adjust_route_area_flag_after = bool(adjust_route_area_flag)
     record.adjust_pin_area_flag_after = bool(adjust_pin_area_flag)
@@ -215,9 +285,111 @@ def finish_inflation_round(
     state.current_snapshot = record.after
     if status == "applied":
         state.num_area_adjust += 1
+    record.geometry_backup = None
     state.round_records.append(record)
     state.current_round = None
     return record
+
+
+def compute_movable_area_increment_ratio(
+    before: Optional[InflationGeometrySnapshot],
+    after: Optional[InflationGeometrySnapshot],
+) -> Optional[float]:
+    if before is None or after is None:
+        return None
+    return (after.movable_area - before.movable_area) / max(before.movable_area, 1e-12)
+
+
+def restore_current_round_geometry(
+    state: Optional[InflationState],
+    data_collections,
+    placedb,
+    pos: torch.Tensor,
+) -> bool:
+    record = None if state is None else state.current_round
+    backup = None if record is None else record.geometry_backup
+    if backup is None:
+        return False
+
+    with torch.no_grad():
+        num_nodes = int(data_collections.node_size_x.numel())
+        current_center_x = pos.data[:num_nodes] + data_collections.node_size_x * 0.5
+        current_center_y = (
+            pos.data[num_nodes : num_nodes + num_nodes]
+            + data_collections.node_size_y * 0.5
+        )
+
+        data_collections.node_size_x.copy_(backup["node_size_x"])
+        data_collections.node_size_y.copy_(backup["node_size_y"])
+        pos.data[:num_nodes].copy_(current_center_x - data_collections.node_size_x * 0.5)
+        pos.data[num_nodes : num_nodes + num_nodes].copy_(
+            current_center_y - data_collections.node_size_y * 0.5
+        )
+        data_collections.pin_offset_x.copy_(backup["pin_offset_x"])
+        data_collections.pin_offset_y.copy_(backup["pin_offset_y"])
+
+        target_density = backup.get("target_density")
+        if isinstance(target_density, torch.Tensor):
+            data_collections.target_density.copy_(target_density)
+
+    if state is not None:
+        state.target_area = backup.get("target_area")
+        state.current_snapshot = capture_inflation_snapshot(data_collections, placedb)
+    return True
+
+
+def enforce_min_area_increment(
+    params,
+    state: Optional[InflationState],
+    data_collections,
+    placedb,
+    pos: torch.Tensor,
+) -> Dict[str, Any]:
+    min_area_inc = _to_float(getattr(params, "xplace_inflation_min_area_inc", 0.01), 0.01)
+    if min_area_inc <= 0:
+        return {
+            "triggered": False,
+            "movable_area_increment_ratio": None,
+            "min_area_increment_threshold": min_area_inc,
+            "rolled_back": False,
+        }
+
+    record = None if state is None else state.current_round
+    if record is None or record.before is None:
+        return {
+            "triggered": False,
+            "movable_area_increment_ratio": None,
+            "min_area_increment_threshold": min_area_inc,
+            "rolled_back": False,
+        }
+
+    attempted_after = capture_inflation_snapshot(data_collections, placedb)
+    movable_area_increment_ratio = compute_movable_area_increment_ratio(
+        record.before, attempted_after
+    )
+    record.movable_area_increment_ratio = movable_area_increment_ratio
+    record.min_area_increment_threshold = min_area_inc
+
+    result = {
+        "triggered": False,
+        "movable_area_increment_ratio": movable_area_increment_ratio,
+        "min_area_increment_threshold": min_area_inc,
+        "rolled_back": False,
+    }
+    if movable_area_increment_ratio is None or movable_area_increment_ratio >= min_area_inc - 1e-12:
+        return result
+
+    result["triggered"] = True
+    result["rolled_back"] = restore_current_round_geometry(state, data_collections, placedb, pos)
+    early_stop_note = "rejected_by_min_area_inc=%.6f<%.6f" % (movable_area_increment_ratio, min_area_inc)
+    record.notes = f"{record.notes} | {early_stop_note}" if record.notes else early_stop_note
+    logging.warning(
+        "Too small relative area increment (%.4f < %.4f). Early terminate Xplace-style cell inflation round %d.",
+        movable_area_increment_ratio,
+        min_area_inc,
+        record.round_idx,
+    )
+    return result
 
 
 def _metric_aliases(metric_name: str) -> List[str]:
@@ -246,7 +418,7 @@ def select_best_gr_solution(state: InflationState, metric_name: str = "est_short
     candidates = [
         record
         for record in state.round_records
-        if record.status in ("applied", "stopped")
+        if record.status == "applied"
         and record.stage_idx == state.stage_idx
         and record.position_snapshot is not None
         and get_round_metric(record, metric_name) is not None
@@ -528,13 +700,25 @@ def should_trigger_xplace_inflation(params, num_area_adjust: int, overflow: Any)
     )
 
 
+def get_area_adjust_flags(params) -> Dict[str, bool]:
+    return {
+        "adjust_area_flag": True,
+        "adjust_route_area_flag": bool(
+            getattr(params, "adjust_gpugr_area_flag", False)
+            or getattr(params, "adjust_nctugr_area_flag", False)
+            or getattr(params, "adjust_rudy_area_flag", False)
+        ),
+        "adjust_pin_area_flag": bool(getattr(params, "adjust_pin_area_flag", False)),
+    }
+
+
 def run_xplace_style_inflation_round(*args, **kwargs) -> Dict[str, Any]:
     logging.info(
-        "Xplace-style inflation controller skeleton is initialized, but the outer-loop execution path "
-        "is not active in this PR. Falling back to the legacy area-adjust flow."
+        "Direct helper entry for Xplace-style inflation is not used; the active execution path "
+        "is coordinated inside NonLinearPlace."
     )
     return {
         "applied": False,
-        "status": "skeleton_only",
-        "reason": "outer_loop_not_wired",
+        "status": "delegated_to_non_linear_place",
+        "reason": "use_non_linear_place_controller",
     }

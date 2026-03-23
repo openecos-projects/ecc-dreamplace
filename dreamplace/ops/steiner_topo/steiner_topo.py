@@ -91,6 +91,7 @@ class SteinerTopo(nn.Module):
         self.num_vertices = None
 
         self.algorithm = algorithm
+        self.last_edge_geometry_stats = None
         
         # L方向相关
         self.edge_l_directions = None  # 每条边的L方向
@@ -142,6 +143,214 @@ class SteinerTopo(nn.Module):
         self.net_flat_topo_sort = self.net_flat_topo_sort.contiguous()
         self.net_flat_topo_sort_start = self.net_flat_topo_sort_start.contiguous()
 
+    def _collect_edge_geometry_stats(self, edge_from, edge_to, x_coords, y_coords, eps=1e-6):
+        def _empty_stats(total_edges=0):
+            return {
+                "total_edges": int(total_edges),
+                "invalid_edges": int(total_edges),
+                "valid_edges": 0,
+                "diagonal_edges": 0,
+                "straight_edges": 0,
+                "diagonal_ratio": 0.0,
+                "mapped_edges": 0,
+                "unmapped_edges": 0,
+                "total_nets": 0,
+                "two_pin_nets": 0,
+                "non_two_pin_nets": 0,
+                "two_pin_net_ratio": 0.0,
+                "mapped_nets": 0,
+                "diagonal_nets": 0,
+                "net_diagonal_ratio": 0.0,
+                "two_pin_mapped_nets": 0,
+                "two_pin_diagonal_nets": 0,
+                "two_pin_net_diagonal_ratio": 0.0,
+                "non_two_pin_mapped_nets": 0,
+                "non_two_pin_diagonal_nets": 0,
+                "non_two_pin_net_diagonal_ratio": 0.0,
+                "two_pin_edges": 0,
+                "two_pin_diagonal_edges": 0,
+                "two_pin_diagonal_ratio": 0.0,
+                "non_two_pin_edges": 0,
+                "non_two_pin_diagonal_edges": 0,
+                "non_two_pin_diagonal_ratio": 0.0,
+            }
+
+        if edge_from is None or edge_to is None or x_coords is None or y_coords is None:
+            return _empty_stats()
+
+        total_edges = int(edge_from.numel())
+        num_vertices = min(int(x_coords.numel()), int(y_coords.numel()))
+        if num_vertices <= 0:
+            return _empty_stats(total_edges)
+
+        valid_mask = (
+            (edge_from >= 0)
+            & (edge_to >= 0)
+            & (edge_from < num_vertices)
+            & (edge_to < num_vertices)
+        )
+        valid_edges = int(valid_mask.sum().item())
+        if valid_edges == 0:
+            stats = _empty_stats(total_edges)
+            stats["invalid_edges"] = total_edges
+            return stats
+
+        valid_from = edge_from[valid_mask]
+        valid_to = edge_to[valid_mask]
+        x1 = x_coords[valid_from]
+        y1 = y_coords[valid_from]
+        x2 = x_coords[valid_to]
+        y2 = y_coords[valid_to]
+        is_diagonal = (torch.abs(x1 - x2) >= eps) & (torch.abs(y1 - y2) >= eps)
+        diagonal_edges = int(is_diagonal.sum().item())
+        straight_edges = valid_edges - diagonal_edges
+
+        stats = {
+            "total_edges": total_edges,
+            "invalid_edges": total_edges - valid_edges,
+            "valid_edges": valid_edges,
+            "diagonal_edges": diagonal_edges,
+            "straight_edges": straight_edges,
+            "diagonal_ratio": diagonal_edges / max(valid_edges, 1),
+            "mapped_edges": 0,
+            "unmapped_edges": 0,
+            "total_nets": 0,
+            "two_pin_nets": 0,
+            "non_two_pin_nets": 0,
+            "two_pin_net_ratio": 0.0,
+            "mapped_nets": 0,
+            "diagonal_nets": 0,
+            "net_diagonal_ratio": 0.0,
+            "two_pin_mapped_nets": 0,
+            "two_pin_diagonal_nets": 0,
+            "two_pin_net_diagonal_ratio": 0.0,
+            "non_two_pin_mapped_nets": 0,
+            "non_two_pin_diagonal_nets": 0,
+            "non_two_pin_net_diagonal_ratio": 0.0,
+            "two_pin_edges": 0,
+            "two_pin_diagonal_edges": 0,
+            "two_pin_diagonal_ratio": 0.0,
+            "non_two_pin_edges": 0,
+            "non_two_pin_diagonal_edges": 0,
+            "non_two_pin_diagonal_ratio": 0.0,
+        }
+
+        if self.flat_net2pin_start_map is None:
+            return stats
+
+        if self.flat_net2pin_start_map.numel() < 2:
+            return stats
+
+        num_nets = int(self.flat_net2pin_start_map.numel()) - 1
+        if num_nets <= 0:
+            return stats
+
+        net_degrees = (
+            self.flat_net2pin_start_map[1:num_nets + 1]
+            - self.flat_net2pin_start_map[:num_nets]
+        )
+        two_pin_net_mask = net_degrees == 2
+        non_two_pin_net_mask = ~two_pin_net_mask
+        total_nets = int(num_nets)
+        two_pin_nets = int(two_pin_net_mask.sum().item())
+        non_two_pin_nets = int(non_two_pin_net_mask.sum().item())
+        stats.update({
+            "total_nets": total_nets,
+            "two_pin_nets": two_pin_nets,
+            "non_two_pin_nets": non_two_pin_nets,
+            "two_pin_net_ratio": two_pin_nets / max(total_nets, 1),
+        })
+
+        # Build pin->net map from flat_net2pin structures.
+        pin_ids = self.flat_net2pin_map[:self.flat_net2pin_start_map[num_nets]].long()
+        if pin_ids.numel() == 0:
+            return stats
+
+        num_pins = int(pin_ids.max().item()) + 1
+        if self.net_steiner_start is not None and self.net_steiner_start.numel() > 0:
+            num_pins = max(num_pins, int(self.net_steiner_start[0].item()))
+
+        pin2net = torch.full((num_pins,), -1, device=pin_ids.device, dtype=torch.long)
+        net_ids = torch.arange(num_nets, device=pin_ids.device, dtype=torch.long)
+        pin_net_ids = torch.repeat_interleave(net_ids, net_degrees.long())
+        pin2net[pin_ids] = pin_net_ids
+
+        vertex_to_net = torch.full((num_vertices,), -1, device=pin_ids.device, dtype=torch.long)
+        pin_span = min(num_vertices, pin2net.numel())
+        if pin_span > 0:
+            vertex_to_net[:pin_span] = pin2net[:pin_span]
+
+        # Fill Steiner ranges directly to avoid bucketize ambiguity on repeated boundaries.
+        if self.net_steiner_start is not None and self.net_steiner_start.numel() >= num_nets + 1:
+            steiner_starts = self.net_steiner_start[:num_nets].long()
+            steiner_ends = self.net_steiner_start[1:num_nets + 1].long()
+            for net_id in range(num_nets):
+                start = int(steiner_starts[net_id].item())
+                end = int(steiner_ends[net_id].item())
+                if end <= start:
+                    continue
+                if start >= num_vertices:
+                    continue
+                start = max(start, 0)
+                end = min(end, num_vertices)
+                if end > start:
+                    vertex_to_net[start:end] = net_id
+
+        edge_net_ids = vertex_to_net[valid_from]
+
+        mapped_edge_mask = edge_net_ids >= 0
+        if not mapped_edge_mask.any():
+            stats.update({
+                "unmapped_edges": valid_edges,
+            })
+            return stats
+
+        edge_degrees = net_degrees[edge_net_ids[mapped_edge_mask]]
+        mapped_diagonal = is_diagonal[mapped_edge_mask]
+        two_pin_mask = edge_degrees == 2
+        non_two_pin_mask = ~two_pin_mask
+
+        two_pin_edges = int(two_pin_mask.sum().item())
+        two_pin_diag = int((mapped_diagonal & two_pin_mask).sum().item())
+        non_two_pin_edges = int(non_two_pin_mask.sum().item())
+        non_two_pin_diag = int((mapped_diagonal & non_two_pin_mask).sum().item())
+
+        mapped_net_ids = edge_net_ids[mapped_edge_mask]
+        net_edge_counts = torch.bincount(mapped_net_ids, minlength=num_nets)
+        diagonal_net_ids = mapped_net_ids[mapped_diagonal]
+        diagonal_net_counts = torch.bincount(diagonal_net_ids, minlength=num_nets)
+
+        mapped_net_mask = net_edge_counts > 0
+        diagonal_net_mask = diagonal_net_counts > 0
+        mapped_nets = int(mapped_net_mask.sum().item())
+        diagonal_nets = int(diagonal_net_mask.sum().item())
+
+        two_pin_mapped_nets = int((mapped_net_mask & two_pin_net_mask).sum().item())
+        two_pin_diagonal_nets = int((diagonal_net_mask & two_pin_net_mask).sum().item())
+        non_two_pin_mapped_nets = int((mapped_net_mask & non_two_pin_net_mask).sum().item())
+        non_two_pin_diagonal_nets = int((diagonal_net_mask & non_two_pin_net_mask).sum().item())
+
+        stats.update({
+            "mapped_edges": int(mapped_edge_mask.sum().item()),
+            "unmapped_edges": int((~mapped_edge_mask).sum().item()),
+            "mapped_nets": mapped_nets,
+            "diagonal_nets": diagonal_nets,
+            "net_diagonal_ratio": diagonal_nets / max(mapped_nets, 1),
+            "two_pin_mapped_nets": two_pin_mapped_nets,
+            "two_pin_diagonal_nets": two_pin_diagonal_nets,
+            "two_pin_net_diagonal_ratio": two_pin_diagonal_nets / max(two_pin_mapped_nets, 1),
+            "non_two_pin_mapped_nets": non_two_pin_mapped_nets,
+            "non_two_pin_diagonal_nets": non_two_pin_diagonal_nets,
+            "non_two_pin_net_diagonal_ratio": non_two_pin_diagonal_nets / max(non_two_pin_mapped_nets, 1),
+            "two_pin_edges": two_pin_edges,
+            "two_pin_diagonal_edges": two_pin_diag,
+            "two_pin_diagonal_ratio": two_pin_diag / max(two_pin_edges, 1),
+            "non_two_pin_edges": non_two_pin_edges,
+            "non_two_pin_diagonal_edges": non_two_pin_diag,
+            "non_two_pin_diagonal_ratio": non_two_pin_diag / max(non_two_pin_edges, 1),
+        })
+        return stats
+
     def rebuild_tree(self, pos):
 
         new_outputs_tuple = steiner_topo_cpp.build_tree(
@@ -152,6 +361,43 @@ class SteinerTopo(nn.Module):
         )
 
         self.update_cache(new_outputs_tuple)
+        self.last_edge_geometry_stats = self._collect_edge_geometry_stats(
+            self.flat_pin_from,
+            self.flat_pin_to,
+            self.newx,
+            self.newy,
+        )
+        logger.info(
+            "FLUTE edge geometry: diagonal_edges=%d/%d (%.2f%%), straight_edges=%d, invalid_edges=%d, "
+            "mapped_edges=%d, unmapped_edges=%d | 2pin diagonal=%d/%d (%.2f%%) | "
+            "non2pin diagonal=%d/%d (%.2f%%) || net_ratio: 2pin=%d/%d (%.2f%%), "
+            "diag_nets=%d/%d (%.2f%%), 2pin_diag_nets=%d/%d (%.2f%%), non2pin_diag_nets=%d/%d (%.2f%%)",
+            self.last_edge_geometry_stats["diagonal_edges"],
+            self.last_edge_geometry_stats["valid_edges"],
+            self.last_edge_geometry_stats["diagonal_ratio"] * 100.0,
+            self.last_edge_geometry_stats["straight_edges"],
+            self.last_edge_geometry_stats["invalid_edges"],
+            self.last_edge_geometry_stats["mapped_edges"],
+            self.last_edge_geometry_stats["unmapped_edges"],
+            self.last_edge_geometry_stats["two_pin_diagonal_edges"],
+            self.last_edge_geometry_stats["two_pin_edges"],
+            self.last_edge_geometry_stats["two_pin_diagonal_ratio"] * 100.0,
+            self.last_edge_geometry_stats["non_two_pin_diagonal_edges"],
+            self.last_edge_geometry_stats["non_two_pin_edges"],
+            self.last_edge_geometry_stats["non_two_pin_diagonal_ratio"] * 100.0,
+            self.last_edge_geometry_stats["two_pin_nets"],
+            self.last_edge_geometry_stats["total_nets"],
+            self.last_edge_geometry_stats["two_pin_net_ratio"] * 100.0,
+            self.last_edge_geometry_stats["diagonal_nets"],
+            self.last_edge_geometry_stats["mapped_nets"],
+            self.last_edge_geometry_stats["net_diagonal_ratio"] * 100.0,
+            self.last_edge_geometry_stats["two_pin_diagonal_nets"],
+            self.last_edge_geometry_stats["two_pin_mapped_nets"],
+            self.last_edge_geometry_stats["two_pin_net_diagonal_ratio"] * 100.0,
+            self.last_edge_geometry_stats["non_two_pin_diagonal_nets"],
+            self.last_edge_geometry_stats["non_two_pin_mapped_nets"],
+            self.last_edge_geometry_stats["non_two_pin_net_diagonal_ratio"] * 100.0,
+        )
         return self.net_flat_topo_sort, self.net_flat_topo_sort_start, self.pin_fa, \
             self.flat_pin_to, self.flat_pin_to_start, self.flat_pin_from
 

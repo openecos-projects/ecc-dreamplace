@@ -521,7 +521,6 @@ class PlaceObj(nn.Module):
         # --- 步骤 2: 初始化ecc并使用正确的线电容为其构建RC树 ---
         # ==============================================================================
         logging.info("正在初始化ecc STA引擎...")
-        ecc_sta = self.placedb.data_manager.get_sta_adapter()
         num_pins = len(self.placedb.pin_names)
         self.id2net_name_map = {v: k for k, v in self.placedb.net_name2id_map.items()}
 
@@ -602,7 +601,7 @@ class PlaceObj(nn.Module):
                         edge_to_res_map.get((parent_idx, global_idx), 0.0)
                     )
                 node_wire_caps.append(node_wire_caps_np[global_idx])
-            ecc_sta.build_rc_tree_from_flat_data(
+            self.placedb.ecc_module.build_rc_tree_from_flat_data(
                 net_name,
                 node_sta_names,
                 node_is_pin,
@@ -621,7 +620,7 @@ class PlaceObj(nn.Module):
         at_late_cpp, at_early_cpp, rt_late_cpp, rt_early_cpp = [], [], [], []
         pin_net_delay_cpp, cell_arc_delays_cpp, net_timing_details_cpp = [], [], []
 
-        ecc_sta.update_and_get_all_pin_timings(
+        self.placedb.ecc_module.update_and_get_all_pin_timings(
             self.placedb.pin_names,
             at_late_cpp,
             at_early_cpp,

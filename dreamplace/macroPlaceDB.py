@@ -30,12 +30,12 @@ class MacroPlaceDB(object):
     @brief placement database
     """
 
-    def __init__(self, data_manager):
+    def __init__(self, ecc_module):
         """
         initialization
         To avoid the usage of list, I flatten everything.
         """
-        self.data_manager = data_manager
+        self.ecc_module = ecc_module
         # self.rawdb = None # raw placement database, a C++ object
 
         # number of real nodes, including movable nodes, terminals, and terminal_NIs
@@ -278,9 +278,9 @@ class MacroPlaceDB(object):
     def setup_rawdb(self, params):
         self.dtype = datatypes[params.dtype]
         if self.pydb is None:
-            self.get_dmInst_ptr = self.data_manager.get_dmInst_ptr()
-            self.pydb = self.data_manager.pydb(
-                self.get_dmInst_ptr,
+            self.ecc_db = self.ecc_module.get_dmInst_ptr()
+            self.pydb = self.ecc_module.pydb(
+                self.ecc_db,
                 params.route_num_bins_x,
                 params.route_num_bins_y,
                 params.routability_opt_flag,
@@ -599,7 +599,7 @@ class MacroPlaceDB(object):
     def virtual_net_init(self):
         max_hop = 2
         print("build macro connections Begin")
-        macro_connections = self.data_manager.build_macro_connection_map(max_hop)
+        macro_connections = self.ecc_module.build_macro_connection_map(max_hop)
         print("build macro connections finished")
         print(f" self.num_physical_nodes =  {self.num_physical_nodes}")
         print(f" self.row_height =  {self.row_height}")
@@ -2000,7 +2000,7 @@ row height = %g, site width = %g
     def write_placement_back(self, node_x, node_y):
         # unscale locations
         # TODO:
-        self.data_manager.write_placement_back(self.get_dmInst_ptr, node_x, node_y)
+        self.ecc_module.write_placement_back(self.ecc_db, node_x, node_y)
 
     def unscale_pl(self, shift_factor, scale_factor):
         """
@@ -2032,19 +2032,3 @@ row height = %g, site width = %g
         self.write_placement_back(node_x, node_y)
         # update raw database
         # place_io.PlaceIOFunction.apply(self.rawdb, node_x, node_y)
-
-
-if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        logging.error("One input parameters in json format in required")
-
-    params = Params.Params()
-    params.load(sys.argv[sys.argv[1]])
-    logging.info("parameters = %s" % (params))
-
-    db = PlaceDB()
-    db(params)
-
-    db.print_node(1)
-    db.print_net(1)
-    db.print_row(1)

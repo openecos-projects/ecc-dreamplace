@@ -112,14 +112,14 @@ class PlacementEngine:
         self.density = float("inf")
         self.metrics = None
 
-    def setup_rawdb(self, data_manager: Any):
+    def setup_rawdb(self, ecc_module: Any):
         # read cpp database
         tt = time.time()
         if self.placedb is None:
-            self.data_manager = data_manager
-            self.placedb = PlaceDB(data_manager)
+            self.ecc_module = ecc_module
+            self.placedb = PlaceDB(ecc_module)
             if self.params.with_sta:
-                self.data_manager.get_sta_adapter().init_sta()
+                self.ecc_module.init_sta()
             self.placedb.setup_rawdb(self.params)
 
         logging.info("setting up raw database takes %.2f seconds" %
@@ -137,7 +137,7 @@ class PlacementEngine:
     def write_back(self, def_file="output.def"):
         # self.placedb.write_placement_back(self.params)
         # self.engine_data_ieda.gds_save(def_file+".gds")
-        self.data_manager.def_save(def_file)
+        self.ecc_module.def_save(def_file)
 
     def update_params(self, new_params: Params):
         self.params.fromJson(new_params.__dict__)
@@ -292,7 +292,7 @@ class PlacementEngine:
             "%s.tcl"
             % (self.params.design_name()),
         )
-        self.data_manager.tcl_save(tcl_file)
+        self.ecc_module.tcl_save(tcl_file)
         # self.placedb.write(self.params, self.gp_out_file)
 
     def run(self):
@@ -359,47 +359,3 @@ class PlacementEngine:
         logging.info(f"Final PPA: {final_ppa}")
 
         return final_ppa
-
-
-if __name__ == "__main__":
-    """
-    @brief main function to invoke the entire placement flow.
-    """
-    logging.root.name = 'DREAMPlace'
-    logging.basicConfig(level=logging.INFO,
-                        format='[%(levelname)-7s] %(name)s - %(message)s',
-                        stream=sys.stdout)
-    # if len(sys.argv) == 1 or "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
-    # params.printWelcome()
-    # params.printHelp()
-    # exit()
-    # init workspace
-    # workspace_path = "/data/project_share/aimp_test/XSTop/workspace_XSTop"
-    # workspace_path = "/home/xingchaoyu/KIANV_workspace/workspace"
-    workspace_path = "/nfs/share/home/zhaoxueyan/flow_110_commercial/KIANV_workspace/workspace"
-    # init aimp
-    data_manager = DataManager(workspace_path)
-    params = Params.Params()
-    workspace = data_manager.workspace
-    # The standalone example below is kept only for manual debugging.
-    # Integrations should provide a data_manager that already exposes DB IO.
-    # params.with_sta = False
-    # init PlacementEngine
-    # json_file = '/home/xingchaoyu/code/ai-mp/workspace_aimp/workspace_NutShell/aimp/log/run-0_0_0/parameters.json'
-    json_file = '/home/xingchaoyu/code/ai-mp/AutoDMP/dreamplace/params2.json'
-    # json_file = '/home/xingchaoyu/code/ai-eda/app/AutoDMP/test/XS_TOP_TSMC28_0208/mobohb_log/XS_TOP/run-1_0_0/parameters.json'
-    # json_file = '/home/xingchaoyu/code/ai-mp/workspace_aimp/workspace_NutShell/aimp/log/run-0_0_8/parameters.json'
-    with open(json_file, 'r') as f:
-        params.fromJson(json.load(f))
-    # params.base_design_name = data_manager.
-    engine = PlacementEngine(params)
-
-    engine.setup_rawdb(data_manager=data_manager)
-    ppa = engine.run()
-
-    ''' 
-    path = '/home/xingchaoyu/code/ai-eda/'
-    json_file = path + 'app/AutoDMP/test/ariane133_nangate45_51/mobohb_log/NV_ariane133_partition_c/run-0_0_0/parameters.json'
-
-
-    '''

@@ -1896,11 +1896,10 @@ class PlaceObj(nn.Module):
                         "same_net_topo_diag_edges",
                         "same_net_topo_edges_with_topology",
                         "same_net_topo_edges_with_observed_intervals",
-                        "same_net_topo_leg_fallback_ratio",
                         "same_net_topo_mean_gap",
                         "same_net_topo_tie_ratio",
-                        "same_net_topo_row_offset",
-                        "same_net_topo_col_offset",
+                        "same_net_topo_zero_zero_edges",
+                        "same_net_topo_exact_equal_edges",
                     )
                 }
                 density_op = getattr(self.l_shape_routability_op, "density_op", None)

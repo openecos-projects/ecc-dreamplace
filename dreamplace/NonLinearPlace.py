@@ -1199,7 +1199,6 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         "soft_l_same_net_topo_diag_edges": "same_net_topo_diag_edges",
                         "soft_l_same_net_topo_edges_with_topology": "same_net_topo_edges_with_topology",
                         "soft_l_same_net_topo_edges_with_observed_intervals": "same_net_topo_edges_with_observed_intervals",
-                        "soft_l_same_net_topo_leg_fallback_ratio": "same_net_topo_leg_fallback_ratio",
                         "soft_l_same_net_topo_mean_gap": "same_net_topo_mean_gap",
                         "soft_l_same_net_topo_tie_ratio": "same_net_topo_tie_ratio",
                     }
@@ -3462,7 +3461,6 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 "soft_l_same_net_topo_diag_edges",
                 "soft_l_same_net_topo_edges_with_topology",
                 "soft_l_same_net_topo_edges_with_observed_intervals",
-                "soft_l_same_net_topo_leg_fallback_ratio",
                 "soft_l_same_net_topo_mean_gap",
                 "soft_l_same_net_topo_tie_ratio",
             ]

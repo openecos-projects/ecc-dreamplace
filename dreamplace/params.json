@@ -355,20 +355,16 @@
         "description": "whether use same-net topo cost as the primary Soft-L score when topology intervals are observed",
         "default": 0
     },
-    "soft_l_topo_stage": {
-        "description": "same-net topo scoring stage selector; currently stage_a implements overlap-ratio-only scoring",
-        "default": "stage_a"
+    "soft_l_same_net_diag_split_sigma": {
+        "description": "distance-decay scale for same-net diagonal-split geometric scoring",
+        "default": 1.0
     },
-    "soft_l_topo_max_row_offset": {
-        "description": "maximum route-grid row offset searched for same-net horizontal interval matches",
-        "default": 0
+    "soft_l_same_net_diag_split_min_support": {
+        "description": "minimum accumulated same-net diagonal-split support required before converting support into topo cost",
+        "default": 1e-6
     },
-    "soft_l_topo_max_col_offset": {
-        "description": "maximum route-grid column offset searched for same-net vertical interval matches",
-        "default": 0
-    },
-    "soft_l_topo_tie_delta": {
-        "description": "telemetry-only near-tie threshold on same-net topo HV/VH cost gap",
+    "soft_l_same_net_diag_split_max_distance": {
+        "description": "optional raw-distance cutoff for same-net diagonal-split scoring; use 0 to disable truncation and rely on soft decay only",
         "default": 0.0
     },
     "l_shape_auto_disable_flag": {

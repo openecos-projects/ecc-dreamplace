@@ -30,7 +30,7 @@ from dreamplace.ops.routability.l_shape_electric_overflow import (
     create_l_shape_electric_overflow
 )
 from dreamplace.ops.routability.same_net_topo_scoring import (
-    compute_same_net_topology_scores,
+    compute_diagonal_split_topo_costs,
 )
 
 logger = logging.getLogger(__name__)
@@ -111,15 +111,14 @@ class LShapeRoutabilityOp(nn.Module):
         self.soft_l_same_net_topo_only_mode = bool(
             getattr(params, "soft_l_same_net_topo_only_mode", False)
         )
-        self.soft_l_topo_stage = str(getattr(params, "soft_l_topo_stage", "stage_a"))
-        self.soft_l_topo_max_row_offset = max(
-            int(getattr(params, "soft_l_topo_max_row_offset", 0)), 0
+        self.soft_l_same_net_diag_split_sigma = max(
+            float(getattr(params, "soft_l_same_net_diag_split_sigma", 1.0)), 1e-6
         )
-        self.soft_l_topo_max_col_offset = max(
-            int(getattr(params, "soft_l_topo_max_col_offset", 0)), 0
+        self.soft_l_same_net_diag_split_min_support = max(
+            float(getattr(params, "soft_l_same_net_diag_split_min_support", 1e-6)), 0.0
         )
-        self.soft_l_topo_tie_delta = max(
-            float(getattr(params, "soft_l_topo_tie_delta", 0.0)), 0.0
+        self.soft_l_same_net_diag_split_max_distance = max(
+            float(getattr(params, "soft_l_same_net_diag_split_max_distance", 0.0)), 0.0
         )
 
         # L形segment构建器
@@ -145,13 +144,12 @@ class LShapeRoutabilityOp(nn.Module):
             )
         if self.soft_l_use_same_net_topo_scoring:
             logger.info(
-                "Same-net topo scoring enabled: stage=%s weight=%.3f topo_only=%s row_offset=%d col_offset=%d tie_delta=%.4f",
-                self.soft_l_topo_stage,
+                "Same-net topo scoring enabled: kernel=diag_split_geometric weight=%.3f topo_only=%s sigma=%.4f min_support=%.3e max_distance=%.4f",
                 self.soft_l_same_net_topo_weight,
                 self.soft_l_same_net_topo_only_mode,
-                self.soft_l_topo_max_row_offset,
-                self.soft_l_topo_max_col_offset,
-                self.soft_l_topo_tie_delta,
+                self.soft_l_same_net_diag_split_sigma,
+                self.soft_l_same_net_diag_split_min_support,
+                self.soft_l_same_net_diag_split_max_distance,
             )
         
         # 根据模式选择密度计算器
@@ -591,23 +589,21 @@ class LShapeRoutabilityOp(nn.Module):
                 route_bin_size_x = (self.xh - self.xl) / float(route_num_bins_x)
                 route_bin_size_y = (self.yh - self.yl) / float(route_num_bins_y)
 
-                topo_x1_idx = self._coord_to_bin_index(dx1, self.xl, route_bin_size_x, route_num_bins_x)
-                topo_y1_idx = self._coord_to_bin_index(dy1, self.yl, route_bin_size_y, route_num_bins_y)
-                topo_x2_idx = self._coord_to_bin_index(dx2, self.xl, route_bin_size_x, route_num_bins_x)
-                topo_y2_idx = self._coord_to_bin_index(dy2, self.yl, route_bin_size_y, route_num_bins_y)
-
                 diag_mask_cpu = is_diagonal.cpu() if is_diagonal.device.type != "cpu" else is_diagonal
-                topo_cost_h, topo_cost_v, topo_observed_mask, topo_debug_stats = compute_same_net_topology_scores(
+                topo_cost_h, topo_cost_v, topo_observed_mask, topo_debug_stats = compute_diagonal_split_topo_costs(
                     edge_net_ids=valid_edge_net_ids[diag_mask_cpu],
-                    x1_idx=topo_x1_idx.cpu(),
-                    y1_idx=topo_y1_idx.cpu(),
-                    x2_idx=topo_x2_idx.cpu(),
-                    y2_idx=topo_y2_idx.cpu(),
+                    x1=dx1.cpu(),
+                    y1=dy1.cpu(),
+                    x2=dx2.cpu(),
+                    y2=dy2.cpu(),
                     topo_cache=self.same_net_topo_cache,
-                    max_row_offset=self.soft_l_topo_max_row_offset,
-                    max_col_offset=self.soft_l_topo_max_col_offset,
-                    missing_dir_penalty=0.0,
-                    tie_delta=self.soft_l_topo_tie_delta,
+                    xl=self.xl,
+                    yl=self.yl,
+                    route_bin_size_x=route_bin_size_x,
+                    route_bin_size_y=route_bin_size_y,
+                    sigma=self.soft_l_same_net_diag_split_sigma,
+                    min_support=self.soft_l_same_net_diag_split_min_support,
+                    max_distance=self.soft_l_same_net_diag_split_max_distance,
                     device=device,
                     dtype=dtype,
                 )
@@ -686,8 +682,10 @@ class LShapeRoutabilityOp(nn.Module):
                         "same_net_topo_scoring_enabled": self.soft_l_use_same_net_topo_scoring,
                         "same_net_topo_only_mode": self.soft_l_same_net_topo_only_mode,
                         "same_net_topo_weight": self.soft_l_same_net_topo_weight,
-                        "same_net_topo_stage": self.soft_l_topo_stage,
-                        "same_net_topo_tie_delta": self.soft_l_topo_tie_delta,
+                        "same_net_topo_kernel": "diag_split_geometric",
+                        "same_net_topo_sigma": self.soft_l_same_net_diag_split_sigma,
+                        "same_net_topo_min_support": self.soft_l_same_net_diag_split_min_support,
+                        "same_net_topo_max_distance": self.soft_l_same_net_diag_split_max_distance,
                     }
                 )
                 if topo_debug_stats is not None:
@@ -698,16 +696,13 @@ class LShapeRoutabilityOp(nn.Module):
                             "same_net_topo_edges_with_observed_intervals": int(
                                 topo_debug_stats.get("edges_with_observed_intervals", 0)
                             ),
-                            "same_net_topo_leg_fallback_ratio": float(
-                                topo_debug_stats.get("leg_fallback_ratio", 0.0)
-                            ),
                             "same_net_topo_mean_gap": float(topo_debug_stats.get("mean_gap", 0.0)),
                             "same_net_topo_tie_ratio": float(topo_debug_stats.get("tie_ratio", 0.0)),
-                            "same_net_topo_row_offset": int(
-                                topo_debug_stats.get("max_row_offset", self.soft_l_topo_max_row_offset)
+                            "same_net_topo_zero_zero_edges": int(
+                                topo_debug_stats.get("zero_zero_edges", 0)
                             ),
-                            "same_net_topo_col_offset": int(
-                                topo_debug_stats.get("max_col_offset", self.soft_l_topo_max_col_offset)
+                            "same_net_topo_exact_equal_edges": int(
+                                topo_debug_stats.get("exact_equal_edges", 0)
                             ),
                         }
                     )
@@ -936,6 +931,8 @@ class LShapeRoutabilityOp(nn.Module):
         self.cached_segments['flat_from'] = flat_pin_from.detach()
         self.cached_segments['flat_to'] = flat_pin_to.detach()
         self.cached_segments['l_directions'] = l_directions.detach()
+        if edge_net_ids is not None:
+            self.cached_segments['edge_net_ids'] = edge_net_ids.detach()
         if soft_l_weights is not None:
             self.cached_segments['soft_l_weights'] = soft_l_weights.detach()
         
@@ -1119,6 +1116,8 @@ class LShapeRoutabilityOp(nn.Module):
         self.cached_segments['flat_from'] = flat_pin_from.detach()
         self.cached_segments['flat_to'] = flat_pin_to.detach()
         self.cached_segments['l_directions'] = l_directions.detach()
+        if edge_net_ids is not None:
+            self.cached_segments['edge_net_ids'] = edge_net_ids.detach()
         if soft_l_weights is not None:
             self.cached_segments['soft_l_weights'] = soft_l_weights.detach()
         self.cached_density_map = density_map
@@ -1558,35 +1557,48 @@ def plot_soft_l_scoring_maps(soft_debug, output_path, title_prefix="Soft L Scori
 
 
 def plot_l_shape_electric_overflow_map(l_shape_op, output_path, title_prefix="L-shape Electric Overflow"):
-    """Plot the overflow map(s) fed into the electric-potential solver."""
+    """Plot GGR overflow and surrogate overflow in a two-row comparison."""
     import matplotlib.pyplot as plt
     import numpy as np
 
-    overflow_map, overflow_map_h, overflow_map_v, split_available, _ = _build_l_shape_electric_plot_maps(
-        l_shape_op
-    )
+    plot_payload = _build_l_shape_electric_plot_maps(l_shape_op)
+    ggr_overflow_map = plot_payload["ggr_overflow_map"]
+    ggr_overflow_map_h = plot_payload["ggr_overflow_map_h"]
+    ggr_overflow_map_v = plot_payload["ggr_overflow_map_v"]
+    overflow_map = plot_payload["surrogate_overflow_map"]
+    overflow_map_h = plot_payload["surrogate_overflow_map_h"]
+    overflow_map_v = plot_payload["surrogate_overflow_map_v"]
+    split_available = plot_payload["split_available"]
 
-    def render_map(ax, map_tensor, title):
+    def compute_limits(*map_tensors):
+        valid_maps = [tensor.numpy() for tensor in map_tensors if isinstance(tensor, torch.Tensor)]
+        if not valid_maps:
+            return 0.0, 1.0
+        stacked = np.concatenate([m.reshape(-1) for m in valid_maps])
+        if float(np.min(stacked)) < -1e-9:
+            vmax = max(1e-6, float(np.percentile(np.abs(stacked), 99)))
+            return -vmax, vmax
+        vmax = max(1e-6, float(np.percentile(stacked, 99)))
+        return 0.0, vmax
+
+    def render_map(ax, map_tensor, title, vmin, vmax):
         map_np = map_tensor.numpy()
-        has_negative = float(np.min(map_np)) < -1e-9
-        if has_negative:
-            vmax = max(1e-6, float(np.percentile(np.abs(map_np), 99)))
+        if vmin < 0.0:
             im = ax.imshow(
                 map_np.T,
                 origin="lower",
                 cmap="coolwarm",
                 aspect="equal",
-                vmin=-vmax,
+                vmin=vmin,
                 vmax=vmax,
             )
         else:
-            vmax = max(1e-6, float(np.percentile(map_np, 99)))
             im = ax.imshow(
                 map_np.T,
                 origin="lower",
                 cmap="plasma",
                 aspect="equal",
-                vmin=0.0,
+                vmin=vmin,
                 vmax=vmax,
             )
         positive_ratio = float(np.mean(map_np > 0))
@@ -1599,17 +1611,27 @@ def plot_l_shape_electric_overflow_map(l_shape_op, output_path, title_prefix="L-
         return im
 
     if split_available and isinstance(overflow_map_h, torch.Tensor) and isinstance(overflow_map_v, torch.Tensor):
-        fig, axes = plt.subplots(1, 3, figsize=(24, 8), constrained_layout=True)
-        im_h = render_map(axes[0], overflow_map_h, f"{title_prefix} H")
-        im_v = render_map(axes[1], overflow_map_v, f"{title_prefix} V")
-        im_t = render_map(axes[2], overflow_map, f"{title_prefix} Total")
-        fig.colorbar(im_h, ax=axes[0], fraction=0.046, pad=0.04, label="Overflow (area units)")
-        fig.colorbar(im_v, ax=axes[1], fraction=0.046, pad=0.04, label="Overflow (area units)")
-        fig.colorbar(im_t, ax=axes[2], fraction=0.046, pad=0.04, label="Overflow (area units)")
+        fig, axes = plt.subplots(2, 3, figsize=(24, 14), constrained_layout=True)
+        limits_h = compute_limits(ggr_overflow_map_h, overflow_map_h)
+        limits_v = compute_limits(ggr_overflow_map_v, overflow_map_v)
+        limits_t = compute_limits(ggr_overflow_map, overflow_map)
+        im_h_ggr = render_map(axes[0, 0], ggr_overflow_map_h, "GGR Overflow H", *limits_h)
+        im_v_ggr = render_map(axes[0, 1], ggr_overflow_map_v, "GGR Overflow V", *limits_v)
+        im_t_ggr = render_map(axes[0, 2], ggr_overflow_map, "GGR Overflow Total", *limits_t)
+        render_map(axes[1, 0], overflow_map_h, "Surrogate Overflow H", *limits_h)
+        render_map(axes[1, 1], overflow_map_v, "Surrogate Overflow V", *limits_v)
+        render_map(axes[1, 2], overflow_map, "Surrogate Overflow Total", *limits_t)
+        axes[0, 0].set_ylabel("Bin Y\nGGR")
+        axes[1, 0].set_ylabel("Bin Y\nSurrogate")
+        fig.colorbar(im_h_ggr, ax=axes[:, 0], fraction=0.025, pad=0.02, label="Overflow (area units)")
+        fig.colorbar(im_v_ggr, ax=axes[:, 1], fraction=0.025, pad=0.02, label="Overflow (area units)")
+        fig.colorbar(im_t_ggr, ax=axes[:, 2], fraction=0.025, pad=0.02, label="Overflow (area units)")
     else:
-        fig, ax = plt.subplots(figsize=(10, 10))
-        im = render_map(ax, overflow_map, title_prefix)
-        fig.colorbar(im, ax=ax, label="Overflow (area units)")
+        fig, axes = plt.subplots(2, 1, figsize=(10, 18), constrained_layout=True)
+        limits = compute_limits(ggr_overflow_map, overflow_map)
+        im_ggr = render_map(axes[0], ggr_overflow_map, "GGR Overflow", *limits)
+        render_map(axes[1], overflow_map, "Surrogate Overflow", *limits)
+        fig.colorbar(im_ggr, ax=axes, label="Overflow (area units)")
 
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close()
@@ -1653,9 +1675,12 @@ def _build_l_shape_electric_plot_maps(l_shape_op):
             "L-shape electric plotting expects a 2D routing demand tensor in density_op.target_demand"
         )
 
-    overflow_map = density_map.clone()
-    overflow_map_h = None
-    overflow_map_v = None
+    surrogate_overflow_map = density_map.clone()
+    surrogate_overflow_map_h = None
+    surrogate_overflow_map_v = None
+    ggr_overflow_map = torch.zeros_like(density_map)
+    ggr_overflow_map_h = None
+    ggr_overflow_map_v = None
     supply_map = target_density
 
     if isinstance(area_per_track, torch.Tensor) and area_per_track.numel() == 1 and float(area_per_track.item()) > 0:
@@ -1693,15 +1718,37 @@ def _build_l_shape_electric_plot_maps(l_shape_op):
 
             demand_h_in_tracks = density_map_h / calibrated_area_per_track_h
             demand_v_in_tracks = density_map_v / calibrated_area_per_track_v
-            overflow_map_h = torch.relu(demand_h_in_tracks - target_density_h) * calibrated_area_per_track_h
-            overflow_map_v = torch.relu(demand_v_in_tracks - target_density_v) * calibrated_area_per_track_v
-            overflow_map = overflow_map_h + overflow_map_v
+            surrogate_overflow_map_h = torch.relu(demand_h_in_tracks - target_density_h) * calibrated_area_per_track_h
+            surrogate_overflow_map_v = torch.relu(demand_v_in_tracks - target_density_v) * calibrated_area_per_track_v
+            surrogate_overflow_map = surrogate_overflow_map_h + surrogate_overflow_map_v
+            if isinstance(target_demand_h, torch.Tensor) and target_demand_h.dim() == 2:
+                ggr_overflow_map_h = torch.relu(target_demand_h - target_density_h) * calibrated_area_per_track_h
+            else:
+                ggr_overflow_map_h = torch.zeros_like(surrogate_overflow_map_h)
+            if isinstance(target_demand_v, torch.Tensor) and target_demand_v.dim() == 2:
+                ggr_overflow_map_v = torch.relu(target_demand_v - target_density_v) * calibrated_area_per_track_v
+            else:
+                ggr_overflow_map_v = torch.zeros_like(surrogate_overflow_map_v)
+            ggr_overflow_map = ggr_overflow_map_h + ggr_overflow_map_v
         else:
             demand_in_tracks = density_map / calibrated_area_per_track
             overflow_in_tracks = torch.relu(demand_in_tracks - supply_map)
-            overflow_map = overflow_in_tracks * calibrated_area_per_track
+            surrogate_overflow_map = overflow_in_tracks * calibrated_area_per_track
+            ggr_overflow_map = torch.relu(target_demand - supply_map) * calibrated_area_per_track
 
-    return overflow_map, overflow_map_h, overflow_map_v, split_available, density_op
+    return {
+        "density_map": density_map,
+        "density_map_h": density_map_h,
+        "density_map_v": density_map_v,
+        "surrogate_overflow_map": surrogate_overflow_map,
+        "surrogate_overflow_map_h": surrogate_overflow_map_h,
+        "surrogate_overflow_map_v": surrogate_overflow_map_v,
+        "ggr_overflow_map": ggr_overflow_map,
+        "ggr_overflow_map_h": ggr_overflow_map_h,
+        "ggr_overflow_map_v": ggr_overflow_map_v,
+        "split_available": split_available,
+        "density_op": density_op,
+    }
 
 
 def plot_l_shape_electric_potential_map(l_shape_op, output_path, title_prefix="L-shape Electric Potential"):
@@ -1709,9 +1756,12 @@ def plot_l_shape_electric_potential_map(l_shape_op, output_path, title_prefix="L
     import matplotlib.pyplot as plt
     import numpy as np
 
-    overflow_map, overflow_map_h, overflow_map_v, split_available, density_op = _build_l_shape_electric_plot_maps(
-        l_shape_op
-    )
+    plot_payload = _build_l_shape_electric_plot_maps(l_shape_op)
+    overflow_map = plot_payload["surrogate_overflow_map"]
+    overflow_map_h = plot_payload["surrogate_overflow_map_h"]
+    overflow_map_v = plot_payload["surrogate_overflow_map_v"]
+    split_available = plot_payload["split_available"]
+    density_op = plot_payload["density_op"]
 
     ref_tensor = getattr(density_op, "bin_center_x", None)
     if not isinstance(ref_tensor, torch.Tensor):

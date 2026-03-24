@@ -84,7 +84,6 @@ class EvalMetrics(object):
         self.soft_l_same_net_topo_diag_edges = None
         self.soft_l_same_net_topo_edges_with_topology = None
         self.soft_l_same_net_topo_edges_with_observed_intervals = None
-        self.soft_l_same_net_topo_leg_fallback_ratio = None
         self.soft_l_same_net_topo_mean_gap = None
         self.soft_l_same_net_topo_tie_ratio = None
 
@@ -211,10 +210,6 @@ class EvalMetrics(object):
         if self.soft_l_same_net_topo_edges_with_observed_intervals is not None:
             content += ", TopoObs %d" % (
                 self.soft_l_same_net_topo_edges_with_observed_intervals
-            )
-        if self.soft_l_same_net_topo_leg_fallback_ratio is not None:
-            content += ", TopoFb %.4f" % (
-                self.soft_l_same_net_topo_leg_fallback_ratio
             )
         if self.soft_l_same_net_topo_mean_gap is not None:
             content += ", TopoGap %.4f" % (self.soft_l_same_net_topo_mean_gap)

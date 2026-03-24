@@ -6,6 +6,14 @@ import torch
 
 logger = logging.getLogger(__name__)
 
+try:
+    import dreamplace.ops.routability.same_net_topo_scoring_cpp as same_net_topo_scoring_cpp
+except ImportError:
+    same_net_topo_scoring_cpp = None
+
+_CPP_PACK_CACHE_KEY = "_same_net_topo_cpp_packed"
+_CPP_PACK_CACHE_META_KEY = "_same_net_topo_cpp_pack_key"
+
 
 def _normalize_net_name(net_name):
     if isinstance(net_name, bytes):
@@ -218,6 +226,90 @@ def build_same_net_topology_cache(route_entries, placedb, max_gap=1):
     return cache, stats
 
 
+def pack_same_net_topology_cache_for_cpp(
+    topo_cache,
+    *,
+    xl,
+    yl,
+    route_bin_size_x,
+    route_bin_size_y,
+):
+    if not isinstance(topo_cache, dict):
+        return None
+
+    net_topologies = topo_cache.get("net_topologies", {})
+    if not net_topologies:
+        return None
+
+    pack_key = (
+        float(xl),
+        float(yl),
+        float(route_bin_size_x),
+        float(route_bin_size_y),
+    )
+    cached_key = topo_cache.get(_CPP_PACK_CACHE_META_KEY)
+    cached_pack = topo_cache.get(_CPP_PACK_CACHE_KEY)
+    if cached_key == pack_key and isinstance(cached_pack, dict):
+        return cached_pack
+
+    net_ids = []
+    h_seg_offsets = [0]
+    v_seg_offsets = [0]
+    h_x1 = []
+    h_y = []
+    h_x2 = []
+    v_x = []
+    v_y1 = []
+    v_y2 = []
+
+    for net_id in sorted(net_topologies.keys()):
+        record = net_topologies[net_id]
+        net_ids.append(int(net_id))
+
+        h_count = 0
+        for row_idx in sorted(record.get("horizontal_by_row", {}).keys()):
+            seg_y = _grid_center(row_idx, yl, route_bin_size_y)
+            intervals = record["horizontal_by_row"][row_idx]
+            for int_lo, int_hi in intervals:
+                h_x1.append(_grid_center(int_lo, xl, route_bin_size_x))
+                h_y.append(seg_y)
+                h_x2.append(_grid_center(int_hi, xl, route_bin_size_x))
+                h_count += 1
+        h_seg_offsets.append(h_seg_offsets[-1] + h_count)
+
+        v_count = 0
+        for col_idx in sorted(record.get("vertical_by_col", {}).keys()):
+            seg_x = _grid_center(col_idx, xl, route_bin_size_x)
+            intervals = record["vertical_by_col"][col_idx]
+            for int_lo, int_hi in intervals:
+                v_x.append(seg_x)
+                v_y1.append(_grid_center(int_lo, yl, route_bin_size_y))
+                v_y2.append(_grid_center(int_hi, yl, route_bin_size_y))
+                v_count += 1
+        v_seg_offsets.append(v_seg_offsets[-1] + v_count)
+
+    packed = {
+        "net_ids": np.asarray(net_ids, dtype=np.int32),
+        "h_seg_offsets": np.asarray(h_seg_offsets, dtype=np.int32),
+        "v_seg_offsets": np.asarray(v_seg_offsets, dtype=np.int32),
+        "h_x1": np.asarray(h_x1, dtype=np.float64),
+        "h_y": np.asarray(h_y, dtype=np.float64),
+        "h_x2": np.asarray(h_x2, dtype=np.float64),
+        "v_x": np.asarray(v_x, dtype=np.float64),
+        "v_y1": np.asarray(v_y1, dtype=np.float64),
+        "v_y2": np.asarray(v_y2, dtype=np.float64),
+    }
+    topo_cache[_CPP_PACK_CACHE_META_KEY] = pack_key
+    topo_cache[_CPP_PACK_CACHE_KEY] = packed
+    logger.info(
+        "Packed same-net topo cache for C++: nets=%d h_segments=%d v_segments=%d",
+        int(packed["net_ids"].size),
+        int(packed["h_x1"].size),
+        int(packed["v_x"].size),
+    )
+    return packed
+
+
 def _to_numpy_int_array(values):
     if isinstance(values, np.ndarray):
         return values.astype(np.int32, copy=False)
@@ -375,7 +467,7 @@ def _append_sample(bucket, edge_id, net_id, cost_h, cost_v, gap, observed_count)
     )
 
 
-def compute_diagonal_split_topo_costs(
+def _compute_diagonal_split_topo_costs_python(
     edge_net_ids,
     x1,
     y1,
@@ -631,4 +723,141 @@ def compute_diagonal_split_topo_costs(
     topo_cost_h = torch.as_tensor(topo_cost_h_np, dtype=dtype, device=device)
     topo_cost_v = torch.as_tensor(topo_cost_v_np, dtype=dtype, device=device)
     topo_observed_mask = torch.as_tensor(topo_observed_mask_np, dtype=torch.bool, device=device)
+    return topo_cost_h, topo_cost_v, topo_observed_mask, stats
+
+
+def _compute_diagonal_split_topo_costs_cpp(
+    edge_net_ids,
+    x1,
+    y1,
+    x2,
+    y2,
+    topo_cache,
+    *,
+    xl,
+    yl,
+    route_bin_size_x,
+    route_bin_size_y,
+    sigma=1.0,
+    min_support=1e-6,
+    max_distance=0.0,
+    device=None,
+    dtype=torch.float32,
+):
+    if same_net_topo_scoring_cpp is None:
+        return None
+
+    packed = pack_same_net_topology_cache_for_cpp(
+        topo_cache,
+        xl=xl,
+        yl=yl,
+        route_bin_size_x=route_bin_size_x,
+        route_bin_size_y=route_bin_size_y,
+    )
+    if not isinstance(packed, dict):
+        return None
+
+    try:
+        topo_cost_h_np, topo_cost_v_np, topo_observed_mask_np, stats = same_net_topo_scoring_cpp.forward(
+            packed["net_ids"],
+            packed["h_seg_offsets"],
+            packed["v_seg_offsets"],
+            packed["h_x1"],
+            packed["h_y"],
+            packed["h_x2"],
+            packed["v_x"],
+            packed["v_y1"],
+            packed["v_y2"],
+            _to_numpy_int_array(edge_net_ids),
+            _to_numpy_float_array(x1),
+            _to_numpy_float_array(y1),
+            _to_numpy_float_array(x2),
+            _to_numpy_float_array(y2),
+            float(sigma),
+            float(min_support),
+            float(max_distance),
+        )
+    except Exception:
+        logger.exception("C++ same-net topo scoring failed; falling back to Python kernel.")
+        return None
+
+    topo_cost_h = torch.as_tensor(np.asarray(topo_cost_h_np), dtype=dtype, device=device)
+    topo_cost_v = torch.as_tensor(np.asarray(topo_cost_v_np), dtype=dtype, device=device)
+    topo_observed_mask = torch.as_tensor(
+        np.asarray(topo_observed_mask_np, dtype=np.bool_),
+        dtype=torch.bool,
+        device=device,
+    )
+    stats = dict(stats or {})
+    stats.setdefault("diag_edges", int(len(edge_net_ids) if edge_net_ids is not None else 0))
+    stats.setdefault("edges_with_topology", 0)
+    stats.setdefault("edges_with_observed_intervals", 0)
+    stats.setdefault("mean_gap", 0.0)
+    stats.setdefault("tie_ratio", 0.0)
+    stats.setdefault("sigma", float(sigma))
+    stats.setdefault("min_support", float(min_support))
+    stats.setdefault("max_distance", float(max_distance))
+    stats["backend"] = "cpp"
+    return topo_cost_h, topo_cost_v, topo_observed_mask, stats
+
+
+def compute_diagonal_split_topo_costs(
+    edge_net_ids,
+    x1,
+    y1,
+    x2,
+    y2,
+    topo_cache,
+    *,
+    xl,
+    yl,
+    route_bin_size_x,
+    route_bin_size_y,
+    sigma=1.0,
+    min_support=1e-6,
+    max_distance=0.0,
+    device=None,
+    dtype=torch.float32,
+    use_cpp=True,
+):
+    if use_cpp:
+        cpp_result = _compute_diagonal_split_topo_costs_cpp(
+            edge_net_ids,
+            x1,
+            y1,
+            x2,
+            y2,
+            topo_cache,
+            xl=xl,
+            yl=yl,
+            route_bin_size_x=route_bin_size_x,
+            route_bin_size_y=route_bin_size_y,
+            sigma=sigma,
+            min_support=min_support,
+            max_distance=max_distance,
+            device=device,
+            dtype=dtype,
+        )
+        if cpp_result is not None:
+            return cpp_result
+
+    topo_cost_h, topo_cost_v, topo_observed_mask, stats = _compute_diagonal_split_topo_costs_python(
+        edge_net_ids,
+        x1,
+        y1,
+        x2,
+        y2,
+        topo_cache,
+        xl=xl,
+        yl=yl,
+        route_bin_size_x=route_bin_size_x,
+        route_bin_size_y=route_bin_size_y,
+        sigma=sigma,
+        min_support=min_support,
+        max_distance=max_distance,
+        device=device,
+        dtype=dtype,
+    )
+    if isinstance(stats, dict):
+        stats["backend"] = "python"
     return topo_cost_h, topo_cost_v, topo_observed_mask, stats

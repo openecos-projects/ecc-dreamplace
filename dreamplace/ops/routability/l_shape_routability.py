@@ -120,6 +120,9 @@ class LShapeRoutabilityOp(nn.Module):
         self.soft_l_same_net_diag_split_max_distance = max(
             float(getattr(params, "soft_l_same_net_diag_split_max_distance", 0.0)), 0.0
         )
+        self.soft_l_same_net_topo_cpp_accel = bool(
+            getattr(params, "soft_l_same_net_topo_cpp_accel", True)
+        )
 
         # L形segment构建器
         self.segment_builder = LShapeSegmentOp(
@@ -144,12 +147,13 @@ class LShapeRoutabilityOp(nn.Module):
             )
         if self.soft_l_use_same_net_topo_scoring:
             logger.info(
-                "Same-net topo scoring enabled: kernel=diag_split_geometric weight=%.3f topo_only=%s sigma=%.4f min_support=%.3e max_distance=%.4f",
+                "Same-net topo scoring enabled: kernel=diag_split_geometric weight=%.3f topo_only=%s sigma=%.4f min_support=%.3e max_distance=%.4f cpp_accel=%s",
                 self.soft_l_same_net_topo_weight,
                 self.soft_l_same_net_topo_only_mode,
                 self.soft_l_same_net_diag_split_sigma,
                 self.soft_l_same_net_diag_split_min_support,
                 self.soft_l_same_net_diag_split_max_distance,
+                self.soft_l_same_net_topo_cpp_accel,
             )
         
         # 根据模式选择密度计算器
@@ -606,6 +610,7 @@ class LShapeRoutabilityOp(nn.Module):
                     max_distance=self.soft_l_same_net_diag_split_max_distance,
                     device=device,
                     dtype=dtype,
+                    use_cpp=self.soft_l_same_net_topo_cpp_accel,
                 )
                 if self.soft_l_same_net_topo_only_mode:
                     cost_h = torch.where(topo_observed_mask, topo_cost_h, cost_h)
@@ -664,6 +669,13 @@ class LShapeRoutabilityOp(nn.Module):
                     .item()
                 )
             if isinstance(self.cached_soft_debug, dict):
+                topo_kernel_name = "diag_split_geometric"
+                if topo_debug_stats is not None:
+                    backend = topo_debug_stats.get("backend", None)
+                    if backend == "cpp":
+                        topo_kernel_name = "diag_split_geometric_cpp"
+                    elif backend == "python":
+                        topo_kernel_name = "diag_split_geometric_python"
                 self.cached_soft_debug.update(
                     {
                         "diag_edge_count": int(is_diagonal.sum().item()),
@@ -682,10 +694,11 @@ class LShapeRoutabilityOp(nn.Module):
                         "same_net_topo_scoring_enabled": self.soft_l_use_same_net_topo_scoring,
                         "same_net_topo_only_mode": self.soft_l_same_net_topo_only_mode,
                         "same_net_topo_weight": self.soft_l_same_net_topo_weight,
-                        "same_net_topo_kernel": "diag_split_geometric",
+                        "same_net_topo_kernel": topo_kernel_name,
                         "same_net_topo_sigma": self.soft_l_same_net_diag_split_sigma,
                         "same_net_topo_min_support": self.soft_l_same_net_diag_split_min_support,
                         "same_net_topo_max_distance": self.soft_l_same_net_diag_split_max_distance,
+                        "same_net_topo_cpp_accel": self.soft_l_same_net_topo_cpp_accel,
                     }
                 )
                 if topo_debug_stats is not None:

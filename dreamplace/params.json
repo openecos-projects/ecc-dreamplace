@@ -367,6 +367,10 @@
         "description": "optional raw-distance cutoff for same-net diagonal-split scoring; use 0 to disable truncation and rely on soft decay only",
         "default": 0.0
     },
+    "soft_l_same_net_topo_cpp_accel": {
+        "description": "whether use the C++ CPU kernel for same-net diagonal-split topo scoring when the extension is available",
+        "default": 1
+    },
     "l_shape_auto_disable_flag": {
         "description": "whether auto-disable soft L-shape when telemetry indicates late-stage overshoot in diff-style runs",
         "default": 0

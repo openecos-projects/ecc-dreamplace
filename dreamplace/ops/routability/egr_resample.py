@@ -46,7 +46,8 @@ def _build_uniform_gcell_info(xl, yl, xh, yh, num_x, num_y):
 
 def create_supply_map_from_placedb(placedb, params, num_bins_x, num_bins_y,
                                    device=None, dtype=None,
-                                   wire_width=None, as_area=False):
+                                   wire_width=None, as_area=False,
+                                   return_directional=False):
     """
     Create supply map from placedb routing grid.
     If as_area=True, convert track capacity to area capacity using wire_width.
@@ -82,22 +83,35 @@ def create_supply_map_from_placedb(placedb, params, num_bins_x, num_bins_y,
     if as_area:
         if wire_width is None or wire_width <= 0:
             logger.warning("wire_width invalid; fallback to track-units supply map")
-            supply = supply_h + supply_v
+            supply_h_out = supply_h
+            supply_v_out = supply_v
         else:
             # Convert track capacity to area capacity per direction
-            supply = supply_h * bin_size_x * wire_width + supply_v * bin_size_y * wire_width
+            supply_h_out = supply_h * bin_size_x * wire_width
+            supply_v_out = supply_v * bin_size_y * wire_width
     else:
-        supply = supply_h + supply_v
+        supply_h_out = supply_h
+        supply_v_out = supply_v
+
+    supply = supply_h_out + supply_v_out
 
     supply_tensor = torch.from_numpy(supply)
+    supply_h_tensor = torch.from_numpy(supply_h_out)
+    supply_v_tensor = torch.from_numpy(supply_v_out)
     if device is not None:
         supply_tensor = supply_tensor.to(device)
+        supply_h_tensor = supply_h_tensor.to(device)
+        supply_v_tensor = supply_v_tensor.to(device)
     if dtype is not None:
         supply_tensor = supply_tensor.to(dtype)
+        supply_h_tensor = supply_h_tensor.to(dtype)
+        supply_v_tensor = supply_v_tensor.to(dtype)
 
     unit = "area" if as_area else "tracks"
     logger.info(f"Placedb supply map ({unit}): min={supply_tensor.min():.3f}, max={supply_tensor.max():.3f}, "
                 f"mean={supply_tensor.mean():.3f}")
+    if return_directional:
+        return supply_tensor, supply_h_tensor, supply_v_tensor
     return supply_tensor
 
 

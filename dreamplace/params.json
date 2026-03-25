@@ -403,6 +403,18 @@
         "description": "whether use the C++ CPU kernel for same-net diagonal-split topo scoring when the extension is available",
         "default": 1
     },
+    "soft_l_source_mode": {
+        "description": "source construction mode for the Soft-L electric surrogate: signed_capacity_residual or blockage_initial_density (track-space fixed-usage + segment-overlap - capacity)",
+        "default": "signed_capacity_residual"
+    },
+    "soft_l_blockage_initial_density": {
+        "description": "whether treat fix_usage_map as fixed initial density in the track-space blockage Soft-L surrogate",
+        "default": 0
+    },
+    "soft_l_negative_residual_scale": {
+        "description": "scaling factor applied to negative Soft-L rho values before Poisson; 1.0 keeps signed symmetry",
+        "default": 1.0
+    },
     "l_shape_auto_disable_flag": {
         "description": "whether auto-disable soft L-shape when telemetry indicates late-stage overshoot in diff-style runs",
         "default": 0

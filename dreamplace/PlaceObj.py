@@ -566,10 +566,19 @@ class PlaceObj(nn.Module):
         num_bins_y,
         target_density=1.0,
         target_demand=None,
+        raw_wire_demand_map=None,
+        supply_original=None,
         target_density_h=None,
         target_density_v=None,
         target_demand_h=None,
         target_demand_v=None,
+        raw_wire_demand_map_h=None,
+        raw_wire_demand_map_v=None,
+        supply_original_h=None,
+        supply_original_v=None,
+        fix_usage_map=None,
+        fix_usage_map_h=None,
+        fix_usage_map_v=None,
     ):
         """
         初始化L形routability模块
@@ -587,10 +596,19 @@ class PlaceObj(nn.Module):
             self.l_shape_routability_op.update_targets(
                 target_density=target_density,
                 target_demand=target_demand,
+                raw_wire_demand_map=raw_wire_demand_map,
+                supply_original=supply_original,
                 target_density_h=target_density_h,
                 target_density_v=target_density_v,
                 target_demand_h=target_demand_h,
                 target_demand_v=target_demand_v,
+                raw_wire_demand_map_h=raw_wire_demand_map_h,
+                raw_wire_demand_map_v=raw_wire_demand_map_v,
+                supply_original_h=supply_original_h,
+                supply_original_v=supply_original_v,
+                fix_usage_map=fix_usage_map,
+                fix_usage_map_h=fix_usage_map_h,
+                fix_usage_map_v=fix_usage_map_v,
             )
             self.use_l_shape_routability = True
             logging.info("L-shape routability already initialized; refreshed targets and re-enabled")
@@ -604,10 +622,19 @@ class PlaceObj(nn.Module):
             num_bins_y=num_bins_y,
             target_density=target_density,
             target_demand=target_demand,
+            raw_wire_demand_map=raw_wire_demand_map,
+            supply_original=supply_original,
             target_density_h=target_density_h,
             target_density_v=target_density_v,
             target_demand_h=target_demand_h,
             target_demand_v=target_demand_v,
+            raw_wire_demand_map_h=raw_wire_demand_map_h,
+            raw_wire_demand_map_v=raw_wire_demand_map_v,
+            supply_original_h=supply_original_h,
+            supply_original_v=supply_original_v,
+            fix_usage_map=fix_usage_map,
+            fix_usage_map_h=fix_usage_map_h,
+            fix_usage_map_v=fix_usage_map_v,
         )
         self.use_l_shape_routability = True
         

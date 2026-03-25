@@ -30,12 +30,15 @@ class LShapeSegmentBuilder:
     每个segment是一个矩形，用于后续密度计算
     """
     
-    def __init__(self, wire_width=0.0):
+    def __init__(self, wire_width=0.0, wire_width_h=None, wire_width_v=None):
         """
         Args:
             wire_width: 线宽，用于给segment增加宽度
         """
         self.wire_width = wire_width
+        self.wire_width_h = float(wire_width if wire_width_h is None else wire_width_h)
+        self.wire_width_v = float(wire_width if wire_width_v is None else wire_width_v)
+        self.use_directional_widths = wire_width_h is not None or wire_width_v is not None
     
     def build_segments(self, newx, newy, flat_from, flat_to, l_directions):
         """
@@ -77,8 +80,6 @@ class LShapeSegmentBuilder:
         flat_to_np = flat_to.cpu().numpy() if flat_to.is_cuda else flat_to.numpy()
         l_dir_np = l_directions.cpu().numpy() if l_directions.is_cuda else l_directions.numpy()
         
-        half_width = self.wire_width / 2.0
-        
         for edge_idx in range(num_edges):
             from_idx = flat_from_np[edge_idx]
             to_idx = flat_to_np[edge_idx]
@@ -105,7 +106,7 @@ class LShapeSegmentBuilder:
             if is_straight:
                 # 直线段：创建一个segment
                 seg_llx, seg_lly, seg_sx, seg_sy, seg_is_h = self._create_segment(
-                    x1, y1, x2, y2, half_width
+                    x1, y1, x2, y2
                 )
                 segment_llx_list.append(seg_llx)
                 segment_lly_list.append(seg_lly)
@@ -136,7 +137,7 @@ class LShapeSegmentBuilder:
                 
                 # Segment 1: p1 -> corner
                 seg1_llx, seg1_lly, seg1_sx, seg1_sy, seg1_is_h = self._create_segment(
-                    x1, y1, corner_x, corner_y, half_width
+                    x1, y1, corner_x, corner_y
                 )
                 if seg1_sx > 1e-6 or seg1_sy > 1e-6:  # 过滤零尺寸segment
                     segment_llx_list.append(seg1_llx)
@@ -148,7 +149,7 @@ class LShapeSegmentBuilder:
                 
                 # Segment 2: corner -> p2
                 seg2_llx, seg2_lly, seg2_sx, seg2_sy, seg2_is_h = self._create_segment(
-                    corner_x, corner_y, x2, y2, half_width
+                    corner_x, corner_y, x2, y2
                 )
                 if seg2_sx > 1e-6 or seg2_sy > 1e-6:  # 过滤零尺寸segment
                     segment_llx_list.append(seg2_llx)
@@ -192,7 +193,7 @@ class LShapeSegmentBuilder:
             'num_segments': num_segments
         }
     
-    def _create_segment(self, x1, y1, x2, y2, half_width):
+    def _create_segment(self, x1, y1, x2, y2):
         """
         创建一个segment（矩形）
         
@@ -216,16 +217,41 @@ class LShapeSegmentBuilder:
         dy = torch.abs(y2 - y1)
         is_horizontal = dx >= dy
         
-        # 添加线宽
-        llx = min_x - half_width
-        lly = min_y - half_width
-        size_x = (max_x - min_x) + 2 * half_width
-        size_y = (max_y - min_y) + 2 * half_width
-        
-        # 确保最小尺寸
-        min_size = half_width * 2 if half_width > 0 else 1e-6
-        size_x = torch.maximum(size_x, torch.tensor(min_size, dtype=size_x.dtype, device=size_x.device))
-        size_y = torch.maximum(size_y, torch.tensor(min_size, dtype=size_y.dtype, device=size_y.device))
+        if self.use_directional_widths:
+            half_width_h = self.wire_width_h / 2.0
+            half_width_v = self.wire_width_v / 2.0
+            width_h = torch.full_like(dx, self.wire_width_h)
+            width_v = torch.full_like(dx, self.wire_width_v)
+            llx = torch.where(
+                is_horizontal,
+                min_x,
+                min_x - half_width_v,
+            )
+            lly = torch.where(
+                is_horizontal,
+                min_y - half_width_h,
+                min_y,
+            )
+            size_x = torch.where(
+                is_horizontal,
+                max_x - min_x,
+                width_v,
+            )
+            size_y = torch.where(
+                is_horizontal,
+                width_h,
+                max_y - min_y,
+            )
+        else:
+            half_width = self.wire_width / 2.0
+            llx = min_x - half_width
+            lly = min_y - half_width
+            size_x = (max_x - min_x) + 2 * half_width
+            size_y = (max_y - min_y) + 2 * half_width
+
+            min_size = half_width * 2 if half_width > 0 else 1e-6
+            size_x = torch.maximum(size_x, torch.tensor(min_size, dtype=size_x.dtype, device=size_x.device))
+            size_y = torch.maximum(size_y, torch.tensor(min_size, dtype=size_y.dtype, device=size_y.device))
         
         return llx, lly, size_x, size_y, is_horizontal
 
@@ -425,11 +451,18 @@ class LShapeSegmentOp:
     优化：预计算拓扑结构，只在坐标更新时重新计算segment位置
     """
     
-    def __init__(self, wire_width=0.0, use_vectorized=True, soft_min_weight=0.0):
+    def __init__(self, wire_width=0.0, wire_width_h=None, wire_width_v=None, use_vectorized=True, soft_min_weight=0.0):
         self.wire_width = wire_width
+        self.wire_width_h = float(wire_width if wire_width_h is None else wire_width_h)
+        self.wire_width_v = float(wire_width if wire_width_v is None else wire_width_v)
+        self.use_directional_widths = wire_width_h is not None or wire_width_v is not None
         self.use_vectorized = use_vectorized
         self.soft_min_weight = float(soft_min_weight)
-        self.builder = LShapeSegmentBuilder(wire_width)
+        self.builder = LShapeSegmentBuilder(
+            wire_width,
+            wire_width_h=wire_width_h,
+            wire_width_v=wire_width_v,
+        )
         
         # 缓存拓扑结构（不随pos变化）
         self._cached_topology = None
@@ -471,17 +504,28 @@ class LShapeSegmentOp:
             'num_segments': 0
         }
 
-    def _create_segment_batch(self, x1, y1, x2, y2, half_width):
+    def _create_segment_batch(self, x1, y1, x2, y2):
         min_x = torch.minimum(x1, x2)
         max_x = torch.maximum(x1, x2)
         min_y = torch.minimum(y1, y2)
         max_y = torch.maximum(y1, y2)
 
-        llx = min_x - half_width
-        lly = min_y - half_width
-        size_x = (max_x - min_x) + 2 * half_width
-        size_y = (max_y - min_y) + 2 * half_width
         is_horizontal = torch.abs(x2 - x1) >= torch.abs(y2 - y1)
+        if self.use_directional_widths:
+            half_width_h = self.wire_width_h / 2.0
+            half_width_v = self.wire_width_v / 2.0
+            width_h = torch.full_like(min_x, self.wire_width_h)
+            width_v = torch.full_like(min_x, self.wire_width_v)
+            llx = torch.where(is_horizontal, min_x, min_x - half_width_v)
+            lly = torch.where(is_horizontal, min_y - half_width_h, min_y)
+            size_x = torch.where(is_horizontal, max_x - min_x, width_v)
+            size_y = torch.where(is_horizontal, width_h, max_y - min_y)
+        else:
+            half_width = self.wire_width / 2.0
+            llx = min_x - half_width
+            lly = min_y - half_width
+            size_x = (max_x - min_x) + 2 * half_width
+            size_y = (max_y - min_y) + 2 * half_width
         return llx, lly, size_x, size_y, is_horizontal
     
     def _compute_topology(self, flat_from, flat_to, l_directions, num_vertices, device):
@@ -498,8 +542,6 @@ class LShapeSegmentOp:
             dict with precomputed topology info
         """
         num_edges = flat_from.numel()
-        half_width = self.wire_width / 2.0
-        
         # 确保所有输入在同一设备上
         if flat_from.device != device:
             flat_from = flat_from.to(device)
@@ -530,7 +572,6 @@ class LShapeSegmentOp:
             'valid_from': valid_from,
             'valid_to': valid_to,
             'valid_edge_idx': valid_edge_idx,
-            'half_width': half_width,
             'num_edges': num_edges
         }
 
@@ -540,8 +581,6 @@ class LShapeSegmentOp:
         """
         device = newx.device
         dtype = newx.dtype
-        half_width = topo['half_width']
-
         if not topo['valid']:
             return self._empty_segment_result(dtype, device)
 
@@ -595,11 +634,22 @@ class LShapeSegmentOp:
         seg1_min_y = torch.minimum(y1, seg1_y2)
         seg1_max_y = torch.maximum(y1, seg1_y2)
         
-        seg1_llx = seg1_min_x - half_width
-        seg1_lly = seg1_min_y - half_width
-        seg1_size_x = (seg1_max_x - seg1_min_x) + 2 * half_width
-        seg1_size_y = (seg1_max_y - seg1_min_y) + 2 * half_width
         seg1_is_h = torch.abs(seg1_x2 - x1) >= torch.abs(seg1_y2 - y1)
+        if self.use_directional_widths:
+            half_width_h = self.wire_width_h / 2.0
+            half_width_v = self.wire_width_v / 2.0
+            width_h = torch.full_like(seg1_min_x, self.wire_width_h)
+            width_v = torch.full_like(seg1_min_x, self.wire_width_v)
+            seg1_llx = torch.where(seg1_is_h, seg1_min_x, seg1_min_x - half_width_v)
+            seg1_lly = torch.where(seg1_is_h, seg1_min_y - half_width_h, seg1_min_y)
+            seg1_size_x = torch.where(seg1_is_h, seg1_max_x - seg1_min_x, width_v)
+            seg1_size_y = torch.where(seg1_is_h, width_h, seg1_max_y - seg1_min_y)
+        else:
+            half_width = self.wire_width / 2.0
+            seg1_llx = seg1_min_x - half_width
+            seg1_lly = seg1_min_y - half_width
+            seg1_size_x = (seg1_max_x - seg1_min_x) + 2 * half_width
+            seg1_size_y = (seg1_max_y - seg1_min_y) + 2 * half_width
         
         # Segment 2: 只有L形边有 (corner -> p2)
         is_l_shape = is_upper_l | is_lower_l
@@ -610,12 +660,23 @@ class LShapeSegmentOp:
         seg2_min_y = torch.minimum(corner_y, y2)
         seg2_max_y = torch.maximum(corner_y, y2)
         
-        seg2_llx = seg2_min_x - half_width
-        seg2_lly = seg2_min_y - half_width
-        seg2_size_x = (seg2_max_x - seg2_min_x) + 2 * half_width
-        seg2_size_y = (seg2_max_y - seg2_min_y) + 2 * half_width
         seg2_is_h = torch.abs(x2 - corner_x) >= torch.abs(y2 - corner_y)
-        
+        if self.use_directional_widths:
+            half_width_h = self.wire_width_h / 2.0
+            half_width_v = self.wire_width_v / 2.0
+            width_h = torch.full_like(seg2_min_x, self.wire_width_h)
+            width_v = torch.full_like(seg2_min_x, self.wire_width_v)
+            seg2_llx = torch.where(seg2_is_h, seg2_min_x, seg2_min_x - half_width_v)
+            seg2_lly = torch.where(seg2_is_h, seg2_min_y - half_width_h, seg2_min_y)
+            seg2_size_x = torch.where(seg2_is_h, seg2_max_x - seg2_min_x, width_v)
+            seg2_size_y = torch.where(seg2_is_h, width_h, seg2_max_y - seg2_min_y)
+        else:
+            half_width = self.wire_width / 2.0
+            seg2_llx = seg2_min_x - half_width
+            seg2_lly = seg2_min_y - half_width
+            seg2_size_x = (seg2_max_x - seg2_min_x) + 2 * half_width
+            seg2_size_y = (seg2_max_y - seg2_min_y) + 2 * half_width
+
         seg2_valid = is_l_shape & (seg2_size_x > 1e-6) & (seg2_size_y > 1e-6)
         
         # 合并所有segments
@@ -645,8 +706,12 @@ class LShapeSegmentOp:
         segment_weight = torch.cat(all_weight)
         
         # 过滤零尺寸segment
-        min_size = max(half_width * 2, 1e-6)
-        valid_seg = (segment_size_x > min_size) | (segment_size_y > min_size)
+        if self.use_directional_widths:
+            valid_seg = (segment_size_x > 1e-6) & (segment_size_y > 1e-6)
+        else:
+            half_width = self.wire_width / 2.0
+            min_size = max(half_width * 2, 1e-6)
+            valid_seg = (segment_size_x > min_size) | (segment_size_y > min_size)
         
         segment_llx = segment_llx[valid_seg]
         segment_lly = segment_lly[valid_seg]
@@ -675,8 +740,6 @@ class LShapeSegmentOp:
         """
         device = newx.device
         dtype = newx.dtype
-        half_width = topo['half_width']
-
         if not topo['valid']:
             return self._empty_segment_result(dtype, device)
 
@@ -731,7 +794,7 @@ class LShapeSegmentOp:
                 all_weight.append(weight[valid])
 
         straight_llx, straight_lly, straight_size_x, straight_size_y, straight_is_h = self._create_segment_batch(
-            x1, y1, x2, y2, half_width
+            x1, y1, x2, y2
         )
         append_group(
             straight_llx,
@@ -751,10 +814,10 @@ class LShapeSegmentOp:
         h_corner_x = x2
         h_corner_y = y1
         h_seg1_llx, h_seg1_lly, h_seg1_size_x, h_seg1_size_y, h_seg1_is_h = self._create_segment_batch(
-            x1, y1, h_corner_x, h_corner_y, half_width
+            x1, y1, h_corner_x, h_corner_y
         )
         h_seg2_llx, h_seg2_lly, h_seg2_size_x, h_seg2_size_y, h_seg2_is_h = self._create_segment_batch(
-            h_corner_x, h_corner_y, x2, y2, half_width
+            h_corner_x, h_corner_y, x2, y2
         )
         h_valid = is_diagonal & (h_weight > min_weight)
         append_group(h_seg1_llx, h_seg1_lly, h_seg1_size_x, h_seg1_size_y, valid_edge_idx, h_seg1_is_h, h_weight, h_valid)
@@ -763,10 +826,10 @@ class LShapeSegmentOp:
         v_corner_x = x1
         v_corner_y = y2
         v_seg1_llx, v_seg1_lly, v_seg1_size_x, v_seg1_size_y, v_seg1_is_h = self._create_segment_batch(
-            x1, y1, v_corner_x, v_corner_y, half_width
+            x1, y1, v_corner_x, v_corner_y
         )
         v_seg2_llx, v_seg2_lly, v_seg2_size_x, v_seg2_size_y, v_seg2_is_h = self._create_segment_batch(
-            v_corner_x, v_corner_y, x2, y2, half_width
+            v_corner_x, v_corner_y, x2, y2
         )
         v_valid = is_diagonal & (v_weight > min_weight)
         append_group(v_seg1_llx, v_seg1_lly, v_seg1_size_x, v_seg1_size_y, valid_edge_idx, v_seg1_is_h, v_weight, v_valid)
@@ -783,8 +846,12 @@ class LShapeSegmentOp:
         segment_is_horizontal = torch.cat(all_is_h)
         segment_weight = torch.cat(all_weight)
 
-        min_size = max(half_width * 2, 1e-6)
-        valid_seg = ((segment_size_x > min_size) | (segment_size_y > min_size)) & (segment_weight > min_weight)
+        if self.use_directional_widths:
+            valid_seg = (segment_size_x > 1e-6) & (segment_size_y > 1e-6) & (segment_weight > min_weight)
+        else:
+            half_width = self.wire_width / 2.0
+            min_size = max(half_width * 2, 1e-6)
+            valid_seg = ((segment_size_x > min_size) | (segment_size_y > min_size)) & (segment_weight > min_weight)
 
         segment_llx = segment_llx[valid_seg]
         segment_lly = segment_lly[valid_seg]

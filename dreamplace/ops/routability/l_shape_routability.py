@@ -1204,9 +1204,13 @@ class LShapeRoutabilityMixin:
             target_demand=target_demand
         )
         self.use_l_shape_routability = True
-        self.l_shape_routability_weight = getattr(params, 'l_shape_routability_weight', 1.0)
-        logger.info(f"L-shape routability initialized with weight {self.l_shape_routability_weight}, "
-                   f"mode={density_mode}")
+        # Placeholder only. Real external weight is calibrated in PlaceObj.
+        self.l_shape_routability_weight = 0.0
+        logger.info(
+            "L-shape routability initialized with placeholder weight %.1e, mode=%s",
+            self.l_shape_routability_weight,
+            density_mode,
+        )
     
     def l_shape_routability_obj(self, pos, use_l_direction=True):
         """
@@ -1691,6 +1695,9 @@ def _build_l_shape_electric_plot_maps(l_shape_op):
     surrogate_overflow_map = density_map.clone()
     surrogate_overflow_map_h = None
     surrogate_overflow_map_v = None
+    surrogate_rho_map = density_map.clone()
+    surrogate_rho_map_h = None
+    surrogate_rho_map_v = None
     ggr_overflow_map = torch.zeros_like(density_map)
     ggr_overflow_map_h = None
     ggr_overflow_map_v = None
@@ -1731,6 +1738,9 @@ def _build_l_shape_electric_plot_maps(l_shape_op):
 
             demand_h_in_tracks = density_map_h / calibrated_area_per_track_h
             demand_v_in_tracks = density_map_v / calibrated_area_per_track_v
+            surrogate_rho_map_h = (demand_h_in_tracks - target_density_h) * calibrated_area_per_track_h
+            surrogate_rho_map_v = (demand_v_in_tracks - target_density_v) * calibrated_area_per_track_v
+            surrogate_rho_map = surrogate_rho_map_h + surrogate_rho_map_v
             surrogate_overflow_map_h = torch.relu(demand_h_in_tracks - target_density_h) * calibrated_area_per_track_h
             surrogate_overflow_map_v = torch.relu(demand_v_in_tracks - target_density_v) * calibrated_area_per_track_v
             surrogate_overflow_map = surrogate_overflow_map_h + surrogate_overflow_map_v
@@ -1745,6 +1755,7 @@ def _build_l_shape_electric_plot_maps(l_shape_op):
             ggr_overflow_map = ggr_overflow_map_h + ggr_overflow_map_v
         else:
             demand_in_tracks = density_map / calibrated_area_per_track
+            surrogate_rho_map = (demand_in_tracks - supply_map) * calibrated_area_per_track
             overflow_in_tracks = torch.relu(demand_in_tracks - supply_map)
             surrogate_overflow_map = overflow_in_tracks * calibrated_area_per_track
             ggr_overflow_map = torch.relu(target_demand - supply_map) * calibrated_area_per_track
@@ -1753,6 +1764,9 @@ def _build_l_shape_electric_plot_maps(l_shape_op):
         "density_map": density_map,
         "density_map_h": density_map_h,
         "density_map_v": density_map_v,
+        "surrogate_rho_map": surrogate_rho_map,
+        "surrogate_rho_map_h": surrogate_rho_map_h,
+        "surrogate_rho_map_v": surrogate_rho_map_v,
         "surrogate_overflow_map": surrogate_overflow_map,
         "surrogate_overflow_map_h": surrogate_overflow_map_h,
         "surrogate_overflow_map_v": surrogate_overflow_map_v,
@@ -1765,14 +1779,14 @@ def _build_l_shape_electric_plot_maps(l_shape_op):
 
 
 def plot_l_shape_electric_potential_map(l_shape_op, output_path, title_prefix="L-shape Electric Potential"):
-    """Plot the potential map(s) reconstructed from the electric overflow maps."""
+    """Plot the potential map(s) reconstructed from the signed rho maps."""
     import matplotlib.pyplot as plt
     import numpy as np
 
     plot_payload = _build_l_shape_electric_plot_maps(l_shape_op)
-    overflow_map = plot_payload["surrogate_overflow_map"]
-    overflow_map_h = plot_payload["surrogate_overflow_map_h"]
-    overflow_map_v = plot_payload["surrogate_overflow_map_v"]
+    rho_map = plot_payload["surrogate_rho_map"]
+    rho_map_h = plot_payload["surrogate_rho_map_h"]
+    rho_map_v = plot_payload["surrogate_rho_map_v"]
     split_available = plot_payload["split_available"]
     density_op = plot_payload["density_op"]
 
@@ -1798,8 +1812,8 @@ def plot_l_shape_electric_potential_map(l_shape_op, output_path, title_prefix="L
 
     def compute_potential(map_tensor):
         map_tensor = map_tensor.to(device=device, dtype=dtype)
-        overflow_map_normalized = map_tensor * (1.0 / bin_area)
-        auv = density_op.dct2.forward(overflow_map_normalized)
+        rho_map_normalized = map_tensor * (1.0 / bin_area)
+        auv = density_op.dct2.forward(rho_map_normalized)
         potential_map = density_op.idct2.forward(auv * density_op.inv_wu2_plus_wv2)
         potential_map = potential_map * bin_area
         return potential_map.detach().cpu().to(dtype=torch.float32)
@@ -1836,9 +1850,9 @@ def plot_l_shape_electric_potential_map(l_shape_op, output_path, title_prefix="L
         ax.set_ylabel("Bin Y")
         return im
 
-    if split_available and isinstance(overflow_map_h, torch.Tensor) and isinstance(overflow_map_v, torch.Tensor):
-        potential_map_h = compute_potential(overflow_map_h)
-        potential_map_v = compute_potential(overflow_map_v)
+    if split_available and isinstance(rho_map_h, torch.Tensor) and isinstance(rho_map_v, torch.Tensor):
+        potential_map_h = compute_potential(rho_map_h)
+        potential_map_v = compute_potential(rho_map_v)
         potential_map = potential_map_h + potential_map_v
         fig, axes = plt.subplots(1, 3, figsize=(24, 8), constrained_layout=True)
         im_h = render_map(axes[0], potential_map_h, f"{title_prefix} H")
@@ -1848,7 +1862,7 @@ def plot_l_shape_electric_potential_map(l_shape_op, output_path, title_prefix="L
         fig.colorbar(im_v, ax=axes[1], fraction=0.046, pad=0.04, label="Potential")
         fig.colorbar(im_t, ax=axes[2], fraction=0.046, pad=0.04, label="Potential")
     else:
-        potential_map = compute_potential(overflow_map)
+        potential_map = compute_potential(rho_map)
         fig, ax = plt.subplots(figsize=(10, 10))
         im = render_map(ax, potential_map, title_prefix)
         fig.colorbar(im, ax=ax, label="Potential")

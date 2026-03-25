@@ -214,17 +214,19 @@ class SegmentElectricPotentialFunction(Function):
                     return calibrated_local
             return fallback
 
-        def _compute_overflow_components(density_map_local, supply_map_local, calibrated_area_per_track):
+        def _compute_rho_components(density_map_local, supply_map_local, calibrated_area_per_track):
             demand_in_tracks = density_map_local / calibrated_area_per_track
             utilization = demand_in_tracks / supply_map_local.clamp(min=1e-6)
-            overflow_in_tracks = (demand_in_tracks - supply_map_local).clamp(min=0)
+            rho_in_tracks = demand_in_tracks - supply_map_local
+            rho_map_local = rho_in_tracks * calibrated_area_per_track
+            overflow_in_tracks = rho_in_tracks.clamp(min=0)
             overflow_map_local = overflow_in_tracks * calibrated_area_per_track
-            return overflow_map_local, utilization
+            return rho_map_local, overflow_map_local, utilization, rho_in_tracks
 
-        def _compute_field_and_energy(overflow_map_local):
-            overflow_map_normalized_local = overflow_map_local.clone()
-            overflow_map_normalized_local.mul_(1.0 / bin_area)
-            auv_local = dct2.forward(overflow_map_normalized_local)
+        def _compute_field_and_energy(rho_map_local):
+            rho_map_normalized_local = rho_map_local.clone()
+            rho_map_normalized_local.mul_(1.0 / bin_area)
+            auv_local = dct2.forward(rho_map_normalized_local)
             field_map_x_local = idxst_idct.forward(
                 auv_local.mul(wu_by_wu2_plus_wv2_half)
             )
@@ -236,8 +238,8 @@ class SegmentElectricPotentialFunction(Function):
             else:
                 potential_map_local = idct2.forward(auv_local.mul(inv_wu2_plus_wv2))
                 potential_map_local.mul_(bin_area)
-                energy_local = potential_map_local.mul(overflow_map_normalized_local).sum()
-            return overflow_map_normalized_local, field_map_x_local, field_map_y_local, energy_local
+                energy_local = potential_map_local.mul(rho_map_normalized_local).sum()
+            return rho_map_normalized_local, field_map_x_local, field_map_y_local, energy_local
 
         target_density_h = None
         target_density_v = None
@@ -336,8 +338,10 @@ class SegmentElectricPotentialFunction(Function):
         M = num_bins_x
         N = num_bins_y
         
-        # Compute overflow map based on supply-demand relationship.
-        # The current implementation only supports 2D routing supply maps.
+        # Compute a signed rho map based on routing demand vs supply.
+        # Overflow remains as telemetry, but the Poisson solver should see
+        # both positive residuals (capacity pressure) and negative residuals
+        # (available resource).
         bin_area = bin_size_x * bin_size_y
         if not isinstance(target_density, torch.Tensor) or target_density.dim() != 2:
             raise TypeError(
@@ -367,11 +371,12 @@ class SegmentElectricPotentialFunction(Function):
 
         calibrated_area_per_track = _calibrate_area_per_track(total_density, total_demand)
         if calibrated_area_per_track is None:
-            overflow_map = density_map
-            overflow_map_normalized, field_map_x, field_map_y, energy = _compute_field_and_energy(overflow_map)
+            rho_map = density_map
+            overflow_map = density_map.clamp(min=0)
+            rho_map_normalized, field_map_x, field_map_y, energy = _compute_field_and_energy(rho_map)
             ctx.field_map_x = field_map_x
             ctx.field_map_y = field_map_y
-            logger.debug("Fallback: using density map directly (net_map or density is zero)")
+            logger.debug("Fallback: using density map directly as the electric rho map (net_map or density is zero)")
         elif directional_split:
             calibrated_area_per_track_h = _calibrate_branch_area_per_track(
                 density_map_h, target_demand_h, fallback=calibrated_area_per_track
@@ -380,15 +385,15 @@ class SegmentElectricPotentialFunction(Function):
                 density_map_v, target_demand_v, fallback=calibrated_area_per_track
             )
 
-            overflow_map_h, utilization_h = _compute_overflow_components(
+            rho_map_h, overflow_map_h, utilization_h, rho_in_tracks_h = _compute_rho_components(
                 density_map_h, target_density_h, calibrated_area_per_track_h
             )
-            overflow_map_v, utilization_v = _compute_overflow_components(
+            rho_map_v, overflow_map_v, utilization_v, rho_in_tracks_v = _compute_rho_components(
                 density_map_v, target_density_v, calibrated_area_per_track_v
             )
 
-            _, field_map_x_h, field_map_y_h, energy_h = _compute_field_and_energy(overflow_map_h)
-            _, field_map_x_v, field_map_y_v, energy_v = _compute_field_and_energy(overflow_map_v)
+            _, field_map_x_h, field_map_y_h, energy_h = _compute_field_and_energy(rho_map_h)
+            _, field_map_x_v, field_map_y_v, energy_v = _compute_field_and_energy(rho_map_v)
 
             ctx.hv_split_active = True
             ctx.h_split_data = prepared_h
@@ -401,30 +406,43 @@ class SegmentElectricPotentialFunction(Function):
             ctx.field_map_y = None
 
             energy = energy_h + energy_v
+            rho_map = rho_map_h + rho_map_v
             overflow_map = overflow_map_h + overflow_map_v
 
             logger.debug(
-                "Calibration(split): area_per_track_h=%.3f area_per_track_v=%.3f util_h_max=%.2f util_v_max=%.2f overflow_bins_h=%d/%d overflow_bins_v=%d/%d",
+                "Calibration(split): area_per_track_h=%.3f area_per_track_v=%.3f util_h_max=%.2f util_v_max=%.2f "
+                "rho_pos_bins_h=%d/%d rho_neg_bins_h=%d/%d overflow_bins_h=%d/%d "
+                "rho_pos_bins_v=%d/%d rho_neg_bins_v=%d/%d overflow_bins_v=%d/%d",
                 float(calibrated_area_per_track_h.item()) if isinstance(calibrated_area_per_track_h, torch.Tensor) else float(calibrated_area_per_track_h),
                 float(calibrated_area_per_track_v.item()) if isinstance(calibrated_area_per_track_v, torch.Tensor) else float(calibrated_area_per_track_v),
                 float(utilization_h.max().item()) if utilization_h.numel() > 0 else 0.0,
                 float(utilization_v.max().item()) if utilization_v.numel() > 0 else 0.0,
+                int((rho_in_tracks_h > 0).sum().item()),
+                int(rho_in_tracks_h.numel()),
+                int((rho_in_tracks_h < 0).sum().item()),
+                int(rho_in_tracks_h.numel()),
                 int((overflow_map_h > 0).sum().item()),
                 int(overflow_map_h.numel()),
+                int((rho_in_tracks_v > 0).sum().item()),
+                int(rho_in_tracks_v.numel()),
+                int((rho_in_tracks_v < 0).sum().item()),
+                int(rho_in_tracks_v.numel()),
                 int((overflow_map_v > 0).sum().item()),
                 int(overflow_map_v.numel()),
             )
         else:
-            overflow_map, utilization = _compute_overflow_components(
+            rho_map, overflow_map, utilization, rho_in_tracks = _compute_rho_components(
                 density_map, supply_map, calibrated_area_per_track
             )
-            overflow_map_normalized, field_map_x, field_map_y, energy = _compute_field_and_energy(overflow_map)
+            rho_map_normalized, field_map_x, field_map_y, energy = _compute_field_and_energy(rho_map)
             ctx.field_map_x = field_map_x
             ctx.field_map_y = field_map_y
 
             logger.debug(
                 f"Calibration(net_map): area_per_track={calibrated_area_per_track:.3f}, "
                 f"utilization: mean={utilization.mean():.2f}, max={utilization.max():.2f}, "
+                f"rho_pos_bins={(rho_in_tracks > 0).sum().item()}/{rho_in_tracks.numel()}, "
+                f"rho_neg_bins={(rho_in_tracks < 0).sum().item()}/{rho_in_tracks.numel()}, "
                 f"overflow_bins={(overflow_map > 0).sum().item()}/{overflow_map.numel()}"
             )
         

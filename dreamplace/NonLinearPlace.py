@@ -1049,6 +1049,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
                 # a function to initialize learning rate
                 def initialize_learning_rate(pos):
+                    if hasattr(model, "set_l_shape_outer_iteration"):
+                        model.set_l_shape_outer_iteration(iteration)
                     learning_rate = model.estimate_initial_learning_rate(
                         pos, global_place_params["learning_rate"]
                     )
@@ -1073,6 +1075,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
                 # as nesterov requires line search, we cannot follow the convention of other solvers
                 if optimizer_name.lower() in {"sgd", "adam", "sgd_momentum", "sgd_nesterov"}:
+                    if hasattr(model, "set_l_shape_outer_iteration"):
+                        model.set_l_shape_outer_iteration(iteration)
                     model.obj_and_grad_fn(model.data_collections.pos[0])
                 elif optimizer_name.lower() != "nesterov":
                     assert 0, "unsupported optimizer %s" % (optimizer_name)
@@ -1157,9 +1161,15 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         "l_shape_weighted_cost": "l_shape_last_weighted_cost",
                         "l_shape_weight": "l_shape_last_weight",
                         "l_shape_target_weight": "l_shape_last_target_weight",
+                        "l_shape_sched_weight": "l_shape_last_sched_weight",
+                        "l_shape_cap_active": "l_shape_last_cap_active",
                         "l_shape_base_grad_norm": "l_shape_last_base_grad_norm",
                         "l_shape_grad_norm": "l_shape_last_grad_norm",
                         "l_shape_grad_ratio": "l_shape_last_grad_ratio",
+                        "l_shape_sched_base_weight": "l_shape_last_sched_base_weight",
+                        "l_shape_sched_sigma": "l_shape_last_sched_sigma",
+                        "l_shape_sched_iter_diff": "l_shape_last_sched_iter_diff",
+                        "l_shape_sched_active": "l_shape_last_sched_active",
                     }
                     for metric_field, model_field in field_map.items():
                         value = getattr(model, model_field, None)
@@ -1535,6 +1545,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     cur_metric.density_weight = model.density_weight.data
                     metrics.append(cur_metric)
                     pos = model.data_collections.pos[0]
+                    if hasattr(model, "set_l_shape_outer_iteration"):
+                        model.set_l_shape_outer_iteration(iteration)
 
                     # move any out-of-bound cell back to placement region
                     self.op_collections.move_boundary_op(pos)
@@ -1894,6 +1906,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     topo_cache=l_shape_inputs.get("same_net_topo_cache"),
                                     topo_stats=l_shape_inputs.get("same_net_topo_stats"),
                                 )
+                            if hasattr(model, "start_l_shape_weight_schedule"):
+                                model.start_l_shape_weight_schedule(iteration)
                             # 初始化基于L-shape overflow的外环状态
                             model._l_shape_overflow_ema = None
                             model._l_shape_overflow_last = None
@@ -2630,6 +2644,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     t3 = time.time()
                     if model.update_mask is not None:
                         pos_bk = pos.data.clone()
+                        if hasattr(model, "set_l_shape_outer_iteration"):
+                            model.set_l_shape_outer_iteration(iteration)
                         optimizer.step()
 
                         for region_id, fence_region_update_flag in enumerate[Any](model.update_mask):
@@ -2638,6 +2654,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 mask = self.op_collections.fence_region_density_ops[region_id].pos_mask
                                 pos.data.masked_scatter_(mask, pos_bk[mask])
                     else:
+                        if hasattr(model, "set_l_shape_outer_iteration"):
+                            model.set_l_shape_outer_iteration(iteration)
                         optimizer.step()
 
                     logging.info("optimizer step %.3f ms" %

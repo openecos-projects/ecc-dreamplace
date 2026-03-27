@@ -704,11 +704,7 @@ class BasicPlace(nn.Module):
         l_shape_routability_enabled = (
             params.routability_opt_flag and params.l_shape_routability_flag
         )
-        if (
-            params.with_sta
-            or params.check_egr_steiner_flag
-            or l_shape_routability_enabled
-        ):
+        if params.with_sta or l_shape_routability_enabled:
             self.op_collections.steiner_topo_op = self.build_steiner_topo(
                 params, placedb, self.data_collections, self.device)
 

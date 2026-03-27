@@ -96,8 +96,8 @@ class LShapeSegmentBuilder:
             l_dir = l_dir_np[edge_idx]
             
             # 判断是否是直线（水平或垂直）
-            is_horizontal_line = torch.abs(y1 - y2) < 1e-6
-            is_vertical_line = torch.abs(x1 - x2) < 1e-6
+            is_horizontal_line = torch.abs(y1 - y2) < 1e-4
+            is_vertical_line = torch.abs(x1 - x2) < 1e-4
             # 如果l_dir标记为STRAIGHT但几何上是斜线，强制按L形处理
             is_straight = (is_horizontal_line or is_vertical_line) or (
                 l_dir == STRAIGHT and (is_horizontal_line or is_vertical_line)
@@ -312,8 +312,8 @@ def build_l_shape_segments_vectorized(newx, newy, flat_from, flat_to, l_directio
     y2 = newy[valid_to]
     
     # 判断边的类型
-    is_horizontal_line = torch.abs(y1 - y2) < 1e-6
-    is_vertical_line = torch.abs(x1 - x2) < 1e-6
+    is_horizontal_line = torch.abs(y1 - y2) < 1e-4
+    is_vertical_line = torch.abs(x1 - x2) < 1e-4
     # 如果l_dir标记为STRAIGHT但几何上为斜线，强制按L形处理
     straight_by_dir = (valid_l_dir == STRAIGHT)
     diag_straight = straight_by_dir & ~(is_horizontal_line | is_vertical_line)
@@ -610,8 +610,8 @@ class LShapeSegmentOp:
         y2 = newy[valid_to]
         
         # 判断几何上的直线
-        is_horizontal_line = torch.abs(y1 - y2) < 1e-6
-        is_vertical_line = torch.abs(x1 - x2) < 1e-6
+        is_horizontal_line = torch.abs(y1 - y2) < 1e-4
+        is_vertical_line = torch.abs(x1 - x2) < 1e-4
         # 如果l_dir标记为STRAIGHT但几何上为斜线，强制按L形处理
         diag_straight = is_straight_by_dir & ~(is_horizontal_line | is_vertical_line)
         is_straight = (is_horizontal_line | is_vertical_line) | (is_straight_by_dir & ~diag_straight)
@@ -770,8 +770,8 @@ class LShapeSegmentOp:
         x2 = newx[valid_to]
         y2 = newy[valid_to]
 
-        is_horizontal_line = torch.abs(y1 - y2) < 1e-6
-        is_vertical_line = torch.abs(x1 - x2) < 1e-6
+        is_horizontal_line = torch.abs(y1 - y2) < 1e-4
+        is_vertical_line = torch.abs(x1 - x2) < 1e-4
         is_straight = is_horizontal_line | is_vertical_line
         is_diagonal = ~is_straight
 

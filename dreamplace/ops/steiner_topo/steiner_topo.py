@@ -143,7 +143,7 @@ class SteinerTopo(nn.Module):
         self.net_flat_topo_sort = self.net_flat_topo_sort.contiguous()
         self.net_flat_topo_sort_start = self.net_flat_topo_sort_start.contiguous()
 
-    def _collect_edge_geometry_stats(self, edge_from, edge_to, x_coords, y_coords, eps=1e-6):
+    def _collect_edge_geometry_stats(self, edge_from, edge_to, x_coords, y_coords, eps=1e-4):
         def _empty_stats(total_edges=0):
             return {
                 "total_edges": int(total_edges),

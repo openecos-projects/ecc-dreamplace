@@ -6,6 +6,9 @@ import torch
 
 logger = logging.getLogger(__name__)
 
+_F32_EPS = np.float32(1e-12)
+_F32_SIGN_TOL = np.float32(1e-9)
+
 try:
     import dreamplace.ops.routability.same_net_topo_scoring_cpp as same_net_topo_scoring_cpp
 except ImportError:
@@ -158,6 +161,7 @@ def _build_net_topology_record(net_id, net_route, max_gap=1):
 def build_same_net_topology_cache(route_entries, placedb, max_gap=1):
     net_name_to_id = _build_net_name_to_id(placedb)
     net_topologies = {}
+    route_entry_meta = {}
     num_route_failed_nets = 0
     unknown_name_count = 0
     total_segments_h = 0
@@ -178,6 +182,15 @@ def build_same_net_topology_cache(route_entries, placedb, max_gap=1):
             if net_id < 0:
                 unknown_name_count += 1
                 continue
+        entries = net_route.get("entries", []) or []
+        wire_entry_count = sum(1 for entry in entries if entry.get("type", "") == "wire")
+        route_entry_meta[int(net_id)] = {
+            "net_id": int(net_id),
+            "net_name": net_route.get("net_name", "") or f"net_{net_id}",
+            "route_failed": bool(net_route.get("route_failed", False)),
+            "entry_count": int(len(entries)),
+            "wire_entry_count": int(wire_entry_count),
+        }
         record = _build_net_topology_record(int(net_id), net_route, max_gap=max_gap)
         if record is None:
             continue
@@ -208,12 +221,13 @@ def build_same_net_topology_cache(route_entries, placedb, max_gap=1):
     cache = {
         "route_grid_shape": stats["route_grid_shape"],
         "net_topologies": net_topologies,
+        "route_entry_meta": route_entry_meta,
         "num_nets_with_topology": stats["num_nets_with_topology"],
         "num_segments_h": stats["num_segments_h"],
         "num_segments_v": stats["num_segments_v"],
     }
     logger.info(
-        "Built same-net topo cache: nets=%d/%d segments_h=%d segments_v=%d route_failed=%d unknown_names=%d invalid_wires=%d max_intervals_per_net=%d",
+        "Built per-net topology cache: nets=%d/%d segments_h=%d segments_v=%d route_failed=%d unknown_names=%d invalid_wires=%d max_intervals_per_net=%d",
         stats["num_nets_with_topology"],
         stats["num_route_entry_nets"],
         stats["num_segments_h"],
@@ -292,17 +306,17 @@ def pack_same_net_topology_cache_for_cpp(
         "net_ids": np.asarray(net_ids, dtype=np.int32),
         "h_seg_offsets": np.asarray(h_seg_offsets, dtype=np.int32),
         "v_seg_offsets": np.asarray(v_seg_offsets, dtype=np.int32),
-        "h_x1": np.asarray(h_x1, dtype=np.float64),
-        "h_y": np.asarray(h_y, dtype=np.float64),
-        "h_x2": np.asarray(h_x2, dtype=np.float64),
-        "v_x": np.asarray(v_x, dtype=np.float64),
-        "v_y1": np.asarray(v_y1, dtype=np.float64),
-        "v_y2": np.asarray(v_y2, dtype=np.float64),
+        "h_x1": np.asarray(h_x1, dtype=np.float32),
+        "h_y": np.asarray(h_y, dtype=np.float32),
+        "h_x2": np.asarray(h_x2, dtype=np.float32),
+        "v_x": np.asarray(v_x, dtype=np.float32),
+        "v_y1": np.asarray(v_y1, dtype=np.float32),
+        "v_y2": np.asarray(v_y2, dtype=np.float32),
     }
     topo_cache[_CPP_PACK_CACHE_META_KEY] = pack_key
     topo_cache[_CPP_PACK_CACHE_KEY] = packed
     logger.info(
-        "Packed same-net topo cache for C++: nets=%d h_segments=%d v_segments=%d",
+        "Packed per-net topology cache for C++: nets=%d h_segments=%d v_segments=%d",
         int(packed["net_ids"].size),
         int(packed["h_x1"].size),
         int(packed["v_x"].size),
@@ -320,10 +334,10 @@ def _to_numpy_int_array(values):
 
 def _to_numpy_float_array(values):
     if isinstance(values, np.ndarray):
-        return values.astype(np.float64, copy=False)
+        return values.astype(np.float32, copy=False)
     if isinstance(values, torch.Tensor):
-        return values.detach().cpu().numpy().astype(np.float64, copy=False)
-    return np.asarray(values, dtype=np.float64)
+        return values.detach().cpu().numpy().astype(np.float32, copy=False)
+    return np.asarray(values, dtype=np.float32)
 
 
 def _build_same_net_topo_zero_tensors(num_edges, device, dtype):
@@ -333,32 +347,41 @@ def _build_same_net_topo_zero_tensors(num_edges, device, dtype):
 
 
 def _grid_center(coord_idx, origin, step):
-    return float(origin) + float(coord_idx) * float(step) + 0.5 * float(step)
+    origin = np.float32(origin)
+    coord_idx = np.float32(coord_idx)
+    step = np.float32(step)
+    return np.float32(origin + coord_idx * step + np.float32(0.5) * step)
 
 
 def _interval_overlap_len(lo1, hi1, lo2, hi2):
-    lo1, hi1 = sorted((float(lo1), float(hi1)))
-    lo2, hi2 = sorted((float(lo2), float(hi2)))
-    return max(0.0, min(hi1, hi2) - max(lo1, lo2))
+    lo1, hi1 = sorted((np.float32(lo1), np.float32(hi1)))
+    lo2, hi2 = sorted((np.float32(lo2), np.float32(hi2)))
+    return np.float32(max(np.float32(0.0), min(hi1, hi2) - max(lo1, lo2)))
 
 
 def _interval_gap(lo1, hi1, lo2, hi2):
-    lo1, hi1 = sorted((float(lo1), float(hi1)))
-    lo2, hi2 = sorted((float(lo2), float(hi2)))
-    if _interval_overlap_len(lo1, hi1, lo2, hi2) > 0.0:
-        return 0.0
+    lo1, hi1 = sorted((np.float32(lo1), np.float32(hi1)))
+    lo2, hi2 = sorted((np.float32(lo2), np.float32(hi2)))
+    if _interval_overlap_len(lo1, hi1, lo2, hi2) > np.float32(0.0):
+        return np.float32(0.0)
     if hi1 < lo2:
-        return float(lo2 - hi1)
+        return np.float32(lo2 - hi1)
     if hi2 < lo1:
-        return float(lo1 - hi2)
-    return 0.0
+        return np.float32(lo1 - hi2)
+    return np.float32(0.0)
 
 
 def _cross_value(dx, dy, x1, y1, qx, qy):
-    return float(dx) * (float(qy) - float(y1)) - float(dy) * (float(qx) - float(x1))
+    dx = np.float32(dx)
+    dy = np.float32(dy)
+    x1 = np.float32(x1)
+    y1 = np.float32(y1)
+    qx = np.float32(qx)
+    qy = np.float32(qy)
+    return np.float32(dx * (qy - y1) - dy * (qx - x1))
 
 
-def _sign_with_tol(value, tol=1e-9):
+def _sign_with_tol(value, tol=_F32_SIGN_TOL):
     if value > tol:
         return 1
     if value < -tol:
@@ -367,11 +390,15 @@ def _sign_with_tol(value, tol=1e-9):
 
 
 def _segment_length(x1, y1, x2, y2):
-    return max(abs(float(x2) - float(x1)) + abs(float(y2) - float(y1)), 1e-9)
+    x1 = np.float32(x1)
+    y1 = np.float32(y1)
+    x2 = np.float32(x2)
+    y2 = np.float32(y2)
+    return np.float32(max(abs(x2 - x1) + abs(y2 - y1), np.float32(1e-9)))
 
 
 def _split_horizontal_segment_by_line(sx1, sy, sx2, x1, y1, dx, dy):
-    sx_lo, sx_hi = sorted((float(sx1), float(sx2)))
+    sx_lo, sx_hi = sorted((np.float32(sx1), np.float32(sx2)))
     cross1 = _cross_value(dx, dy, x1, y1, sx_lo, sy)
     cross2 = _cross_value(dx, dy, x1, y1, sx_hi, sy)
     sign1 = _sign_with_tol(cross1)
@@ -379,12 +406,12 @@ def _split_horizontal_segment_by_line(sx1, sy, sx2, x1, y1, dx, dy):
 
     if sign1 == 0 and sign2 == 0:
         return [(sx_lo, sy, sx_hi, sy)]
-    if sign1 == sign2 or sign1 == 0 or sign2 == 0 or abs(dy) <= 1e-12:
+    if sign1 == sign2 or sign1 == 0 or sign2 == 0 or abs(np.float32(dy)) <= _F32_EPS:
         return [(sx_lo, sy, sx_hi, sy)]
 
-    x_int = float(x1) + float(dx) * ((float(sy) - float(y1)) / float(dy))
+    x_int = np.float32(x1) + np.float32(dx) * ((np.float32(sy) - np.float32(y1)) / np.float32(dy))
     x_int = min(max(x_int, sx_lo), sx_hi)
-    if x_int <= sx_lo + 1e-12 or x_int >= sx_hi - 1e-12:
+    if x_int <= sx_lo + _F32_EPS or x_int >= sx_hi - _F32_EPS:
         return [(sx_lo, sy, sx_hi, sy)]
     return [
         (sx_lo, sy, x_int, sy),
@@ -393,7 +420,7 @@ def _split_horizontal_segment_by_line(sx1, sy, sx2, x1, y1, dx, dy):
 
 
 def _split_vertical_segment_by_line(sx, sy1, sy2, x1, y1, dx, dy):
-    sy_lo, sy_hi = sorted((float(sy1), float(sy2)))
+    sy_lo, sy_hi = sorted((np.float32(sy1), np.float32(sy2)))
     cross1 = _cross_value(dx, dy, x1, y1, sx, sy_lo)
     cross2 = _cross_value(dx, dy, x1, y1, sx, sy_hi)
     sign1 = _sign_with_tol(cross1)
@@ -401,12 +428,12 @@ def _split_vertical_segment_by_line(sx, sy1, sy2, x1, y1, dx, dy):
 
     if sign1 == 0 and sign2 == 0:
         return [(sx, sy_lo, sx, sy_hi)]
-    if sign1 == sign2 or sign1 == 0 or sign2 == 0 or abs(dx) <= 1e-12:
+    if sign1 == sign2 or sign1 == 0 or sign2 == 0 or abs(np.float32(dx)) <= _F32_EPS:
         return [(sx, sy_lo, sx, sy_hi)]
 
-    y_int = float(y1) + float(dy) * ((float(sx) - float(x1)) / float(dx))
+    y_int = np.float32(y1) + np.float32(dy) * ((np.float32(sx) - np.float32(x1)) / np.float32(dx))
     y_int = min(max(y_int, sy_lo), sy_hi)
-    if y_int <= sy_lo + 1e-12 or y_int >= sy_hi - 1e-12:
+    if y_int <= sy_lo + _F32_EPS or y_int >= sy_hi - _F32_EPS:
         return [(sx, sy_lo, sx, sy_hi)]
     return [
         (sx, sy_lo, sx, y_int),
@@ -415,8 +442,8 @@ def _split_vertical_segment_by_line(sx, sy1, sy2, x1, y1, dx, dy):
 
 
 def _piece_side_affinity(piece_x1, piece_y1, piece_x2, piece_y2, x1, y1, dx, dy, sign_h):
-    mid_x = 0.5 * (float(piece_x1) + float(piece_x2))
-    mid_y = 0.5 * (float(piece_y1) + float(piece_y2))
+    mid_x = np.float32(0.5) * (np.float32(piece_x1) + np.float32(piece_x2))
+    mid_y = np.float32(0.5) * (np.float32(piece_y1) + np.float32(piece_y2))
     side_val = _cross_value(dx, dy, x1, y1, mid_x, mid_y)
     piece_sign = _sign_with_tol(side_val)
     if piece_sign == 0:
@@ -427,29 +454,29 @@ def _piece_side_affinity(piece_x1, piece_y1, piece_x2, piece_y2, x1, y1, dx, dy,
 
 
 def _horizontal_leg_affinity(piece_x1, piece_y, piece_x2, leg_y, leg_x1, leg_x2, sigma, max_distance):
-    piece_lo, piece_hi = sorted((float(piece_x1), float(piece_x2)))
-    leg_lo, leg_hi = sorted((float(leg_x1), float(leg_x2)))
+    piece_lo, piece_hi = sorted((np.float32(piece_x1), np.float32(piece_x2)))
+    leg_lo, leg_hi = sorted((np.float32(leg_x1), np.float32(leg_x2)))
     x_gap = _interval_gap(piece_lo, piece_hi, leg_lo, leg_hi)
-    y_offset = abs(float(piece_y) - float(leg_y))
+    y_offset = abs(np.float32(piece_y) - np.float32(leg_y))
     raw_dist = y_offset + x_gap
-    if float(max_distance) > 0.0 and raw_dist > float(max_distance):
-        return 0.0
-    piece_len = max(piece_hi - piece_lo, 1e-9)
+    if np.float32(max_distance) > np.float32(0.0) and raw_dist > np.float32(max_distance):
+        return np.float32(0.0)
+    piece_len = max(piece_hi - piece_lo, np.float32(1e-9))
     dist_norm = raw_dist / piece_len
-    return float(np.exp(-dist_norm / max(float(sigma), 1e-9)))
+    return np.float32(np.exp(-dist_norm / max(np.float32(sigma), np.float32(1e-9))))
 
 
 def _vertical_leg_affinity(piece_x, piece_y1, piece_y2, leg_x, leg_y1, leg_y2, sigma, max_distance):
-    piece_lo, piece_hi = sorted((float(piece_y1), float(piece_y2)))
-    leg_lo, leg_hi = sorted((float(leg_y1), float(leg_y2)))
+    piece_lo, piece_hi = sorted((np.float32(piece_y1), np.float32(piece_y2)))
+    leg_lo, leg_hi = sorted((np.float32(leg_y1), np.float32(leg_y2)))
     y_gap = _interval_gap(piece_lo, piece_hi, leg_lo, leg_hi)
-    x_offset = abs(float(piece_x) - float(leg_x))
+    x_offset = abs(np.float32(piece_x) - np.float32(leg_x))
     raw_dist = x_offset + y_gap
-    if float(max_distance) > 0.0 and raw_dist > float(max_distance):
-        return 0.0
-    piece_len = max(piece_hi - piece_lo, 1e-9)
+    if np.float32(max_distance) > np.float32(0.0) and raw_dist > np.float32(max_distance):
+        return np.float32(0.0)
+    piece_len = max(piece_hi - piece_lo, np.float32(1e-9))
     dist_norm = raw_dist / piece_len
-    return float(np.exp(-dist_norm / max(float(sigma), 1e-9)))
+    return np.float32(np.exp(-dist_norm / max(np.float32(sigma), np.float32(1e-9))))
 
 
 def _append_sample(bucket, edge_id, net_id, cost_h, cost_v, gap, observed_count):
@@ -465,6 +492,67 @@ def _append_sample(bucket, edge_id, net_id, cost_h, cost_v, gap, observed_count)
             "observed_count": int(observed_count),
         }
     )
+
+
+def _append_edge_reason_sample(
+    bucket,
+    *,
+    edge_id,
+    net_id,
+    net_name,
+    reason,
+    x1,
+    y1,
+    x2,
+    y2,
+    observed_piece_count=0,
+    score_h=0.0,
+    score_v=0.0,
+    total_support=0.0,
+    route_failed=False,
+    route_entry_present=False,
+    wire_entry_count=0,
+    bbox=None,
+    limit=12,
+):
+    if len(bucket) >= int(limit):
+        return
+    sample = {
+        "edge_id": int(edge_id),
+        "net_id": int(net_id),
+        "net_name": _normalize_net_name(net_name),
+        "reason": str(reason),
+        "x1": float(x1),
+        "y1": float(y1),
+        "x2": float(x2),
+        "y2": float(y2),
+        "observed_piece_count": int(observed_piece_count),
+        "score_h": float(score_h),
+        "score_v": float(score_v),
+        "total_support": float(total_support),
+        "route_failed": bool(route_failed),
+        "route_entry_present": bool(route_entry_present),
+        "wire_entry_count": int(wire_entry_count),
+    }
+    if bbox is not None:
+        sample["bbox"] = [int(v) for v in bbox]
+    bucket.append(sample)
+
+
+def _counter_top_list(counter, net_name_lookup=None, topk=12):
+    items = []
+    for net_id, count in counter.most_common(int(topk)):
+        net_name = None
+        if isinstance(net_name_lookup, dict):
+            net_name = net_name_lookup.get(int(net_id), None)
+        items.append(
+            {
+                "net_id": int(net_id),
+                "net_name": _normalize_net_name(net_name if net_name is not None else f"net_{int(net_id)}"),
+                "count": int(count),
+            }
+        )
+    return items
 
 
 def _compute_diagonal_split_topo_costs_python(
@@ -493,6 +581,13 @@ def _compute_diagonal_split_topo_costs_python(
         "diag_edges": int(num_edges),
         "edges_with_topology": 0,
         "edges_with_observed_intervals": 0,
+        "edges_missing_topology": 0,
+        "edges_missing_topology_no_route_entry": 0,
+        "edges_missing_topology_route_failed": 0,
+        "edges_missing_topology_no_wire_entries": 0,
+        "edges_missing_topology_other": 0,
+        "edges_with_zero_observed_pieces": 0,
+        "edges_with_weak_support": 0,
         "mean_gap": 0.0,
         "tie_ratio": 1.0 if num_edges > 0 else 0.0,
         "sigma": float(sigma),
@@ -503,6 +598,12 @@ def _compute_diagonal_split_topo_costs_python(
         return topo_cost_h, topo_cost_v, topo_observed_mask, stats
 
     net_topologies = topo_cache.get("net_topologies", {})
+    route_entry_meta = topo_cache.get("route_entry_meta", {})
+    net_name_lookup = {}
+    for net_id, record in net_topologies.items():
+        net_name_lookup[int(net_id)] = record.get("net_name", f"net_{int(net_id)}")
+    for net_id, meta in route_entry_meta.items():
+        net_name_lookup.setdefault(int(net_id), meta.get("net_name", f"net_{int(net_id)}"))
     if not net_topologies:
         return topo_cost_h, topo_cost_v, topo_observed_mask, stats
 
@@ -530,18 +631,56 @@ def _compute_diagonal_split_topo_costs_python(
     sample_observed_zero_zero = []
     sample_unobserved_zero_zero = []
     sample_exact_equal = []
+    sample_missing_topology = []
+    sample_zero_support = []
+    sample_weak_support = []
+    missing_topology_counter = Counter()
+    zero_support_counter = Counter()
+    weak_support_counter = Counter()
 
     for edge_id in range(num_edges):
         net_id = int(edge_net_ids_np[edge_id])
         record = net_topologies.get(net_id)
-        if record is None:
-            continue
-        edges_with_topology += 1
-
         ex1 = float(x1_np[edge_id])
         ey1 = float(y1_np[edge_id])
         ex2 = float(x2_np[edge_id])
         ey2 = float(y2_np[edge_id])
+        if record is None:
+            stats["edges_missing_topology"] += 1
+            missing_topology_counter[int(net_id)] += 1
+            meta = route_entry_meta.get(int(net_id))
+            route_entry_present = meta is not None
+            route_failed = bool(meta.get("route_failed", False)) if isinstance(meta, dict) else False
+            wire_entry_count = int(meta.get("wire_entry_count", 0)) if isinstance(meta, dict) else 0
+            if not route_entry_present:
+                reason = "no_route_entry"
+                stats["edges_missing_topology_no_route_entry"] += 1
+            elif route_failed:
+                reason = "route_failed"
+                stats["edges_missing_topology_route_failed"] += 1
+            elif wire_entry_count <= 0:
+                reason = "no_wire_entries"
+                stats["edges_missing_topology_no_wire_entries"] += 1
+            else:
+                reason = "route_entry_without_topology"
+                stats["edges_missing_topology_other"] += 1
+            _append_edge_reason_sample(
+                sample_missing_topology,
+                edge_id=edge_id,
+                net_id=net_id,
+                net_name=(meta or {}).get("net_name", f"net_{net_id}"),
+                reason=reason,
+                x1=ex1,
+                y1=ey1,
+                x2=ex2,
+                y2=ey2,
+                route_failed=route_failed,
+                route_entry_present=route_entry_present,
+                wire_entry_count=wire_entry_count,
+            )
+            continue
+        edges_with_topology += 1
+
         dx = ex2 - ex1
         dy = ey2 - ey1
         if abs(dx) <= 1e-12 or abs(dy) <= 1e-12:
@@ -656,6 +795,48 @@ def _compute_diagonal_split_topo_costs_python(
         else:
             topo_cost_h_np[edge_id] = 0.0
             topo_cost_v_np[edge_id] = 0.0
+            if observed_piece_count <= 0:
+                stats["edges_with_zero_observed_pieces"] += 1
+                zero_support_counter[int(net_id)] += 1
+                _append_edge_reason_sample(
+                    sample_zero_support,
+                    edge_id=edge_id,
+                    net_id=net_id,
+                    net_name=record.get("net_name", f"net_{net_id}"),
+                    reason="zero_observed_support",
+                    x1=ex1,
+                    y1=ey1,
+                    x2=ex2,
+                    y2=ey2,
+                    observed_piece_count=observed_piece_count,
+                    score_h=score_h,
+                    score_v=score_v,
+                    total_support=total_support,
+                    route_entry_present=True,
+                    wire_entry_count=int(record.get("raw_wire_count", 0)),
+                    bbox=record.get("bbox", None),
+                )
+            else:
+                stats["edges_with_weak_support"] += 1
+                weak_support_counter[int(net_id)] += 1
+                _append_edge_reason_sample(
+                    sample_weak_support,
+                    edge_id=edge_id,
+                    net_id=net_id,
+                    net_name=record.get("net_name", f"net_{net_id}"),
+                    reason="weak_support_below_threshold",
+                    x1=ex1,
+                    y1=ey1,
+                    x2=ex2,
+                    y2=ey2,
+                    observed_piece_count=observed_piece_count,
+                    score_h=score_h,
+                    score_v=score_v,
+                    total_support=total_support,
+                    route_entry_present=True,
+                    wire_entry_count=int(record.get("raw_wire_count", 0)),
+                    bbox=record.get("bbox", None),
+                )
 
         gap = abs(float(topo_cost_h_np[edge_id]) - float(topo_cost_v_np[edge_id]))
         gap_values[edge_id] = gap
@@ -717,8 +898,14 @@ def _compute_diagonal_split_topo_costs_python(
         stats["sample_observed_zero_zero"] = sample_observed_zero_zero
         stats["sample_unobserved_zero_zero"] = sample_unobserved_zero_zero
         stats["sample_exact_equal"] = sample_exact_equal
+        stats["sample_missing_topology"] = sample_missing_topology
+        stats["sample_zero_support"] = sample_zero_support
+        stats["sample_weak_support"] = sample_weak_support
     stats["edges_with_topology"] = int(edges_with_topology)
     stats["edges_with_observed_intervals"] = int(edges_with_observed_intervals)
+    stats["missing_topology_top_nets"] = _counter_top_list(missing_topology_counter, net_name_lookup)
+    stats["zero_support_top_nets"] = _counter_top_list(zero_support_counter, net_name_lookup)
+    stats["weak_support_top_nets"] = _counter_top_list(weak_support_counter, net_name_lookup)
 
     topo_cost_h = torch.as_tensor(topo_cost_h_np, dtype=dtype, device=device)
     topo_cost_v = torch.as_tensor(topo_cost_v_np, dtype=dtype, device=device)
@@ -778,11 +965,11 @@ def _compute_diagonal_split_topo_costs_cpp(
             float(max_distance),
         )
     except Exception:
-        logger.exception("C++ same-net topo scoring failed; falling back to Python kernel.")
+        logger.exception("C++ per-net topology scoring failed; falling back to Python kernel.")
         return None
 
-    topo_cost_h = torch.as_tensor(np.asarray(topo_cost_h_np), dtype=dtype, device=device)
-    topo_cost_v = torch.as_tensor(np.asarray(topo_cost_v_np), dtype=dtype, device=device)
+    topo_cost_h = torch.as_tensor(np.asarray(topo_cost_h_np, dtype=np.float32), dtype=dtype, device=device)
+    topo_cost_v = torch.as_tensor(np.asarray(topo_cost_v_np, dtype=np.float32), dtype=dtype, device=device)
     topo_observed_mask = torch.as_tensor(
         np.asarray(topo_observed_mask_np, dtype=np.bool_),
         dtype=torch.bool,
@@ -792,11 +979,24 @@ def _compute_diagonal_split_topo_costs_cpp(
     stats.setdefault("diag_edges", int(len(edge_net_ids) if edge_net_ids is not None else 0))
     stats.setdefault("edges_with_topology", 0)
     stats.setdefault("edges_with_observed_intervals", 0)
+    stats.setdefault("edges_missing_topology", 0)
+    stats.setdefault("edges_missing_topology_no_route_entry", 0)
+    stats.setdefault("edges_missing_topology_route_failed", 0)
+    stats.setdefault("edges_missing_topology_no_wire_entries", 0)
+    stats.setdefault("edges_missing_topology_other", 0)
+    stats.setdefault("edges_with_zero_observed_pieces", 0)
+    stats.setdefault("edges_with_weak_support", 0)
     stats.setdefault("mean_gap", 0.0)
     stats.setdefault("tie_ratio", 0.0)
     stats.setdefault("sigma", float(sigma))
     stats.setdefault("min_support", float(min_support))
     stats.setdefault("max_distance", float(max_distance))
+    stats.setdefault("sample_missing_topology", [])
+    stats.setdefault("sample_zero_support", [])
+    stats.setdefault("sample_weak_support", [])
+    stats.setdefault("missing_topology_top_nets", [])
+    stats.setdefault("zero_support_top_nets", [])
+    stats.setdefault("weak_support_top_nets", [])
     stats["backend"] = "cpp"
     return topo_cost_h, topo_cost_v, topo_observed_mask, stats
 

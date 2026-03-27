@@ -85,8 +85,6 @@ class SegmentElectricPotentialFunction(Function):
         supply_original,
         fix_usage_map,
         area_per_track,
-        blockage_initial_density,
-        negative_residual_scale,
         xl, yl, xh, yh,
         bin_size_x, bin_size_y,
         num_segments,
@@ -201,44 +199,6 @@ class SegmentElectricPotentialFunction(Function):
                 prepared["sorted_segment_map"],
             )
 
-        def _calibrate_area_per_track(total_density, total_demand):
-            if total_demand > 0 and total_density > 0:
-                if isinstance(area_per_track, torch.Tensor) and area_per_track.numel() == 1:
-                    if (area_per_track <= 0).all():
-                        area_per_track.fill_(total_density / total_demand)
-                    return area_per_track.to(device=segment_pos.device, dtype=segment_pos.dtype)
-                return total_density / total_demand
-            return None
-
-        def _calibrate_branch_area_per_track(density_map_local, demand_map_local, fallback=None):
-            if isinstance(demand_map_local, torch.Tensor) and demand_map_local.dim() == 2:
-                total_density_local = density_map_local.sum()
-                total_demand_local = demand_map_local.sum()
-                calibrated_local = _calibrate_area_per_track(total_density_local, total_demand_local)
-                if calibrated_local is not None:
-                    return calibrated_local
-            return fallback
-
-        def _apply_negative_scale(rho_map_local):
-            if negative_residual_scale >= 1.0:
-                return rho_map_local
-            return torch.where(
-                rho_map_local > 0,
-                rho_map_local,
-                rho_map_local * negative_residual_scale,
-            )
-
-        def _compute_signed_capacity_rho_components(density_map_local, supply_map_local, calibrated_area_per_track):
-            demand_in_tracks = density_map_local / calibrated_area_per_track
-            utilization = demand_in_tracks / supply_map_local.clamp(min=1e-6)
-            rho_in_tracks = demand_in_tracks - supply_map_local
-            rho_map_local = rho_in_tracks * calibrated_area_per_track
-            rho_map_local = rho_map_local - rho_map_local.mean()
-            rho_map_local = _apply_negative_scale(rho_map_local)
-            overflow_in_tracks = rho_in_tracks.clamp(min=0)
-            overflow_map_local = overflow_in_tracks * calibrated_area_per_track
-            return rho_map_local, overflow_map_local, utilization, rho_in_tracks
-
         def _compute_blockage_track_rho_components(
             density_seg_area_local,
             supply_original_local,
@@ -251,7 +211,6 @@ class SegmentElectricPotentialFunction(Function):
             rho_tracks_local = occupancy_tracks_local
             rho_centered_tracks_local = rho_tracks_local - rho_tracks_local.mean()
             rho_map_local = rho_centered_tracks_local
-            rho_map_local = _apply_negative_scale(rho_map_local)
             overflow_map_local = (occupancy_tracks_local - capacity_tracks_local).clamp(min=0)
             utilization = occupancy_tracks_local / capacity_tracks_local.clamp(min=1e-6)
             return (
@@ -405,16 +364,13 @@ class SegmentElectricPotentialFunction(Function):
             raise TypeError(
                 "L-shape electric potential requires target_demand to be a 2D routing demand map tensor"
             )
-        calibration_demand_map = _prepare_optional_map(raw_wire_demand_map)
-        if calibration_demand_map is None:
-            calibration_demand_map = target_demand.to(device=segment_pos.device, dtype=segment_pos.dtype)
         planar_fix_usage_map = _prepare_optional_map(fix_usage_map)
 
         supply_map = target_density.to(device=segment_pos.device, dtype=segment_pos.dtype)
         supply_original_map = None
         if isinstance(supply_original, torch.Tensor) and supply_original.dim() == 2:
             supply_original_map = supply_original.to(device=segment_pos.device, dtype=segment_pos.dtype)
-        if blockage_initial_density and isinstance(supply_original_map, torch.Tensor):
+        if isinstance(supply_original_map, torch.Tensor):
             current_demand_supply_ratio = float(
                 (
                     (density_map.sum() / bin_area)
@@ -429,7 +385,7 @@ class SegmentElectricPotentialFunction(Function):
                 ).detach().item()
             )
         SegmentElectricPotentialFunction.last_demand_supply_ratio = current_demand_supply_ratio
-        if blockage_initial_density and isinstance(supply_original_map, torch.Tensor):
+        if isinstance(supply_original_map, torch.Tensor):
             logger.info(
                 f"[L-shape supply/demand] density_seg_tracks_sum={(density_map.sum() / bin_area).item():.3e}, "
                 f"supply_original_sum={supply_original_map.sum().item():.3e}, "
@@ -442,13 +398,8 @@ class SegmentElectricPotentialFunction(Function):
                 f"ratio={current_demand_supply_ratio:.2f}"
             )
 
-        total_density = density_map.sum()
-        total_demand = calibration_demand_map.sum()
-
-        calibrated_area_per_track = _calibrate_area_per_track(total_density, total_demand)
         if (
             directional_split
-            and blockage_initial_density
             and isinstance(supply_original_h, torch.Tensor)
             and isinstance(supply_original_v, torch.Tensor)
             and isinstance(fix_usage_map_h, torch.Tensor)
@@ -521,11 +472,7 @@ class SegmentElectricPotentialFunction(Function):
                 int((overflow_map_v > 0).sum().item()),
                 int(overflow_map_v.numel()),
             )
-        elif (
-            blockage_initial_density
-            and isinstance(supply_original_map, torch.Tensor)
-            and isinstance(planar_fix_usage_map, torch.Tensor)
-        ):
+        elif isinstance(supply_original_map, torch.Tensor) and isinstance(planar_fix_usage_map, torch.Tensor):
             (
                 rho_map,
                 overflow_map,
@@ -557,84 +504,9 @@ class SegmentElectricPotentialFunction(Function):
                 int((overflow_map > 0).sum().item()),
                 int(overflow_map.numel()),
             )
-        elif calibrated_area_per_track is None:
-            rho_map = density_map
-            overflow_map = density_map.clamp(min=0)
-            rho_map_normalized, field_map_x, field_map_y, energy = _compute_field_and_energy(rho_map)
-            ctx.field_map_x = field_map_x
-            ctx.field_map_y = field_map_y
-            logger.debug("Fallback: using density map directly as the electric rho map (net_map or density is zero)")
-        elif directional_split:
-            calibrated_area_per_track_h = _calibrate_branch_area_per_track(
-                density_map_h,
-                raw_wire_demand_map_h if isinstance(raw_wire_demand_map_h, torch.Tensor) else target_demand_h,
-                fallback=calibrated_area_per_track,
-            )
-            calibrated_area_per_track_v = _calibrate_branch_area_per_track(
-                density_map_v,
-                raw_wire_demand_map_v if isinstance(raw_wire_demand_map_v, torch.Tensor) else target_demand_v,
-                fallback=calibrated_area_per_track,
-            )
-
-            rho_map_h, overflow_map_h, utilization_h, rho_in_tracks_h = _compute_signed_capacity_rho_components(
-                density_map_h, target_density_h, calibrated_area_per_track_h
-            )
-            rho_map_v, overflow_map_v, utilization_v, rho_in_tracks_v = _compute_signed_capacity_rho_components(
-                density_map_v, target_density_v, calibrated_area_per_track_v
-            )
-
-            _, field_map_x_h, field_map_y_h, energy_h = _compute_field_and_energy(rho_map_h)
-            _, field_map_x_v, field_map_y_v, energy_v = _compute_field_and_energy(rho_map_v)
-
-            ctx.hv_split_active = True
-            ctx.h_split_data = prepared_h
-            ctx.v_split_data = prepared_v
-            ctx.h_field_map_x = field_map_x_h
-            ctx.h_field_map_y = field_map_y_h
-            ctx.v_field_map_x = field_map_x_v
-            ctx.v_field_map_y = field_map_y_v
-            ctx.field_map_x = None
-            ctx.field_map_y = None
-
-            energy = energy_h + energy_v
-            rho_map = rho_map_h + rho_map_v
-            overflow_map = overflow_map_h + overflow_map_v
-
-            logger.debug(
-                "Calibration(split): area_per_track_h=%.3f area_per_track_v=%.3f util_h_max=%.2f util_v_max=%.2f "
-                "rho_pos_bins_h=%d/%d rho_neg_bins_h=%d/%d overflow_bins_h=%d/%d "
-                "rho_pos_bins_v=%d/%d rho_neg_bins_v=%d/%d overflow_bins_v=%d/%d",
-                float(calibrated_area_per_track_h.item()) if isinstance(calibrated_area_per_track_h, torch.Tensor) else float(calibrated_area_per_track_h),
-                float(calibrated_area_per_track_v.item()) if isinstance(calibrated_area_per_track_v, torch.Tensor) else float(calibrated_area_per_track_v),
-                float(utilization_h.max().item()) if utilization_h.numel() > 0 else 0.0,
-                float(utilization_v.max().item()) if utilization_v.numel() > 0 else 0.0,
-                int((rho_in_tracks_h > 0).sum().item()),
-                int(rho_in_tracks_h.numel()),
-                int((rho_in_tracks_h < 0).sum().item()),
-                int(rho_in_tracks_h.numel()),
-                int((overflow_map_h > 0).sum().item()),
-                int(overflow_map_h.numel()),
-                int((rho_in_tracks_v > 0).sum().item()),
-                int(rho_in_tracks_v.numel()),
-                int((rho_in_tracks_v < 0).sum().item()),
-                int(rho_in_tracks_v.numel()),
-                int((overflow_map_v > 0).sum().item()),
-                int(overflow_map_v.numel()),
-            )
         else:
-            rho_map, overflow_map, utilization, rho_in_tracks = _compute_signed_capacity_rho_components(
-                density_map, supply_map, calibrated_area_per_track
-            )
-            rho_map_normalized, field_map_x, field_map_y, energy = _compute_field_and_energy(rho_map)
-            ctx.field_map_x = field_map_x
-            ctx.field_map_y = field_map_y
-
-            logger.debug(
-                f"Calibration(net_map): area_per_track={calibrated_area_per_track:.3f}, "
-                f"utilization: mean={utilization.mean():.2f}, max={utilization.max():.2f}, "
-                f"rho_pos_bins={(rho_in_tracks > 0).sum().item()}/{rho_in_tracks.numel()}, "
-                f"rho_neg_bins={(rho_in_tracks < 0).sum().item()}/{rho_in_tracks.numel()}, "
-                f"overflow_bins={(overflow_map > 0).sum().item()}/{overflow_map.numel()}"
+            raise TypeError(
+                "L-shape blockage initial density requires supply_original and fix_usage maps for either planar or H/V split routing data"
             )
         
 
@@ -908,9 +780,6 @@ class LShapeElectricPotential(nn.Module):
         fix_usage_map=None,
         fix_usage_map_h=None,
         fix_usage_map_v=None,
-        source_mode="signed_capacity_residual",
-        blockage_initial_density=False,
-        negative_residual_scale=1.0,
         padding=0,
         deterministic_flag=True,
         fast_mode=False
@@ -942,9 +811,7 @@ class LShapeElectricPotential(nn.Module):
         self.deterministic_flag = deterministic_flag
         self.last_demand_supply_ratio = None
         self.fast_mode = fast_mode
-        self.source_mode = str(source_mode).strip().lower()
-        self.blockage_initial_density = bool(blockage_initial_density) or self.source_mode == "blockage_initial_density"
-        self.negative_residual_scale = float(negative_residual_scale)
+        self.blockage_initial_density = True
         
         if isinstance(target_density, torch.Tensor):
             self.register_buffer('target_density', target_density)
@@ -1477,8 +1344,6 @@ class LShapeElectricPotential(nn.Module):
             self.supply_original,
             self.fix_usage_map,
             self.area_per_track,
-            self.blockage_initial_density,
-            self.negative_residual_scale,
             self.xl, self.yl, self.xh, self.yh,
             self.bin_size_x, self.bin_size_y,
             num_segments,
@@ -1653,9 +1518,6 @@ def create_l_shape_electric_potential(
     fix_usage_map=None,
     fix_usage_map_h=None,
     fix_usage_map_v=None,
-    source_mode="signed_capacity_residual",
-    blockage_initial_density=False,
-    negative_residual_scale=1.0,
     padding=0,
     deterministic_flag=True,
     fast_mode=False
@@ -1702,9 +1564,6 @@ def create_l_shape_electric_potential(
         fix_usage_map=fix_usage_map,
         fix_usage_map_h=fix_usage_map_h,
         fix_usage_map_v=fix_usage_map_v,
-        source_mode=source_mode,
-        blockage_initial_density=blockage_initial_density,
-        negative_residual_scale=negative_residual_scale,
         padding=padding,
         deterministic_flag=deterministic_flag,
         fast_mode=fast_mode

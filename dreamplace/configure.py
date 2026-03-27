@@ -16,7 +16,7 @@ compile_configurations = {
         "Boost_INCLUDE_DIRS" : "/home/sxr/miniconda3/envs/opt-gpu/include", 
         "ZLIB_INCLUDE_DIRS" : "/home/sxr/miniconda3/envs/opt-gpu/include", 
         "ZLIB_LIBRARIES" : "/home/sxr/miniconda3/envs/opt-gpu/lib/libz.so", 
-        "CUDA_FOUND" : "TRUE", 
+        "CUDA_FOUND" : "", 
         "CUDA_TOOLKIT_ROOT_DIR" : "/usr/local/cuda-12.6", 
         "CMAKE_CUDA_FLAGS" : "", 
         "CAIRO_FOUND" : "TRUE", 

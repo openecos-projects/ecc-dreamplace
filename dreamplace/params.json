@@ -331,10 +331,6 @@
         "description": "optional route_ySize override for gpugr final evaluation; use 0 to follow the Xplace grid rule",
         "default": 0
     },
-    "l_shape_wire_width_mode": {
-        "description": "effective segment width mode for L-shape routability: min_width, cap_weighted_width, or cap_weighted_footprint",
-        "default": "cap_weighted_width"
-    },
     "l_shape_grad_target_ratio": {
         "description": "target ratio between weighted L-shape gradient norm and base wirelength+density gradient norm",
         "default": 0.3
@@ -375,45 +371,17 @@
         "description": "scale factor multiplied onto the median absolute H/V cost gap when soft_l_adaptive_tau is enabled",
         "default": 1.0
     },
-    "soft_l_use_same_net_topo_scoring": {
-        "description": "whether add same-net routed-topology overlap scoring into Soft-L HV/VH cost computation",
-        "default": 0
-    },
-    "soft_l_same_net_topo_weight": {
-        "description": "additive weight for same-net topo cost when combined with the existing global Soft-L map cost",
-        "default": 1.0
-    },
-    "soft_l_same_net_topo_only_mode": {
-        "description": "whether use same-net topo cost as the primary Soft-L score when topology intervals are observed",
-        "default": 0
-    },
     "soft_l_same_net_diag_split_sigma": {
-        "description": "distance-decay scale for same-net diagonal-split geometric scoring",
+        "description": "distance-decay scale for per-net topology diagonal-split geometric scoring",
         "default": 1.0
     },
     "soft_l_same_net_diag_split_min_support": {
-        "description": "minimum accumulated same-net diagonal-split support required before converting support into topo cost",
+        "description": "minimum accumulated per-net topology diagonal-split support required before converting support into topo cost",
         "default": 1e-6
     },
     "soft_l_same_net_diag_split_max_distance": {
-        "description": "optional raw-distance cutoff for same-net diagonal-split scoring; use 0 to disable truncation and rely on soft decay only",
+        "description": "optional raw-distance cutoff for per-net topology diagonal-split scoring; use 0 to disable truncation and rely on soft decay only",
         "default": 0.0
-    },
-    "soft_l_same_net_topo_cpp_accel": {
-        "description": "whether use the C++ CPU kernel for same-net diagonal-split topo scoring when the extension is available",
-        "default": 1
-    },
-    "soft_l_source_mode": {
-        "description": "source construction mode for the Soft-L electric surrogate: signed_capacity_residual or blockage_initial_density (track-space fixed-usage + segment-overlap - capacity)",
-        "default": "signed_capacity_residual"
-    },
-    "soft_l_blockage_initial_density": {
-        "description": "whether treat fix_usage_map as fixed initial density in the track-space blockage Soft-L surrogate",
-        "default": 0
-    },
-    "soft_l_negative_residual_scale": {
-        "description": "scaling factor applied to negative Soft-L rho values before Poisson; 1.0 keeps signed symmetry",
-        "default": 1.0
     },
     "l_shape_auto_disable_flag": {
         "description": "whether auto-disable soft L-shape when telemetry indicates late-stage overshoot in diff-style runs",

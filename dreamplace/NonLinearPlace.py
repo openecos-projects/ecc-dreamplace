@@ -206,24 +206,6 @@ def _sync_gpugr_route_grid_to_autodmp(params, placedb, model=None):
     return route_xsize, route_ysize
 
 
-def _normalize_l_shape_wire_width_mode(params):
-    mode = str(getattr(params, "l_shape_wire_width_mode", "cap_weighted_width")).strip().lower()
-    alias_map = {
-        "min": "min_width",
-        "minwidth": "min_width",
-        "cap_weighted": "cap_weighted_width",
-        "capacity_weighted": "cap_weighted_width",
-        "capacity_weighted_width": "cap_weighted_width",
-        "cap_weighted_width_spacing": "cap_weighted_footprint",
-        "capacity_weighted_footprint": "cap_weighted_footprint",
-        "cap_weighted_pitch": "cap_weighted_footprint",
-        "capacity_weighted_pitch": "cap_weighted_footprint",
-        "pitch": "cap_weighted_footprint",
-        "footprint": "cap_weighted_footprint",
-    }
-    return alias_map.get(mode, mode)
-
-
 def _fallback_l_shape_wire_width(placedb, route_xsize=None, route_ysize=None, fallback_wire_width=None):
     if fallback_wire_width is not None and float(fallback_wire_width) > 0:
         return float(fallback_wire_width), "external_fallback"
@@ -247,13 +229,9 @@ def _fallback_l_shape_wire_width(placedb, route_xsize=None, route_ysize=None, fa
     return 0.0, "none"
 
 
-def _resolve_l_shape_wire_width(params, placedb, route_xsize=None, route_ysize=None, fallback_wire_width=None):
-    mode = _normalize_l_shape_wire_width_mode(params)
-
+def _resolve_l_shape_wire_width(placedb, route_xsize=None, route_ysize=None, fallback_wire_width=None):
     raw_widths = getattr(placedb, "min_wire_widths", None)
     widths = np.array(raw_widths, dtype=float) if raw_widths is not None and len(raw_widths) > 0 else np.array([], dtype=float)
-    raw_spacings = getattr(placedb, "min_wire_spacings", None)
-    spacings = np.array(raw_spacings, dtype=float) if raw_spacings is not None and len(raw_spacings) > 0 else np.array([], dtype=float)
     raw_h_caps = getattr(placedb, "unit_horizontal_capacities", None)
     raw_v_caps = getattr(placedb, "unit_vertical_capacities", None)
     h_caps = np.array(raw_h_caps, dtype=float) if raw_h_caps is not None else np.array([], dtype=float)
@@ -262,8 +240,7 @@ def _resolve_l_shape_wire_width(params, placedb, route_xsize=None, route_ysize=N
     def _finalize(value, source):
         wire_width = float(value)
         logging.info(
-            "Resolved L-shape wire width: mode=%s source=%s value=%.4f",
-            mode,
+            "Resolved L-shape wire width: source=%s value=%.4f",
             source,
             wire_width,
         )
@@ -271,41 +248,21 @@ def _resolve_l_shape_wire_width(params, placedb, route_xsize=None, route_ysize=N
 
     positive_width_mask = widths > 0
     positive_widths = widths[positive_width_mask]
-    if mode == "min_width":
-        if positive_widths.size > 0:
-            return _finalize(positive_widths.min(), "min_wire_width")
-    else:
-        num_layers = widths.size
-        if num_layers > 0 and h_caps.size >= num_layers and v_caps.size >= num_layers:
-            layer_caps = h_caps[:num_layers] + v_caps[:num_layers]
-            layer_mask = positive_width_mask & (layer_caps > 0)
-            if mode == "cap_weighted_footprint":
-                if spacings.size >= num_layers:
-                    layer_footprints = widths[:num_layers] + np.clip(spacings[:num_layers], a_min=0.0, a_max=None)
-                    layer_mask = layer_mask & (layer_footprints > 0)
-                    if np.any(layer_mask):
-                        return _finalize(
-                            np.average(layer_footprints[layer_mask], weights=layer_caps[layer_mask]),
-                            "capacity_weighted(width+spacing)",
-                        )
-                logging.warning(
-                    "Cannot compute cap_weighted_footprint for L-shape wire width because valid min_wire_spacings are unavailable. "
-                    "Fall back to cap_weighted_width."
-                )
-                mode = "cap_weighted_width"
-
-            if mode == "cap_weighted_width" and np.any(layer_mask):
-                return _finalize(
-                    np.average(widths[:num_layers][layer_mask], weights=layer_caps[layer_mask]),
-                    "capacity_weighted(width)",
-                )
-        elif positive_widths.size > 0:
-            logging.warning(
-                "Cannot compute %s for L-shape wire width because routing-layer capacities are unavailable. "
-                "Fall back to min_width.",
-                mode,
+    num_layers = widths.size
+    if num_layers > 0 and h_caps.size >= num_layers and v_caps.size >= num_layers:
+        layer_caps = h_caps[:num_layers] + v_caps[:num_layers]
+        layer_mask = positive_width_mask & (layer_caps > 0)
+        if np.any(layer_mask):
+            return _finalize(
+                np.average(widths[:num_layers][layer_mask], weights=layer_caps[layer_mask]),
+                "capacity_weighted(width)",
             )
-            return _finalize(positive_widths.min(), "min_wire_width(no_capacity)")
+    elif positive_widths.size > 0:
+        logging.warning(
+            "Cannot compute capacity_weighted(width) for L-shape wire width because routing-layer capacities are unavailable. "
+            "Fall back to min_width."
+        )
+        return _finalize(positive_widths.min(), "min_wire_width(no_capacity)")
 
     fallback_value, fallback_source = _fallback_l_shape_wire_width(
         placedb,
@@ -315,16 +272,14 @@ def _resolve_l_shape_wire_width(params, placedb, route_xsize=None, route_ysize=N
     )
     if fallback_value > 0:
         logging.warning(
-            "Fallback L-shape wire width: mode=%s source=%s value=%.4f",
-            mode,
+            "Fallback L-shape wire width: source=%s value=%.4f",
             fallback_source,
             fallback_value,
         )
         return float(fallback_value)
 
     logging.warning(
-        "Failed to resolve L-shape wire width for mode=%s. Fall back to 0.0, which may collapse segment thickness.",
-        mode,
+        "Failed to resolve L-shape wire width. Fall back to 0.0, which may collapse segment thickness."
     )
     return 0.0
 
@@ -418,7 +373,6 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
         "supply_original_v": supply_map_v.clone(),
     }
     wire_width = _resolve_l_shape_wire_width(
-        params,
         placedb,
         route_xsize=route_xsize,
         route_ysize=route_ysize,
@@ -569,7 +523,6 @@ def _prepare_l_shape_inputs_from_egr(params, placedb, pos, model):
         return_wire_width=True,
     )
     wire_width = _resolve_l_shape_wire_width(
-        params,
         placedb,
         fallback_wire_width=wire_width,
     )
@@ -1681,78 +1634,6 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         logging.info("Update steiner topo %.3f ms" %
                                      ((time.time() - t_steiner) * 1000))
 
-
-                    if params.check_egr_steiner_flag and (iteration == 100):
-                        
-                        t_steiner = time.time()
-                        with torch.no_grad():
-                            pin_pos = self.op_collections.pin_pos_op(pos)
-                            if pin_pos.is_cuda:
-                                pin_pos = pin_pos.cpu()
-                            self.data_collections.net_flat_topo_sort, self.data_collections.net_flat_topo_sort_start, \
-                                self.data_collections.pin_fa, self.data_collections.flat_pin_to, self.data_collections.flat_pin_to_start, \
-                                self.data_collections.flat_pin_from = self.op_collections.steiner_topo_op.rebuild_tree(
-                                    pin_pos)
-                        logging.info("Update steiner topo %.3f ms" %
-                                     ((time.time() - t_steiner) * 1000))
-                        
-                        model.op_collections.irt_egr_congestion_map_op(
-                            pos, stage="egr2D", resolve_congestion="low"
-                        )
-                        
-                        # EGR guide路径
-                        guide_path = "/nfs/share/home/sxr/routability_benchmark/dataset_cx55/20251023/gcd/workspace/output/iEDA/data/rt/rt_temp_directory/early_router/route_planar.guide"
-                        gcell_info_path = "/nfs/share/home/sxr/routability_benchmark/dataset_cx55/20251023/gcd/workspace/output/iEDA/data/rt/rt_temp_directory/early_router/gcell.info"
-                        
-                        steiner_topo_op = self.op_collections.steiner_topo_op
-                        
-                        # ========== 方式1: 只解析L方向（使用FLUTE拓扑，EGR确定L方向）==========
-                        if steiner_topo_op.l_direction_resolver is None:
-                            steiner_topo_op.init_l_direction_resolver(placedb, params)
-                        
-                        l_directions = steiner_topo_op.resolve_l_directions_from_egr(guide_path)
-                        logging.info(f"Resolved L directions for {len(l_directions)} edges")
-                        
-                        # ========== 方式2: 使用EGR构建Steiner树（替代FLUTE）==========
-                        # # 初始化EGR Steiner构建器
-                        # if not hasattr(steiner_topo_op, 'egr_steiner_builder') or steiner_topo_op.egr_steiner_builder is None:
-                        #     steiner_topo_op.init_egr_steiner_builder(placedb, params)
-                        # 
-                        # # 使用EGR构建Steiner树（记录Steiner点信息）
-                        # t_egr_build = time.time()
-                        # egr_result = steiner_topo_op.rebuild_tree_from_egr(
-                        #     pin_pos, 
-                        #     guide_path, 
-                        #     gcell_info_path
-                        # )
-                        # logging.info(f"Built Steiner tree from EGR in {(time.time() - t_egr_build) * 1000:.3f} ms")
-                        # logging.info(f"Total Steiner points from EGR: {egr_result['num_steiner']}")
-                        # 
-                        # # 打印Steiner点统计信息
-                        # steiner_topo_op.print_steiner_info()
-                        # 
-                        # # 导出Steiner点到CSV（方便分析）
-                        # steiner_csv_path = os.path.join(params.result_dir, "steiner_points.csv")
-                        # steiner_topo_op.export_steiner_points(steiner_csv_path)
-                        # logging.info(f"Steiner points exported to {steiner_csv_path}")
-                        # 
-                        # # 打印特定net的详细信息（调试用）
-                        # # steiner_topo_op.print_steiner_info("net_name")
-                        # 
-                        # # 获取Steiner点列表进行自定义处理
-                        # steiner_pts = steiner_topo_op.get_steiner_points()
-                        # for sp in steiner_pts[:5]:  # 打印前5个
-                        #     logging.info(f"  Steiner Point: net={sp.net_name}, "
-                        #                 f"gcell=({sp.gcell_x},{sp.gcell_y}), "
-                        #                 f"gcell_center=({sp.gcell_center_x:.2f},{sp.gcell_center_y:.2f})um, "
-                        #                 f"relate_x={sp.relate_x_pin_name}, relate_y={sp.relate_y_pin_name}")
-                        # ================================================================
-
-                        # Plot Steiner and Guide
-                        output_plot_path = os.path.join(params.result_dir, "steiner_guide_comparison.png")
-                        self.plot_steiner_and_guide(guide_path, self.op_collections.steiner_topo_op, self.data_collections.flat_pin_from, self.data_collections.flat_pin_to, output_plot_path, params, placedb)
-
-                        # exit(0)
 
                     # ========== L形Routability Density Objective ==========
                     # 根据overflow条件启用L形routability

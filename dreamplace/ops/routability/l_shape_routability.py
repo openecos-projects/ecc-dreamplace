@@ -875,8 +875,12 @@ class LShapeRoutabilityOp(nn.Module):
                         self.soft_l_temperature, dtype=dtype, device=device
                     )
                 else:
+                    # Per-edge adaptive tau: scale by each edge's own cost magnitude
+                    # instead of global median gap, avoiding the "chasing-tail" problem
+                    # where tau ~ median(gap) guarantees ~50% near-tie edges.
+                    per_edge_cost_scale = ((cost_h + cost_v) / 2).clamp(min=1e-6)
+                    tau = self.soft_l_adaptive_scale * per_edge_cost_scale
                     tau_source_gap = torch.quantile(raw_cost_gap, 0.5).clamp(min=1e-6)
-                    tau = self.soft_l_adaptive_scale * tau_source_gap
             else:
                 tau = self.soft_l_temperature
 
@@ -930,7 +934,9 @@ class LShapeRoutabilityOp(nn.Module):
                         "mean_entropy": float(entropy.mean().item()),
                         "near_tie_ratio": near_tie_ratio,
                         "resolver_agreement_ratio": resolver_agreement_ratio,
-                        "tau": float(tau) if isinstance(tau, (int, float)) else float(tau.item()),
+                        "tau": float(tau) if isinstance(tau, (int, float)) else float(tau.mean().item()),
+                        "tau_min": float(tau) if isinstance(tau, (int, float)) else float(tau.min().item()),
+                        "tau_max": float(tau) if isinstance(tau, (int, float)) else float(tau.max().item()),
                         "adaptive_tau": self.soft_l_adaptive_tau,
                         "per_net_topology_mode": self.per_net_topology_mode,
                         "per_net_topology_kernel": topo_kernel_name,

@@ -216,6 +216,11 @@ class PlaceDataCollection(object):
                 placedb.flat_net2pin_start_map
             ).to(device)
             self.net_weights = torch.from_numpy(placedb.net_weights).to(device)
+            self.modularity_cluster_ids_by_level = []
+            self.modularity_num_clusters_by_level = []
+            self.modularity_resolutions_used = []
+            self.modularity_cluster_source = "none"
+            self.refresh_modularity_clusters_from_placedb(placedb)
 
             # regions
             self.flat_region_boxes = torch.from_numpy(placedb.flat_region_boxes).to(
@@ -407,6 +412,53 @@ class PlaceDataCollection(object):
                 self.flat_pin_to = None
                 self.flat_pin_to_start = None
                 self.flat_pin_from = None
+
+    def refresh_modularity_clusters_from_placedb(self, placedb):
+        self.modularity_cluster_ids_by_level = []
+        self.modularity_num_clusters_by_level = []
+        self.modularity_resolutions_used = []
+        self.modularity_cluster_source = "none"
+
+        result = getattr(placedb, "modularity_active_clustering_result", None)
+        if result is not None:
+            self.modularity_cluster_source = "active"
+        else:
+            result = getattr(placedb, "modularity_topology_clustering_result", None)
+            if result is not None:
+                self.modularity_cluster_source = "topology"
+
+        if result is None:
+            return
+
+        cluster_ids_by_level = []
+        num_clusters_by_level = []
+        expected_num_nodes = int(placedb.num_movable_nodes)
+        for level_idx, cluster_ids in enumerate(result.cluster_ids_by_level):
+            if not isinstance(cluster_ids, torch.Tensor):
+                cluster_ids = torch.as_tensor(cluster_ids, dtype=torch.int64)
+            cluster_ids = cluster_ids.to(device=self.device, dtype=torch.int64)
+            if cluster_ids.numel() != expected_num_nodes:
+                raise ValueError(
+                    "modularity cluster size mismatch at level %d: got %d nodes, expected %d"
+                    % (level_idx, cluster_ids.numel(), expected_num_nodes)
+                )
+            cluster_ids_by_level.append(cluster_ids)
+            if level_idx < len(result.num_clusters_by_level):
+                num_clusters = int(result.num_clusters_by_level[level_idx])
+            else:
+                num_clusters = int(cluster_ids.max().item()) + 1 if cluster_ids.numel() else 0
+            num_clusters_by_level.append(num_clusters)
+
+        self.modularity_cluster_ids_by_level = cluster_ids_by_level
+        self.modularity_num_clusters_by_level = num_clusters_by_level
+        self.modularity_resolutions_used = list(getattr(result, "resolutions_used", []))
+        logging.info(
+            "Loaded modularity %s clusters on %s: levels=%d counts=%s",
+            self.modularity_cluster_source,
+            str(self.device),
+            len(self.modularity_cluster_ids_by_level),
+            self.modularity_num_clusters_by_level,
+        )
 
     def bin_center_x_padded(self, placedb, padding, num_bins_x):
         """

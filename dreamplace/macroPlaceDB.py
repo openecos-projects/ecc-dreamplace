@@ -142,6 +142,8 @@ class MacroPlaceDB(object):
         self.is_pin_upper_y = None
         self.dtype = None
         self.pydb = None
+        self.modularity_topology_clustering_result = None
+        self.modularity_active_clustering_result = None
 
         # Timing model
         self.start_points = None
@@ -304,8 +306,47 @@ class MacroPlaceDB(object):
         # self.virtual_net_init()
         self.initialize(params)
         self.params = params
+        self.build_modularity_topology_clusters(params)
         net_degrees = np.array([len(pins) for pins in self.net2pin_map])
         print("net_degrees max{} min{}", max(net_degrees), min(net_degrees))
+
+    def _validate_modularity_inflation_contract(self, params):
+        if not getattr(params, "modularity_inflation_flag", False):
+            return
+        if not getattr(params, "routability_opt_flag", False):
+            raise RuntimeError(
+                "modularity_inflation_flag=1 requires routability_opt_flag=1"
+            )
+        if not getattr(params, "modularity_require_gpugr_flag", 1):
+            return
+        if not getattr(params, "adjust_gpugr_area_flag", False):
+            raise RuntimeError(
+                "modularity_inflation_flag=1 requires adjust_gpugr_area_flag=1"
+            )
+        if getattr(params, "adjust_nctugr_area_flag", False):
+            raise RuntimeError(
+                "modularity_inflation_flag=1 does not support adjust_nctugr_area_flag=1"
+            )
+        if getattr(params, "adjust_rudy_area_flag", False):
+            raise RuntimeError(
+                "modularity_inflation_flag=1 does not support adjust_rudy_area_flag=1"
+            )
+
+    def build_modularity_topology_clusters(self, params):
+        if not getattr(params, "modularity_inflation_flag", False):
+            self.modularity_topology_clustering_result = None
+            self.modularity_active_clustering_result = None
+            return
+
+        self._validate_modularity_inflation_contract(params)
+        from dreamplace.ops.routability.leiden_clustering import (
+            build_topology_leiden_clusters,
+        )
+
+        self.modularity_topology_clustering_result = build_topology_leiden_clusters(
+            self, params
+        )
+        self.modularity_active_clustering_result = None
 
     def clustering(self, cluster_config):
         pass

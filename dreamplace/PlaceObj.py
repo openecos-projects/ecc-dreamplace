@@ -3558,6 +3558,15 @@ class PlaceObj(nn.Module):
         total_place_area = (
             total_movable_area + total_filler_area
         ) / data_collections.target_density
+        modularity_config = None
+        if getattr(params, "modularity_inflation_flag", False):
+            modularity_config = {
+                "enabled": True,
+                "params": params,
+                "placedb": placedb,
+                "data_collections": data_collections,
+                "node_weights": data_collections.pin_weights[: placedb.num_movable_nodes],
+            }
         adjust_node_area_op = adjust_node_area.AdjustNodeArea(
             flat_node2pin_map=data_collections.flat_node2pin_map,
             flat_node2pin_start_map=data_collections.flat_node2pin_start_map,
@@ -3581,9 +3590,16 @@ class PlaceObj(nn.Module):
             route_area_adjust_stop_ratio=params.route_area_adjust_stop_ratio,
             pin_area_adjust_stop_ratio=params.pin_area_adjust_stop_ratio,
             unit_pin_capacity=data_collections.unit_pin_capacity,
+            modularity_config=modularity_config,
         )
 
-        def build_adjust_node_area_op(pos, route_utilization_map, pin_utilization_map):
+        def build_adjust_node_area_op(
+            pos,
+            route_utilization_map,
+            pin_utilization_map,
+            modularity_maps=None,
+            inflation_round=0,
+        ):
             return adjust_node_area_op(
                 pos,
                 data_collections.node_size_x,
@@ -3593,6 +3609,8 @@ class PlaceObj(nn.Module):
                 data_collections.target_density,
                 route_utilization_map,
                 pin_utilization_map,
+                modularity_maps=modularity_maps,
+                inflation_round=inflation_round,
             )
 
         build_adjust_node_area_op._xplace_adjust_node_area_impl = adjust_node_area_op

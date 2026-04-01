@@ -39,6 +39,10 @@ from dreamplace.ops.routability.egr_resample import (
 from dreamplace.ops.routability.same_net_topo_scoring import (
     build_same_net_topology_cache,
 )
+from dreamplace.ops.routability.leiden_clustering import (
+    build_active_leiden_clusters,
+    plot_modularity_clusters,
+)
 from dreamplace.ops.routability import xplace_inflation_controller
 
 
@@ -167,6 +171,165 @@ def _split_gpugr_maps_by_direction(placedb, capacity_map, demand_map):
     demand_h_xy = demand_map[h_mask].sum(dim=0) if h_mask.any() else torch.zeros_like(demand_map[0])
     demand_v_xy = demand_map[v_mask].sum(dim=0) if v_mask.any() else torch.zeros_like(demand_map[0])
     return supply_h_xy, supply_v_xy, demand_h_xy, demand_v_xy
+
+
+def _prepare_modularity_maps_from_gpugr(placedb, gpugr_congestion_map_op, pos, eps=1e-6):
+    result = getattr(gpugr_congestion_map_op, "last_result", None)
+    if not isinstance(result, dict):
+        raise RuntimeError("modularity_inflation_flag=1 requires gpugr last_result to be populated")
+    maps = result.get("maps")
+    if not isinstance(maps, dict):
+        raise RuntimeError("modularity_inflation_flag=1 requires gpugr last_result['maps']")
+    params = getattr(gpugr_congestion_map_op, "params", None)
+
+    target_x = int(getattr(placedb, "num_routing_grids_x", 0))
+    target_y = int(getattr(placedb, "num_routing_grids_y", 0))
+    if target_x <= 0 or target_y <= 0:
+        raise RuntimeError("Invalid routing grid for modularity gpugr maps: %dx%d" % (target_x, target_y))
+
+    skip_m1_route = bool(getattr(params, "gpugr_area_adjust_skip_m1_route", 1))
+
+    def _reduce_map(name, required=True, fallback=None, start_layer=0):
+        raw_map = maps.get(name)
+        if raw_map is None:
+            if required:
+                raise RuntimeError("modularity_inflation_flag=1 requires gpugr map '%s'" % name)
+            return fallback
+        raw_map = raw_map.detach().to(device=pos.device, dtype=pos.dtype)
+        if raw_map.dim() == 3:
+            effective_start = int(start_layer) if raw_map.size(0) > int(start_layer) else 0
+            if effective_start != int(start_layer):
+                logging.warning(
+                    "modularity_inflation_flag requested start_layer=%d for gpugr map '%s' but only %d layers are available; fall back to layer 0",
+                    int(start_layer),
+                    name,
+                    int(raw_map.size(0)),
+                )
+            xy_map = raw_map[effective_start:].sum(dim=0)
+        elif raw_map.dim() == 2:
+            xy_map = raw_map
+        else:
+            raise RuntimeError("Unsupported gpugr map '%s' dim=%d" % (name, raw_map.dim()))
+        return _resample_xy_map(xy_map, target_x, target_y)
+
+    start_layer = 1 if skip_m1_route else 0
+    capacity_xy = _reduce_map("capacity_map", start_layer=start_layer)
+    wire_demand_xy = _reduce_map("wire_demand_map", start_layer=start_layer)
+    via_demand_xy = _reduce_map("via_demand_map", start_layer=start_layer)
+    total_demand_xy = wire_demand_xy + via_demand_xy
+    fix_usage_xy = _reduce_map(
+        "fix_usage_map",
+        required=False,
+        fallback=torch.zeros_like(capacity_xy),
+        start_layer=start_layer,
+    )
+    mov_usage_xy = _reduce_map(
+        "mov_usage_map",
+        required=False,
+        fallback=total_demand_xy.clamp(min=0.0),
+        start_layer=start_layer,
+    )
+    solver_capacity_xy = capacity_xy.clamp(min=float(eps))
+    solver_demand_xy = total_demand_xy.clamp(min=0.0)
+    gpugr_overflow_xy = _reduce_map(
+        "cg_map_union_overflow",
+        required=False,
+        fallback=torch.zeros_like(solver_capacity_xy),
+    ).clamp(min=0.0)
+    solver_ratio_overflow_xy = torch.clamp(
+        solver_demand_xy / solver_capacity_xy.clamp(min=float(eps)) - 1.0,
+        min=0.0,
+    )
+    solver_diff_overflow_xy = solver_demand_xy - solver_capacity_xy
+
+    logging.info(
+        "Prepared modularity gpugr maps: skip_m1=%d solver_demand max=%.4f capacity max=%.4f ratio_ovfl max=%.4f diff_ovfl max=%.4f gpugr_ovfl max=%.4f local max=%.4f global max=%.4f",
+        int(skip_m1_route),
+        float(solver_demand_xy.max().item()) if solver_demand_xy.numel() else 0.0,
+        float(solver_capacity_xy.max().item()) if solver_capacity_xy.numel() else 0.0,
+        float(solver_ratio_overflow_xy.max().item()) if solver_ratio_overflow_xy.numel() else 0.0,
+        float(solver_diff_overflow_xy.max().item()) if solver_diff_overflow_xy.numel() else 0.0,
+        float(gpugr_overflow_xy.max().item()) if gpugr_overflow_xy.numel() else 0.0,
+        float(mov_usage_xy.max().item()) if mov_usage_xy.numel() else 0.0,
+        float(fix_usage_xy.max().item()) if fix_usage_xy.numel() else 0.0,
+    )
+    return {
+        "solver_demand_map": solver_demand_xy,
+        "solver_capacity_map": solver_capacity_xy,
+        "local_demand_map": mov_usage_xy,
+        "global_demand_map": fix_usage_xy,
+        "capacity_map": capacity_xy,
+        "total_demand_map": total_demand_xy,
+    }
+
+
+def _is_modularity_inflation_enabled(params):
+    return bool(getattr(params, "modularity_inflation_flag", False))
+
+
+def _ensure_modularity_inflation_contract(params, route_map_source=None):
+    if not _is_modularity_inflation_enabled(params):
+        return
+    if not getattr(params, "routability_opt_flag", False):
+        raise RuntimeError(
+            "modularity_inflation_flag=1 requires routability_opt_flag=1"
+        )
+    if not getattr(params, "modularity_require_gpugr_flag", 1):
+        return
+    if not getattr(params, "adjust_gpugr_area_flag", False):
+        raise RuntimeError(
+            "modularity_inflation_flag=1 requires adjust_gpugr_area_flag=1"
+        )
+    if getattr(params, "adjust_nctugr_area_flag", False):
+        raise RuntimeError(
+            "modularity_inflation_flag=1 does not support adjust_nctugr_area_flag=1"
+        )
+    if getattr(params, "adjust_rudy_area_flag", False):
+        raise RuntimeError(
+            "modularity_inflation_flag=1 does not support adjust_rudy_area_flag=1"
+        )
+    if route_map_source is not None and route_map_source != "gpugr":
+        raise RuntimeError(
+            "modularity_inflation_flag=1 requires gpugr route source, got %s"
+            % route_map_source
+        )
+
+
+def _ensure_modularity_active_clusters(params, placedb, model, pos, num_area_adjust):
+    if not _is_modularity_inflation_enabled(params):
+        return
+    if int(num_area_adjust) != 0:
+        return
+    if getattr(placedb, "modularity_active_clustering_result", None) is not None:
+        return
+
+    active_result = build_active_leiden_clusters(placedb, params, pos)
+    placedb.modularity_active_clustering_result = active_result
+    if hasattr(model, "data_collections") and model.data_collections is not None:
+        model.data_collections.refresh_modularity_clusters_from_placedb(placedb)
+    logging.info(
+        "Prepared modularity active clusters at first inflation trigger: levels=%d counts=%s",
+        len(active_result.cluster_ids_by_level),
+        active_result.num_clusters_by_level,
+    )
+    if getattr(params, "modularity_plot_flag", False):
+        saved_paths = plot_modularity_clusters(
+            placedb=placedb,
+            params=params,
+            pos=pos,
+            clustering_result=active_result,
+            source="active",
+            round_idx=int(num_area_adjust),
+        )
+        logging.info(
+            "Saved modularity debug plots: %s",
+            saved_paths,
+        )
+        if getattr(params, "modularity_plot_exit_flag", False):
+            logging.info(
+                "modularity_plot_exit_flag=1, exit(0) after saving modularity debug plots"
+            )
+            raise SystemExit(0)
 
 
 def _sync_gpugr_route_grid_to_autodmp(params, placedb, model=None):
@@ -2962,6 +3125,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 Lgamma_metrics = all_metrics
 
                 if params.routability_opt_flag:
+                    _ensure_modularity_inflation_contract(params)
                     adjust_area_flag = True
                     adjust_route_area_flag = (
                         getattr(params, "adjust_gpugr_area_flag", False)
@@ -3145,6 +3309,11 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     route_map_source = "irt_egr"
                                 else:
                                     route_map_source = "rudy"
+                            if round_adjust_route_area_flag:
+                                _ensure_modularity_inflation_contract(
+                                    params,
+                                    route_map_source=route_map_source,
+                                )
                             current_inflation_round = None
                             if getattr(model, "inflation_state", None) is not None:
                                 xplace_inflation_controller.maybe_capture_model_density_state(
@@ -3177,9 +3346,18 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 num_area_adjust,
                                 model,
                             )
+                            if round_adjust_route_area_flag:
+                                _ensure_modularity_active_clusters(
+                                    params,
+                                    placedb,
+                                    model,
+                                    pos,
+                                    num_area_adjust,
+                                )
 
                             route_utilization_map = None
                             pin_utilization_map = None
+                            modularity_maps = None
                             gpugr_metrics = {}
                             low_util_context = None
                             if round_adjust_route_area_flag:
@@ -3197,6 +3375,13 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                         "last_metrics",
                                         {},
                                     ) or {}
+                                    if _is_modularity_inflation_enabled(params):
+                                        modularity_maps = _prepare_modularity_maps_from_gpugr(
+                                            placedb,
+                                            model.op_collections.gpugr_congestion_map_op,
+                                            pos,
+                                            eps=getattr(params, "modularity_active_bin_overflow_eps", 1e-6),
+                                        )
                                 elif params.adjust_nctugr_area_flag:
                                     route_utilization_map = model.op_collections.irt_egr_congestion_map_op(
                                         pos, stage="egr3D", resolve_congestion="high")
@@ -3249,7 +3434,11 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 adjust_route_area_flag,
                                 adjust_pin_area_flag,
                             ) = model.op_collections.adjust_node_area_op(
-                                pos, route_utilization_map, pin_utilization_map
+                                pos,
+                                route_utilization_map,
+                                pin_utilization_map,
+                                modularity_maps=modularity_maps,
+                                inflation_round=int(num_area_adjust),
                             )
                             xplace_inflation_controller.restore_low_util_inflation(
                                 model.op_collections.adjust_node_area_op,

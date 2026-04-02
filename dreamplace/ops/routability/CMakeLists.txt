@@ -25,5 +25,3 @@ install(FILES ${INSTALL_SRCS} DESTINATION dreamplace/ops/${OP_NAME})
 
 file(GLOB INSTALL_MISC ${CMAKE_CURRENT_SOURCE_DIR}/*.lef)
 install(FILES ${INSTALL_MISC} DESTINATION dreamplace/ops/${OP_NAME})
-
-install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/plot DESTINATION dreamplace/ops/${OP_NAME})

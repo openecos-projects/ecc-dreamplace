@@ -544,6 +544,7 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
     logging.info(
         "Prepared gpugr L-shape inputs: route_grid=%dx%d l_shape_bins=%dx%d nets=%d entries=%d "
         "supply[min=%.3f max=%.3f mean=%.3f] demand[min=%.3f max=%.3f mean=%.3f] "
+        "CHmax/top1/bin=%.1f%%/%.1f%%/%.2f%% CVmax/top1/bin=%.1f%%/%.1f%%/%.2f%% "
         "#OvflNets=%d EstShorts=%.0f",
         route_xsize,
         route_ysize,
@@ -557,6 +558,12 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
         demand_map.min().item(),
         demand_map.max().item(),
         demand_map.mean().item(),
+        metrics["cg_map_h_raw_max"] * 100.0,
+        metrics["cg_map_h_raw_top1pct_mean"] * 100.0,
+        metrics["cg_map_h_raw_overflow_bin_ratio"] * 100.0,
+        metrics["cg_map_v_raw_max"] * 100.0,
+        metrics["cg_map_v_raw_top1pct_mean"] * 100.0,
+        metrics["cg_map_v_raw_overflow_bin_ratio"] * 100.0,
         metrics["num_overflow_nets"],
         metrics["gr_est_shorts"],
     )
@@ -642,12 +649,22 @@ def _run_gpugr_final_eval(params, placedb, pos):
     )
     metrics = result["metrics"]
     logging.info(
-        "Final gpugr eval finished. #OvflNets=%d GR_WL=%.0f GR_Vias=%.0f EstShorts=%.0f elapsed=%.3fs",
+        "Final gpugr eval finished. #OvflNets=%d GR_WL=%.0f GR_Vias=%.0f EstShorts=%.0f elapsed=%.3fs "
+        "CHmax/mean/top1/bin=%.1f%%/%.1f%%/%.1f%%/%.2f%% "
+        "CVmax/mean/top1/bin=%.1f%%/%.1f%%/%.1f%%/%.2f%%",
         metrics["num_overflow_nets"],
         metrics["gr_wirelength"],
         metrics["gr_num_vias"],
         metrics["gr_est_shorts"],
         metrics["elapsed_sec"],
+        metrics["cg_map_h_raw_max"] * 100.0,
+        metrics["cg_map_h_raw_mean"] * 100.0,
+        metrics["cg_map_h_raw_top1pct_mean"] * 100.0,
+        metrics["cg_map_h_raw_overflow_bin_ratio"] * 100.0,
+        metrics["cg_map_v_raw_max"] * 100.0,
+        metrics["cg_map_v_raw_mean"] * 100.0,
+        metrics["cg_map_v_raw_top1pct_mean"] * 100.0,
+        metrics["cg_map_v_raw_overflow_bin_ratio"] * 100.0,
     )
     return result
 

@@ -97,11 +97,19 @@ class GPUGR(object):
         metrics = result["metrics"]
         self.last_metrics = dict(metrics)
         logger.info(
-            "gpugr congestion map for inflation: grid=%dx%d ovfl_max=%.4f ovfl_mean=%.4f #OvflNets=%d EstShorts=%.0f",
+            "gpugr congestion map for inflation: grid=%dx%d ovfl_max=%.4f ovfl_mean=%.4f "
+            "CHmax/top1/bin=%.1f%%/%.1f%%/%.2f%% CVmax/top1/bin=%.1f%%/%.1f%%/%.2f%% "
+            "#OvflNets=%d EstShorts=%.0f",
             route_xsize,
             route_ysize,
             overflow_xy.max().item(),
             overflow_xy.mean().item(),
+            metrics["cg_map_h_raw_max"] * 100.0,
+            metrics["cg_map_h_raw_top1pct_mean"] * 100.0,
+            metrics["cg_map_h_raw_overflow_bin_ratio"] * 100.0,
+            metrics["cg_map_v_raw_max"] * 100.0,
+            metrics["cg_map_v_raw_top1pct_mean"] * 100.0,
+            metrics["cg_map_v_raw_overflow_bin_ratio"] * 100.0,
             metrics["num_overflow_nets"],
             metrics["gr_est_shorts"],
         )

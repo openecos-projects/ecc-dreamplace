@@ -196,15 +196,15 @@ def plot_node_grad_directions(pos, grad_1, grad_2 = None, grad_3 = None, title="
     plt.scatter(node_x[:N], node_y[:N], s=6, color='gray')
     plt.quiver(
         node_x[:N], node_y[:N], grad_1_x[:N] * scale_factor, grad_1_y[:N] * scale_factor,
-        color='red', scale=1, scale_units='xy', width=0.0005, label='Gradient 1'
+        color='red', scale=1, scale_units='xy', width=0.0008, headwidth=4, headlength=5, headaxislength=4, label='Gradient 1'
     )
     plt.quiver(
         node_x[:N], node_y[:N], grad_2_x[:N] * scale_factor, grad_2_y[:N] * scale_factor,
-        color='blue', scale=1, scale_units='xy', width=0.0005, label='Gradient 2'
+        color='blue', scale=1, scale_units='xy', width=0.0008, headwidth=4, headlength=5, headaxislength=4, label='Gradient 2'
     )
     plt.quiver(
         node_x[:N], node_y[:N], grad_3_x[:N] * scale_factor, grad_3_y[:N] * scale_factor,
-        color='green', scale=1, scale_units='xy', width=0.0005, label='Gradient 3'
+        color='green', scale=1, scale_units='xy', width=0.0008, headwidth=4, headlength=5, headaxislength=4, label='Gradient 3'
     )
     
     plt.xlabel("X")

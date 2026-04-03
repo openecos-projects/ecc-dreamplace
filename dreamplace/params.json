@@ -335,6 +335,10 @@
         "description": "target ratio between weighted L-shape gradient norm and base wirelength+density gradient norm",
         "default": 0.3
     },
+    "l_shape_filler_reverse_force": {
+        "description": "strength of filler reverse force: push fillers TOWARD congested areas using the L-shape Poisson field, so fillers occupy congested bins and density gradient locks real cells away; 0 disables",
+        "default": 0.0
+    },
     "l_shape_weight_momentum": {
         "description": "EMA momentum used by the legacy per-iteration L-shape weight update when the Xplace-style scheduler is disabled",
         "default": 0.1

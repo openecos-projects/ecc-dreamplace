@@ -61,6 +61,9 @@ class SegmentElectricPotentialFunction(Function):
     Forward: Compute density map and potential energy using DCT.
     Backward: Compute gradients using electric field from Poisson equation.
     """
+    # Class-level storage for the last computed field maps (for filler reverse force)
+    last_field_map_x = None
+    last_field_map_y = None
     
     @staticmethod
     def forward(
@@ -621,6 +624,21 @@ class SegmentElectricPotentialFunction(Function):
         if segment_pos.is_cuda:
             torch.cuda.synchronize()
         logger.debug(f"Segment electric potential forward: {(time.time() - tt) * 1000:.2f} ms")
+
+        # Save field maps for filler reverse force (detached, no autograd)
+        if ctx.hv_split_active:
+            if ctx.h_field_map_x is not None and ctx.v_field_map_x is not None:
+                SegmentElectricPotentialFunction.last_field_map_x = (ctx.h_field_map_x + ctx.v_field_map_x).detach()
+                SegmentElectricPotentialFunction.last_field_map_y = (ctx.h_field_map_y + ctx.v_field_map_y).detach()
+            elif ctx.h_field_map_x is not None:
+                SegmentElectricPotentialFunction.last_field_map_x = ctx.h_field_map_x.detach()
+                SegmentElectricPotentialFunction.last_field_map_y = ctx.h_field_map_y.detach()
+            elif ctx.v_field_map_x is not None:
+                SegmentElectricPotentialFunction.last_field_map_x = ctx.v_field_map_x.detach()
+                SegmentElectricPotentialFunction.last_field_map_y = ctx.v_field_map_y.detach()
+        elif ctx.field_map_x is not None:
+            SegmentElectricPotentialFunction.last_field_map_x = ctx.field_map_x.detach()
+            SegmentElectricPotentialFunction.last_field_map_y = ctx.field_map_y.detach()
         
         return energy
     

@@ -425,6 +425,10 @@ class PlaceObj(nn.Module):
         )
         # 目标：L-shape梯度范数占density梯度范数的比例
         self.l_shape_grad_target_ratio = getattr(params, 'l_shape_grad_target_ratio', 0.3) 
+        # Filler reverse force: push fillers toward congested areas using L-shape field
+        self.l_shape_filler_reverse_force = float(
+            getattr(params, "l_shape_filler_reverse_force", 0.0)
+        )
         # 权重调整的平滑因子 (0~1, 越小越平滑)
         self.l_shape_weight_momentum = getattr(params, 'l_shape_weight_momentum', 0.1)
         self.l_shape_use_xplace_weight_schedule = bool(
@@ -2094,6 +2098,43 @@ class PlaceObj(nn.Module):
                     current_weight * l_shape_grad_norm_value / (base_grad_norm_value + 1e-12)
                 )
             obj = obj + l_shape_weighted
+            # Filler reverse force: push fillers toward congested areas
+            # using the L-shape Poisson field (bilinear interpolation on field_map)
+            if self.l_shape_filler_reverse_force > 0:
+                from dreamplace.ops.routability.l_shape_electric_potential import SegmentElectricPotentialFunction
+                field_map_x = SegmentElectricPotentialFunction.last_field_map_x
+                field_map_y = SegmentElectricPotentialFunction.last_field_map_y
+                if field_map_x is not None and field_map_y is not None:
+                    density_op = self.l_shape_routability_op.density_op
+                    num_physical = self.placedb.num_physical_nodes
+                    num_nodes = self.placedb.num_nodes
+                    filler_x = pos.data[num_physical:num_nodes]
+                    filler_y = pos.data[num_nodes + num_physical : 2 * num_nodes]
+                    bin_x = (filler_x - density_op.xl) / density_op.bin_size_x - 0.5
+                    bin_y = (filler_y - density_op.yl) / density_op.bin_size_y - 0.5
+                    bin_x = bin_x.clamp(0, density_op.num_bins_x - 1.001)
+                    bin_y = bin_y.clamp(0, density_op.num_bins_y - 1.001)
+                    ix0 = bin_x.long()
+                    iy0 = bin_y.long()
+                    ix1 = (ix0 + 1).clamp(max=density_op.num_bins_x - 1)
+                    iy1 = (iy0 + 1).clamp(max=density_op.num_bins_y - 1)
+                    wx = bin_x - ix0.float()
+                    wy = bin_y - iy0.float()
+                    fx = (field_map_x[ix0, iy0] * (1 - wx) * (1 - wy)
+                        + field_map_x[ix1, iy0] * wx * (1 - wy)
+                        + field_map_x[ix0, iy1] * (1 - wx) * wy
+                        + field_map_x[ix1, iy1] * wx * wy)
+                    fy = (field_map_y[ix0, iy0] * (1 - wx) * (1 - wy)
+                        + field_map_y[ix1, iy0] * wx * (1 - wy)
+                        + field_map_y[ix0, iy1] * (1 - wx) * wy
+                        + field_map_y[ix1, iy1] * wx * wy)
+                    base_filler_x = base_grad[num_physical:num_nodes]
+                    base_filler_y = base_grad[num_nodes + num_physical : 2 * num_nodes]
+                    base_filler_norm = (base_filler_x.norm(p=2)**2 + base_filler_y.norm(p=2)**2).sqrt()
+                    raw_rev_norm = (fx.norm(p=2)**2 + fy.norm(p=2)**2).sqrt()
+                    filler_force_scale = self.l_shape_filler_reverse_force * base_filler_norm / raw_rev_norm if raw_rev_norm > 1e-12 and base_filler_norm > 1e-12 else 0.0
+                    pos.grad.data[num_physical:num_nodes] += filler_force_scale * fx
+                    pos.grad.data[num_nodes + num_physical : 2 * num_nodes] += filler_force_scale * fy
             pos.grad.data.add_(base_grad)
             self._apply_gradient_masks_only(pos.grad.data)
             self.l_shape_last_cost = float(l_shape_cost.item())

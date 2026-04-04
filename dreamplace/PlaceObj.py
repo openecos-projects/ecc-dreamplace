@@ -429,6 +429,10 @@ class PlaceObj(nn.Module):
         self.l_shape_filler_reverse_force = float(
             getattr(params, "l_shape_filler_reverse_force", 0.0)
         )
+        # Filler pseudo wire force: pull random fillers to most congested point (Xplace-style)
+        self.l_shape_filler_pseudo_wire_ratio = float(
+            getattr(params, "l_shape_filler_pseudo_wire_ratio", 0.0)
+        )
         # 权重调整的平滑因子 (0~1, 越小越平滑)
         self.l_shape_weight_momentum = getattr(params, 'l_shape_weight_momentum', 0.1)
         self.l_shape_use_xplace_weight_schedule = bool(
@@ -2108,33 +2112,131 @@ class PlaceObj(nn.Module):
                     density_op = self.l_shape_routability_op.density_op
                     num_physical = self.placedb.num_physical_nodes
                     num_nodes = self.placedb.num_nodes
+                    # filler positions
                     filler_x = pos.data[num_physical:num_nodes]
                     filler_y = pos.data[num_nodes + num_physical : 2 * num_nodes]
+                    # map filler positions to bin coordinates (continuous)
                     bin_x = (filler_x - density_op.xl) / density_op.bin_size_x - 0.5
                     bin_y = (filler_y - density_op.yl) / density_op.bin_size_y - 0.5
                     bin_x = bin_x.clamp(0, density_op.num_bins_x - 1.001)
                     bin_y = bin_y.clamp(0, density_op.num_bins_y - 1.001)
+                    # bilinear interpolation indices
                     ix0 = bin_x.long()
                     iy0 = bin_y.long()
                     ix1 = (ix0 + 1).clamp(max=density_op.num_bins_x - 1)
                     iy1 = (iy0 + 1).clamp(max=density_op.num_bins_y - 1)
                     wx = bin_x - ix0.float()
                     wy = bin_y - iy0.float()
+                    # interpolate field_map_x (force in x direction)
                     fx = (field_map_x[ix0, iy0] * (1 - wx) * (1 - wy)
                         + field_map_x[ix1, iy0] * wx * (1 - wy)
                         + field_map_x[ix0, iy1] * (1 - wx) * wy
                         + field_map_x[ix1, iy1] * wx * wy)
+                    # interpolate field_map_y (force in y direction)
                     fy = (field_map_y[ix0, iy0] * (1 - wx) * (1 - wy)
                         + field_map_y[ix1, iy0] * wx * (1 - wy)
                         + field_map_y[ix0, iy1] * (1 - wx) * wy
                         + field_map_y[ix1, iy1] * wx * wy)
+                    # Adaptive scaling: l_shape_filler_reverse_force is the target ratio
+                    # of filler reverse force norm to base_grad filler norm
                     base_filler_x = base_grad[num_physical:num_nodes]
                     base_filler_y = base_grad[num_nodes + num_physical : 2 * num_nodes]
                     base_filler_norm = (base_filler_x.norm(p=2)**2 + base_filler_y.norm(p=2)**2).sqrt()
                     raw_rev_norm = (fx.norm(p=2)**2 + fy.norm(p=2)**2).sqrt()
-                    filler_force_scale = self.l_shape_filler_reverse_force * base_filler_norm / raw_rev_norm if raw_rev_norm > 1e-12 and base_filler_norm > 1e-12 else 0.0
-                    pos.grad.data[num_physical:num_nodes] += filler_force_scale * fx
-                    pos.grad.data[num_nodes + num_physical : 2 * num_nodes] += filler_force_scale * fy
+                    if raw_rev_norm > 1e-12 and base_filler_norm > 1e-12:
+                        filler_force_scale = self.l_shape_filler_reverse_force * base_filler_norm / raw_rev_norm
+                    else:
+                        filler_force_scale = 0.0
+                    filler_force_x = filler_force_scale * fx
+                    filler_force_y = filler_force_scale * fy
+                    pos.grad.data[num_physical:num_nodes] += filler_force_x
+                    pos.grad.data[num_nodes + num_physical : 2 * num_nodes] += filler_force_y
+
+                    # Diagnostic log
+                    filler_rev_norm = (filler_force_x.norm(p=2)**2 + filler_force_y.norm(p=2)**2).sqrt()
+                    logging.info(
+                        f"FillerRevForce: rev_norm={filler_rev_norm:.4e}, "
+                        f"base_filler_norm={base_filler_norm:.4e}, "
+                        f"ratio={filler_rev_norm / (base_filler_norm + 1e-12):.4f}, "
+                        f"scale={filler_force_scale:.4e}, "
+                        f"num_fillers={num_nodes - num_physical}"
+                    )
+
+            # Filler pseudo wire force: Xplace-style, pull random fillers to most congested point
+            if self.l_shape_filler_pseudo_wire_ratio > 0:
+                from dreamplace.ops.routability.l_shape_electric_potential import SegmentElectricPotentialFunction
+                import torchvision
+                overflow_map = SegmentElectricPotentialFunction.last_overflow_map
+                if overflow_map is not None:
+                    num_physical = self.placedb.num_physical_nodes
+                    num_nodes = self.placedb.num_nodes
+                    num_fillers = num_nodes - num_physical
+                    density_op = self.l_shape_routability_op.density_op
+
+                    # 1. Gaussian blur + average pooling to find local most congested point
+                    blurrer = torchvision.transforms.GaussianBlur(kernel_size=7, sigma=2)
+                    overflow_blurred = blurrer(overflow_map.unsqueeze(0)).squeeze(0)
+                    mean_kernel = 11
+                    overflow_mean = torch.nn.functional.avg_pool2d(
+                        overflow_map.unsqueeze(0), mean_kernel, 1, padding=mean_kernel // 2
+                    ).squeeze(0)
+
+                    # 2. Find most congested bin
+                    max_idx = overflow_mean.view(-1).argmax()
+                    max_bin_x = max_idx // overflow_mean.shape[1]
+                    max_bin_y = max_idx % overflow_mean.shape[1]
+
+                    # 3. Convert to physical coordinates (bin center)
+                    target_x = density_op.xl + (max_bin_x.float() + 0.5) * density_op.bin_size_x
+                    target_y = density_op.yl + (max_bin_y.float() + 0.5) * density_op.bin_size_y
+
+                    # 4. Randomly select fillers
+                    num_selected = max(1, int(num_fillers * self.l_shape_filler_pseudo_wire_ratio))
+                    selected_indices = torch.randperm(num_fillers, device=pos.device)[:num_selected]
+
+                    # 5. Get selected filler positions (as leaf tensors with grad)
+                    filler_idx_x = num_physical + selected_indices
+                    filler_idx_y = num_nodes + num_physical + selected_indices
+                    filler_pos_x = pos[filler_idx_x].clone().requires_grad_(True)
+                    filler_pos_y = pos[filler_idx_y].clone().requires_grad_(True)
+                    filler_pos = torch.stack([filler_pos_x, filler_pos_y], dim=1)  # [N, 2]
+
+                    # 6. Create virtual pin positions with noise (Xplace-style)
+                    # Each filler has slightly different target to avoid clustering
+                    target_pos = torch.tensor([[target_x, target_y]], device=pos.device, dtype=pos.dtype)
+                    target_pos = target_pos.repeat(num_selected, 1)  # [N, 2]
+                    # Add noise: scale * 5 * randn, where scale is roughly bin_size
+                    noise_scale = max(density_op.bin_size_x, density_op.bin_size_y) * 5
+                    target_pos.add_(torch.randn_like(target_pos) * noise_scale)
+
+                    # 7. Compute WA wirelength and gradient using autograd
+                    # Each filler-target pair is a 2-pin net
+                    gamma = 4.0  # WA gamma parameter
+                    dist = torch.norm(filler_pos - target_pos, dim=1)  # [N]
+
+                    # WA = sum(dist * exp(gamma * dist)) / sum(exp(gamma * dist))
+                    # Clamp to prevent overflow
+                    exp_gamma_dist = torch.exp((gamma * dist).clamp(max=80))
+                    wa_wirelength = (dist * exp_gamma_dist).sum() / exp_gamma_dist.sum()
+
+                    # Backward to get gradient w.r.t. filler positions
+                    wa_wirelength.backward()
+
+                    # Extract gradients
+                    force_x = filler_pos_x.grad
+                    force_y = filler_pos_y.grad
+
+                    if force_x is not None and force_y is not None:
+                        # Apply to pos.grad (negative because WA is minimized)
+                        pos.grad.data[filler_idx_x] -= force_x
+                        pos.grad.data[filler_idx_y] -= force_y
+
+                        logging.info(
+                            f"FillerPseudoWire: selected={num_selected}, target=({target_x:.1f},{target_y:.1f}), "
+                            f"wa_wirelength={wa_wirelength.item():.4e}, "
+                            f"force_norm={(force_x.norm()**2 + force_y.norm()**2).sqrt():.4e}"
+                        )
+
             pos.grad.data.add_(base_grad)
             self._apply_gradient_masks_only(pos.grad.data)
             self.l_shape_last_cost = float(l_shape_cost.item())

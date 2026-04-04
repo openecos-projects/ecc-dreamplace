@@ -3573,7 +3573,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
                                 # disable L-shape during inflation recovery;
                                 # it will re-enable when overflow drops below threshold again
-                                if getattr(model, "use_l_shape_routability", False):
+                                # NOTE: can be overridden by l_shape_keep_during_inflation parameter
+                                keep_during_inflation = getattr(params, "l_shape_keep_during_inflation", False)
+                                if getattr(model, "use_l_shape_routability", False) and not keep_during_inflation:
                                     disable_l_shape_for_recovery(
                                         iteration,
                                         reason="inflation",

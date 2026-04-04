@@ -339,6 +339,14 @@
         "description": "strength of filler reverse force: push fillers TOWARD congested areas using the L-shape Poisson field, so fillers occupy congested bins and density gradient locks real cells away; 0 disables",
         "default": 0.0
     },
+    "l_shape_filler_pseudo_wire_ratio": {
+        "description": "ratio of fillers to pull toward the most congested point using pseudo wire force (Xplace-style); 0.05 means 5% of fillers are selected randomly and attracted to the max congestion bin",
+        "default": 0.0
+    },
+    "l_shape_keep_during_inflation": {
+        "description": "keep L-shape routability enabled during inflation (normally disabled); enables filler pseudo wire force to work with inflation",
+        "default": false
+    },
     "l_shape_weight_momentum": {
         "description": "EMA momentum used by the legacy per-iteration L-shape weight update when the Xplace-style scheduler is disabled",
         "default": 0.1

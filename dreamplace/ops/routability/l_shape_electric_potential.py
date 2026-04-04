@@ -64,6 +64,7 @@ class SegmentElectricPotentialFunction(Function):
     # Class-level storage for the last computed field maps (for filler reverse force)
     last_field_map_x = None
     last_field_map_y = None
+    last_overflow_map = None  # for pseudo wire force
     
     @staticmethod
     def forward(
@@ -636,9 +637,19 @@ class SegmentElectricPotentialFunction(Function):
             elif ctx.v_field_map_x is not None:
                 SegmentElectricPotentialFunction.last_field_map_x = ctx.v_field_map_x.detach()
                 SegmentElectricPotentialFunction.last_field_map_y = ctx.v_field_map_y.detach()
+            # Save overflow map for pseudo wire force (HV split: sum of h and v)
+            if 'overflow_map_h' in locals() and 'overflow_map_v' in locals():
+                SegmentElectricPotentialFunction.last_overflow_map = (overflow_map_h + overflow_map_v).detach()
+            elif 'overflow_map_h' in locals():
+                SegmentElectricPotentialFunction.last_overflow_map = overflow_map_h.detach()
+            elif 'overflow_map_v' in locals():
+                SegmentElectricPotentialFunction.last_overflow_map = overflow_map_v.detach()
         elif ctx.field_map_x is not None:
             SegmentElectricPotentialFunction.last_field_map_x = ctx.field_map_x.detach()
             SegmentElectricPotentialFunction.last_field_map_y = ctx.field_map_y.detach()
+            # Save overflow map for pseudo wire force (planar)
+            if 'overflow_map' in locals():
+                SegmentElectricPotentialFunction.last_overflow_map = overflow_map.detach()
         
         return energy
     

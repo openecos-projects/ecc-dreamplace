@@ -21,3 +21,4 @@ unittest
 *_unittest
 
 *.png
+dreamplace/configure.py

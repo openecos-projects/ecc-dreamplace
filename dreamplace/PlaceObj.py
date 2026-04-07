@@ -1780,8 +1780,9 @@ class PlaceObj(nn.Module):
             inner_density_grad[num_nodes : num_nodes + num_movable_nodes].masked_fill_(
                 mask, 0
             )
-            inner_density_grad[num_nodes - num_filler_nodes : num_nodes].mul_(0.5)
-            inner_density_grad[-num_filler_nodes:].mul_(0.5)
+            if num_filler_nodes > 0:
+                inner_density_grad[num_nodes - num_filler_nodes : num_nodes].mul_(0.5)
+                inner_density_grad[-num_filler_nodes:].mul_(0.5)
             if pos_w.grad is not None:
                 pos_w.grad.zero_()
 
@@ -1801,8 +1802,9 @@ class PlaceObj(nn.Module):
             outer_density_grad[num_nodes : num_nodes + num_movable_nodes].masked_fill_(
                 mask, 0
             )
-            outer_density_grad[num_nodes - num_filler_nodes : num_nodes].mul_(0.5)
-            outer_density_grad[-num_filler_nodes:].mul_(0.5)
+            if num_filler_nodes > 0:
+                outer_density_grad[num_nodes - num_filler_nodes : num_nodes].mul_(0.5)
+                outer_density_grad[-num_filler_nodes:].mul_(0.5)
 
             if self.quad_penalty:
                 density = self.op_collections.density_op(pos_w.data)
@@ -3694,10 +3696,13 @@ class PlaceObj(nn.Module):
             data_collections.node_size_x[: placedb.num_movable_nodes]
             * data_collections.node_size_y[: placedb.num_movable_nodes]
         ).sum()
-        total_filler_area = (
-            data_collections.node_size_x[-placedb.num_filler_nodes :]
-            * data_collections.node_size_y[-placedb.num_filler_nodes :]
-        ).sum()
+        if placedb.num_filler_nodes > 0:
+            total_filler_area = (
+                data_collections.node_size_x[-placedb.num_filler_nodes :]
+                * data_collections.node_size_y[-placedb.num_filler_nodes :]
+            ).sum()
+        else:
+            total_filler_area = data_collections.node_size_x.new_tensor(0.0)
         total_place_area = (
             total_movable_area + total_filler_area
         ) / data_collections.target_density

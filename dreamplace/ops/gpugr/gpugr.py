@@ -1,5 +1,6 @@
 import os
 import logging
+from datetime import datetime
 
 import torch
 import torch.nn.functional as F
@@ -15,6 +16,8 @@ class GPUGR(object):
         self.params = params
         self.placedb = placedb
         self._gpugr_op = None
+        self._call_index = 0
+        self._session_tag = None
         self.last_result = None
         self.last_metrics = None
         self.last_route_grid = None
@@ -26,6 +29,17 @@ class GPUGR(object):
         if self._gpugr_op is None:
             self._gpugr_op = IEDAGPUGR(dir_workspace=self.placedb.data_manager.dir_workspace)
         return self._gpugr_op
+
+    def _resolve_call_output_dir(self, save_artifacts: bool):
+        result_root = os.path.join(self.params.result_dir, "gpugr_area_adjust")
+        if not save_artifacts:
+            return result_root
+
+        if self._session_tag is None:
+            self._session_tag = datetime.now().strftime("run_%Y%m%d_%H%M%S")
+        result_root = os.path.join(result_root, self._session_tag)
+        self._call_index += 1
+        return os.path.join(result_root, f"call_{self._call_index:03d}")
 
     def _write_back_pos_to_ieda(self, pos):
         if pos.is_cuda:
@@ -69,7 +83,8 @@ class GPUGR(object):
 
         self._write_back_pos_to_ieda(pos)
         gpugr_op = self._get_gpugr_op()
-        result_dir = os.path.join(self.params.result_dir, "gpugr_area_adjust")
+        save_artifacts = bool(getattr(self.params, "gpugr_area_adjust_save_artifacts", 0))
+        result_dir = self._resolve_call_output_dir(save_artifacts)
         result = gpugr_op.run_gpugr(
             out_dir=result_dir,
             design_name=self.params.design_name(),
@@ -82,20 +97,25 @@ class GPUGR(object):
             verbose_parser_log=bool(getattr(self.params, "gpugr_area_adjust_verbose_parser_log", 0)),
             cpp_log_level=int(getattr(self.params, "gpugr_area_adjust_cpp_log_level", 2)),
             keep_temp_def=bool(getattr(self.params, "gpugr_area_adjust_keep_temp_def", 0)),
-            save_artifacts=bool(getattr(self.params, "gpugr_area_adjust_save_artifacts", 0)),
+            save_artifacts=save_artifacts,
         )
         self.last_result = result
         self.last_route_grid = (route_xsize, route_ysize)
 
-        overflow_xy = result["maps"]["cg_map_union_overflow"].detach().to(
-            device=pos.device,
-            dtype=pos.dtype,
-        )
+        maps = result["maps"]
+        overflow_xy = maps["cg_map_union_overflow"]
+        overflow_xy = overflow_xy.detach().to(device=pos.device, dtype=pos.dtype)
         overflow_xy = self._resample_xy_map(overflow_xy, route_xsize, route_ysize)
         route_utilization_map = (overflow_xy + 1.0).contiguous()
 
         metrics = result["metrics"]
         self.last_metrics = dict(metrics)
+        artifact_paths = result.get("artifact_paths", {}) or {}
+        if artifact_paths:
+            logger.info(
+                "saved gpugr area-adjust artifacts to %s",
+                artifact_paths.get("png_dir", result_dir),
+            )
         logger.info(
             "gpugr congestion map for inflation: grid=%dx%d ovfl_max=%.4f ovfl_mean=%.4f "
             "CHmax/top1/bin=%.1f%%/%.1f%%/%.2f%% CVmax/top1/bin=%.1f%%/%.1f%%/%.2f%% "

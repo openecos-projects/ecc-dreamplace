@@ -89,7 +89,7 @@ genrule(
             cp "$$src" "$$STAGE/$$src"
         done
 
-        # Copy compiled .so files from cmake output
+        # Copy compiled .so files and generated configure.py from cmake output
         for d in $(locations //:dreamplace_cmake); do
             if [ -d "$$d" ]; then
                 find "$$d" -name '*.so' | while read f; do
@@ -97,9 +97,7 @@ genrule(
                     mkdir -p "$$STAGE/dreamplace/$$(dirname "$$rel")"
                     cp -f "$$f" "$$STAGE/dreamplace/$$rel"
                 done
-                if [ -f "$$d/dreamplace/configure.py" ]; then
-                    cp -f "$$d/dreamplace/configure.py" "$$STAGE/dreamplace/configure.py"
-                fi
+                find "$$d" -name 'configure.py' -path '*/dreamplace/*' -exec cp -f {} "$$STAGE/dreamplace/configure.py" \;
                 break
             fi
         done

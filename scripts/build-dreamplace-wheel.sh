@@ -54,6 +54,7 @@ echo "[dreamplace-wheel] torch lib dir: $torch_lib_dir"
 EXCLUDE_LIBS=(
     libtorch.so libtorch_cpu.so libtorch_python.so libc10.so libshm.so
     libgomp.so.1
+    # CUDA (not present in CPU build, but excluded as safety net)
     libcudart.so.12 libcublasLt.so.12 libcublas.so.12 libcudnn.so.9
     libcupti.so.12 libnvToolsExt.so.1 libnvrtc.so.12 libcufft.so.11
     libcurand.so.10 libcusparse.so.12 libcusolver.so.11 libnccl.so.2

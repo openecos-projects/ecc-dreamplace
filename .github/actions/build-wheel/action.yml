@@ -22,7 +22,7 @@ runs:
         sudo apt-get install -y \
           cmake ninja-build build-essential pkg-config patchelf \
           g++-10 libboost-all-dev libcairo2-dev libgflags-dev \
-          libgoogle-glog-dev flex bison libeigen3-dev libgtest-dev
+          libgoogle-glog-dev flex libfl-dev bison libeigen3-dev libgtest-dev
 
     - name: Setup Bazel
       uses: bazel-contrib/setup-bazel@0.14.0

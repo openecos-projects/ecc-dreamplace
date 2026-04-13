@@ -97,7 +97,7 @@ genrule(
                     mkdir -p "$$STAGE/dreamplace/$$(dirname "$$rel")"
                     cp -f "$$f" "$$STAGE/dreamplace/$$rel"
                 done
-                find "$$d" -name 'configure.py' -path '*/dreamplace/*' -exec cp -f {} "$$STAGE/dreamplace/configure.py" \;
+                find "$$d" -name 'configure.py' -path '*/dreamplace/*' -exec cp -f {} "$$STAGE/dreamplace/configure.py" ';'
                 break
             fi
         done

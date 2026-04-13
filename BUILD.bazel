@@ -44,7 +44,7 @@ cmake(
         "@python_3_11//:python3",
         "@python_3_11//:python_headers",
         "@python_3_11//:libpython",
-        "@pypi//torch",
+        "@dreamplace_pypi//torch",
     ],
     install = True,
     out_headers_only = True,

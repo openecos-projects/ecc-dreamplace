@@ -29,12 +29,12 @@ uv_export(
 # pip dependencies (torch, numpy, etc.) resolved from uv_export output
 pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
 pip.parse(
-    hub_name = "pypi",
+    hub_name = "dreamplace_pypi",
     python_version = "3.11",
     requirements_lock = "@uv_requirements//:requirements_lock.txt",
     extra_pip_args = ["--extra-index-url=https://download.pytorch.org/whl/cpu"],
 )
-use_repo(pip, "pypi")
+use_repo(pip, "dreamplace_pypi")
 
 # System pkg-config paths for cmake() to find boost, cairo, zlib, etc.
 pkg_config = use_extension("//bazel:pkg_config.bzl", "pkg_config")

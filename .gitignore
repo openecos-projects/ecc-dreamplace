@@ -22,3 +22,6 @@ include
 unittest
 .cache
 *_unittest
+
+# Bazel
+bazel-*

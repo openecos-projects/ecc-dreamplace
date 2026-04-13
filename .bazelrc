@@ -1,0 +1,14 @@
+build --disk_cache=~/.cache/bazel-disk
+build --spawn_strategy=sandboxed,local
+build --verbose_failures
+build --show_timestamps
+# Inherit PATH so sandboxed genrules can find uv, auditwheel, etc.
+build --action_env=PATH
+
+# GitHub mirror config for restricted networks.
+# Usage: bazel --config=ghproxy build //...
+common:ghproxy --experimental_downloader_config=.bazel_downloader_config
+common:ghproxy --registry=https://ghfast.top/https://raw.githubusercontent.com/bazelbuild/bazel-central-registry/main
+common:ghproxy --experimental_repository_downloader_retries=5
+common:ghproxy --http_connector_attempts=16
+common:ghproxy --http_connector_retry_max_timeout=30s

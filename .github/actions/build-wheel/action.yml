@@ -1,0 +1,55 @@
+name: Build DreamPlace Wheel
+description: Compile C++ operators, build raw wheel, auditwheel repair, smoke test
+
+runs:
+  using: composite
+  steps:
+    - name: Free disk space
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: true
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: false
+
+    - name: Install system dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          cmake ninja-build build-essential pkg-config patchelf \
+          g++-10 libboost-all-dev libcairo2-dev libgflags-dev \
+          libgoogle-glog-dev flex bison libeigen3-dev libgtest-dev
+
+    - name: Setup Bazel
+      uses: bazel-contrib/setup-bazel@0.14.0
+      with:
+        bazelisk-cache: true
+        disk-cache: ${{ github.workflow }}
+        repository-cache: true
+
+    - name: Setup Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Setup uv
+      uses: astral-sh/setup-uv@v5
+      with:
+        version: latest
+        enable-cache: true
+
+    - name: Install Python dependencies
+      shell: bash
+      run: uv sync --frozen --all-groups --python 3.11
+
+    - name: Build raw wheel (CMake compile + uv build)
+      shell: bash
+      run: bazel build //:dreamplace_raw_wheel
+
+    - name: Build repaired wheel (auditwheel + smoke test)
+      shell: bash
+      run: bazel run //:build_dreamplace_wheel

@@ -30,6 +30,12 @@ dependencies = [
 module-name = "dreamplace"
 module-root = ""
 
+[dependency-groups]
+dev = [
+  "auditwheel",
+  "uv-build>=0.10.9",
+]
+
 [tool.black]
 line-length = 88
 target-version = ["py38"]

@@ -46,10 +46,6 @@ runs:
       shell: bash
       run: uv sync --frozen --all-groups --python 3.11
 
-    - name: Build raw wheel (CMake compile + uv build)
-      shell: bash
-      run: bazel build //:dreamplace_raw_wheel
-
     - name: Build repaired wheel (auditwheel + smoke test)
       shell: bash
       run: bazel run //:build_dreamplace_wheel

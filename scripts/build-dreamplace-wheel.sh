@@ -19,6 +19,15 @@ else
     die "auditwheel not found. Install dev deps: uv sync --frozen --all-groups --python 3.11"
 fi
 
+# Resolve Python interpreter (prefer uv-managed venv, fall back to PATH)
+if [[ -x "${WS}/.venv/bin/python3" ]]; then
+    PYTHON3_SYS="${WS}/.venv/bin/python3"
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON3_SYS="$(command -v python3)"
+else
+    die "python3 not found. Install Python 3.11+ or create .venv via 'uv sync'."
+fi
+
 # Resolve runfiles inputs
 RF="${RUNFILES_DIR:-${BASH_SOURCE[0]}.runfiles}"
 raw_whl="$RF/$1"
@@ -44,7 +53,7 @@ local_raw_whl="$raw_out/$(basename "$raw_whl")"
 # Bazel may have renamed the wheel to a stable filename (ecc_dreamplace.whl).
 # auditwheel requires a valid PEP 427 wheel filename. Restore it from metadata.
 if [[ "$(basename "$local_raw_whl")" == ecc_dreamplace.whl ]]; then
-    wheel_arch=$("${WS}/.venv/bin/python3" -c "
+    wheel_arch=$("$PYTHON3_SYS" -c "
 import zipfile, sys
 pkg = ver = tag = None
 with zipfile.ZipFile(sys.argv[1]) as zf:
@@ -69,9 +78,12 @@ with zipfile.ZipFile(sys.argv[1]) as zf:
 fi
 
 # Locate torch's lib directory so auditwheel can find libtorch.so, libc10.so, etc.
-torch_lib_dir="$("${WS}/.venv/bin/python3" -c "import torch, pathlib; print(pathlib.Path(torch.__file__).parent / 'lib')" 2>/dev/null || true)"
+torch_lib_dir=$("$PYTHON3_SYS" -c "
+import torch, pathlib, sys
+print(pathlib.Path(torch.__file__).parent / 'lib')
+" 2>&1) || die "failed to import torch in $PYTHON3_SYS. Ensure torch is installed: uv sync --frozen --all-groups --python 3.11"
 [[ -n "$torch_lib_dir" && -d "$torch_lib_dir" ]] \
-    || die "could not locate torch lib directory. Run: uv sync --frozen --all-groups --python 3.11"
+    || die "torch lib directory not found at $torch_lib_dir. Ensure torch is installed."
 export LD_LIBRARY_PATH="${torch_lib_dir}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 echo "[dreamplace-wheel] torch lib dir: $torch_lib_dir"
 

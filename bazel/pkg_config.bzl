@@ -2,9 +2,16 @@
 
 def _pkg_config_path_repo_impl(repository_ctx):
     result = repository_ctx.execute(["pkg-config", "--variable", "pc_path", "pkg-config"])
-    path = result.stdout.strip() if result.return_code == 0 else ""
+    if result.return_code != 0:
+        fail(
+            "pkg-config failed (return code {}): {}\n{}".format(
+                result.return_code,
+                result.stdout.strip(),
+                result.stderr.strip(),
+            ),
+        )
     repository_ctx.file("BUILD.bazel", "")
-    repository_ctx.file("defs.bzl", 'PKG_CONFIG_PATH = "%s"' % path)
+    repository_ctx.file("defs.bzl", 'PKG_CONFIG_PATH = "%s"' % result.stdout.strip())
 
 _pkg_config_path_repo = repository_rule(
     implementation = _pkg_config_path_repo_impl,

@@ -43,7 +43,7 @@ local_raw_whl="$raw_out/$(basename "$raw_whl")"
 
 # Bazel may have renamed the wheel to a stable filename (ecc_dreamplace.whl).
 # auditwheel requires a valid PEP 427 wheel filename. Restore it from metadata.
-if [[ "$local_raw_whl" == ecc_dreamplace.whl ]]; then
+if [[ "$(basename "$local_raw_whl")" == ecc_dreamplace.whl ]]; then
     wheel_arch=$("${WS}/.venv/bin/python3" -c "
 import zipfile, sys
 with zipfile.ZipFile(sys.argv[1]) as zf:

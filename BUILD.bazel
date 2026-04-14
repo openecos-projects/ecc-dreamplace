@@ -75,7 +75,7 @@ genrule(
         "//:dreamplace_cmake",
         "//:dreamplace_python_sources",
     ],
-    outs = ["dreamplace_raw_wheel/ecc_dreamplace-0.1.0-py3-none-any.whl"],
+    outs = ["dreamplace_raw_wheel/ecc_dreamplace.whl"],
     cmd = """
         set -euo pipefail
         UV="$$(command -v uv)"

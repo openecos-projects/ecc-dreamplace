@@ -2,7 +2,7 @@ module(
     name = "ecc-dreamplace",
     # Must match pyproject.toml version (read by auto-tag workflow).
     # Update both together when bumping versions.
-    version = "0.1.0",
+    version = "0.1.0-alpha",
 )
 
 bazel_dep(name = "rules_python", version = "1.7.0")

@@ -7,7 +7,7 @@ die() { echo "ERROR: $1" >&2; exit 1; }
 
 WS="${BUILD_WORKSPACE_DIRECTORY:-}"
 [[ -n "$WS" && -d "$WS" ]] || die "BUILD_WORKSPACE_DIRECTORY is not set. Run via: bazel run //:build_dreamplace_wheel"
-[[ $# -ge 1 ]] || die "missing dreamplace_raw_wheel runfiles path argument."
+[[ $# -ge 2 ]] || die "missing arguments: dreamplace_raw_wheel path and Python3 path."
 command -v sha256sum >/dev/null 2>&1 || die "required command not found: sha256sum"
 
 # Resolve auditwheel binary

@@ -15,6 +15,7 @@ def _pkg_config_path_repo_impl(repository_ctx):
 
 _pkg_config_path_repo = repository_rule(
     implementation = _pkg_config_path_repo_impl,
+    local = True,
 )
 
 def _pkg_config_ext_impl(module_ctx):

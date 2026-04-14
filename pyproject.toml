@@ -33,7 +33,6 @@ module-root = ""
 [dependency-groups]
 dev = [
   "auditwheel",
-  "uv-build>=0.10.9,<0.12",
 ]
 
 [tool.black]

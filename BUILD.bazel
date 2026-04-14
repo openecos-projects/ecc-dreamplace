@@ -16,6 +16,8 @@ filegroup(
             "dist/**",
             "scripts/**",
             "bazel/**",
+            "bazel-*",
+            ".venv/**",
             "BUILD.bazel",
             "MODULE.bazel",
             "MODULE.bazel.lock",

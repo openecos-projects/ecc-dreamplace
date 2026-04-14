@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-version:
+    name: Check Version Consistency
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify MODULE.bazel matches pyproject.toml
+        run: |
+          MODULE_VER=$(python3 -c "import re;t=open('MODULE.bazel').read();m=re.search(r'version\s*=\s*\"([^\"]+)\"',t);print(m.group(1) if m else '')")
+          PY_VER=$(python3 -c "import re;t=open('pyproject.toml').read();m=re.search(r'^version\s*=\s*\"([^\"]+)\"',t,re.MULTILINE);print(m.group(1) if m else '')")
+          echo "MODULE.bazel version: $MODULE_VER"
+          echo "pyproject.toml version: $PY_VER"
+          [[ "$MODULE_VER" == "$PY_VER" ]] || {
+            echo "ERROR: version mismatch. MODULE.bazel='$MODULE_VER' pyproject.toml='$PY_VER'"
+            exit 1
+          }
+
+  build-wheel:
+    name: Build Wheel
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build wheel
+        uses: ./.github/actions/build-wheel
+
+      - name: Upload repaired wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: ecc-dreamplace-wheel
+          path: dist/wheel/repaired/ecc_dreamplace-*.whl
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: checksums
+          path: dist/wheel/SHA256SUMS
+          retention-days: 7
+          if-no-files-found: error

@@ -1,0 +1,123 @@
+load("@rules_foreign_cc//foreign_cc:defs.bzl", "cmake")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@pkg_config_path//:defs.bzl", "PKG_CONFIG_PATH")
+
+package(default_visibility = ["//visibility:public"])
+
+# All source files for the cmake() sandbox. No nested BUILD files in thirdparty/
+# (verified), so a root glob works without stripping.
+filegroup(
+    name = "all_sources",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "*.so",
+            ".github/**",
+            "dist/**",
+            "scripts/**",
+            "bazel/**",
+            "bazel-*",
+            ".venv/**",
+            "BUILD.bazel",
+            "MODULE.bazel",
+            "MODULE.bazel.lock",
+            ".bazelrc",
+            "uv.lock",
+        ],
+    ),
+)
+
+cmake(
+    name = "dreamplace_cmake",
+    lib_source = "//:all_sources",
+    cache_entries = {
+        "CMAKE_BUILD_TYPE": "Release",
+        # Must match torch's _GLIBCXX_USE_CXX11_ABI (pip torch uses 1).
+        "CMAKE_CXX_ABI": "1",
+        "PYTHON_EXECUTABLE": "$$EXT_BUILD_ROOT/$(execpath @python_3_11//:python3)",
+        # All three must be set to skip TorchExtension.cmake auto-detection
+        # (which requires `import torch` and all its transitive deps on PYTHONPATH).
+        # The pip repo name varies by platform, so find it dynamically.
+        "TORCH_INSTALL_PREFIX": "$$(find $$EXT_BUILD_ROOT/external -type d -name torch -path '*/site-packages/torch' | head -1)",
+        "TORCH_ENABLE_CUDA": "0",
+        "TORCH_VERSION": "2.10.0",
+    },
+    build_data = [
+        "@python_3_11//:python3",
+        "@python_3_11//:python_headers",
+        "@python_3_11//:libpython",
+        "@dreamplace_pypi//torch",
+    ],
+    install = True,
+    out_headers_only = True,
+    postfix_script = """
+        echo "DreamPlace: build and install completed"
+    """,
+    env = {
+        "PKG_CONFIG_PATH": PKG_CONFIG_PATH,
+    },
+    generate_args = ["-GNinja"],
+    out_data_dirs = ["dreamplace"],
+)
+
+filegroup(
+    name = "dreamplace_python_sources",
+    srcs = glob(
+        [
+            "dreamplace/**/*.py",
+            "pyproject.toml",
+        ],
+        exclude = ["**/__pycache__/**"],
+    ),
+)
+
+genrule(
+    name = "dreamplace_raw_wheel",
+    srcs = [
+        "//:dreamplace_cmake",
+        "//:dreamplace_python_sources",
+    ],
+    outs = ["dreamplace_raw_wheel/ecc_dreamplace.whl"],
+    cmd = """
+        set -euo pipefail
+        UV="$$(command -v uv)"
+        [[ -x "$$UV" ]] || { echo "ERROR: uv not found in PATH. Install: https://docs.astral.sh/uv/"; exit 1; }
+        STAGE=$$(mktemp -d)
+        trap 'rm -rf "$$STAGE"' EXIT
+
+        # Copy Python sources + pyproject.toml (paths are relative to execroot)
+        for src in $(locations //:dreamplace_python_sources); do
+            mkdir -p "$$STAGE/$$(dirname "$$src")"
+            cp "$$src" "$$STAGE/$$src"
+        done
+
+        # Copy compiled .so files and generated configure.py from cmake output
+        for d in $(locations //:dreamplace_cmake); do
+            if [ -d "$$d" ]; then
+                find "$$d" -name '*.so' | while read f; do
+                    rel=$${f#*dreamplace/}
+                    mkdir -p "$$STAGE/dreamplace/$$(dirname "$$rel")"
+                    cp -f "$$f" "$$STAGE/dreamplace/$$rel"
+                done
+                find "$$d" -name 'configure.py' -path '*/dreamplace/*' -exec cp -f {} "$$STAGE/dreamplace/configure.py" ';'
+                break
+            fi
+        done
+
+        "$$UV" build --wheel --directory "$$STAGE" --out-dir "$$STAGE/_dist" --cache-dir "$$STAGE/.uv-cache"
+        cp "$$STAGE"/_dist/*.whl "$@"
+    """,
+)
+
+sh_binary(
+    name = "build_dreamplace_wheel",
+    srcs = ["scripts/build-dreamplace-wheel.sh"],
+    data = [
+        "//:dreamplace_raw_wheel",
+        "@python_3_11//:python3",
+    ],
+    args = [
+        "$(rlocationpath //:dreamplace_raw_wheel)",
+        "$(rlocationpath @python_3_11//:python3)",
+    ],
+)

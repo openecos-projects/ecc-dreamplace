@@ -301,7 +301,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "auditwheel" },
-    { name = "uv-build", specifier = ">=0.10.9" },
+    { name = "uv-build", specifier = ">=0.10.9,<0.12" },
 ]
 
 [[package]]

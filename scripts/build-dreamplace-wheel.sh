@@ -46,6 +46,7 @@ local_raw_whl="$raw_out/$(basename "$raw_whl")"
 if [[ "$(basename "$local_raw_whl")" == ecc_dreamplace.whl ]]; then
     wheel_arch=$("${WS}/.venv/bin/python3" -c "
 import zipfile, sys
+pkg = ver = tag = None
 with zipfile.ZipFile(sys.argv[1]) as zf:
     for name in zf.namelist():
         if name.endswith('.dist-info/METADATA'):
@@ -55,10 +56,12 @@ with zipfile.ZipFile(sys.argv[1]) as zf:
         elif name.endswith('.dist-info/WHEEL'):
             for line in zf.read(name).decode().splitlines():
                 if line.startswith('Tag: '):
-                    print(f'{pkg}-{ver}-{line[5:]}.whl')
-                    sys.exit(0)
-    print('ERROR: wheel metadata incomplete', file=sys.stderr)
-    sys.exit(1)
+                    tag = line[5:]
+    if pkg and ver and tag:
+        print(f'{pkg}-{ver}-{tag}.whl')
+    else:
+        print('ERROR: wheel metadata incomplete', file=sys.stderr)
+        sys.exit(1)
 " "$local_raw_whl") || die "could not determine PEP 427 filename from wheel metadata"
     mv "$local_raw_whl" "$raw_out/$wheel_arch"
     local_raw_whl="$raw_out/$wheel_arch"

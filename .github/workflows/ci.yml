@@ -19,16 +19,8 @@ jobs:
 
       - name: Verify MODULE.bazel matches pyproject.toml
         run: |
-          MODULE_VER=$(python3 -c "
-            import re; t = open('MODULE.bazel').read()
-            m = re.search(r'version\s*=\s*\"([^\"]+)\"', t)
-            print(m.group(1) if m else '')
-          ")
-          PY_VER=$(python3 -c "
-            import re; t = open('pyproject.toml').read()
-            m = re.search(r'^version\s*=\s*\"([^\"]+)\"', t, re.MULTILINE)
-            print(m.group(1) if m else '')
-          ")
+          MODULE_VER=$(python3 -c "import re;t=open('MODULE.bazel').read();m=re.search(r'version\s*=\s*\"([^\"]+)\"',t);print(m.group(1) if m else '')")
+          PY_VER=$(python3 -c "import re;t=open('pyproject.toml').read();m=re.search(r'^version\s*=\s*\"([^\"]+)\"',t,re.MULTILINE);print(m.group(1) if m else '')")
           echo "MODULE.bazel version: $MODULE_VER"
           echo "pyproject.toml version: $PY_VER"
           [[ "$MODULE_VER" == "$PY_VER" ]] || {

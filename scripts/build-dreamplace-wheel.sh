@@ -41,6 +41,30 @@ trap 'rm -rf "$smoke_dir"' EXIT
 cp "$raw_whl" "$raw_out/"
 local_raw_whl="$raw_out/$(basename "$raw_whl")"
 
+# Bazel may have renamed the wheel to a stable filename (ecc_dreamplace.whl).
+# auditwheel requires a valid PEP 427 wheel filename. Restore it from metadata.
+if [[ "$local_raw_whl" == ecc_dreamplace.whl ]]; then
+    wheel_arch=$("${WS}/.venv/bin/python3" -c "
+import zipfile, sys
+with zipfile.ZipFile(sys.argv[1]) as zf:
+    for name in zf.namelist():
+        if name.endswith('.dist-info/METADATA'):
+            meta = dict(line.split(': ', 1) for line in zf.read(name).decode().splitlines() if ': ' in line)
+            pkg = meta['Name'].lower().replace('-', '_')
+            ver = meta['Version']
+        elif name.endswith('.dist-info/WHEEL'):
+            for line in zf.read(name).decode().splitlines():
+                if line.startswith('Tag: '):
+                    print(f'{pkg}-{ver}-{line[5:]}.whl')
+                    sys.exit(0)
+    print('ERROR: wheel metadata incomplete', file=sys.stderr)
+    sys.exit(1)
+" "$local_raw_whl") || die "could not determine PEP 427 filename from wheel metadata"
+    mv "$local_raw_whl" "$raw_out/$wheel_arch"
+    local_raw_whl="$raw_out/$wheel_arch"
+    echo "[dreamplace-wheel] restored PEP 427 filename: $(basename "$local_raw_whl")"
+fi
+
 # Locate torch's lib directory so auditwheel can find libtorch.so, libc10.so, etc.
 torch_lib_dir="$("${WS}/.venv/bin/python3" -c "import torch, pathlib; print(pathlib.Path(torch.__file__).parent / 'lib')" 2>/dev/null || true)"
 [[ -n "$torch_lib_dir" && -d "$torch_lib_dir" ]] \
@@ -60,6 +84,7 @@ EXCLUDE_LIBS=(
     libcurand.so.10 libcusparse.so.12 libcusolver.so.11 libnccl.so.2
     libnvJitLink.so.12 libtriton.so
 )
+
 exclude_flags=()
 for lib in "${EXCLUDE_LIBS[@]}"; do
     exclude_flags+=(--exclude "$lib")
@@ -68,14 +93,13 @@ done
 echo "[dreamplace-wheel] running auditwheel show/repair"
 [[ -f "$local_raw_whl" ]] || die "raw wheel not found after copy: $local_raw_whl"
 
-for whl in "$local_raw_whl"; do
-    {
-        echo "=== $(basename "$whl") ==="
-        "$auditwheel_bin" show "$whl"
-        echo
-    } >> "$show_report"
-    "$auditwheel_bin" repair "$whl" -w "$repair_out" "${exclude_flags[@]}"
-done
+{
+    echo "=== $(basename "$local_raw_whl") ==="
+    "$auditwheel_bin" show "$local_raw_whl"
+    echo
+} >> "$show_report"
+
+"$auditwheel_bin" repair "$local_raw_whl" -w "$repair_out" "${exclude_flags[@]}"
 
 shopt -s nullglob
 repaired_wheels=("$repair_out"/ecc_dreamplace-*.whl)

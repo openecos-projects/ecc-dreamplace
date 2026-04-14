@@ -9,6 +9,7 @@ WS="${BUILD_WORKSPACE_DIRECTORY:-}"
 [[ -n "$WS" && -d "$WS" ]] || die "BUILD_WORKSPACE_DIRECTORY is not set. Run via: bazel run //:build_dreamplace_wheel"
 [[ $# -ge 2 ]] || die "missing arguments: dreamplace_raw_wheel path and Python3 path."
 command -v sha256sum >/dev/null 2>&1 || die "required command not found: sha256sum"
+command -v unzip >/dev/null 2>&1 || die "required command not found: unzip"
 
 # Resolve auditwheel binary
 if [[ -x "${WS}/.venv/bin/auditwheel" ]]; then
@@ -53,11 +54,13 @@ local_raw_whl="$raw_out/$(basename "$raw_whl")"
 # Bazel may have renamed the wheel to a stable filename (ecc_dreamplace.whl).
 # auditwheel requires a valid PEP 427 wheel filename. Restore it from metadata.
 if [[ "$(basename "$local_raw_whl")" == ecc_dreamplace.whl ]]; then
-    wheel_ver=$(unzip -p "$local_raw_whl" '*.dist-info/METADATA' | grep '^Version:' | head -1 | cut -d' ' -f2)
-    [ -n "$wheel_ver" ] || die "could not determine version from wheel metadata"
-    wheel_arch="ecc_dreamplace-${wheel_ver}-py3-none-any.whl"
-    mv "$local_raw_whl" "$raw_out/$wheel_arch"
-    local_raw_whl="$raw_out/$wheel_arch"
+    wheel_ver=$({ unzip -p "$local_raw_whl" '*.dist-info/METADATA' | grep '^Version:' | head -1 | cut -d' ' -f2; } || true)
+    [ -n "$wheel_ver" ] || die "could not determine version from wheel METADATA"
+    wheel_tag=$({ unzip -p "$local_raw_whl" '*.dist-info/WHEEL' | grep '^Tag:' | head -1 | cut -d' ' -f2 | tr -d '\r'; } || true)
+    [ -n "$wheel_tag" ] || die "could not determine compatibility tag from wheel WHEEL file"
+    wheel_name="ecc_dreamplace-${wheel_ver}-${wheel_tag}.whl"
+    mv "$local_raw_whl" "$raw_out/$wheel_name"
+    local_raw_whl="$raw_out/$wheel_name"
     echo "[dreamplace-wheel] restored PEP 427 filename: $(basename "$local_raw_whl")"
 fi
 

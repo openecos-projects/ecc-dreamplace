@@ -53,25 +53,9 @@ local_raw_whl="$raw_out/$(basename "$raw_whl")"
 # Bazel may have renamed the wheel to a stable filename (ecc_dreamplace.whl).
 # auditwheel requires a valid PEP 427 wheel filename. Restore it from metadata.
 if [[ "$(basename "$local_raw_whl")" == ecc_dreamplace.whl ]]; then
-    wheel_arch=$("$PYTHON3_SYS" -c "
-import zipfile, sys
-pkg = ver = tag = None
-with zipfile.ZipFile(sys.argv[1]) as zf:
-    for name in zf.namelist():
-        if name.endswith('.dist-info/METADATA'):
-            meta = dict(line.split(': ', 1) for line in zf.read(name).decode().splitlines() if ': ' in line)
-            pkg = meta['Name'].lower().replace('-', '_')
-            ver = meta['Version']
-        elif name.endswith('.dist-info/WHEEL'):
-            for line in zf.read(name).decode().splitlines():
-                if line.startswith('Tag: '):
-                    tag = line[5:]
-    if pkg and ver and tag:
-        print(f'{pkg}-{ver}-{tag}.whl')
-    else:
-        print('ERROR: wheel metadata incomplete', file=sys.stderr)
-        sys.exit(1)
-" "$local_raw_whl") || die "could not determine PEP 427 filename from wheel metadata"
+    wheel_ver=$(unzip -p "$local_raw_whl" '*.dist-info/METADATA' | grep '^Version:' | head -1 | cut -d' ' -f2)
+    [ -n "$wheel_ver" ] || die "could not determine version from wheel metadata"
+    wheel_arch="ecc_dreamplace-${wheel_ver}-py3-none-any.whl"
     mv "$local_raw_whl" "$raw_out/$wheel_arch"
     local_raw_whl="$raw_out/$wheel_arch"
     echo "[dreamplace-wheel] restored PEP 427 filename: $(basename "$local_raw_whl")"

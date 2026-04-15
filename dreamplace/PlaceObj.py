@@ -3739,6 +3739,7 @@ class PlaceObj(nn.Module):
             pin_area_adjust_stop_ratio=params.pin_area_adjust_stop_ratio,
             unit_pin_capacity=data_collections.unit_pin_capacity,
             modularity_config=modularity_config,
+            params=params,
         )
 
         def build_adjust_node_area_op(

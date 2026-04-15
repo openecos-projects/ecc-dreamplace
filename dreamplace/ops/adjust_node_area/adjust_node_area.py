@@ -1,9 +1,11 @@
 import math
+import os
 import torch
 from torch import nn
 import torch.nn.functional as F
 import logging
 import pdb
+import numpy as np
 
 import dreamplace.ops.adjust_node_area.adjust_node_area_cpp as adjust_node_area_cpp
 import dreamplace.ops.adjust_node_area.update_pin_offset_cpp as update_pin_offset_cpp
@@ -95,7 +97,8 @@ class AdjustNodeArea(nn.Module):
         route_area_adjust_stop_ratio=0.01,
         pin_area_adjust_stop_ratio=0.05,
         unit_pin_capacity=0.0,
-        modularity_config=None):
+        modularity_config=None,
+        params=None):
         super(AdjustNodeArea, self).__init__()
         self.flat_node2pin_start_map = flat_node2pin_start_map
         self.flat_node2pin_map = flat_node2pin_map
@@ -148,7 +151,172 @@ class AdjustNodeArea(nn.Module):
         self.total_whitespace_area = total_whitespace_area
         self.modularity_config = modularity_config or {}
         self.modularity_enabled = bool(self.modularity_config.get("enabled", False))
+        self.params = params or self.modularity_config.get("params")
         self.last_modularity_summary = None
+
+    def _maybe_plot_inflation_cells(
+        self,
+        pos,
+        old_movable_area,
+        old_node_size_x_movable,
+        old_node_size_y_movable,
+        actual_area_increment,
+        inflation_round,
+    ):
+        params = self.params
+        if params is None or not getattr(params, "modularity_plot_flag", False):
+            return
+        if actual_area_increment is None or actual_area_increment.numel() == 0:
+            return
+
+        result_dir = getattr(params, "result_dir", None)
+        if not result_dir:
+            return
+
+        try:
+            design_name = params.design_name()
+        except Exception:
+            design_name = "design"
+
+        inflation_mode = "modularity" if self.modularity_enabled else "standard"
+        level_idx = -1
+        if self.modularity_enabled and isinstance(self.last_modularity_summary, dict):
+            level_idx = int(self.last_modularity_summary.get("level_idx", -1))
+
+        output_dir = os.path.join(
+            result_dir,
+            design_name,
+            "plot",
+            "%s_inflation" % inflation_mode,
+        )
+        os.makedirs(output_dir, exist_ok=True)
+        if self.modularity_enabled:
+            output_name = "modularity_cell_inflation_round%d_level%d.png" % (
+                int(inflation_round),
+                level_idx,
+            )
+        else:
+            output_name = "standard_cell_inflation_round%d.png" % int(inflation_round)
+        output_path = os.path.join(output_dir, output_name)
+        npz_path = output_path[:-4] + ".npz"
+
+        with torch.no_grad():
+            num_nodes = int(pos.numel() / 2)
+            center_x = (
+                pos[: self.num_movable_nodes] + old_node_size_x_movable * 0.5
+            ).detach().cpu().numpy()
+            center_y = (
+                pos[num_nodes : num_nodes + self.num_movable_nodes]
+                + old_node_size_y_movable * 0.5
+            ).detach().cpu().numpy()
+            area_increment_np = actual_area_increment.detach().cpu().numpy()
+            inflated_mask = area_increment_np > 0
+            old_movable_area_np = old_movable_area.detach().cpu().numpy()
+            inflation_ratio_np = np.ones_like(area_increment_np)
+            positive_area_mask = old_movable_area_np > 0
+            inflation_ratio_np[positive_area_mask] = (
+                1.0 + area_increment_np[positive_area_mask] / old_movable_area_np[positive_area_mask]
+            )
+
+        fig, ax = plt.subplots(figsize=(10, 10))
+        if (~inflated_mask).any():
+            ax.scatter(
+                center_x[~inflated_mask],
+                center_y[~inflated_mask],
+                c="#bdbdbd",
+                s=1.0,
+                marker="s",
+                linewidths=0,
+                alpha=0.35,
+                rasterized=True,
+                label="No inflation",
+            )
+        if inflated_mask.any():
+            inflated_ratios = inflation_ratio_np[inflated_mask]
+            ratio_min = float(inflated_ratios.min())
+            ratio_max = float(inflated_ratios.max())
+            if math.isclose(ratio_min, ratio_max):
+                ratio_max = ratio_min + 1e-6
+            norm = plt.Normalize(
+                vmin=ratio_min,
+                vmax=ratio_max,
+            )
+            scatter = ax.scatter(
+                center_x[inflated_mask],
+                center_y[inflated_mask],
+                c=inflated_ratios,
+                s=2.0,
+                marker="s",
+                linewidths=0,
+                alpha=0.9,
+                cmap="turbo",
+                norm=norm,
+                rasterized=True,
+                label="Inflated (colored by ratio)",
+            )
+            cbar = fig.colorbar(scatter, ax=ax, orientation="vertical", fraction=0.035, pad=0.02)
+            cbar.set_label("Inflation Ratio")
+        ax.set_xlim(float(self.xl), float(self.xh))
+        ax.set_ylim(float(self.yl), float(self.yh))
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        inflated_ratio_stats = inflation_ratio_np[inflated_mask]
+        if self.modularity_enabled:
+            title = (
+                "Modularity Inflation Cells R%d L%d | inflated=%d/%d (%.2f%%) | ratio %.4f/%.4f/%.4f"
+                % (
+                    int(inflation_round),
+                    level_idx,
+                    int(inflated_mask.sum()),
+                    int(inflated_mask.size),
+                    100.0 * float(inflated_mask.mean()) if inflated_mask.size else 0.0,
+                    float(inflated_ratio_stats.min()) if inflated_ratio_stats.size else 1.0,
+                    float(inflated_ratio_stats.mean()) if inflated_ratio_stats.size else 1.0,
+                    float(inflated_ratio_stats.max()) if inflated_ratio_stats.size else 1.0,
+                )
+            )
+        else:
+            title = (
+                "Standard Inflation Cells R%d | inflated=%d/%d (%.2f%%) | ratio %.4f/%.4f/%.4f"
+                % (
+                    int(inflation_round),
+                    int(inflated_mask.sum()),
+                    int(inflated_mask.size),
+                    100.0 * float(inflated_mask.mean()) if inflated_mask.size else 0.0,
+                    float(inflated_ratio_stats.min()) if inflated_ratio_stats.size else 1.0,
+                    float(inflated_ratio_stats.mean()) if inflated_ratio_stats.size else 1.0,
+                    float(inflated_ratio_stats.max()) if inflated_ratio_stats.size else 1.0,
+                )
+            )
+        ax.set_title(title)
+        ax.legend(loc="upper right", frameon=False, markerscale=4)
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+        np.savez_compressed(
+            npz_path,
+            center_x=center_x,
+            center_y=center_y,
+            inflated_mask=inflated_mask.astype(np.uint8),
+            area_increment=area_increment_np,
+            inflation_ratio=inflation_ratio_np,
+            inflation_round=np.asarray([int(inflation_round)], dtype=np.int64),
+            level_idx=np.asarray([level_idx], dtype=np.int64),
+            inflation_mode=np.asarray([inflation_mode]),
+        )
+        logger.info(
+            "Saved %s cell inflation plot: round=%d level=%d inflated=%d/%d ratio[min/mean/max]=%.4f/%.4f/%.4f path=%s",
+            inflation_mode,
+            int(inflation_round),
+            level_idx,
+            int(inflated_mask.sum()),
+            int(inflated_mask.size),
+            float(inflated_ratio_stats.min()) if inflated_ratio_stats.size else 1.0,
+            float(inflated_ratio_stats.mean()) if inflated_ratio_stats.size else 1.0,
+            float(inflated_ratio_stats.max()) if inflated_ratio_stats.size else 1.0,
+            output_path,
+        )
 
     def _select_modularity_cluster_ids(self, inflation_round):
         if not self.modularity_enabled:
@@ -415,6 +583,15 @@ class AdjustNodeArea(nn.Module):
             else:
                 new_movable_area = old_movable_area + area_increment * scale_factor
                 area_increment_sum *= scale_factor
+            actual_area_increment = new_movable_area - old_movable_area
+            self._maybe_plot_inflation_cells(
+                pos=pos,
+                old_movable_area=old_movable_area,
+                old_node_size_x_movable=old_node_size_x_movable,
+                old_node_size_y_movable=old_node_size_y_movable,
+                actual_area_increment=actual_area_increment,
+                inflation_round=inflation_round,
+            )
             new_movable_area_sum = old_movable_area_sum + area_increment_sum
             area_increment_ratio = area_increment_sum / old_movable_area_sum
             logger.info(

@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag to release (e.g., v0.1.0-alpha)'
+        required: true
+        default: 'v0.1.0-alpha'
 
 permissions:
   contents: write
@@ -21,9 +27,16 @@ jobs:
       - name: Build wheel
         uses: ./.github/actions/build-wheel
 
-      - name: Extract version from tag
+      - name: Determine tag version
         id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG_VERSION="${{ github.event.inputs.tag_name }}"
+          else
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+          echo "full_tag=${GITHUB_REF_NAME:-${{ github.event.inputs.tag_name }}}" >> "$GITHUB_OUTPUT"
 
       - name: Generate release notes
         id: notes
@@ -52,8 +65,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --title "ecc-dreamplace ${{ github.ref_name }}" \
+          gh release create "${{ steps.version.outputs.full_tag }}" \
+            --title "ecc-dreamplace ${{ steps.version.outputs.full_tag }}" \
             --notes-file release-notes.md \
             dist/wheel/repaired/ecc_dreamplace-*.whl \
             dist/wheel/SHA256SUMS

@@ -3266,334 +3266,334 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             break
 
                         # for routability optimization
-                        trigger_xplace_inflation = xplace_inflation_controller.should_trigger_xplace_inflation(
-                            params,
-                            num_area_adjust=num_area_adjust,
-                            overflow=Llambda_metrics[-1][-1].overflow,
-                        )
-                        trigger_legacy_inflation = (
-                            params.routability_opt_flag
-                            and not trigger_xplace_inflation
-                            and num_area_adjust < max_area_adjust_rounds
-                            and Llambda_metrics[-1][-1].overflow < params.node_area_adjust_overflow
-                        )
-                        if trigger_xplace_inflation or trigger_legacy_inflation:
-                            use_xplace_outer_loop = bool(trigger_xplace_inflation)
-                            round_flags = (
-                                xplace_inflation_controller.get_area_adjust_flags(params)
-                                if use_xplace_outer_loop
-                                else {
-                                    "adjust_area_flag": adjust_area_flag,
-                                    "adjust_route_area_flag": adjust_route_area_flag,
-                                    "adjust_pin_area_flag": adjust_pin_area_flag,
-                                }
-                            )
-                            round_adjust_area_flag = round_flags["adjust_area_flag"]
-                            round_adjust_route_area_flag = round_flags["adjust_route_area_flag"]
-                            round_adjust_pin_area_flag = round_flags["adjust_pin_area_flag"]
-                            content = (
-                                "routability optimization round %d: adjust area flags = (%d, %d, %d)"
-                                % (
-                                    num_area_adjust,
-                                    round_adjust_area_flag,
-                                    round_adjust_route_area_flag,
-                                    round_adjust_pin_area_flag,
-                                )
-                            )
-                            pos = model.data_collections.pos[0]
-                            if use_xplace_outer_loop and best_pos[0] is not None:
-                                pos.data.copy_(best_pos[0].data)
-                                content = (
-                                    "xplace-style inflation round %d: restore best_pos snapshot before gpugr/area-adjust | "
-                                    % num_area_adjust
-                                ) + content
-                                logging.info(
-                                    "Xplace-style inflation round %d uses best_pos snapshot with best overflow %.6f at iter %d",
-                                    num_area_adjust,
-                                    float(best_metric[0].overflow[-1]) if best_metric[0] is not None else float("nan"),
-                                    int(best_metric[0].iteration) if best_metric[0] is not None else -1,
-                                )
-                            elif use_xplace_outer_loop:
-                                logging.info(
-                                    "Xplace-style inflation round %d cannot find an earlier best_pos snapshot; use current position as trigger input",
-                                    num_area_adjust,
-                                )
-                            route_map_source = "none"
-                            if round_adjust_route_area_flag:
-                                if getattr(params, "adjust_gpugr_area_flag", False):
-                                    route_map_source = "gpugr"
-                                elif params.adjust_nctugr_area_flag:
-                                    route_map_source = "irt_egr"
-                                else:
-                                    route_map_source = "rudy"
-                            if round_adjust_route_area_flag:
-                                _ensure_modularity_inflation_contract(
-                                    params,
-                                    route_map_source=route_map_source,
-                                )
-                            current_inflation_round = None
-                            if getattr(model, "inflation_state", None) is not None:
-                                xplace_inflation_controller.maybe_capture_model_density_state(
-                                    model.inflation_state,
-                                    model,
-                                )
-                                current_inflation_round = xplace_inflation_controller.begin_inflation_round(
-                                    model.inflation_state,
-                                    self.data_collections,
-                                    placedb,
-                                    pos=pos,
-                                    round_idx=num_area_adjust,
-                                    stage_idx=cur_stage,
-                                    iteration=iteration,
-                                    overflow=Llambda_metrics[-1][-1].overflow,
-                                    route_map_source=route_map_source,
-                                    adjust_area_flag=round_adjust_area_flag,
-                                    adjust_route_area_flag=round_adjust_route_area_flag,
-                                    adjust_pin_area_flag=round_adjust_pin_area_flag,
-                                    notes=(
-                                        "xplace_outer_loop_best_pos"
-                                        if use_xplace_outer_loop
-                                        else "legacy_area_adjust"
-                                    ),
-                                )
-                            _run_gpugr_before_first_area_adjust_and_exit(
+                        if params.routability_opt_flag:
+                            trigger_xplace_inflation = xplace_inflation_controller.should_trigger_xplace_inflation(
                                 params,
-                                placedb,
-                                pos,
-                                num_area_adjust,
-                                model,
+                                num_area_adjust=num_area_adjust,
+                                overflow=Llambda_metrics[-1][-1].overflow,
                             )
-                            if round_adjust_route_area_flag:
-                                _ensure_modularity_active_clusters(
+                            trigger_legacy_inflation = (
+                                not trigger_xplace_inflation
+                                and num_area_adjust < max_area_adjust_rounds
+                                and Llambda_metrics[-1][-1].overflow < params.node_area_adjust_overflow
+                            )
+                            if trigger_xplace_inflation or trigger_legacy_inflation:
+                                use_xplace_outer_loop = bool(trigger_xplace_inflation)
+                                round_flags = (
+                                    xplace_inflation_controller.get_area_adjust_flags(params)
+                                    if use_xplace_outer_loop
+                                    else {
+                                        "adjust_area_flag": adjust_area_flag,
+                                        "adjust_route_area_flag": adjust_route_area_flag,
+                                        "adjust_pin_area_flag": adjust_pin_area_flag,
+                                    }
+                                )
+                                round_adjust_area_flag = round_flags["adjust_area_flag"]
+                                round_adjust_route_area_flag = round_flags["adjust_route_area_flag"]
+                                round_adjust_pin_area_flag = round_flags["adjust_pin_area_flag"]
+                                content = (
+                                    "routability optimization round %d: adjust area flags = (%d, %d, %d)"
+                                    % (
+                                        num_area_adjust,
+                                        round_adjust_area_flag,
+                                        round_adjust_route_area_flag,
+                                        round_adjust_pin_area_flag,
+                                    )
+                                )
+                                pos = model.data_collections.pos[0]
+                                if use_xplace_outer_loop and best_pos[0] is not None:
+                                    pos.data.copy_(best_pos[0].data)
+                                    content = (
+                                        "xplace-style inflation round %d: restore best_pos snapshot before gpugr/area-adjust | "
+                                        % num_area_adjust
+                                    ) + content
+                                    logging.info(
+                                        "Xplace-style inflation round %d uses best_pos snapshot with best overflow %.6f at iter %d",
+                                        num_area_adjust,
+                                        float(best_metric[0].overflow[-1]) if best_metric[0] is not None else float("nan"),
+                                        int(best_metric[0].iteration) if best_metric[0] is not None else -1,
+                                    )
+                                elif use_xplace_outer_loop:
+                                    logging.info(
+                                        "Xplace-style inflation round %d cannot find an earlier best_pos snapshot; use current position as trigger input",
+                                        num_area_adjust,
+                                    )
+                                route_map_source = "none"
+                                if round_adjust_route_area_flag:
+                                    if getattr(params, "adjust_gpugr_area_flag", False):
+                                        route_map_source = "gpugr"
+                                    elif params.adjust_nctugr_area_flag:
+                                        route_map_source = "irt_egr"
+                                    else:
+                                        route_map_source = "rudy"
+                                if round_adjust_route_area_flag:
+                                    _ensure_modularity_inflation_contract(
+                                        params,
+                                        route_map_source=route_map_source,
+                                    )
+                                current_inflation_round = None
+                                if getattr(model, "inflation_state", None) is not None:
+                                    xplace_inflation_controller.maybe_capture_model_density_state(
+                                        model.inflation_state,
+                                        model,
+                                    )
+                                    current_inflation_round = xplace_inflation_controller.begin_inflation_round(
+                                        model.inflation_state,
+                                        self.data_collections,
+                                        placedb,
+                                        pos=pos,
+                                        round_idx=num_area_adjust,
+                                        stage_idx=cur_stage,
+                                        iteration=iteration,
+                                        overflow=Llambda_metrics[-1][-1].overflow,
+                                        route_map_source=route_map_source,
+                                        adjust_area_flag=round_adjust_area_flag,
+                                        adjust_route_area_flag=round_adjust_route_area_flag,
+                                        adjust_pin_area_flag=round_adjust_pin_area_flag,
+                                        notes=(
+                                            "xplace_outer_loop_best_pos"
+                                            if use_xplace_outer_loop
+                                            else "legacy_area_adjust"
+                                        ),
+                                    )
+                                _run_gpugr_before_first_area_adjust_and_exit(
                                     params,
                                     placedb,
-                                    model,
                                     pos,
                                     num_area_adjust,
+                                    model,
                                 )
-
-                            route_utilization_map = None
-                            pin_utilization_map = None
-                            modularity_maps = None
-                            gpugr_metrics = {}
-                            low_util_context = None
-                            if round_adjust_route_area_flag:
-                                if getattr(params, "adjust_gpugr_area_flag", False):
-                                    _sync_gpugr_route_grid_to_autodmp(
+                                if round_adjust_route_area_flag:
+                                    _ensure_modularity_active_clusters(
                                         params,
                                         placedb,
-                                        model=model,
+                                        model,
+                                        pos,
+                                        num_area_adjust,
                                     )
-                                    route_utilization_map = model.op_collections.gpugr_congestion_map_op(
-                                        pos
-                                    )
-                                    gpugr_metrics = getattr(
-                                        model.op_collections.gpugr_congestion_map_op,
-                                        "last_metrics",
-                                        {},
-                                    ) or {}
-                                    if _is_modularity_inflation_enabled(params):
-                                        modularity_maps = _prepare_modularity_maps_from_gpugr(
+
+                                route_utilization_map = None
+                                pin_utilization_map = None
+                                modularity_maps = None
+                                gpugr_metrics = {}
+                                low_util_context = None
+                                if round_adjust_route_area_flag:
+                                    if getattr(params, "adjust_gpugr_area_flag", False):
+                                        _sync_gpugr_route_grid_to_autodmp(
+                                            params,
                                             placedb,
-                                            model.op_collections.gpugr_congestion_map_op,
-                                            pos,
-                                            eps=getattr(params, "modularity_active_bin_overflow_eps", 1e-6),
+                                            model=model,
                                         )
-                                elif params.adjust_nctugr_area_flag:
-                                    route_utilization_map = model.op_collections.irt_egr_congestion_map_op(
-                                        pos, stage="egr3D", resolve_congestion="high")
-                                else:
-                                    route_utilization_map = model.op_collections.route_utilization_map_op(
+                                        route_utilization_map = model.op_collections.gpugr_congestion_map_op(
+                                            pos
+                                        )
+                                        gpugr_metrics = getattr(
+                                            model.op_collections.gpugr_congestion_map_op,
+                                            "last_metrics",
+                                            {},
+                                        ) or {}
+                                        if _is_modularity_inflation_enabled(params):
+                                            modularity_maps = _prepare_modularity_maps_from_gpugr(
+                                                placedb,
+                                                model.op_collections.gpugr_congestion_map_op,
+                                                pos,
+                                                eps=getattr(params, "modularity_active_bin_overflow_eps", 1e-6),
+                                            )
+                                    elif params.adjust_nctugr_area_flag:
+                                        route_utilization_map = model.op_collections.irt_egr_congestion_map_op(
+                                            pos, stage="egr3D", resolve_congestion="high")
+                                    else:
+                                        route_utilization_map = model.op_collections.route_utilization_map_op(
+                                            pos)
+                                    if params.plot_flag:
+                                        path = "%s/%s" % (params.result_dir,
+                                                          params.design_name())
+                                        figname = "%s/plot/route%d.png" % (
+                                            path, num_area_adjust)
+                                        os.system("mkdir -p %s" %
+                                                  (os.path.dirname(figname)))
+                                        plt.imsave(
+                                            figname, route_utilization_map.pow(
+                                                params.route_opt_adjust_exponent).data.cpu().numpy().T, origin="lower"
+                                        )
+                                        logging.info(
+                                            "plot route utilization map to %s" % (
+                                                figname)
+                                        )
+                                        logging.info(
+                                            "plot route utilization map to %s" % (
+                                                figname)
+                                        )
+                                if round_adjust_pin_area_flag:
+                                    pin_utilization_map = model.op_collections.pin_utilization_map_op(
                                         pos)
-                                if params.plot_flag:
-                                    path = "%s/%s" % (params.result_dir,
-                                                      params.design_name())
-                                    figname = "%s/plot/route%d.png" % (
-                                        path, num_area_adjust)
-                                    os.system("mkdir -p %s" %
-                                              (os.path.dirname(figname)))
-                                    plt.imsave(
-                                        figname, route_utilization_map.pow(
-                                            params.route_opt_adjust_exponent).data.cpu().numpy().T, origin="lower"
+                                    if params.plot_flag:
+                                        path = "%s/%s" % (params.result_dir,
+                                                          params.design_name())
+                                        figname = "%s/plot/pin%d.png" % (
+                                            path, num_area_adjust)
+                                        os.system("mkdir -p %s" %
+                                                  (os.path.dirname(figname)))
+                                        plt.imsave(
+                                            figname, pin_utilization_map.data.cpu().numpy().T, origin="lower"
+                                        )
+                                if getattr(model, "inflation_state", None) is not None:
+                                    low_util_context = xplace_inflation_controller.prepare_low_util_inflation(
+                                        params,
+                                        model.inflation_state,
+                                        placedb,
+                                        self.data_collections,
+                                        model.op_collections.adjust_node_area_op,
+                                        gpugr_metrics,
                                     )
-                                    logging.info(
-                                        "plot route utilization map to %s" % (
-                                            figname)
-                                    )
-                                    logging.info(
-                                        "plot route utilization map to %s" % (
-                                            figname)
-                                    )
-                            if round_adjust_pin_area_flag:
-                                pin_utilization_map = model.op_collections.pin_utilization_map_op(
-                                    pos)
-                                if params.plot_flag:
-                                    path = "%s/%s" % (params.result_dir,
-                                                      params.design_name())
-                                    figname = "%s/plot/pin%d.png" % (
-                                        path, num_area_adjust)
-                                    os.system("mkdir -p %s" %
-                                              (os.path.dirname(figname)))
-                                    plt.imsave(
-                                        figname, pin_utilization_map.data.cpu().numpy().T, origin="lower"
-                                    )
-                            if getattr(model, "inflation_state", None) is not None:
-                                low_util_context = xplace_inflation_controller.prepare_low_util_inflation(
-                                    params,
-                                    model.inflation_state,
-                                    placedb,
-                                    self.data_collections,
-                                    model.op_collections.adjust_node_area_op,
-                                    gpugr_metrics,
-                                )
-                            (
-                                adjust_area_flag,
-                                adjust_route_area_flag,
-                                adjust_pin_area_flag,
-                            ) = model.op_collections.adjust_node_area_op(
-                                pos,
-                                route_utilization_map,
-                                pin_utilization_map,
-                                modularity_maps=modularity_maps,
-                                inflation_round=int(num_area_adjust),
-                            )
-                            xplace_inflation_controller.restore_low_util_inflation(
-                                model.op_collections.adjust_node_area_op,
-                                low_util_context,
-                            )
-                            low_util_metrics = {}
-                            if adjust_area_flag:
-                                low_util_metrics = xplace_inflation_controller.apply_low_util_target_density(
-                                    params,
-                                    getattr(model, "inflation_state", None),
-                                    self.data_collections,
-                                    placedb,
+                                (
+                                    adjust_area_flag,
+                                    adjust_route_area_flag,
+                                    adjust_pin_area_flag,
+                                ) = model.op_collections.adjust_node_area_op(
                                     pos,
+                                    route_utilization_map,
+                                    pin_utilization_map,
+                                    modularity_maps=modularity_maps,
+                                    inflation_round=int(num_area_adjust),
+                                )
+                                xplace_inflation_controller.restore_low_util_inflation(
+                                    model.op_collections.adjust_node_area_op,
                                     low_util_context,
                                 )
-                            min_area_inc_metrics = {}
-                            if (
-                                adjust_area_flag
-                                and current_inflation_round is not None
-                                and use_xplace_outer_loop
-                            ):
-                                min_area_inc_result = xplace_inflation_controller.enforce_min_area_increment(
-                                    params,
-                                    model.inflation_state,
-                                    self.data_collections,
-                                    placedb,
-                                    pos,
+                                low_util_metrics = {}
+                                if adjust_area_flag:
+                                    low_util_metrics = xplace_inflation_controller.apply_low_util_target_density(
+                                        params,
+                                        getattr(model, "inflation_state", None),
+                                        self.data_collections,
+                                        placedb,
+                                        pos,
+                                        low_util_context,
+                                    )
+                                min_area_inc_metrics = {}
+                                if (
+                                    adjust_area_flag
+                                    and current_inflation_round is not None
+                                    and use_xplace_outer_loop
+                                ):
+                                    min_area_inc_result = xplace_inflation_controller.enforce_min_area_increment(
+                                        params,
+                                        model.inflation_state,
+                                        self.data_collections,
+                                        placedb,
+                                        pos,
+                                    )
+                                    movable_area_increment_ratio = min_area_inc_result.get(
+                                        "movable_area_increment_ratio"
+                                    )
+                                    if movable_area_increment_ratio is not None:
+                                        min_area_inc_metrics = {
+                                            "xplace_movable_area_increment_ratio": float(
+                                                movable_area_increment_ratio
+                                            ),
+                                            "xplace_min_area_increment_threshold": float(
+                                                min_area_inc_result[
+                                                    "min_area_increment_threshold"
+                                                ]
+                                            ),
+                                        }
+                                    if min_area_inc_result.get("triggered"):
+                                        low_util_metrics = {}
+                                        adjust_area_flag = False
+                                        adjust_route_area_flag = False
+                                        adjust_pin_area_flag = False
+                                content += " -> (%d, %d, %d)" % (
+                                    adjust_area_flag,
+                                    adjust_route_area_flag,
+                                    adjust_pin_area_flag,
                                 )
-                                movable_area_increment_ratio = min_area_inc_result.get(
-                                    "movable_area_increment_ratio"
-                                )
-                                if movable_area_increment_ratio is not None:
-                                    min_area_inc_metrics = {
-                                        "xplace_movable_area_increment_ratio": float(
-                                            movable_area_increment_ratio
+                                logging.info(content)
+                                if current_inflation_round is not None:
+                                    round_status = "applied" if adjust_area_flag else "stopped"
+                                    xplace_inflation_controller.finish_inflation_round(
+                                        model.inflation_state,
+                                        self.data_collections,
+                                        placedb,
+                                        adjust_area_flag=adjust_area_flag,
+                                        adjust_route_area_flag=adjust_route_area_flag,
+                                        adjust_pin_area_flag=adjust_pin_area_flag,
+                                        status=round_status,
+                                        pos=pos,
+                                        gr_metrics=dict(
+                                            {
+                                                "placement_overflow": Llambda_metrics[-1][-1].overflow,
+                                            },
+                                            **min_area_inc_metrics,
+                                            **low_util_metrics,
+                                            **gpugr_metrics,
                                         ),
-                                        "xplace_min_area_increment_threshold": float(
-                                            min_area_inc_result[
-                                                "min_area_increment_threshold"
-                                            ]
-                                        ),
-                                    }
-                                if min_area_inc_result.get("triggered"):
-                                    low_util_metrics = {}
-                                    adjust_area_flag = False
-                                    adjust_route_area_flag = False
-                                    adjust_pin_area_flag = False
-                            content += " -> (%d, %d, %d)" % (
-                                adjust_area_flag,
-                                adjust_route_area_flag,
-                                adjust_pin_area_flag,
-                            )
-                            logging.info(content)
-                            if current_inflation_round is not None:
-                                round_status = "applied" if adjust_area_flag else "stopped"
-                                xplace_inflation_controller.finish_inflation_round(
-                                    model.inflation_state,
-                                    self.data_collections,
-                                    placedb,
-                                    adjust_area_flag=adjust_area_flag,
-                                    adjust_route_area_flag=adjust_route_area_flag,
-                                    adjust_pin_area_flag=adjust_pin_area_flag,
-                                    status=round_status,
-                                    pos=pos,
-                                    gr_metrics=dict(
-                                        {
-                                            "placement_overflow": Llambda_metrics[-1][-1].overflow,
-                                        },
-                                        **min_area_inc_metrics,
-                                        **low_util_metrics,
-                                        **gpugr_metrics,
-                                    ),
-                                )
-                                selected_metric_name = getattr(
-                                    params,
-                                    "xplace_inflation_select_metric",
-                                    "est_shorts",
-                                )
-                                round_metric_value = xplace_inflation_controller.get_round_metric(
-                                    model.inflation_state.round_records[-1],
-                                    selected_metric_name,
-                                )
-                                if round_metric_value is not None:
-                                    logging.info(
-                                        "Recorded Xplace-style inflation round %d: %s=%.4f trigger_overflow=%.6f",
-                                        num_area_adjust,
+                                    )
+                                    selected_metric_name = getattr(
+                                        params,
+                                        "xplace_inflation_select_metric",
+                                        "est_shorts",
+                                    )
+                                    round_metric_value = xplace_inflation_controller.get_round_metric(
+                                        model.inflation_state.round_records[-1],
                                         selected_metric_name,
-                                        round_metric_value,
-                                        float(Llambda_metrics[-1][-1].overflow),
                                     )
-                            if adjust_area_flag:
-                                num_area_adjust += 1
-                                if getattr(model, "inflation_state", None) is not None:
-                                    model.inflation_state.num_area_adjust = num_area_adjust
-                                # restart Llambda
-                                model.op_collections.density_op.reset()
-                                model.op_collections.density_overflow_op.reset()
-                                model.op_collections.pin_utilization_map_op.reset()
-                                model.initialize_density_weight(
-                                    params, placedb)
-                                model.density_weight.mul_(
-                                    0.1 / params.density_weight)
-                                logging.info("density_weight = %.6E" %
-                                             (model.density_weight.data))
-                                # load state to restart the optimizer
-                                optimizer.load_state_dict(initial_state)
-                                # must after loading the state
-                                initialize_learning_rate(pos)
-                                # increase iterations of the sub problem to slow down the search
-                                model.Lsub_iteration = model.routability_Lsub_iteration
+                                    if round_metric_value is not None:
+                                        logging.info(
+                                            "Recorded Xplace-style inflation round %d: %s=%.4f trigger_overflow=%.6f",
+                                            num_area_adjust,
+                                            selected_metric_name,
+                                            round_metric_value,
+                                            float(Llambda_metrics[-1][-1].overflow),
+                                        )
+                                if adjust_area_flag:
+                                    num_area_adjust += 1
+                                    if getattr(model, "inflation_state", None) is not None:
+                                        model.inflation_state.num_area_adjust = num_area_adjust
+                                    # restart Llambda
+                                    model.op_collections.density_op.reset()
+                                    model.op_collections.density_overflow_op.reset()
+                                    model.op_collections.pin_utilization_map_op.reset()
+                                    model.initialize_density_weight(
+                                        params, placedb)
+                                    model.density_weight.mul_(
+                                        0.1 / params.density_weight)
+                                    logging.info("density_weight = %.6E" %
+                                                 (model.density_weight.data))
+                                    # load state to restart the optimizer
+                                    optimizer.load_state_dict(initial_state)
+                                    # must after loading the state
+                                    initialize_learning_rate(pos)
+                                    # increase iterations of the sub problem to slow down the search
+                                    model.Lsub_iteration = model.routability_Lsub_iteration
 
-                                # reset best metric
-                                best_metric[0] = None
-                                best_pos[0] = None
+                                    # reset best metric
+                                    best_metric[0] = None
+                                    best_pos[0] = None
 
-                                # disable L-shape during inflation recovery;
-                                # it will re-enable when overflow drops below threshold again
-                                # NOTE: can be overridden by l_shape_keep_during_inflation parameter
-                                keep_during_inflation = getattr(params, "l_shape_keep_during_inflation", False)
-                                if getattr(model, "use_l_shape_routability", False) and not keep_during_inflation:
-                                    disable_l_shape_for_recovery(
-                                        iteration,
-                                        reason="inflation",
-                                        update_threshold=True,
-                                        inflation_round=num_area_adjust,
+                                    # disable L-shape during inflation recovery;
+                                    # it will re-enable when overflow drops below threshold again
+                                    # NOTE: can be overridden by l_shape_keep_during_inflation parameter
+                                    keep_during_inflation = getattr(params, "l_shape_keep_during_inflation", False)
+                                    if getattr(model, "use_l_shape_routability", False) and not keep_during_inflation:
+                                        disable_l_shape_for_recovery(
+                                            iteration,
+                                            reason="inflation",
+                                            update_threshold=True,
+                                            inflation_round=num_area_adjust,
+                                        )
+
+                                    break
+                                else:
+                                    num_area_adjust = max_area_adjust_rounds
+                                    if getattr(model, "inflation_state", None) is not None:
+                                        model.inflation_state.num_area_adjust = num_area_adjust
+                                    logging.info(
+                                        "Terminate routability inflation after round %d because adjust_node_area reported no further area change",
+                                        current_inflation_round.round_idx
+                                        if current_inflation_round is not None
+                                        else num_area_adjust,
                                     )
-
-                                break
-                            else:
-                                num_area_adjust = max_area_adjust_rounds
-                                if getattr(model, "inflation_state", None) is not None:
-                                    model.inflation_state.num_area_adjust = num_area_adjust
-                                logging.info(
-                                    "Terminate routability inflation after round %d because adjust_node_area reported no further area change",
-                                    current_inflation_round.round_idx
-                                    if current_inflation_round is not None
-                                    else num_area_adjust,
-                                )
 
                     # gradually reduce gamma to tradeoff smoothness and accuracy
                     if len(placedb.regions) > 0 and Llambda_metrics[-1][-1].goverflow is not None:

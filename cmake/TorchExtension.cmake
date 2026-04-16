@@ -140,4 +140,11 @@ function(add_pytorch_extension target_name)
     TORCH_VERSION_MINOR=${TORCH_VERSION_MINOR}
     ENABLE_CUDA=${TORCH_ENABLE_CUDA}
     ${ARG_EXTRA_DEFINITIONS})
+  # Statically link libstdc++ on Linux so the .so extensions do not carry a
+  # runtime GLIBCXX version requirement.  This avoids ImportError when the
+  # wheel is loaded inside a PyInstaller bundle that ships an older
+  # libstdc++.so.6.
+  if(UNIX AND NOT APPLE)
+    target_link_options(${target_name} PRIVATE "-static-libstdc++")
+  endif()
 endfunction()

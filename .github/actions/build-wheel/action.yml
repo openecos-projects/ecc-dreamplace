@@ -1,5 +1,6 @@
 name: Build DreamPlace Wheel
 description: Compile C++ operators, build raw wheel, auditwheel repair, smoke test
+# Requires: container quay.io/pypa/manylinux_2_28_x86_64 at the job level
 
 runs:
   using: composite
@@ -7,11 +8,17 @@ runs:
     - name: Install system dependencies
       shell: bash
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          cmake ninja-build build-essential pkg-config patchelf \
-          libboost-all-dev libcairo2-dev libgflags-dev \
-          libgoogle-glog-dev flex libfl-dev bison libeigen3-dev libgtest-dev unzip zip
+        yum install -y epel-release
+        yum install -y dnf-plugins-core
+        dnf config-manager --set-enabled powertools || true
+        yum install -y \
+          cmake ninja-build pkgconfig patchelf \
+          boost-devel cairo-devel gflags-devel \
+          glog-devel flex flex-devel bison eigen3-devel gtest-devel unzip zip
+
+    - name: Setup Python 3.11
+      shell: bash
+      run: echo "/opt/python/cp311-cp311/bin" >> "$GITHUB_PATH"
 
     - name: Setup Bazel
       uses: bazel-contrib/setup-bazel@0.14.0
@@ -19,11 +26,6 @@ runs:
         bazelisk-cache: true
         disk-cache: ${{ github.workflow }}
         repository-cache: true
-
-    - name: Setup Python 3.11
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
 
     - name: Setup uv
       uses: astral-sh/setup-uv@v5
@@ -37,4 +39,6 @@ runs:
 
     - name: Build repaired wheel (auditwheel + smoke test)
       shell: bash
-      run: bazel run //:build_dreamplace_wheel
+      run: |
+        source /opt/rh/gcc-toolset-12/enable
+        bazel run //:build_dreamplace_wheel

@@ -56,12 +56,14 @@ jobs:
         id: version
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG_VERSION="${{ github.event.inputs.tag_name }}"
+            FULL_TAG="${{ github.event.inputs.tag_name }}"
+            TAG_VERSION="${FULL_TAG#v}"
           else
+            FULL_TAG="${GITHUB_REF_NAME}"
             TAG_VERSION="${GITHUB_REF_NAME#v}"
           fi
           echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
-          echo "full_tag=${GITHUB_REF_NAME:-${{ github.event.inputs.tag_name }}}" >> "$GITHUB_OUTPUT"
+          echo "full_tag=$FULL_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Generate release notes
         id: notes

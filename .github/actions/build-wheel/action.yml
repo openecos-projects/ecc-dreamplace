@@ -12,6 +12,7 @@ runs:
         yum install -y dnf-plugins-core
         dnf config-manager --set-enabled powertools || true
         yum install -y \
+          gcc-toolset-12-gcc gcc-toolset-12-gcc-c++ gcc-toolset-12-libstdc++-devel \
           cmake ninja-build pkgconfig patchelf \
           boost-devel cairo-devel gflags-devel \
           glog-devel flex flex-devel bison eigen3-devel gtest-devel unzip zip

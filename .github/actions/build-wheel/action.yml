@@ -22,11 +22,11 @@ runs:
       run: echo "/opt/python/cp311-cp311/bin" >> "$GITHUB_PATH"
 
     - name: Setup Bazel
-      uses: bazel-contrib/setup-bazel@0.14.0
-      with:
-        bazelisk-cache: true
-        disk-cache: ${{ github.workflow }}
-        repository-cache: true
+      shell: bash
+      run: |
+        curl -fsSL https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64 \
+          -o /usr/local/bin/bazel
+        chmod +x /usr/local/bin/bazel
 
     - name: Setup uv
       uses: astral-sh/setup-uv@v5

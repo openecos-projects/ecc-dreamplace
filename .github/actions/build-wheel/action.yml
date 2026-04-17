@@ -40,6 +40,7 @@ runs:
 
     - name: Build repaired wheel (auditwheel + smoke test)
       shell: bash
-      run: |
-        source /opt/rh/gcc-toolset-12/enable
-        bazel run //:build_dreamplace_wheel
+      env:
+        CC: /opt/rh/gcc-toolset-12/root/usr/bin/gcc
+        CXX: /opt/rh/gcc-toolset-12/root/usr/bin/g++
+      run: bazel run //:build_dreamplace_wheel

@@ -1,6 +1,6 @@
 name: Build DreamPlace Wheel
 description: Compile C++ operators, build raw wheel, auditwheel repair, smoke test
-# Requires: container quay.io/pypa/manylinux_2_28_x86_64 at the job level
+# Requires: container quay.io/pypa/manylinux_2_34_x86_64 at the job level
 
 runs:
   using: composite
@@ -8,11 +8,9 @@ runs:
     - name: Install system dependencies
       shell: bash
       run: |
-        yum install -y epel-release
-        yum install -y dnf-plugins-core
-        dnf config-manager --set-enabled powertools || true
-        yum install -y \
-          gcc-toolset-12-gcc gcc-toolset-12-gcc-c++ gcc-toolset-12-libstdc++-devel \
+        dnf install -y epel-release
+        dnf config-manager --set-enabled crb || true
+        dnf install -y \
           cmake ninja-build pkgconfig patchelf \
           boost-devel cairo-devel gflags-devel \
           glog-devel flex flex-devel bison eigen3-devel gtest-devel unzip zip
@@ -40,7 +38,4 @@ runs:
 
     - name: Build repaired wheel (auditwheel + smoke test)
       shell: bash
-      env:
-        CC: /opt/rh/gcc-toolset-12/root/usr/bin/gcc
-        CXX: /opt/rh/gcc-toolset-12/root/usr/bin/g++
       run: bazel run //:build_dreamplace_wheel

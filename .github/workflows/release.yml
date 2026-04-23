@@ -8,7 +8,7 @@ on:
       tag_name:
         description: 'Tag to release (e.g., v0.1.0-alpha.1)'
         required: true
-        default: 'v0.1.0-alpha.1'
+        default: 'v0.1.0-alpha.2'
 
 permissions:
   contents: write

@@ -633,8 +633,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                                       params.design_name())
                                     figname = "%s/plot/route%d.png" % (
                                         path, num_area_adjust)
-                                    os.system("mkdir -p %s" %
-                                              (os.path.dirname(figname)))
+                                    os.makedirs(os.path.dirname(figname),
+                                                exist_ok=True)
                                     route_utilization_map_copy = route_utilization_map.clone()
                                     route_utilization_map_copy = route_utilization_map_copy - 1
                                     route_utilization_map_copy.clamp_(min=0, max=4)
@@ -658,8 +658,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                                       params.design_name())
                                     figname = "%s/plot/pin%d.png" % (
                                         path, num_area_adjust)
-                                    os.system("mkdir -p %s" %
-                                              (os.path.dirname(figname)))
+                                    os.makedirs(os.path.dirname(figname),
+                                                exist_ok=True)
                                     plt.imsave(
                                         figname, pin_utilization_map.data.cpu().numpy().T, origin="lower"
                                     )

@@ -34,7 +34,6 @@ jobs:
           name: dreamplace-wheel
           path: |
             dist/wheel/repaired/ecc_dreamplace-*.whl
-            dist/wheel/SHA256SUMS
 
   release:
     name: Create Release
@@ -83,7 +82,10 @@ jobs:
             echo "## Checksums"
             echo ""
             echo '```'
-            cat dist/wheel/SHA256SUMS
+            (
+              cd dist/wheel/repaired
+              sha256sum ecc_dreamplace-*.whl
+            )
             echo '```'
           } > release-notes.md
           cat release-notes.md
@@ -95,5 +97,4 @@ jobs:
           gh release create "${{ steps.version.outputs.full_tag }}" \
             --title "ecc-dreamplace ${{ steps.version.outputs.full_tag }}" \
             --notes-file release-notes.md \
-            dist/wheel/repaired/ecc_dreamplace-*.whl \
-            dist/wheel/SHA256SUMS
+            dist/wheel/repaired/ecc_dreamplace-*.whl

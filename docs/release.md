@@ -33,7 +33,7 @@ gh pr create --title "chore: bump version to 0.2.0" --body "Preparing release v0
 
 After merge to `main`:
 1. **Auto-tag**: `auto-tag.yml` detects the version change and creates `v0.2.0` (skipped if tag exists).
-2. **Release**: `release.yml` triggers on the `v*` tag, builds the wheel, and publishes to GitHub Releases.
+2. **Release**: `release.yml` triggers on the `v*` tag, builds the wheel, generates release notes with `git-cliff` using `.github/cliff.toml`, and publishes to GitHub Releases.
 
 ## Verify
 

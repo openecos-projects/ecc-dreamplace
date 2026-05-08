@@ -29,6 +29,10 @@ dependencies = [
 [tool.uv.build-backend]
 module-name = "dreamplace"
 module-root = ""
+wheel-include = [
+  "thirdparty/NCTUgr.ICCAD2012/**",
+  "thirdparty/flute/lut.ICCAD2015/**",
+]
 
 [dependency-groups]
 dev = [

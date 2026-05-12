@@ -49,7 +49,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: dreamplace-wheel
-          path: dist/wheel
+          path: dist/wheel/repaired
 
       - name: Determine tag version
         id: version

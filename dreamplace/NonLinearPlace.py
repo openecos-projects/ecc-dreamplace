@@ -39,6 +39,7 @@ from dreamplace.ops.routability.egr_resample import (
 from dreamplace.ops.routability.same_net_topo_scoring import (
     build_same_net_topology_cache,
 )
+from dreamplace.ops.routability.profile_timing import profile_scope
 from dreamplace.ops.routability.leiden_clustering import (
     build_active_leiden_clusters,
     plot_modularity_clusters,
@@ -450,46 +451,63 @@ def _resolve_l_shape_wire_width(placedb, route_xsize=None, route_ysize=None, fal
 def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
     from tools.iEDA.module.gpugr import IEDAGPUGR
 
-    _write_back_autodmp_pos_to_ieda(pos, params, placedb)
-    route_xsize, route_ysize = _sync_gpugr_route_grid_to_autodmp(
-        params,
-        placedb,
-        model=model,
-    )
+    with profile_scope(params, "gpugr_prepare.write_back_pos", tensor=pos):
+        _write_back_autodmp_pos_to_ieda(pos, params, placedb)
+    with profile_scope(params, "gpugr_prepare.sync_route_grid", tensor=pos):
+        route_xsize, route_ysize = _sync_gpugr_route_grid_to_autodmp(
+            params,
+            placedb,
+            model=model,
+        )
     l_shape_num_bins_x = int(getattr(params, "num_bins_x", placedb.num_bins_x))
     l_shape_num_bins_y = int(getattr(params, "num_bins_y", placedb.num_bins_y))
 
     gpugr_op = IEDAGPUGR(dir_workspace=placedb.data_manager.dir_workspace)
-    result = gpugr_op.run_gpugr(
-        out_dir=os.path.join(params.result_dir, "gpugr_l_shape"),
-        design_name=params.design_name(),
-        gpu=getattr(params, "gpu_id", 0),
-        threads=params.num_threads,
-        route_xsize=route_xsize,
-        route_ysize=route_ysize,
-        rrr_iters=int(getattr(params, "gpugr_l_direction_rrr_iters", 0)),
-        skip_m1_route=True,
-        keep_temp_def=False,
-        save_artifacts=bool(getattr(params, "gpugr_l_direction_save_artifacts", 0)),
-        include_route_entries=True,
-    )
+    with profile_scope(
+        params,
+        "gpugr_prepare.run_gpugr",
+        tensor=pos,
+        route_grid=f"{route_xsize}x{route_ysize}",
+    ):
+        result = gpugr_op.run_gpugr(
+            out_dir=os.path.join(params.result_dir, "gpugr_l_shape"),
+            design_name=params.design_name(),
+            gpu=getattr(params, "gpu_id", 0),
+            threads=params.num_threads,
+            route_xsize=route_xsize,
+            route_ysize=route_ysize,
+            rrr_iters=int(getattr(params, "gpugr_l_direction_rrr_iters", 0)),
+            skip_m1_route=True,
+            keep_temp_def=False,
+            save_artifacts=bool(getattr(params, "gpugr_l_direction_save_artifacts", 0)),
+            include_route_entries=True,
+        )
 
     maps = result["maps"]
     metrics = result["metrics"]
     route_entries = result.get("route_entries", [])
     total_entries = sum(len(net.get("entries", [])) for net in route_entries)
-    same_net_topo_cache, same_net_topo_stats = build_same_net_topology_cache(
-        route_entries,
-        placedb,
-    )
+    with profile_scope(
+        params,
+        "gpugr_prepare.same_net_topology_cache",
+        tensor=pos,
+        route_nets=len(route_entries),
+        route_entries=total_entries,
+    ):
+        same_net_topo_cache, same_net_topo_stats = build_same_net_topology_cache(
+            route_entries,
+            placedb,
+            profile_enabled=params,
+        )
 
-    capacity_map = maps["capacity_map"].detach().to(device=pos.device, dtype=pos.dtype)
-    raw_wire_layer_map = maps["raw_wire_demand_map"].detach().to(device=pos.device, dtype=pos.dtype)
-    fix_usage_layer_map = maps["fix_usage_map"].detach().to(device=pos.device, dtype=pos.dtype)
-    mov_usage_layer_map = maps["mov_usage_map"].detach().to(device=pos.device, dtype=pos.dtype)
-    total_demand_map = (maps["wire_demand_map"] + maps["via_demand_map"]).detach().to(
-        device=pos.device, dtype=pos.dtype
-    )
+    with profile_scope(params, "gpugr_prepare.map_to_device", tensor=pos):
+        capacity_map = maps["capacity_map"].detach().to(device=pos.device, dtype=pos.dtype)
+        raw_wire_layer_map = maps["raw_wire_demand_map"].detach().to(device=pos.device, dtype=pos.dtype)
+        fix_usage_layer_map = maps["fix_usage_map"].detach().to(device=pos.device, dtype=pos.dtype)
+        mov_usage_layer_map = maps["mov_usage_map"].detach().to(device=pos.device, dtype=pos.dtype)
+        total_demand_map = (maps["wire_demand_map"] + maps["via_demand_map"]).detach().to(
+            device=pos.device, dtype=pos.dtype
+        )
     supply_xy = capacity_map.sum(dim=0)
     raw_wire_xy = raw_wire_layer_map.sum(dim=0)
     fix_usage_xy = fix_usage_layer_map.sum(dim=0)
@@ -515,21 +533,27 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
         capacity_map,
         mov_usage_layer_map,
     )
-    supply_map = _resample_xy_map(supply_xy, l_shape_num_bins_x, l_shape_num_bins_y)
-    raw_wire_demand_map = _resample_xy_map(raw_wire_xy, l_shape_num_bins_x, l_shape_num_bins_y)
-    fix_usage_map = _resample_xy_map(fix_usage_xy, l_shape_num_bins_x, l_shape_num_bins_y)
-    mov_usage_map = _resample_xy_map(mov_usage_xy, l_shape_num_bins_x, l_shape_num_bins_y)
-    demand_map = _resample_xy_map(demand_xy, l_shape_num_bins_x, l_shape_num_bins_y)
-    supply_map_h = _resample_xy_map(supply_h_xy, l_shape_num_bins_x, l_shape_num_bins_y)
-    supply_map_v = _resample_xy_map(supply_v_xy, l_shape_num_bins_x, l_shape_num_bins_y)
-    raw_wire_demand_map_h = _resample_xy_map(raw_wire_h_xy, l_shape_num_bins_x, l_shape_num_bins_y)
-    raw_wire_demand_map_v = _resample_xy_map(raw_wire_v_xy, l_shape_num_bins_x, l_shape_num_bins_y)
-    fix_usage_map_h = _resample_xy_map(fix_usage_h_xy, l_shape_num_bins_x, l_shape_num_bins_y)
-    fix_usage_map_v = _resample_xy_map(fix_usage_v_xy, l_shape_num_bins_x, l_shape_num_bins_y)
-    mov_usage_map_h = _resample_xy_map(mov_usage_h_xy, l_shape_num_bins_x, l_shape_num_bins_y)
-    mov_usage_map_v = _resample_xy_map(mov_usage_v_xy, l_shape_num_bins_x, l_shape_num_bins_y)
-    demand_map_h = _resample_xy_map(demand_h_xy, l_shape_num_bins_x, l_shape_num_bins_y)
-    demand_map_v = _resample_xy_map(demand_v_xy, l_shape_num_bins_x, l_shape_num_bins_y)
+    with profile_scope(
+        params,
+        "gpugr_prepare.split_resample_maps",
+        tensor=pos,
+        l_shape_bins=f"{l_shape_num_bins_x}x{l_shape_num_bins_y}",
+    ):
+        supply_map = _resample_xy_map(supply_xy, l_shape_num_bins_x, l_shape_num_bins_y)
+        raw_wire_demand_map = _resample_xy_map(raw_wire_xy, l_shape_num_bins_x, l_shape_num_bins_y)
+        fix_usage_map = _resample_xy_map(fix_usage_xy, l_shape_num_bins_x, l_shape_num_bins_y)
+        mov_usage_map = _resample_xy_map(mov_usage_xy, l_shape_num_bins_x, l_shape_num_bins_y)
+        demand_map = _resample_xy_map(demand_xy, l_shape_num_bins_x, l_shape_num_bins_y)
+        supply_map_h = _resample_xy_map(supply_h_xy, l_shape_num_bins_x, l_shape_num_bins_y)
+        supply_map_v = _resample_xy_map(supply_v_xy, l_shape_num_bins_x, l_shape_num_bins_y)
+        raw_wire_demand_map_h = _resample_xy_map(raw_wire_h_xy, l_shape_num_bins_x, l_shape_num_bins_y)
+        raw_wire_demand_map_v = _resample_xy_map(raw_wire_v_xy, l_shape_num_bins_x, l_shape_num_bins_y)
+        fix_usage_map_h = _resample_xy_map(fix_usage_h_xy, l_shape_num_bins_x, l_shape_num_bins_y)
+        fix_usage_map_v = _resample_xy_map(fix_usage_v_xy, l_shape_num_bins_x, l_shape_num_bins_y)
+        mov_usage_map_h = _resample_xy_map(mov_usage_h_xy, l_shape_num_bins_x, l_shape_num_bins_y)
+        mov_usage_map_v = _resample_xy_map(mov_usage_v_xy, l_shape_num_bins_x, l_shape_num_bins_y)
+        demand_map_h = _resample_xy_map(demand_h_xy, l_shape_num_bins_x, l_shape_num_bins_y)
+        demand_map_v = _resample_xy_map(demand_v_xy, l_shape_num_bins_x, l_shape_num_bins_y)
     supply_original_maps = {
         "supply_original": supply_map.clone(),
         "supply_original_h": supply_map_h.clone(),
@@ -820,11 +844,19 @@ def _resolve_l_directions_for_l_shape(
             metrics["num_overflow_nets"],
             metrics["gr_est_shorts"],
         )
-        return steiner_topo_op.resolve_l_directions_from_gpugr(route_entries)
+        with profile_scope(
+            params,
+            "l_direction.resolve_from_gpugr",
+            tensor=pos,
+            route_nets=len(route_entries),
+            route_entries=total_entries,
+        ):
+            return steiner_topo_op.resolve_l_directions_from_gpugr(route_entries)
 
     egr_guide_path = getattr(params, "egr_guide_path", _get_default_egr_guide_path(params))
     logging.info("Resolve L directions from EGR guide: %s", egr_guide_path)
-    return steiner_topo_op.resolve_l_directions_from_egr(egr_guide_path)
+    with profile_scope(params, "l_direction.resolve_from_egr", tensor=pos):
+        return steiner_topo_op.resolve_l_directions_from_egr(egr_guide_path)
 
 
 class NonLinearPlace(BasicPlace.BasicPlace):
@@ -1881,13 +1913,14 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             t_l_shape_init = time.time()
                             
                             # Step 1: 更新Steiner树
-                            with torch.no_grad():
-                                pin_pos = self.op_collections.pin_pos_op(pos)
-                                if pin_pos.is_cuda:
-                                    pin_pos = pin_pos.cpu()
-                                self.data_collections.net_flat_topo_sort, self.data_collections.net_flat_topo_sort_start, \
-                                    self.data_collections.pin_fa, self.data_collections.flat_pin_to, self.data_collections.flat_pin_to_start, \
-                                    self.data_collections.flat_pin_from = self.op_collections.steiner_topo_op.rebuild_tree(pin_pos)
+                            with profile_scope(params, "l_shape_init.rebuild_tree", tensor=pos, iteration=iteration):
+                                with torch.no_grad():
+                                    pin_pos = self.op_collections.pin_pos_op(pos)
+                                    if pin_pos.is_cuda:
+                                        pin_pos = pin_pos.cpu()
+                                    self.data_collections.net_flat_topo_sort, self.data_collections.net_flat_topo_sort_start, \
+                                        self.data_collections.pin_fa, self.data_collections.flat_pin_to, self.data_collections.flat_pin_to_start, \
+                                        self.data_collections.flat_pin_from = self.op_collections.steiner_topo_op.rebuild_tree(pin_pos)
                             
                             L_shape_num_bins_x = params.num_bins_x
                             L_shape_num_bins_y = params.num_bins_y
@@ -2032,26 +2065,27 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             
                             # Step 5: 初始化L形routability模块
 
-                            model.init_l_shape_routability(
-                                wire_width=wire_width,
-                                num_bins_x=L_shape_num_bins_x,
-                                num_bins_y=L_shape_num_bins_y,
-                                target_density=supply_map,
-                                target_demand=demand_map,
-                                raw_wire_demand_map=l_shape_inputs.get("raw_wire_demand_map"),
-                                supply_original=l_shape_inputs.get("supply_original"),
-                                target_density_h=l_shape_inputs.get("supply_map_h"),
-                                target_density_v=l_shape_inputs.get("supply_map_v"),
-                                target_demand_h=l_shape_inputs.get("demand_map_h"),
-                                target_demand_v=l_shape_inputs.get("demand_map_v"),
-                                raw_wire_demand_map_h=l_shape_inputs.get("raw_wire_demand_map_h"),
-                                raw_wire_demand_map_v=l_shape_inputs.get("raw_wire_demand_map_v"),
-                                supply_original_h=l_shape_inputs.get("supply_original_h"),
-                                supply_original_v=l_shape_inputs.get("supply_original_v"),
-                                fix_usage_map=l_shape_inputs.get("fix_usage_map"),
-                                fix_usage_map_h=l_shape_inputs.get("fix_usage_map_h"),
-                                fix_usage_map_v=l_shape_inputs.get("fix_usage_map_v"),
-                            )
+                            with profile_scope(params, "l_shape_init.construct_op", tensor=pos, iteration=iteration):
+                                model.init_l_shape_routability(
+                                    wire_width=wire_width,
+                                    num_bins_x=L_shape_num_bins_x,
+                                    num_bins_y=L_shape_num_bins_y,
+                                    target_density=supply_map,
+                                    target_demand=demand_map,
+                                    raw_wire_demand_map=l_shape_inputs.get("raw_wire_demand_map"),
+                                    supply_original=l_shape_inputs.get("supply_original"),
+                                    target_density_h=l_shape_inputs.get("supply_map_h"),
+                                    target_density_v=l_shape_inputs.get("supply_map_v"),
+                                    target_demand_h=l_shape_inputs.get("demand_map_h"),
+                                    target_demand_v=l_shape_inputs.get("demand_map_v"),
+                                    raw_wire_demand_map_h=l_shape_inputs.get("raw_wire_demand_map_h"),
+                                    raw_wire_demand_map_v=l_shape_inputs.get("raw_wire_demand_map_v"),
+                                    supply_original_h=l_shape_inputs.get("supply_original_h"),
+                                    supply_original_v=l_shape_inputs.get("supply_original_v"),
+                                    fix_usage_map=l_shape_inputs.get("fix_usage_map"),
+                                    fix_usage_map_h=l_shape_inputs.get("fix_usage_map_h"),
+                                    fix_usage_map_v=l_shape_inputs.get("fix_usage_map_v"),
+                                )
                             if model.l_shape_routability_op is not None:
                                 model.l_shape_routability_op.update_same_net_topology(
                                     topo_cache=l_shape_inputs.get("same_net_topo_cache"),
@@ -2216,13 +2250,14 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             if model.l_shape_routability_op is not None:
                                 model.l_shape_routability_op.segment_builder.reset_cache()
                             
-                            with torch.no_grad():
-                                pin_pos = self.op_collections.pin_pos_op(pos)
-                                if pin_pos.is_cuda:
-                                    pin_pos = pin_pos.cpu()
-                                self.data_collections.net_flat_topo_sort, self.data_collections.net_flat_topo_sort_start, \
-                                    self.data_collections.pin_fa, self.data_collections.flat_pin_to, self.data_collections.flat_pin_to_start, \
-                                    self.data_collections.flat_pin_from = self.op_collections.steiner_topo_op.rebuild_tree(pin_pos)
+                            with profile_scope(params, "l_shape_update.rebuild_tree", tensor=pos, iteration=iteration):
+                                with torch.no_grad():
+                                    pin_pos = self.op_collections.pin_pos_op(pos)
+                                    if pin_pos.is_cuda:
+                                        pin_pos = pin_pos.cpu()
+                                    self.data_collections.net_flat_topo_sort, self.data_collections.net_flat_topo_sort_start, \
+                                        self.data_collections.pin_fa, self.data_collections.flat_pin_to, self.data_collections.flat_pin_to_start, \
+                                        self.data_collections.flat_pin_from = self.op_collections.steiner_topo_op.rebuild_tree(pin_pos)
                             
                             gpugr_inputs = None
                             l_shape_inputs = None
@@ -2274,27 +2309,28 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     ),
                                 )
                             if model.l_shape_routability_op is not None and l_shape_inputs is not None:
-                                model.l_shape_routability_op.update_targets(
-                                    target_density=l_shape_inputs["supply_map"],
-                                    target_demand=l_shape_inputs["demand_map"],
-                                    raw_wire_demand_map=l_shape_inputs.get("raw_wire_demand_map"),
-                                    target_density_h=l_shape_inputs.get("supply_map_h"),
-                                    target_density_v=l_shape_inputs.get("supply_map_v"),
-                                    target_demand_h=l_shape_inputs.get("demand_map_h"),
-                                    target_demand_v=l_shape_inputs.get("demand_map_v"),
-                                    raw_wire_demand_map_h=l_shape_inputs.get("raw_wire_demand_map_h"),
-                                    raw_wire_demand_map_v=l_shape_inputs.get("raw_wire_demand_map_v"),
-                                    supply_original=l_shape_inputs.get("supply_original"),
-                                    supply_original_h=l_shape_inputs.get("supply_original_h"),
-                                    supply_original_v=l_shape_inputs.get("supply_original_v"),
-                                    fix_usage_map=l_shape_inputs.get("fix_usage_map"),
-                                    fix_usage_map_h=l_shape_inputs.get("fix_usage_map_h"),
-                                    fix_usage_map_v=l_shape_inputs.get("fix_usage_map_v"),
-                                )
-                                model.l_shape_routability_op.update_same_net_topology(
-                                    topo_cache=l_shape_inputs.get("same_net_topo_cache"),
-                                    topo_stats=l_shape_inputs.get("same_net_topo_stats"),
-                                )
+                                with profile_scope(params, "l_shape_update.update_targets", tensor=pos, iteration=iteration):
+                                    model.l_shape_routability_op.update_targets(
+                                        target_density=l_shape_inputs["supply_map"],
+                                        target_demand=l_shape_inputs["demand_map"],
+                                        raw_wire_demand_map=l_shape_inputs.get("raw_wire_demand_map"),
+                                        target_density_h=l_shape_inputs.get("supply_map_h"),
+                                        target_density_v=l_shape_inputs.get("supply_map_v"),
+                                        target_demand_h=l_shape_inputs.get("demand_map_h"),
+                                        target_demand_v=l_shape_inputs.get("demand_map_v"),
+                                        raw_wire_demand_map_h=l_shape_inputs.get("raw_wire_demand_map_h"),
+                                        raw_wire_demand_map_v=l_shape_inputs.get("raw_wire_demand_map_v"),
+                                        supply_original=l_shape_inputs.get("supply_original"),
+                                        supply_original_h=l_shape_inputs.get("supply_original_h"),
+                                        supply_original_v=l_shape_inputs.get("supply_original_v"),
+                                        fix_usage_map=l_shape_inputs.get("fix_usage_map"),
+                                        fix_usage_map_h=l_shape_inputs.get("fix_usage_map_h"),
+                                        fix_usage_map_v=l_shape_inputs.get("fix_usage_map_v"),
+                                    )
+                                    model.l_shape_routability_op.update_same_net_topology(
+                                        topo_cache=l_shape_inputs.get("same_net_topo_cache"),
+                                        topo_stats=l_shape_inputs.get("same_net_topo_stats"),
+                                    )
                                 if (
                                     getattr(model.l_shape_routability_op, "wire_width_h", None) is None
                                     and getattr(model.l_shape_routability_op, "wire_width_v", None) is None

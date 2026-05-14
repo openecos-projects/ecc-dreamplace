@@ -7,6 +7,8 @@
 
 import torch
 import logging
+import hashlib
+from torch.autograd import Function
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +18,82 @@ V_FIRST = 1       # 先垂直后水平, 拐点在 (x1, y2)
 STRAIGHT = 2      # 直线（水平或垂直）
 FAKE_STRAIGHT = 3 # 伪直线（在gcell下只有一条wire）
 UNKNOWN = -1      # 未知，segment阶段跳过
+
+
+def _stable_argsort(values):
+    try:
+        return torch.argsort(values, stable=True)
+    except TypeError:
+        return torch.argsort(values)
+
+
+def _build_gather_plan(indices):
+    indices = indices.to(dtype=torch.long).contiguous()
+    if indices.numel() == 0:
+        empty_long = torch.tensor([], dtype=torch.long, device=indices.device)
+        return {
+            "indices": indices,
+            "order": empty_long,
+            "unique": empty_long,
+            "counts": empty_long,
+        }
+
+    order = _stable_argsort(indices)
+    sorted_indices = indices.index_select(0, order)
+    unique, counts = torch.unique_consecutive(sorted_indices, return_counts=True)
+    return {
+        "indices": indices,
+        "order": order,
+        "unique": unique,
+        "counts": counts.to(dtype=torch.long),
+    }
+
+
+def _move_gather_plan(plan, device):
+    if plan["indices"].device == device:
+        return plan
+    return {key: value.to(device) for key, value in plan.items()}
+
+
+class _DeterministicGather1DFunction(Function):
+    @staticmethod
+    def forward(ctx, values, indices, order, unique_indices, counts):
+        ctx.input_numel = int(values.numel())
+        ctx.save_for_backward(order, unique_indices, counts)
+        return values.index_select(0, indices)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad_values = None
+        if ctx.needs_input_grad[0]:
+            order, unique_indices, counts = ctx.saved_tensors
+            grad_values = grad_output.new_zeros(ctx.input_numel)
+            if unique_indices.numel() > 0 and grad_output.numel() > 0:
+                sorted_grad = grad_output.contiguous().index_select(0, order)
+                counts = counts.to(device=sorted_grad.device)
+                if hasattr(torch, "segment_reduce"):
+                    reduced = torch.segment_reduce(sorted_grad, "sum", lengths=counts)
+                else:
+                    pieces = []
+                    start = 0
+                    for count in counts.cpu().tolist():
+                        end = start + int(count)
+                        pieces.append(sorted_grad[start:end].sum(dim=0))
+                        start = end
+                    reduced = torch.stack(pieces) if pieces else sorted_grad[:0]
+                grad_values.index_copy_(0, unique_indices, reduced)
+        return grad_values, None, None, None, None
+
+
+def _deterministic_gather_1d(values, plan):
+    plan = _move_gather_plan(plan, values.device)
+    return _DeterministicGather1DFunction.apply(
+        values,
+        plan["indices"],
+        plan["order"],
+        plan["unique"],
+        plan["counts"],
+    )
 
 
 class LShapeSegmentBuilder:
@@ -451,13 +529,22 @@ class LShapeSegmentOp:
     优化：预计算拓扑结构，只在坐标更新时重新计算segment位置
     """
     
-    def __init__(self, wire_width=0.0, wire_width_h=None, wire_width_v=None, use_vectorized=True, soft_min_weight=0.0):
+    def __init__(
+        self,
+        wire_width=0.0,
+        wire_width_h=None,
+        wire_width_v=None,
+        use_vectorized=True,
+        soft_min_weight=0.0,
+        deterministic_backward=False,
+    ):
         self.wire_width = wire_width
         self.wire_width_h = float(wire_width if wire_width_h is None else wire_width_h)
         self.wire_width_v = float(wire_width if wire_width_v is None else wire_width_v)
         self.use_directional_widths = wire_width_h is not None or wire_width_v is not None
         self.use_vectorized = use_vectorized
         self.soft_min_weight = float(soft_min_weight)
+        self.deterministic_backward = bool(deterministic_backward)
         self.builder = LShapeSegmentBuilder(
             wire_width,
             wire_width_h=wire_width_h,
@@ -475,21 +562,27 @@ class LShapeSegmentOp:
         self._cached_input_hash = None
         logger.info("LShapeSegmentOp cache reset")
     
+    def _tensor_content_digest(self, tensor):
+        if not isinstance(tensor, torch.Tensor):
+            return ("none", 0, "none")
+        values = tensor.detach()
+        if values.device.type != "cpu":
+            values = values.cpu()
+        values = values.contiguous()
+        digest = hashlib.blake2b(digest_size=16)
+        digest.update(str(values.dtype).encode("ascii"))
+        digest.update(str(tuple(int(dim) for dim in values.shape)).encode("ascii"))
+        if values.numel() > 0:
+            digest.update(values.view(torch.uint8).numpy().tobytes())
+        return (str(values.dtype), int(values.numel()), digest.hexdigest())
+
     def _compute_input_hash(self, flat_from, flat_to, l_directions):
-        """计算输入的hash值，用于检测拓扑变化"""
-        # 使用边的部分数据来快速检测变化
-        # 检查：边数量 + 前/后几条边的内容 + l_directions的sum
-        num_edges = flat_from.numel()
-        if num_edges == 0:
-            return (0, 0, 0, 0)
-        
-        # 采样检查（避免对整个tensor计算hash）
-        sample_size = min(10, num_edges)
-        from_sample = flat_from[:sample_size].sum().item()
-        to_sample = flat_to[:sample_size].sum().item()
-        l_dir_sum = l_directions.sum().item()
-        
-        return (num_edges, from_sample, to_sample, l_dir_sum)
+        """Compute an exact topology signature for cache invalidation."""
+        return (
+            self._tensor_content_digest(flat_from),
+            self._tensor_content_digest(flat_to),
+            self._tensor_content_digest(l_directions),
+        )
 
     def _empty_segment_result(self, dtype, device):
         empty = torch.tensor([], dtype=dtype, device=device)
@@ -571,9 +664,23 @@ class LShapeSegmentOp:
             'valid_mask': valid_mask,
             'valid_from': valid_from,
             'valid_to': valid_to,
+            'valid_from_gather_plan': _build_gather_plan(valid_from),
+            'valid_to_gather_plan': _build_gather_plan(valid_to),
             'valid_edge_idx': valid_edge_idx,
             'num_edges': num_edges
         }
+
+    def _gather_vertices(self, values, topo, key):
+        indices = topo[key]
+        if indices.device != values.device:
+            indices = indices.to(values.device)
+        if not self.deterministic_backward or not values.requires_grad:
+            return values[indices]
+
+        plan = topo.get(f"{key}_gather_plan")
+        if plan is None:
+            plan = _build_gather_plan(indices)
+        return _deterministic_gather_1d(values, plan)
 
     def _compute_segments_hard(self, newx, newy, topo, l_directions):
         """
@@ -604,10 +711,10 @@ class LShapeSegmentOp:
         is_straight_by_dir = (valid_l_dir == STRAIGHT)
 
         # 获取端点坐标
-        x1 = newx[valid_from]
-        y1 = newy[valid_from]
-        x2 = newx[valid_to]
-        y2 = newy[valid_to]
+        x1 = self._gather_vertices(newx, topo, 'valid_from')
+        y1 = self._gather_vertices(newy, topo, 'valid_from')
+        x2 = self._gather_vertices(newx, topo, 'valid_to')
+        y2 = self._gather_vertices(newy, topo, 'valid_to')
         
         # 判断几何上的直线
         is_horizontal_line = torch.abs(y1 - y2) < 1e-4
@@ -765,10 +872,10 @@ class LShapeSegmentOp:
         fallback = torch.full_like(valid_soft, 0.5)
         valid_soft = torch.where(weight_sum > 1e-12, valid_soft / weight_sum.clamp_min(1e-12), fallback)
 
-        x1 = newx[valid_from]
-        y1 = newy[valid_from]
-        x2 = newx[valid_to]
-        y2 = newy[valid_to]
+        x1 = self._gather_vertices(newx, topo, 'valid_from')
+        y1 = self._gather_vertices(newy, topo, 'valid_from')
+        x2 = self._gather_vertices(newx, topo, 'valid_to')
+        y2 = self._gather_vertices(newy, topo, 'valid_to')
 
         is_horizontal_line = torch.abs(y1 - y2) < 1e-4
         is_vertical_line = torch.abs(x1 - x2) < 1e-4
@@ -900,7 +1007,11 @@ class LShapeSegmentOp:
                 flat_from, flat_to, l_directions, len(newx), device
             )
             self._cached_input_hash = current_hash
-            logger.info(f"Computed topology: {self._cached_topology['num_valid']} valid edges (hash={current_hash[0]})")
+            logger.info(
+                "Computed topology: %d valid edges (hash=%s)",
+                self._cached_topology["num_valid"],
+                current_hash[0][2] if current_hash and current_hash[0] else "none",
+            )
 
         # 快速计算segment坐标
         if soft_l_weights is None:

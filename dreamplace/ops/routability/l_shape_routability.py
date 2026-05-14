@@ -11,11 +11,14 @@ import logging
 import time
 import json
 import os
+import hashlib
 
 from dreamplace.ops.routability.l_shape_segment import (
     LShapeSegmentOp,
     build_segment_pos_tensor,
     build_l_shape_segments_vectorized,
+    _build_gather_plan,
+    _deterministic_gather_1d,
     H_FIRST, V_FIRST, STRAIGHT, FAKE_STRAIGHT, UNKNOWN
 )
 from dreamplace.ops.routability.segment_density import (
@@ -34,8 +37,19 @@ from dreamplace.ops.routability.l_shape_electric_overflow import (
 from dreamplace.ops.routability.same_net_topo_scoring import (
     compute_diagonal_split_topo_costs,
 )
+from dreamplace.ops.routability.profile_timing import (
+    profile_end,
+    profile_scope,
+    profile_start,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _as_bool(value):
+    if isinstance(value, str):
+        return value.strip().lower() not in ("0", "false", "no", "off")
+    return bool(value)
 
 
 class LShapeRoutabilityOp(nn.Module):
@@ -129,7 +143,29 @@ class LShapeRoutabilityOp(nn.Module):
         self.soft_l_same_net_diag_split_max_distance = max(
             float(getattr(params, "soft_l_same_net_diag_split_max_distance", 0.0)), 0.0
         )
+        self.profile_enabled = bool(getattr(params, "l_shape_profile_flag", False))
+        self.deterministic_flag = _as_bool(getattr(params, "deterministic_flag", False))
+        self.debug_hash_enabled = _as_bool(getattr(params, "l_shape_debug_hash_flag", False))
+        self.debug_hash_start_iter = int(getattr(params, "l_shape_debug_hash_start_iter", -1))
+        self.debug_hash_end_iter = int(getattr(params, "l_shape_debug_hash_end_iter", -1))
+        self.debug_hash_sample = max(int(getattr(params, "l_shape_debug_hash_sample", 4096)), 0)
+        self._debug_hash_iteration = None
         self.per_net_topology_use_cpp = True
+        cache_flag = getattr(params, "l_shape_edge_net_ids_cache_flag", 1)
+        if isinstance(cache_flag, str):
+            self.l_shape_edge_net_ids_cache_flag = cache_flag.strip().lower() not in (
+                "0",
+                "false",
+                "no",
+                "off",
+            )
+        else:
+            self.l_shape_edge_net_ids_cache_flag = bool(cache_flag)
+        self.soft_l_debug_update_interval = max(
+            int(getattr(params, "soft_l_debug_update_interval", 10)),
+            1,
+        )
+        self._soft_l_debug_call_count = 0
         self.blockage_initial_density = True
 
         directional_track_widths = (
@@ -150,6 +186,7 @@ class LShapeRoutabilityOp(nn.Module):
             wire_width_v=self.wire_width_v,
             use_vectorized=True,
             soft_min_weight=self.soft_l_min_weight,
+            deterministic_backward=self.deterministic_flag,
         )
         if directional_track_widths:
             logger.info(
@@ -159,7 +196,7 @@ class LShapeRoutabilityOp(nn.Module):
             )
         if self.soft_l_assignment:
             logger.info(
-                "Soft L-assignment enabled: tau=%.3f adaptive_tau=%s adaptive_scale=%.3f prior=%s bias=%.3f min_weight=%.3f tie_delta=%.3f bg=%.3f self_ov=%.3f hotspot=%.3f hotspot_ramp=%.3f",
+                "Soft L-assignment enabled: tau=%.3f adaptive_tau=%s adaptive_scale=%.3f prior=%s bias=%.3f min_weight=%.3f tie_delta=%.3f bg=%.3f self_ov=%.3f hotspot=%.3f hotspot_ramp=%.3f debug_interval=%d edge_net_ids_cache=%s",
                 self.soft_l_temperature,
                 self.soft_l_adaptive_tau,
                 self.soft_l_adaptive_scale,
@@ -171,12 +208,15 @@ class LShapeRoutabilityOp(nn.Module):
                 self.soft_l_self_overflow_weight,
                 self.soft_l_hotspot_weight,
                 self.soft_l_hotspot_ramp_ratio,
+                self.soft_l_debug_update_interval,
+                self.l_shape_edge_net_ids_cache_flag,
             )
         logger.info(
-            "Per-net topology scoring enabled: kernel=diag_split_geometric topo_only=1 sigma=%.4f min_support=%.3e max_distance=%.4f cpp=1",
+            "Per-net topology scoring enabled: kernel=diag_split_geometric topo_only=1 sigma=%.4f min_support=%.3e max_distance=%.4f cpp=1 overflow_density_deterministic=%s",
             self.soft_l_same_net_diag_split_sigma,
             self.soft_l_same_net_diag_split_min_support,
             self.soft_l_same_net_diag_split_max_distance,
+            self.deterministic_flag,
         )
         
         # 根据模式选择密度计算器
@@ -202,13 +242,15 @@ class LShapeRoutabilityOp(nn.Module):
                 fix_usage_map_h=fix_usage_map_h,
                 fix_usage_map_v=fix_usage_map_v,
                 # padding=1,  # 边界填充
-                fast_mode=False
+                fast_mode=False,
+                profile_enabled=self.profile_enabled,
             )
             self.overflow_op = create_l_shape_electric_overflow(
                 placedb,
                 num_bins_x=num_bins_x,
                 num_bins_y=num_bins_y,
                 target_density=target_density,
+                deterministic_flag=self.deterministic_flag,
                 # padding=1  # 边界填充
             )
             logger.info(f"Using C++/CUDA electric potential for routability")
@@ -234,6 +276,10 @@ class LShapeRoutabilityOp(nn.Module):
         # 缓存
         self.cached_segments = None
         self.cached_soft_debug = None
+        self._cached_edge_net_ids = None
+        self._cached_edge_net_ids_key = None
+        self._cached_soft_edge_topology = None
+        self._cached_soft_edge_topology_key = None
         self.cached_density_map = None
         self.cached_density_map_h = None
         self.cached_density_map_v = None
@@ -252,6 +298,104 @@ class LShapeRoutabilityOp(nn.Module):
         self.fix_usage_map = fix_usage_map
         self.fix_usage_map_h = fix_usage_map_h
         self.fix_usage_map_v = fix_usage_map_v
+
+    def set_debug_iteration(self, iteration):
+        self._debug_hash_iteration = None if iteration is None else int(iteration)
+
+    def _debug_hash_active(self):
+        if not self.debug_hash_enabled:
+            return False
+        iteration = self._debug_hash_iteration
+        if iteration is None:
+            return False
+        start_iter = self.debug_hash_start_iter
+        end_iter = self.debug_hash_end_iter
+        if start_iter >= 0 and iteration < start_iter:
+            return False
+        if end_iter >= 0 and iteration > end_iter:
+            return False
+        return True
+
+    def _tensor_debug_hash(self, tensor):
+        if tensor is None:
+            return "none"
+        if not isinstance(tensor, torch.Tensor):
+            return str(type(tensor).__name__)
+        values = tensor.detach()
+        if values.device.type != "cpu":
+            values = values.cpu()
+        values = values.contiguous()
+        numel = int(values.numel())
+        if numel == 0:
+            return "empty"
+        sample = self.debug_hash_sample
+        shape = tuple(int(dim) for dim in values.shape)
+        dtype = str(values.dtype)
+        if sample > 0 and numel > sample:
+            half = max(sample // 2, 1)
+            values = torch.cat((values.reshape(-1)[:half], values.reshape(-1)[-half:]))
+        raw_values = values.reshape(-1).contiguous().view(torch.uint8).numpy().tobytes()
+        header = ("%s|%s|%d|" % (dtype, shape, numel)).encode("ascii")
+        return hashlib.sha1(header + raw_values).hexdigest()[:16]
+
+    def _tensor_debug_stats(self, tensor):
+        if not isinstance(tensor, torch.Tensor):
+            return ""
+        values = tensor.detach()
+        if values.device.type != "cpu":
+            values = values.cpu()
+        values = values.reshape(-1)
+        if values.numel() == 0:
+            return " dtype=%s shape=%s numel=0" % (
+                str(tensor.dtype),
+                tuple(int(dim) for dim in tensor.shape),
+            )
+        prefix = " dtype=%s shape=%s" % (
+            str(tensor.dtype),
+            tuple(int(dim) for dim in tensor.shape),
+        )
+        if not torch.is_floating_point(values):
+            return prefix + " numel=%d min=%d max=%d sum=%d" % (
+                int(values.numel()),
+                int(values.min().item()),
+                int(values.max().item()),
+                int(values.to(dtype=torch.int64).sum().item()),
+            )
+        values_f = values.to(dtype=torch.float64)
+        return prefix + " numel=%d min=%.9e max=%.9e sum=%.9e mean=%.9e" % (
+            int(values.numel()),
+            float(values_f.min().item()),
+            float(values_f.max().item()),
+            float(values_f.sum().item()),
+            float(values_f.mean().item()),
+        )
+
+    def _log_debug_hash(self, name, tensor, **fields):
+        if not self._debug_hash_active():
+            return
+        extra = " ".join("%s=%s" % (key, value) for key, value in fields.items())
+        if extra:
+            extra = " " + extra
+        logger.info(
+            "LShapeHash iter=%s name=%s hash=%s%s%s",
+            self._debug_hash_iteration,
+            name,
+            self._tensor_debug_hash(tensor),
+            self._tensor_debug_stats(tensor),
+            extra,
+        )
+
+    def log_debug_hash(self, name, tensor, **fields):
+        self._log_debug_hash(name, tensor, **fields)
+
+    def _gather_vertices(self, values, indices, gather_plan=None):
+        if indices.device != values.device:
+            indices = indices.to(values.device)
+        if not self.deterministic_flag or not values.requires_grad:
+            return values[indices]
+        if gather_plan is None:
+            gather_plan = _build_gather_plan(indices)
+        return _deterministic_gather_1d(values, gather_plan)
 
     def update_targets(
         self,
@@ -357,7 +501,11 @@ class LShapeRoutabilityOp(nn.Module):
             updated = True
 
         if updated:
+            if hasattr(self.segment_builder, "reset_cache"):
+                self.segment_builder.reset_cache()
+            self._clear_soft_edge_topology_cache()
             self.cached_soft_debug = None
+            self._soft_l_debug_call_count = 0
             self.cached_density_map = None
             self.cached_density_map_h = None
             self.cached_density_map_v = None
@@ -383,6 +531,12 @@ class LShapeRoutabilityOp(nn.Module):
     def update_per_net_topology(self, topo_cache=None, topo_stats=None):
         self.per_net_topology_cache = topo_cache
         self.per_net_topology_stats = topo_stats
+        self._soft_l_debug_call_count = 0
+        self._cached_edge_net_ids = None
+        self._cached_edge_net_ids_key = None
+        self._clear_soft_edge_topology_cache()
+        if hasattr(self.segment_builder, "reset_cache"):
+            self.segment_builder.reset_cache()
         if isinstance(self.cached_soft_debug, dict):
             self.cached_soft_debug.update(
                 {
@@ -428,6 +582,124 @@ class LShapeRoutabilityOp(nn.Module):
                         vertex_to_net[s:min(e, num_vertices)] = net_id
         return vertex_to_net
 
+    def _tensor_sample_signature(self, tensor, sample_size=8):
+        if not isinstance(tensor, torch.Tensor):
+            if not hasattr(tensor, "__len__"):
+                return (0, 0, 0, 0, 0)
+            numel = int(len(tensor))
+            if numel == 0:
+                return (0, 0, 0, 0, 0)
+            sample = min(int(sample_size), numel)
+            front = sum(int(tensor[idx]) for idx in range(sample))
+            back = sum(int(tensor[numel - sample + idx]) for idx in range(sample))
+            return (numel, 0, 0, int(front), int(back))
+
+        values = tensor.detach()
+        numel = int(values.numel())
+        if numel == 0:
+            return (0, int(values.data_ptr()), int(getattr(tensor, "_version", 0)), 0, 0)
+
+        sample = min(int(sample_size), numel)
+        front_values = values[:sample]
+        back_values = values[-sample:]
+        if front_values.device.type != "cpu":
+            front_values = front_values.cpu()
+        if back_values.device.type != "cpu":
+            back_values = back_values.cpu()
+        return (
+            numel,
+            int(values.data_ptr()),
+            int(getattr(tensor, "_version", 0)),
+            int(front_values.to(dtype=torch.int64).sum().item()),
+            int(back_values.to(dtype=torch.int64).sum().item()),
+        )
+
+    def _edge_net_ids_cache_key(self, steiner_topo_op, flat_pin_from, flat_pin_to, num_vertices):
+        net_steiner_start = getattr(steiner_topo_op, "net_steiner_start", None)
+        return (
+            int(num_vertices),
+            self._tensor_sample_signature(flat_pin_from),
+            self._tensor_sample_signature(flat_pin_to),
+            self._tensor_sample_signature(net_steiner_start),
+        )
+
+    def _clear_soft_edge_topology_cache(self):
+        self._cached_soft_edge_topology = None
+        self._cached_soft_edge_topology_key = None
+
+    def _soft_edge_topology_cache_key(self, flat_pin_from, flat_pin_to, num_vertices, device):
+        return (
+            int(num_vertices),
+            str(device),
+            self._tensor_sample_signature(flat_pin_from),
+            self._tensor_sample_signature(flat_pin_to),
+        )
+
+    def _get_soft_edge_topology(self, flat_pin_from, flat_pin_to, num_vertices, device):
+        cache_key = self._soft_edge_topology_cache_key(
+            flat_pin_from,
+            flat_pin_to,
+            num_vertices,
+            device,
+        )
+        cached = self._cached_soft_edge_topology
+        if (
+            cache_key == self._cached_soft_edge_topology_key
+            and isinstance(cached, dict)
+            and int(cached.get("num_edges", -1)) == int(flat_pin_from.numel())
+        ):
+            return cached
+
+        if flat_pin_from.device != device:
+            flat_pin_from = flat_pin_from.to(device)
+        if flat_pin_to.device != device:
+            flat_pin_to = flat_pin_to.to(device)
+
+        valid_mask = (
+            (flat_pin_from >= 0)
+            & (flat_pin_to >= 0)
+            & (flat_pin_from < num_vertices)
+            & (flat_pin_to < num_vertices)
+        )
+        if not valid_mask.any():
+            topology = {
+                "valid": False,
+                "num_edges": int(flat_pin_from.numel()),
+                "num_valid": 0,
+                "all_valid": False,
+            }
+            self._cached_soft_edge_topology_key = cache_key
+            self._cached_soft_edge_topology = topology
+            return topology
+
+        all_valid = bool(valid_mask.all().item())
+        if all_valid:
+            valid_from = flat_pin_from
+            valid_to = flat_pin_to
+            valid_mask_cpu = None
+        else:
+            valid_from = flat_pin_from[valid_mask]
+            valid_to = flat_pin_to[valid_mask]
+            valid_mask_cpu = valid_mask.cpu() if valid_mask.device.type != "cpu" else valid_mask
+
+        topology = {
+            "valid": True,
+            "num_edges": int(flat_pin_from.numel()),
+            "num_valid": int(valid_from.numel()),
+            "all_valid": all_valid,
+            "valid_mask": valid_mask,
+            "valid_mask_cpu": valid_mask_cpu,
+            "valid_from": valid_from,
+            "valid_to": valid_to,
+        }
+        if self.deterministic_flag:
+            topology["valid_from_gather_plan"] = _build_gather_plan(valid_from)
+            topology["valid_to_gather_plan"] = _build_gather_plan(valid_to)
+
+        self._cached_soft_edge_topology_key = cache_key
+        self._cached_soft_edge_topology = topology
+        return topology
+
     def _build_edge_net_ids(self, steiner_topo_op, flat_pin_from, flat_pin_to, num_vertices):
         vertex_to_net = self._build_vertex_to_net(steiner_topo_op, num_vertices)
         flat_pin_from_cpu = flat_pin_from.cpu() if isinstance(flat_pin_from, torch.Tensor) and flat_pin_from.device.type != "cpu" else flat_pin_from
@@ -447,6 +719,31 @@ class LShapeRoutabilityOp(nn.Module):
         chosen_net = torch.where(net_from >= 0, net_from, net_to)
         edge_net_ids[valid_mask] = chosen_net
         return edge_net_ids
+
+    def _get_edge_net_ids(self, steiner_topo_op, flat_pin_from, flat_pin_to, num_vertices):
+        cache_key = self._edge_net_ids_cache_key(
+            steiner_topo_op,
+            flat_pin_from,
+            flat_pin_to,
+            num_vertices,
+        )
+        cached = self._cached_edge_net_ids
+        if (
+            cache_key == self._cached_edge_net_ids_key
+            and isinstance(cached, torch.Tensor)
+            and int(cached.numel()) == int(flat_pin_from.numel())
+        ):
+            return cached
+
+        edge_net_ids = self._build_edge_net_ids(
+            steiner_topo_op,
+            flat_pin_from,
+            flat_pin_to,
+            num_vertices,
+        )
+        self._cached_edge_net_ids_key = cache_key
+        self._cached_edge_net_ids = edge_net_ids.detach().cpu()
+        return self._cached_edge_net_ids
 
     def _prepare_soft_map(self, candidate, device, dtype):
         if not isinstance(candidate, torch.Tensor):
@@ -513,6 +810,7 @@ class LShapeRoutabilityOp(nn.Module):
         Resolver prior and near-tie hard switching are still disabled
         by the per-net topology mode gates outside this helper.
         """
+        previous_soft_debug = self.cached_soft_debug if isinstance(self.cached_soft_debug, dict) else {}
         total_supply = self._prepare_soft_map(getattr(self.density_op, "target_density", None), device, dtype)
         total_demand = self._prepare_soft_map(getattr(self.density_op, "target_demand", None), device, dtype)
         total_cached = self._prepare_soft_map(self.cached_density_map, device, dtype)
@@ -577,6 +875,9 @@ class LShapeRoutabilityOp(nn.Module):
             "target_demand_supply_ratio": target_demand_supply_ratio,
             "per_net_topology_fallback_mode": "legacy_soft_l_heuristic",
         }
+        for key, value in previous_soft_debug.items():
+            if key not in self.cached_soft_debug and not isinstance(value, torch.Tensor):
+                self.cached_soft_debug[key] = value
 
         return cost_map_h, cost_map_v, hotspot_map_h, hotspot_map_v, effective_hotspot_weight
 
@@ -752,74 +1053,95 @@ class LShapeRoutabilityOp(nn.Module):
         dtype = newx.dtype
         num_edges = flat_pin_from.numel()
         weights = torch.zeros((num_edges, 2), dtype=dtype, device=device)
+        profile_timer = profile_start(self.profile_enabled, tensor=newx)
+
+        def _finish(result, **fields):
+            profile_end(
+                self.profile_enabled,
+                profile_timer,
+                "l_shape_op.soft_l_weights",
+                tensor=newx,
+                logger=logger,
+                edges=num_edges,
+                **fields,
+            )
+            return result
+
         if num_edges == 0:
-            return weights
+            return _finish(weights, diag_edges=0)
 
-        if flat_pin_from.device != device:
-            flat_pin_from = flat_pin_from.to(device)
-        if flat_pin_to.device != device:
-            flat_pin_to = flat_pin_to.to(device)
-        if l_directions.device != device:
-            l_directions = l_directions.to(device)
+        with profile_scope(self.profile_enabled, "soft_l_weights.prepare_edges", tensor=newx, logger=logger):
+            if l_directions.device != device:
+                l_directions = l_directions.to(device)
 
-        valid_mask = (flat_pin_from >= 0) & (flat_pin_to >= 0) & (flat_pin_from < len(newx)) & (flat_pin_to < len(newx))
-        if not valid_mask.any():
-            return weights
+            soft_topology = self._get_soft_edge_topology(
+                flat_pin_from,
+                flat_pin_to,
+                len(newx),
+                device,
+            )
+            if not soft_topology.get("valid", False):
+                return _finish(weights, valid_edges=0, diag_edges=0)
 
-        valid_from = flat_pin_from[valid_mask]
-        valid_to = flat_pin_to[valid_mask]
-        valid_l_dir = l_directions[valid_mask]
-        valid_edge_net_ids = None
-        if isinstance(edge_net_ids, torch.Tensor):
-            valid_mask_cpu = valid_mask.cpu() if valid_mask.device.type != "cpu" else valid_mask
-            edge_net_ids_cpu = edge_net_ids.cpu() if edge_net_ids.device.type != "cpu" else edge_net_ids
-            valid_edge_net_ids = edge_net_ids_cpu[valid_mask_cpu]
+            valid_mask = soft_topology["valid_mask"]
+            valid_from = soft_topology["valid_from"]
+            valid_to = soft_topology["valid_to"]
+            all_valid_edges = bool(soft_topology.get("all_valid", False))
+            valid_l_dir = l_directions if all_valid_edges else l_directions[valid_mask]
+            valid_edge_net_ids = None
+            if isinstance(edge_net_ids, torch.Tensor):
+                edge_net_ids_cpu = edge_net_ids.cpu() if edge_net_ids.device.type != "cpu" else edge_net_ids
+                if all_valid_edges:
+                    valid_edge_net_ids = edge_net_ids_cpu
+                else:
+                    valid_mask_cpu = soft_topology.get("valid_mask_cpu")
+                    if valid_mask_cpu is None:
+                        valid_mask_cpu = valid_mask.cpu() if valid_mask.device.type != "cpu" else valid_mask
+                    valid_edge_net_ids = edge_net_ids_cpu[valid_mask_cpu]
 
-        x1 = newx[valid_from]
-        y1 = newy[valid_from]
-        x2 = newx[valid_to]
-        y2 = newy[valid_to]
+            x1 = self._gather_vertices(newx, valid_from, soft_topology.get("valid_from_gather_plan"))
+            y1 = self._gather_vertices(newy, valid_from, soft_topology.get("valid_from_gather_plan"))
+            x2 = self._gather_vertices(newx, valid_to, soft_topology.get("valid_to_gather_plan"))
+            y2 = self._gather_vertices(newy, valid_to, soft_topology.get("valid_to_gather_plan"))
 
-        is_horizontal_line = torch.abs(y1 - y2) < 1e-4
-        is_vertical_line = torch.abs(x1 - x2) < 1e-4
-        is_straight = is_horizontal_line | is_vertical_line
-        is_diagonal = ~is_straight
+            is_horizontal_line = torch.abs(y1 - y2) < 1e-4
+            is_vertical_line = torch.abs(x1 - x2) < 1e-4
+            is_straight = is_horizontal_line | is_vertical_line
+            is_diagonal = ~is_straight
+            diag_edge_count = int(is_diagonal.sum().item())
 
-        valid_weights = torch.zeros((valid_from.numel(), 2), dtype=dtype, device=device)
-        valid_weights[:, 0] = 1.0  # straight edge fallback; soft mode only reads diagonal weights
+            valid_weights = torch.zeros((valid_from.numel(), 2), dtype=dtype, device=device)
+            valid_weights[:, 0] = 1.0  # straight edge fallback; soft mode only reads diagonal weights
 
         if is_diagonal.any():
-            cost_map_h, cost_map_v, hotspot_map_h, hotspot_map_v, effective_hotspot_weight = self._get_soft_l_scoring_maps(device, dtype)
-            prefix_x_h = cost_map_h.cumsum(dim=0)
-            prefix_y_v = cost_map_v.cumsum(dim=1)
-            hotspot_prefix_x_h = hotspot_map_h.cumsum(dim=0) if effective_hotspot_weight > 0.0 else None
-            hotspot_prefix_y_v = hotspot_map_v.cumsum(dim=1) if effective_hotspot_weight > 0.0 else None
+            with profile_scope(
+                self.profile_enabled,
+                "soft_l_weights.diag_indexing",
+                tensor=newx,
+                logger=logger,
+                diag_edges=diag_edge_count,
+            ):
+                dx1 = x1[is_diagonal]
+                dy1 = y1[is_diagonal]
+                dx2 = x2[is_diagonal]
+                dy2 = y2[is_diagonal]
 
-            dx1 = x1[is_diagonal]
-            dy1 = y1[is_diagonal]
-            dx2 = x2[is_diagonal]
-            dy2 = y2[is_diagonal]
+                x1_idx = self._coord_to_bin_index(dx1, self.xl, self.bin_size_x, self.num_bins_x)
+                y1_idx = self._coord_to_bin_index(dy1, self.yl, self.bin_size_y, self.num_bins_y)
+                x2_idx = self._coord_to_bin_index(dx2, self.xl, self.bin_size_x, self.num_bins_x)
+                y2_idx = self._coord_to_bin_index(dy2, self.yl, self.bin_size_y, self.num_bins_y)
+                diag_l_dir = valid_l_dir[is_diagonal]
 
-            x1_idx = self._coord_to_bin_index(dx1, self.xl, self.bin_size_x, self.num_bins_x)
-            y1_idx = self._coord_to_bin_index(dy1, self.yl, self.bin_size_y, self.num_bins_y)
-            x2_idx = self._coord_to_bin_index(dx2, self.xl, self.bin_size_x, self.num_bins_x)
-            y2_idx = self._coord_to_bin_index(dy2, self.yl, self.bin_size_y, self.num_bins_y)
-            diag_l_dir = valid_l_dir[is_diagonal]
-
-            cost_h = self._horizontal_cost(prefix_x_h, y1_idx, x1_idx, x2_idx) + self._vertical_cost(prefix_y_v, x2_idx, y1_idx, y2_idx)
-            cost_v = self._vertical_cost(prefix_y_v, x1_idx, y1_idx, y2_idx) + self._horizontal_cost(prefix_x_h, y2_idx, x1_idx, x2_idx)
-
-            if hotspot_prefix_x_h is not None and hotspot_prefix_y_v is not None:
-                hotspot_h = self._horizontal_cost(hotspot_prefix_x_h, y1_idx, x1_idx, x2_idx) + self._vertical_cost(
-                    hotspot_prefix_y_v, x2_idx, y1_idx, y2_idx
-                )
-                hotspot_v = self._vertical_cost(hotspot_prefix_y_v, x1_idx, y1_idx, y2_idx) + self._horizontal_cost(
-                    hotspot_prefix_x_h, y2_idx, x1_idx, x2_idx
-                )
-                cost_h = cost_h + effective_hotspot_weight * hotspot_h
-                cost_v = cost_v + effective_hotspot_weight * hotspot_v
+            next_soft_l_debug_call_count = self._soft_l_debug_call_count + 1
+            should_update_soft_debug = (
+                next_soft_l_debug_call_count == 1
+                or next_soft_l_debug_call_count % self.soft_l_debug_update_interval == 0
+            )
 
             topo_debug_stats = None
+            topo_cost_h = None
+            topo_cost_v = None
+            topo_observed_mask = None
             missing_count = int(is_diagonal.sum().item())
             total_count = int(is_diagonal.sum().item())
             if isinstance(self.per_net_topology_cache, dict) and valid_edge_net_ids is not None:
@@ -836,84 +1158,232 @@ class LShapeRoutabilityOp(nn.Module):
                 route_bin_size_y = (self.yh - self.yl) / float(route_num_bins_y)
 
                 diag_mask_cpu = is_diagonal.cpu() if is_diagonal.device.type != "cpu" else is_diagonal
-                topo_cost_h, topo_cost_v, topo_observed_mask, topo_debug_stats = compute_diagonal_split_topo_costs(
-                    edge_net_ids=valid_edge_net_ids[diag_mask_cpu],
-                    x1=dx1.cpu(),
-                    y1=dy1.cpu(),
-                    x2=dx2.cpu(),
-                    y2=dy2.cpu(),
-                    topo_cache=self.per_net_topology_cache,
-                    xl=self.xl,
-                    yl=self.yl,
-                    route_bin_size_x=route_bin_size_x,
-                    route_bin_size_y=route_bin_size_y,
-                    sigma=self.soft_l_same_net_diag_split_sigma,
-                    min_support=self.soft_l_same_net_diag_split_min_support,
-                    max_distance=self.soft_l_same_net_diag_split_max_distance,
-                    device=device,
-                    dtype=dtype,
-                    use_cpp=self.per_net_topology_use_cpp,
-                )
-                topo_observed_mask_cpu = topo_observed_mask.cpu() if topo_observed_mask.device.type != "cpu" else topo_observed_mask
-                missing_count = int((~topo_observed_mask_cpu).sum().item())
-                total_count = int(topo_observed_mask_cpu.numel())
-                cost_h = torch.where(topo_observed_mask, topo_cost_h, cost_h)
-                cost_v = torch.where(topo_observed_mask, topo_cost_v, cost_v)
+                with profile_scope(
+                    self.profile_enabled,
+                    "l_shape_op.same_net_topo_scoring",
+                    tensor=newx,
+                    logger=logger,
+                    diag_edges=diag_edge_count,
+                    cpp=int(self.per_net_topology_use_cpp),
+                ):
+                    topo_cost_h, topo_cost_v, topo_observed_mask, topo_debug_stats = compute_diagonal_split_topo_costs(
+                        edge_net_ids=valid_edge_net_ids[diag_mask_cpu],
+                        x1=dx1.cpu(),
+                        y1=dy1.cpu(),
+                        x2=dx2.cpu(),
+                        y2=dy2.cpu(),
+                        topo_cache=self.per_net_topology_cache,
+                        xl=self.xl,
+                        yl=self.yl,
+                        route_bin_size_x=route_bin_size_x,
+                        route_bin_size_y=route_bin_size_y,
+                        sigma=self.soft_l_same_net_diag_split_sigma,
+                        min_support=self.soft_l_same_net_diag_split_min_support,
+                        max_distance=self.soft_l_same_net_diag_split_max_distance,
+                        device=device,
+                        dtype=dtype,
+                        use_cpp=self.per_net_topology_use_cpp,
+                        profile_enabled=self.profile_enabled,
+                        collect_stats=should_update_soft_debug,
+                    )
+                with profile_scope(
+                    self.profile_enabled,
+                    "soft_l_weights.topo_apply",
+                    tensor=newx,
+                    logger=logger,
+                    diag_edges=diag_edge_count,
+                ):
+                    topo_observed_mask_cpu = topo_observed_mask.cpu() if topo_observed_mask.device.type != "cpu" else topo_observed_mask
+                    missing_count = int((~topo_observed_mask_cpu).sum().item())
+                    total_count = int(topo_observed_mask_cpu.numel())
+
+            need_full_base_cost = topo_observed_mask is None or self._debug_hash_active()
+            topo_missing_mask = None
+            need_missing_base_cost = False
+            if topo_observed_mask is not None and missing_count > 0 and not need_full_base_cost:
+                topo_missing_mask = ~topo_observed_mask
+                need_missing_base_cost = True
+
+            cost_h = topo_cost_h
+            cost_v = topo_cost_v
+            base_cost_h = None
+            base_cost_v = None
+            if need_full_base_cost or need_missing_base_cost:
+                with profile_scope(
+                    self.profile_enabled,
+                    "soft_l_weights.map_prefix",
+                    tensor=newx,
+                    logger=logger,
+                    diag_edges=diag_edge_count,
+                    fallback_edges=diag_edge_count if need_full_base_cost else missing_count,
+                ):
+                    cost_map_h, cost_map_v, hotspot_map_h, hotspot_map_v, effective_hotspot_weight = self._get_soft_l_scoring_maps(device, dtype)
+                    prefix_x_h = cost_map_h.cumsum(dim=0)
+                    prefix_y_v = cost_map_v.cumsum(dim=1)
+                    hotspot_prefix_x_h = hotspot_map_h.cumsum(dim=0) if effective_hotspot_weight > 0.0 else None
+                    hotspot_prefix_y_v = hotspot_map_v.cumsum(dim=1) if effective_hotspot_weight > 0.0 else None
+                    self._log_debug_hash("soft_l.cost_map_h", cost_map_h, diag_edges=diag_edge_count)
+                    self._log_debug_hash("soft_l.cost_map_v", cost_map_v, diag_edges=diag_edge_count)
+
+                with profile_scope(
+                    self.profile_enabled,
+                    "soft_l_weights.base_cost",
+                    tensor=newx,
+                    logger=logger,
+                    diag_edges=diag_edge_count,
+                    fallback_edges=diag_edge_count if need_full_base_cost else missing_count,
+                ):
+                    if need_full_base_cost:
+                        bx1_idx = x1_idx
+                        by1_idx = y1_idx
+                        bx2_idx = x2_idx
+                        by2_idx = y2_idx
+                    else:
+                        bx1_idx = x1_idx[topo_missing_mask]
+                        by1_idx = y1_idx[topo_missing_mask]
+                        bx2_idx = x2_idx[topo_missing_mask]
+                        by2_idx = y2_idx[topo_missing_mask]
+
+                    base_cost_h = self._horizontal_cost(prefix_x_h, by1_idx, bx1_idx, bx2_idx) + self._vertical_cost(
+                        prefix_y_v, bx2_idx, by1_idx, by2_idx
+                    )
+                    base_cost_v = self._vertical_cost(prefix_y_v, bx1_idx, by1_idx, by2_idx) + self._horizontal_cost(
+                        prefix_x_h, by2_idx, bx1_idx, bx2_idx
+                    )
+
+                    if hotspot_prefix_x_h is not None and hotspot_prefix_y_v is not None:
+                        hotspot_h = self._horizontal_cost(hotspot_prefix_x_h, by1_idx, bx1_idx, bx2_idx) + self._vertical_cost(
+                            hotspot_prefix_y_v, bx2_idx, by1_idx, by2_idx
+                        )
+                        hotspot_v = self._vertical_cost(hotspot_prefix_y_v, bx1_idx, by1_idx, by2_idx) + self._horizontal_cost(
+                            hotspot_prefix_x_h, by2_idx, bx1_idx, bx2_idx
+                        )
+                        base_cost_h = base_cost_h + effective_hotspot_weight * hotspot_h
+                        base_cost_v = base_cost_v + effective_hotspot_weight * hotspot_v
+
+                    if need_full_base_cost:
+                        cost_h = base_cost_h
+                        cost_v = base_cost_v
+                        self._log_debug_hash("soft_l.base_cost_h", cost_h, diag_edges=diag_edge_count)
+                        self._log_debug_hash("soft_l.base_cost_v", cost_v, diag_edges=diag_edge_count)
+                        self._log_debug_hash("soft_l.diag_l_dir", diag_l_dir, diag_edges=diag_edge_count)
+
+            if topo_observed_mask is not None:
+                with profile_scope(
+                    self.profile_enabled,
+                    "soft_l_weights.topo_merge",
+                    tensor=newx,
+                    logger=logger,
+                    diag_edges=diag_edge_count,
+                    fallback_edges=missing_count,
+                ):
+                    self._log_debug_hash("soft_l.topo_cost_h", topo_cost_h, diag_edges=diag_edge_count)
+                    self._log_debug_hash("soft_l.topo_cost_v", topo_cost_v, diag_edges=diag_edge_count)
+                    self._log_debug_hash("soft_l.topo_observed_mask", topo_observed_mask, diag_edges=diag_edge_count)
+                    if need_full_base_cost:
+                        cost_h = torch.where(topo_observed_mask, topo_cost_h, cost_h)
+                        cost_v = torch.where(topo_observed_mask, topo_cost_v, cost_v)
+                    elif missing_count > 0:
+                        cost_h = topo_cost_h.clone()
+                        cost_v = topo_cost_v.clone()
+                        cost_h[topo_missing_mask] = base_cost_h
+                        cost_v[topo_missing_mask] = base_cost_v
+                    else:
+                        cost_h = topo_cost_h
+                        cost_v = topo_cost_v
+                    self._log_debug_hash("soft_l.merged_cost_h", cost_h, diag_edges=diag_edge_count)
+                    self._log_debug_hash("soft_l.merged_cost_v", cost_v, diag_edges=diag_edge_count)
+
+            self._soft_l_debug_call_count = next_soft_l_debug_call_count
 
             raw_cost_h = cost_h
             raw_cost_v = cost_v
-            if self.soft_l_use_resolver_prior and not self.per_net_topology_mode:
-                cost_h = cost_h - self.soft_l_prior_bias * (diag_l_dir == H_FIRST).to(dtype)
-                cost_v = cost_v - self.soft_l_prior_bias * (diag_l_dir == V_FIRST).to(dtype)
+            with profile_scope(
+                self.profile_enabled,
+                "soft_l_weights.softmax_core",
+                tensor=newx,
+                logger=logger,
+                diag_edges=diag_edge_count,
+            ):
+                if self.soft_l_use_resolver_prior and not self.per_net_topology_mode:
+                    cost_h = cost_h - self.soft_l_prior_bias * (diag_l_dir == H_FIRST).to(dtype)
+                    cost_v = cost_v - self.soft_l_prior_bias * (diag_l_dir == V_FIRST).to(dtype)
 
-            raw_cost_gap = (raw_cost_h - raw_cost_v).abs()
-            biased_cost_gap = (cost_h - cost_v).abs()
-            tau_source_gap = None
-            if self.soft_l_adaptive_tau:
-                if raw_cost_gap.numel() == 0:
-                    tau = torch.tensor(
-                        self.soft_l_temperature, dtype=dtype, device=device
-                    )
+                if self.soft_l_adaptive_tau:
+                    if cost_h.numel() == 0:
+                        tau = torch.tensor(
+                            self.soft_l_temperature, dtype=dtype, device=device
+                        )
+                    else:
+                        # Per-edge adaptive tau: scale by each edge's own cost magnitude
+                        # instead of global median gap, avoiding the "chasing-tail" problem
+                        # where tau ~ median(gap) guarantees ~50% near-tie edges.
+                        per_edge_cost_scale = ((cost_h + cost_v) / 2).clamp(min=1e-6)
+                        tau = self.soft_l_adaptive_scale * per_edge_cost_scale
                 else:
-                    # Per-edge adaptive tau: scale by each edge's own cost magnitude
-                    # instead of global median gap, avoiding the "chasing-tail" problem
-                    # where tau ~ median(gap) guarantees ~50% near-tie edges.
-                    per_edge_cost_scale = ((cost_h + cost_v) / 2).clamp(min=1e-6)
-                    tau = self.soft_l_adaptive_scale * per_edge_cost_scale
-                    tau_source_gap = torch.quantile(raw_cost_gap, 0.5).clamp(min=1e-6)
-            else:
-                tau = self.soft_l_temperature
+                    tau = self.soft_l_temperature
 
-            logits = torch.stack((-cost_h / tau, -cost_v / tau), dim=1)
-            diag_weights = torch.softmax(logits, dim=1)
-            max_prob = diag_weights.max(dim=1).values
-            near_tie_ratio = None
-            if self.soft_l_tie_break_delta > 0.0 and not self.per_net_topology_mode:
-                near_tie = max_prob <= (0.5 + self.soft_l_tie_break_delta)
-                near_tie_ratio = float(near_tie.to(dtype).mean().item())
-                if near_tie.any():
-                    choose_h = cost_h <= cost_v
-                    tie_weights = torch.stack(
-                        [choose_h.to(dtype=dtype), (~choose_h).to(dtype=dtype)], dim=1
-                    )
-                    diag_weights = torch.where(near_tie.unsqueeze(1), tie_weights, diag_weights)
-            safe_weights = diag_weights.clamp_min(1e-12)
-            entropy = -(safe_weights * safe_weights.log()).sum(dim=1)
-            pred_dir = torch.where(
-                diag_weights[:, 0] >= diag_weights[:, 1],
-                torch.full_like(diag_l_dir, H_FIRST),
-                torch.full_like(diag_l_dir, V_FIRST),
-            )
-            known_resolver = (diag_l_dir == H_FIRST) | (diag_l_dir == V_FIRST)
-            resolver_agreement_ratio = None
-            if known_resolver.any():
-                resolver_agreement_ratio = float(
-                    (pred_dir[known_resolver] == diag_l_dir[known_resolver])
-                    .to(dtype)
-                    .mean()
-                    .item()
+                logits = torch.stack((-cost_h / tau, -cost_v / tau), dim=1)
+                diag_weights = torch.softmax(logits, dim=1)
+                self._log_debug_hash("soft_l.tau", tau, diag_edges=diag_edge_count)
+                self._log_debug_hash("soft_l.diag_weights", diag_weights, diag_edges=diag_edge_count)
+                max_prob = None
+                near_tie_ratio = None
+                if self.soft_l_tie_break_delta > 0.0 and not self.per_net_topology_mode:
+                    max_prob = diag_weights.max(dim=1).values
+                    near_tie = max_prob <= (0.5 + self.soft_l_tie_break_delta)
+                    if should_update_soft_debug:
+                        near_tie_ratio = float(near_tie.to(dtype).mean().item())
+                    if near_tie.any():
+                        choose_h = cost_h <= cost_v
+                        tie_weights = torch.stack(
+                            [choose_h.to(dtype=dtype), (~choose_h).to(dtype=dtype)], dim=1
+                        )
+                        diag_weights = torch.where(near_tie.unsqueeze(1), tie_weights, diag_weights)
+
+            if isinstance(self.cached_soft_debug, dict) and not should_update_soft_debug:
+                self.cached_soft_debug.update(
+                    {
+                        "diag_edge_count": int(diag_edge_count),
+                        "per_net_topology_missing_edges": missing_count,
+                        "per_net_topology_fallback_edges": missing_count,
+                        "per_net_topology_total_diag_edges": total_count,
+                    }
                 )
-            if isinstance(self.cached_soft_debug, dict):
+
+            if should_update_soft_debug and isinstance(self.cached_soft_debug, dict):
+                with profile_scope(
+                    self.profile_enabled,
+                    "soft_l_weights.softmax_stats",
+                    tensor=newx,
+                    logger=logger,
+                    diag_edges=diag_edge_count,
+                ):
+                    raw_cost_gap = (raw_cost_h - raw_cost_v).abs()
+                    biased_cost_gap = (cost_h - cost_v).abs()
+                    tau_source_gap = None
+                    if self.soft_l_adaptive_tau and raw_cost_gap.numel() > 0:
+                        tau_source_gap = torch.quantile(raw_cost_gap, 0.5).clamp(min=1e-6)
+                    if max_prob is None:
+                        max_prob = diag_weights.max(dim=1).values
+                    safe_weights = diag_weights.clamp_min(1e-12)
+                    entropy = -(safe_weights * safe_weights.log()).sum(dim=1)
+                    pred_dir = torch.where(
+                        diag_weights[:, 0] >= diag_weights[:, 1],
+                        torch.full_like(diag_l_dir, H_FIRST),
+                        torch.full_like(diag_l_dir, V_FIRST),
+                    )
+                    known_resolver = (diag_l_dir == H_FIRST) | (diag_l_dir == V_FIRST)
+                    resolver_agreement_ratio = None
+                    if known_resolver.any():
+                        resolver_agreement_ratio = float(
+                            (pred_dir[known_resolver] == diag_l_dir[known_resolver])
+                            .to(dtype)
+                            .mean()
+                            .item()
+                        )
+
+                debug_timer = profile_start(self.profile_enabled, tensor=newx)
                 topo_kernel_name = "diag_split_geometric"
                 if topo_debug_stats is not None:
                     backend = topo_debug_stats.get("backend", None)
@@ -923,7 +1393,7 @@ class LShapeRoutabilityOp(nn.Module):
                         topo_kernel_name = "diag_split_geometric_python"
                 self.cached_soft_debug.update(
                     {
-                        "diag_edge_count": int(is_diagonal.sum().item()),
+                        "diag_edge_count": int(diag_edge_count),
                         "mean_cost_gap": float(biased_cost_gap.mean().item()),
                         "raw_cost_gap_p50": float(torch.quantile(raw_cost_gap, 0.5).item()),
                         "biased_cost_gap_p50": float(torch.quantile(biased_cost_gap, 0.5).item()),
@@ -944,6 +1414,8 @@ class LShapeRoutabilityOp(nn.Module):
                         "per_net_topology_min_support": self.soft_l_same_net_diag_split_min_support,
                         "per_net_topology_max_distance": self.soft_l_same_net_diag_split_max_distance,
                         "per_net_topology_use_cpp": self.per_net_topology_use_cpp,
+                        "soft_l_debug_update_interval": self.soft_l_debug_update_interval,
+                        "soft_l_debug_call_count": self._soft_l_debug_call_count,
                     }
                 )
                 if topo_debug_stats is not None:
@@ -975,10 +1447,33 @@ class LShapeRoutabilityOp(nn.Module):
                             "per_net_topology_total_diag_edges": total_count,
                         }
                     )
-            valid_weights[is_diagonal] = diag_weights
+                profile_end(
+                    self.profile_enabled,
+                    debug_timer,
+                    "soft_l_weights.debug_update",
+                    tensor=newx,
+                    logger=logger,
+                    diag_edges=diag_edge_count,
+                )
+            with profile_scope(
+                self.profile_enabled,
+                "soft_l_weights.scatter_diag",
+                tensor=newx,
+                logger=logger,
+                diag_edges=diag_edge_count,
+            ):
+                valid_weights[is_diagonal] = diag_weights
 
-        weights[valid_mask] = valid_weights
-        return weights
+        with profile_scope(
+            self.profile_enabled,
+            "soft_l_weights.scatter_valid",
+            tensor=newx,
+            logger=logger,
+            valid_edges=int(valid_from.numel()),
+            diag_edges=diag_edge_count,
+        ):
+            weights[valid_mask] = valid_weights
+        return _finish(weights, valid_edges=int(valid_from.numel()), diag_edges=diag_edge_count)
 
     def _prepare_segment_weights(self, segment_result, device):
         segment_weight = segment_result.get('segment_weight', None)
@@ -1027,6 +1522,18 @@ class LShapeRoutabilityOp(nn.Module):
         """
         tt = time.time()
         original_device = pos.device
+        profile_timer = profile_start(self.profile_enabled, tensor=pos)
+
+        def _finish(cost, **fields):
+            profile_end(
+                self.profile_enabled,
+                profile_timer,
+                "l_shape_op.forward.total",
+                tensor=pos,
+                logger=logger,
+                **fields,
+            )
+            return cost
         
         # ========== 关键修复: 保持梯度链完整 ==========
         # steiner_topo_op 只支持CPU，所以我们需要：
@@ -1061,11 +1568,14 @@ class LShapeRoutabilityOp(nn.Module):
             )
 
         # 2. 计算pin位置并clamp到边界（防止out-of-bound）
-        pin_pos = pin_pos_op(pos)
-        num_pins = pin_pos.numel() // 2
-        pin_pos_x = pin_pos[:num_pins].clamp(self.xl, self.xh)
-        pin_pos_y = pin_pos[num_pins:].clamp(self.yl, self.yh)
-        pin_pos = torch.cat([pin_pos_x, pin_pos_y], dim=0)
+        with profile_scope(self.profile_enabled, "l_shape_op.pin_pos_clamp", tensor=pos, logger=logger):
+            pin_pos = pin_pos_op(pos)
+            num_pins = pin_pos.numel() // 2
+            pin_pos_x = pin_pos[:num_pins].clamp(self.xl, self.xh)
+            pin_pos_y = pin_pos[num_pins:].clamp(self.yl, self.yh)
+            pin_pos = torch.cat([pin_pos_x, pin_pos_y], dim=0)
+        self._log_debug_hash("forward.pos", pos)
+        self._log_debug_hash("forward.pin_pos", pin_pos)
         
         # 3. 将pin_pos移到CPU（保持梯度连接）
         if pin_pos.is_cuda:
@@ -1074,7 +1584,12 @@ class LShapeRoutabilityOp(nn.Module):
             pin_pos_cpu = pin_pos
         
         # 4. 调用steiner_topo_op (在CPU上)
-        newx, newy = steiner_topo_op(pin_pos_cpu)
+        with profile_scope(self.profile_enabled, "l_shape_op.steiner_topo", tensor=pos, logger=logger):
+            newx, newy = steiner_topo_op(pin_pos_cpu)
+        self._log_debug_hash("forward.pin_relate_x", getattr(steiner_topo_op, "pin_relate_x", None))
+        self._log_debug_hash("forward.pin_relate_y", getattr(steiner_topo_op, "pin_relate_y", None))
+        self._log_debug_hash("forward.newx", newx)
+        self._log_debug_hash("forward.newy", newy)
                 
         # 5. 获取边信息（确保在CPU上）
         flat_pin_from = steiner_topo_op.flat_pin_from
@@ -1082,7 +1597,10 @@ class LShapeRoutabilityOp(nn.Module):
         
         if flat_pin_from is None or flat_pin_to is None:
             logger.warning("Steiner edges not available, returning zero cost")
-            return torch.zeros(1, dtype=pos.dtype, device=original_device, requires_grad=True)
+            return _finish(
+                torch.zeros(1, dtype=pos.dtype, device=original_device, requires_grad=True),
+                segments=0,
+            )
         
         # 确保边信息在CPU上（与newx, newy一致）
         if flat_pin_from.is_cuda:
@@ -1107,32 +1625,60 @@ class LShapeRoutabilityOp(nn.Module):
                 "No L-direction info, using default %s",
                 "UNKNOWN" if fallback_direction == UNKNOWN else "H_FIRST",
             )
+        self._log_debug_hash("forward.flat_pin_from", flat_pin_from)
+        self._log_debug_hash("forward.flat_pin_to", flat_pin_to)
+        self._log_debug_hash("forward.l_directions", l_directions)
         
         soft_l_weights = None
+        edge_net_ids = None
         if self.soft_l_assignment:
-            edge_net_ids = None
             if isinstance(self.per_net_topology_cache, dict):
-                edge_net_ids = self._build_edge_net_ids(
-                    steiner_topo_op,
-                    flat_pin_from,
-                    flat_pin_to,
-                    newx.numel(),
-                )
+                with profile_scope(
+                    self.profile_enabled,
+                    "l_shape_op.edge_net_ids",
+                    tensor=pos,
+                    logger=logger,
+                    edges=int(flat_pin_from.numel()),
+                ):
+                    if self.l_shape_edge_net_ids_cache_flag:
+                        edge_net_ids = self._get_edge_net_ids(
+                            steiner_topo_op,
+                            flat_pin_from,
+                            flat_pin_to,
+                            newx.numel(),
+                        )
+                    else:
+                        edge_net_ids = self._build_edge_net_ids(
+                            steiner_topo_op,
+                            flat_pin_from,
+                            flat_pin_to,
+                            newx.numel(),
+                        )
+                    self._log_debug_hash("forward.edge_net_ids", edge_net_ids)
             soft_l_weights = self._compute_soft_l_weights(
                 newx, newy, flat_pin_from, flat_pin_to, l_directions, edge_net_ids=edge_net_ids
             )
+            self._log_debug_hash("forward.soft_l_weights", soft_l_weights)
         else:
             self.cached_soft_debug = None
 
         # 6. 构建L形segments（在CPU上）
-        segment_result = self.segment_builder(
-            newx, newy, flat_pin_from, flat_pin_to, l_directions, soft_l_weights=soft_l_weights
-        )
+        with profile_scope(self.profile_enabled, "l_shape_op.segment_builder", tensor=pos, logger=logger):
+            segment_result = self.segment_builder(
+                newx, newy, flat_pin_from, flat_pin_to, l_directions, soft_l_weights=soft_l_weights
+            )
+        self._log_debug_hash("forward.segment_pos", segment_result.get("segment_pos"))
+        self._log_debug_hash("forward.segment_size_x", segment_result.get("segment_size_x"))
+        self._log_debug_hash("forward.segment_size_y", segment_result.get("segment_size_y"))
+        self._log_debug_hash("forward.segment_is_horizontal", segment_result.get("segment_is_horizontal"))
 
         num_segments = segment_result['num_segments']
         if num_segments == 0:
             logger.warning("No valid segments built")
-            return torch.zeros(1, dtype=pos.dtype, device=original_device, requires_grad=True)
+            return _finish(
+                torch.zeros(1, dtype=pos.dtype, device=original_device, requires_grad=True),
+                segments=0,
+            )
 
         # 保存缓存（包含绘图所需的原始数据）
         self.cached_segments = segment_result
@@ -1151,43 +1697,64 @@ class LShapeRoutabilityOp(nn.Module):
         segment_size_x = segment_result['segment_size_x']
         segment_size_y = segment_result['segment_size_y']
         segment_weight = self._prepare_segment_weights(segment_result, segment_pos.device)
+        self._log_debug_hash("forward.segment_weight", segment_weight)
         
         # 根据模式选择计算方式
         if self.density_mode == "electric":
             # 使用C++/CUDA电势场模型
             # 如果density_op支持CUDA，将数据移到CUDA
-            if original_device.type == 'cuda':
-                segment_pos = segment_pos.to(original_device)
-                segment_size_x = segment_size_x.to(original_device)
-                segment_size_y = segment_size_y.to(original_device)
-                if segment_weight is not None:
-                    segment_weight = segment_weight.to(original_device)
-            segment_is_horizontal = segment_result.get('segment_is_horizontal', None)
-            cost = self.density_op(
-                segment_pos,
-                segment_size_x,
-                segment_size_y,
-                segment_is_horizontal,
-                segment_weight=segment_weight,
-            )
+            with profile_scope(self.profile_enabled, "l_shape_op.density_cost", tensor=pos, logger=logger, segments=num_segments):
+                if original_device.type == 'cuda':
+                    segment_pos = segment_pos.to(original_device)
+                    segment_size_x = segment_size_x.to(original_device)
+                    segment_size_y = segment_size_y.to(original_device)
+                    if segment_weight is not None:
+                        segment_weight = segment_weight.to(original_device)
+                segment_is_horizontal = segment_result.get('segment_is_horizontal', None)
+                cost = self.density_op(
+                    segment_pos,
+                    segment_size_x,
+                    segment_size_y,
+                    segment_is_horizontal,
+                    segment_weight=segment_weight,
+                )
+                if self._debug_hash_active():
+                    try:
+                        from dreamplace.ops.routability.l_shape_electric_potential import SegmentElectricPotentialFunction
+                        self._log_debug_hash("electric.density_map", SegmentElectricPotentialFunction.last_density_map)
+                        self._log_debug_hash("electric.density_map_h", SegmentElectricPotentialFunction.last_density_map_h)
+                        self._log_debug_hash("electric.density_map_v", SegmentElectricPotentialFunction.last_density_map_v)
+                        self._log_debug_hash("electric.rho_map", SegmentElectricPotentialFunction.last_rho_map)
+                        self._log_debug_hash("electric.rho_map_h", SegmentElectricPotentialFunction.last_rho_map_h)
+                        self._log_debug_hash("electric.rho_map_v", SegmentElectricPotentialFunction.last_rho_map_v)
+                        self._log_debug_hash("electric.field_map_x", SegmentElectricPotentialFunction.last_field_map_x)
+                        self._log_debug_hash("electric.field_map_y", SegmentElectricPotentialFunction.last_field_map_y)
+                        self._log_debug_hash("electric.overflow_map", SegmentElectricPotentialFunction.last_overflow_map)
+                        self._log_debug_hash("electric.energy", SegmentElectricPotentialFunction.last_energy)
+                        self._log_debug_hash("electric.energy_h", SegmentElectricPotentialFunction.last_energy_h)
+                        self._log_debug_hash("electric.energy_v", SegmentElectricPotentialFunction.last_energy_v)
+                    except Exception as exc:
+                        logger.warning("LShapeHash iter=%s electric map hash failed: %s", self._debug_hash_iteration, exc)
         else:
             # 使用Python RUDY密度的energy模式
-            cost = self.density_op(
-                segment_pos,
-                segment_size_x,
-                segment_size_y,
-                mode="energy",
-                segment_weight=segment_weight,
-            )
+            with profile_scope(self.profile_enabled, "l_shape_op.density_cost", tensor=pos, logger=logger, segments=num_segments):
+                cost = self.density_op(
+                    segment_pos,
+                    segment_size_x,
+                    segment_size_y,
+                    mode="energy",
+                    segment_weight=segment_weight,
+                )
         
         # 确保cost在原始设备上
         if cost.device != original_device:
             cost = cost.to(original_device)
+        self._log_debug_hash("forward.cost", cost, segments=num_segments)
         
         logger.debug(f"L-shape routability cost: {cost.item():.4f}, "
                     f"{num_segments} segments, {(time.time() - tt) * 1000:.2f} ms")
         
-        return cost
+        return _finish(cost, segments=num_segments)
     
     def get_density_map(self, pos, steiner_topo_op, pin_pos_op, use_l_direction=True):
         """
@@ -1230,6 +1797,10 @@ class LShapeRoutabilityOp(nn.Module):
         # steiner_topo_op要求CPU tensor
         pin_pos_cpu = pin_pos.cpu() if pin_pos.is_cuda else pin_pos
         newx, newy = steiner_topo_op(pin_pos_cpu)
+        self._log_debug_hash("get_density_map.pin_relate_x", getattr(steiner_topo_op, "pin_relate_x", None))
+        self._log_debug_hash("get_density_map.pin_relate_y", getattr(steiner_topo_op, "pin_relate_y", None))
+        self._log_debug_hash("get_density_map.newx", newx)
+        self._log_debug_hash("get_density_map.newy", newy)
         
         # 将结果移回原设备
         if device.type == 'cuda':
@@ -1266,12 +1837,27 @@ class LShapeRoutabilityOp(nn.Module):
         if self.soft_l_assignment:
             edge_net_ids = None
             if isinstance(self.per_net_topology_cache, dict):
-                edge_net_ids = self._build_edge_net_ids(
-                    steiner_topo_op,
-                    flat_pin_from,
-                    flat_pin_to,
-                    newx.numel(),
-                )
+                with profile_scope(
+                    self.profile_enabled,
+                    "l_shape_op.edge_net_ids",
+                    tensor=pos,
+                    logger=logger,
+                    edges=int(flat_pin_from.numel()),
+                ):
+                    if self.l_shape_edge_net_ids_cache_flag:
+                        edge_net_ids = self._get_edge_net_ids(
+                            steiner_topo_op,
+                            flat_pin_from,
+                            flat_pin_to,
+                            newx.numel(),
+                        )
+                    else:
+                        edge_net_ids = self._build_edge_net_ids(
+                            steiner_topo_op,
+                            flat_pin_from,
+                            flat_pin_to,
+                            newx.numel(),
+                        )
             soft_l_weights = self._compute_soft_l_weights(
                 newx, newy, flat_pin_from, flat_pin_to, l_directions, edge_net_ids=edge_net_ids
             )
@@ -1298,6 +1884,7 @@ class LShapeRoutabilityOp(nn.Module):
             segment_weight=segment_weight,
             mask=None,
         )
+        self._log_debug_hash("get_density_map.total", density_map)
         segment_is_horizontal = segment_result.get('segment_is_horizontal', None)
         if isinstance(segment_is_horizontal, torch.Tensor) and segment_is_horizontal.numel() == segment_result['num_segments']:
             segment_is_horizontal = segment_is_horizontal.to(torch.bool)
@@ -1315,6 +1902,8 @@ class LShapeRoutabilityOp(nn.Module):
                 segment_weight=segment_weight,
                 mask=~segment_is_horizontal,
             )
+            self._log_debug_hash("get_density_map.h", density_map_h)
+            self._log_debug_hash("get_density_map.v", density_map_v)
         else:
             density_map_h = None
             density_map_v = None
@@ -1333,6 +1922,9 @@ class LShapeRoutabilityOp(nn.Module):
         self.cached_density_map = density_map
         self.cached_density_map_h = density_map_h
         self.cached_density_map_v = density_map_v
+        self._log_debug_hash("density_map.cached_total", self.cached_density_map)
+        self._log_debug_hash("density_map.cached_h", self.cached_density_map_h)
+        self._log_debug_hash("density_map.cached_v", self.cached_density_map_v)
         return density_map
     
     def get_segments_for_plot(self):

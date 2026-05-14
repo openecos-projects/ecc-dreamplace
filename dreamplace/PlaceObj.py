@@ -58,6 +58,7 @@ from dreamplace.ops.rc_timing.rc_timing import RCTiming
 from dreamplace.BasicPlace import PlaceDataCollection
 from tools.iEDA.module.sta import IEDASta
 from dreamplace.ops.routability.plot_map import plot_node_grad_directions
+from dreamplace.ops.routability.profile_timing import profile_scope
 
 
 class PreconditionOp:
@@ -513,6 +514,10 @@ class PlaceObj(nn.Module):
             self._l_shape_outer_iteration = None
         else:
             self._l_shape_outer_iteration = int(iteration)
+        if self.l_shape_routability_op is not None and hasattr(
+            self.l_shape_routability_op, "set_debug_iteration"
+        ):
+            self.l_shape_routability_op.set_debug_iteration(self._l_shape_outer_iteration)
 
     def _get_l_shape_density_weight_scalar(self):
         density_weight = getattr(self, "density_weight", None)
@@ -601,7 +606,44 @@ class PlaceObj(nn.Module):
         from dreamplace.ops.routability.l_shape_routability import LShapeRoutabilityOp
         
         if self.l_shape_routability_op is not None:
-            self.l_shape_routability_op.update_targets(
+            with profile_scope(
+                self.params,
+                "place_obj.init_l_shape.update_existing_targets",
+                logger=logging,
+            ):
+                self.l_shape_routability_op.update_targets(
+                    target_density=target_density,
+                    target_demand=target_demand,
+                    raw_wire_demand_map=raw_wire_demand_map,
+                    supply_original=supply_original,
+                    target_density_h=target_density_h,
+                    target_density_v=target_density_v,
+                    target_demand_h=target_demand_h,
+                    target_demand_v=target_demand_v,
+                    raw_wire_demand_map_h=raw_wire_demand_map_h,
+                    raw_wire_demand_map_v=raw_wire_demand_map_v,
+                    supply_original_h=supply_original_h,
+                    supply_original_v=supply_original_v,
+                    fix_usage_map=fix_usage_map,
+                    fix_usage_map_h=fix_usage_map_h,
+                    fix_usage_map_v=fix_usage_map_v,
+                )
+            self.use_l_shape_routability = True
+            logging.info("L-shape routability already initialized; refreshed targets and re-enabled")
+            return
+        
+        with profile_scope(
+            self.params,
+            "place_obj.init_l_shape.construct_routability_op",
+            logger=logging,
+            bins=f"{num_bins_x}x{num_bins_y}",
+        ):
+            self.l_shape_routability_op = LShapeRoutabilityOp(
+                placedb=self.placedb,
+                params=self.params,
+                wire_width=wire_width,
+                num_bins_x=num_bins_x,
+                num_bins_y=num_bins_y,
                 target_density=target_density,
                 target_demand=target_demand,
                 raw_wire_demand_map=raw_wire_demand_map,
@@ -618,32 +660,6 @@ class PlaceObj(nn.Module):
                 fix_usage_map_h=fix_usage_map_h,
                 fix_usage_map_v=fix_usage_map_v,
             )
-            self.use_l_shape_routability = True
-            logging.info("L-shape routability already initialized; refreshed targets and re-enabled")
-            return
-        
-        self.l_shape_routability_op = LShapeRoutabilityOp(
-            placedb=self.placedb,
-            params=self.params,
-            wire_width=wire_width,
-            num_bins_x=num_bins_x,
-            num_bins_y=num_bins_y,
-            target_density=target_density,
-            target_demand=target_demand,
-            raw_wire_demand_map=raw_wire_demand_map,
-            supply_original=supply_original,
-            target_density_h=target_density_h,
-            target_density_v=target_density_v,
-            target_demand_h=target_demand_h,
-            target_demand_v=target_demand_v,
-            raw_wire_demand_map_h=raw_wire_demand_map_h,
-            raw_wire_demand_map_v=raw_wire_demand_map_v,
-            supply_original_h=supply_original_h,
-            supply_original_v=supply_original_v,
-            fix_usage_map=fix_usage_map,
-            fix_usage_map_h=fix_usage_map_h,
-            fix_usage_map_v=fix_usage_map_v,
-        )
         self.use_l_shape_routability = True
         
         if isinstance(target_density, torch.Tensor):
@@ -677,13 +693,22 @@ class PlaceObj(nn.Module):
         if self.l_shape_routability_op is None:
             logging.warning("L-shape routability not initialized")
             return torch.zeros(1, dtype=pos.dtype, device=pos.device)
+        if hasattr(self.l_shape_routability_op, "set_debug_iteration"):
+            self.l_shape_routability_op.set_debug_iteration(self._l_shape_outer_iteration)
         
-        return self.l_shape_routability_op(
-            pos,
-            self.op_collections.steiner_topo_op,
-            self.op_collections.pin_pos_op,
-            use_l_direction=use_l_direction,
-        )
+        with profile_scope(
+            self.params,
+            "place_obj.l_shape_routability_obj",
+            tensor=pos,
+            logger=logging,
+            iteration=self._l_shape_outer_iteration,
+        ):
+            return self.l_shape_routability_op(
+                pos,
+                self.op_collections.steiner_topo_op,
+                self.op_collections.pin_pos_op,
+                use_l_direction=use_l_direction,
+            )
     
     def get_l_shape_density_map(self, pos, use_l_direction=True):
         """获取L形密度图用于可视化"""
@@ -1926,13 +1951,39 @@ class PlaceObj(nn.Module):
 
         if pos.grad is not None:
             pos.grad.zero_()
-        obj = self.obj_fn(pos)
-
-        obj.backward()
-        assert torch.isnan(pos.grad).any() == False, "Gradient contains NaN"
-        self.op_collections.precondition_op(
-            pos.grad, self.density_weight, self.update_mask, self.fix_nodes_mask
+        profile_active = (
+            bool(getattr(self.params, "l_shape_profile_flag", False))
+            and self.use_l_shape_routability
+            and self.l_shape_routability_op is not None
         )
+        with profile_scope(
+            profile_active,
+            "place_obj.base_obj_forward",
+            tensor=pos,
+            logger=logging,
+            iteration=self._l_shape_outer_iteration,
+        ):
+            obj = self.obj_fn(pos)
+
+        with profile_scope(
+            profile_active,
+            "place_obj.base_obj_backward",
+            tensor=pos,
+            logger=logging,
+            iteration=self._l_shape_outer_iteration,
+        ):
+            obj.backward()
+        assert torch.isnan(pos.grad).any() == False, "Gradient contains NaN"
+        with profile_scope(
+            profile_active,
+            "place_obj.base_precondition",
+            tensor=pos.grad,
+            logger=logging,
+            iteration=self._l_shape_outer_iteration,
+        ):
+            self.op_collections.precondition_op(
+                pos.grad, self.density_weight, self.update_mask, self.fix_nodes_mask
+            )
         self.l_shape_last_cost = None
         self.l_shape_last_weighted_cost = None
         self.l_shape_last_weight = None
@@ -1951,25 +2002,56 @@ class PlaceObj(nn.Module):
         # ========== L形Routability梯度 ==========
         if self.use_l_shape_routability and self.l_shape_routability_op is not None:
             # 保存 wirelength + density 的梯度
+            current_iteration = self._l_shape_outer_iteration
+            debug_hash_op = (
+                self.l_shape_routability_op
+                if hasattr(self.l_shape_routability_op, "log_debug_hash")
+                else None
+            )
             base_grad = pos.grad.data.clone()
             base_grad_norm = base_grad.norm(p=2)
             base_grad_norm_value = float(base_grad_norm.item())
+            if debug_hash_op is not None:
+                debug_hash_op.log_debug_hash(
+                    "place_obj.base_grad",
+                    base_grad,
+                    norm="%.9e" % base_grad_norm_value,
+                )
             
             pos.grad.zero_()
             
             # 计算L形routability cost 
-            l_shape_cost = self.l_shape_routability_obj(pos, use_l_direction=True)
-            l_shape_cost.backward()
+            with profile_scope(
+                self.params,
+                "place_obj.l_shape_cost_forward",
+                tensor=pos,
+                logger=logging,
+                iteration=current_iteration,
+            ):
+                l_shape_cost = self.l_shape_routability_obj(pos, use_l_direction=True)
+            with profile_scope(
+                self.params,
+                "place_obj.l_shape_cost_backward",
+                tensor=pos,
+                logger=logging,
+                iteration=current_iteration,
+            ):
+                l_shape_cost.backward()
             
             # 获取原始 L-shape 梯度范数
             l_shape_grad_raw = pos.grad.data.clone()
             l_shape_grad_norm = l_shape_grad_raw.norm(p=2)
             l_shape_grad_norm_value = float(l_shape_grad_norm.item())
+            if debug_hash_op is not None:
+                debug_hash_op.log_debug_hash(
+                    "place_obj.l_shape_grad_raw",
+                    l_shape_grad_raw,
+                    norm="%.9e" % l_shape_grad_norm_value,
+                )
             target_weight_value = None
             sched_weight_value = None
             cap_active = False
 
-            current_iteration = self._l_shape_outer_iteration
             current_weight = float(self.l_shape_routability_weight.item())
             density_weight_scalar = self._get_l_shape_density_weight_scalar()
             sched_base_weight = None
@@ -1978,86 +2060,93 @@ class PlaceObj(nn.Module):
             sched_active = False
 
             if self.l_shape_use_xplace_weight_schedule:
-                if (
-                    self._l_shape_sched_active
-                    and not self._l_shape_sched_initialized
-                    and current_iteration is not None
-                    and l_shape_grad_norm > 1e-10
-                    and base_grad_norm > 1e-10
+                with profile_scope(
+                    self.params,
+                    "place_obj.l_shape_weight_schedule",
+                    tensor=pos.grad,
+                    logger=logging,
+                    iteration=current_iteration,
                 ):
-                    target_weight = (
-                        self.l_shape_grad_target_ratio * base_grad_norm
-                        / (l_shape_grad_norm + 1e-12)
-                    ).item()
-                    base_weight = target_weight / max(density_weight_scalar, 1e-12)
-                    base_weight = max(
-                        self.l_shape_weight_min,
-                        min(self.l_shape_weight_max, base_weight),
-                    )
-                    self._l_shape_sched_base_weight = float(base_weight)
-                    self._l_shape_sched_initialized = True
-                    self._l_shape_weight_initialized = True
-                    logging.info(
-                        "L-shape weight schedule calibrated at iter %d: "
-                        "target_weight=%.4e base_weight=%.4e density_weight=%.4e "
-                        "(base_grad=%.4e, l_shape_grad=%.4e, target_ratio=%.4f)",
-                        int(current_iteration),
-                        float(target_weight),
-                        float(base_weight),
-                        float(density_weight_scalar),
-                        base_grad_norm_value,
-                        l_shape_grad_norm_value,
-                        float(self.l_shape_grad_target_ratio),
-                    )
-
-                if self._l_shape_sched_active and self._l_shape_sched_initialized:
-                    sched_active = True
-                    sched_base_weight = float(self._l_shape_sched_base_weight)
-                    sched_iter_diff = max(
-                        0,
-                        int(current_iteration) - int(self._l_shape_sched_start_iter),
-                    ) if (
-                        current_iteration is not None
-                        and self._l_shape_sched_start_iter is not None
-                    ) else 0
-                    sched_sigma = self._l_shape_param_smooth_func(sched_iter_diff)
-                    sched_weight_value = float(
-                        density_weight_scalar * sched_base_weight
-                    ) * float(sched_sigma)
-                    target_weight_value = float(
-                        self.l_shape_grad_target_ratio * base_grad_norm_value
-                        / (l_shape_grad_norm_value + 1e-12)
-                    )
-                    new_weight = sched_weight_value
-                    if target_weight_value is not None and new_weight > target_weight_value:
-                        new_weight = target_weight_value
-                        cap_active = True
-                    new_weight = max(
-                        self.l_shape_weight_min,
-                        min(self.l_shape_weight_max, new_weight),
-                    )
-                    current_weight = float(new_weight)
-                    self.l_shape_routability_weight.data.fill_(current_weight)
-                    pos.grad.data.mul_(current_weight)
-                    if sched_iter_diff > int(self.l_shape_num_route_iter):
-                        self._l_shape_sched_active = False
-                        sched_active = False
-                        logging.info(
-                            "End Xplace-style L-shape weight schedule at iter %d "
-                            "(dt=%d, sigma=%.4e, weight=%.4e)",
-                            int(current_iteration),
-                            int(sched_iter_diff),
-                            float(sched_sigma),
-                            float(current_weight),
+                    if (
+                        self._l_shape_sched_active
+                        and not self._l_shape_sched_initialized
+                        and current_iteration is not None
+                        and l_shape_grad_norm > 1e-10
+                        and base_grad_norm > 1e-10
+                    ):
+                        target_weight = (
+                            self.l_shape_grad_target_ratio * base_grad_norm
+                            / (l_shape_grad_norm + 1e-12)
+                        ).item()
+                        base_weight = target_weight / max(density_weight_scalar, 1e-12)
+                        base_weight = max(
+                            self.l_shape_weight_min,
+                            min(self.l_shape_weight_max, base_weight),
                         )
-                else:
-                    # Keep l-shape contribution disabled until the first valid
-                    # schedule calibration instead of applying a placeholder weight.
-                    pos.grad.zero_()
-                    self.l_shape_routability_weight.data.zero_()
-                    current_weight = 0.0
-                    sched_active = bool(self._l_shape_sched_active)
-                    sched_base_weight = self._l_shape_sched_base_weight
+                        self._l_shape_sched_base_weight = float(base_weight)
+                        self._l_shape_sched_initialized = True
+                        self._l_shape_weight_initialized = True
+                        logging.info(
+                            "L-shape weight schedule calibrated at iter %d: "
+                            "target_weight=%.4e base_weight=%.4e density_weight=%.4e "
+                            "(base_grad=%.4e, l_shape_grad=%.4e, target_ratio=%.4f)",
+                            int(current_iteration),
+                            float(target_weight),
+                            float(base_weight),
+                            float(density_weight_scalar),
+                            base_grad_norm_value,
+                            l_shape_grad_norm_value,
+                            float(self.l_shape_grad_target_ratio),
+                        )
+
+                    if self._l_shape_sched_active and self._l_shape_sched_initialized:
+                        sched_active = True
+                        sched_base_weight = float(self._l_shape_sched_base_weight)
+                        sched_iter_diff = max(
+                            0,
+                            int(current_iteration) - int(self._l_shape_sched_start_iter),
+                        ) if (
+                            current_iteration is not None
+                            and self._l_shape_sched_start_iter is not None
+                        ) else 0
+                        sched_sigma = self._l_shape_param_smooth_func(sched_iter_diff)
+                        sched_weight_value = float(
+                            density_weight_scalar * sched_base_weight
+                        ) * float(sched_sigma)
+                        target_weight_value = float(
+                            self.l_shape_grad_target_ratio * base_grad_norm_value
+                            / (l_shape_grad_norm_value + 1e-12)
+                        )
+                        new_weight = sched_weight_value
+                        if target_weight_value is not None and new_weight > target_weight_value:
+                            new_weight = target_weight_value
+                            cap_active = True
+                        new_weight = max(
+                            self.l_shape_weight_min,
+                            min(self.l_shape_weight_max, new_weight),
+                        )
+                        current_weight = float(new_weight)
+                        self.l_shape_routability_weight.data.fill_(current_weight)
+                        pos.grad.data.mul_(current_weight)
+                        if sched_iter_diff > int(self.l_shape_num_route_iter):
+                            self._l_shape_sched_active = False
+                            sched_active = False
+                            logging.info(
+                                "End Xplace-style L-shape weight schedule at iter %d "
+                                "(dt=%d, sigma=%.4e, weight=%.4e)",
+                                int(current_iteration),
+                                int(sched_iter_diff),
+                                float(sched_sigma),
+                                float(current_weight),
+                            )
+                    else:
+                        # Keep l-shape contribution disabled until the first valid
+                        # schedule calibration instead of applying a placeholder weight.
+                        pos.grad.zero_()
+                        self.l_shape_routability_weight.data.zero_()
+                        current_weight = 0.0
+                        sched_active = bool(self._l_shape_sched_active)
+                        sched_base_weight = self._l_shape_sched_base_weight
             else:
                 # 自适应调整权重
                 # 目标: l_shape_grad_norm * weight ≈ target_ratio * base_grad_norm
@@ -2239,8 +2328,23 @@ class PlaceObj(nn.Module):
                             f"force_norm={(force_x.norm()**2 + force_y.norm()**2).sqrt():.4e}"
                         )
 
-            pos.grad.data.add_(base_grad)
-            self._apply_gradient_masks_only(pos.grad.data)
+            with profile_scope(
+                self.params,
+                "place_obj.l_shape_apply_grad",
+                tensor=pos.grad,
+                logger=logging,
+                iteration=current_iteration,
+            ):
+                if debug_hash_op is not None:
+                    debug_hash_op.log_debug_hash(
+                        "place_obj.l_shape_grad_weighted",
+                        pos.grad.data,
+                        weight="%.9e" % float(self.l_shape_routability_weight.item()),
+                    )
+                pos.grad.data.add_(base_grad)
+                self._apply_gradient_masks_only(pos.grad.data)
+                if debug_hash_op is not None:
+                    debug_hash_op.log_debug_hash("place_obj.final_grad", pos.grad.data)
             self.l_shape_last_cost = float(l_shape_cost.item())
             self.l_shape_last_weighted_cost = float(l_shape_weighted.item())
             self.l_shape_last_weight = current_weight

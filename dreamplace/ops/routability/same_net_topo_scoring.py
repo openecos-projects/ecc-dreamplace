@@ -1,8 +1,16 @@
 import logging
+import time
 from collections import Counter, defaultdict
 
 import numpy as np
 import torch
+
+from dreamplace.ops.routability.profile_timing import (
+    l_shape_profile_enabled,
+    profile_end,
+    profile_scope,
+    profile_start,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +42,9 @@ def _build_net_name_to_id(placedb):
 def _merge_intervals(intervals, max_gap=1):
     if not intervals:
         return []
+    if len(intervals) == 1:
+        lo, hi = intervals[0]
+        return [(int(min(lo, hi)), int(max(lo, hi)))]
     normalized = sorted((min(lo, hi), max(lo, hi)) for lo, hi in intervals)
     merged = [[int(normalized[0][0]), int(normalized[0][1])]]
     for lo, hi in normalized[1:]:
@@ -58,11 +69,10 @@ def _route_grid_shape(placedb):
     return (num_x, num_y)
 
 
-def _build_net_topology_record(net_id, net_route, max_gap=1):
+def _build_net_topology_record(net_id, net_route, max_gap=1, return_wire_count=False):
     entries = net_route.get("entries", []) or []
     horizontal_by_row = defaultdict(list)
     vertical_by_col = defaultdict(list)
-    point_count = Counter()
     invalid_wire_count = 0
     raw_wire_count = 0
 
@@ -91,14 +101,10 @@ def _build_net_topology_record(net_id, net_route, max_gap=1):
         if is_horizontal and y1 == y2:
             lo, hi = sorted((x1, x2))
             horizontal_by_row[int(y1)].append((int(lo), int(hi)))
-            point_count[(int(x1), int(y1))] += 1
-            point_count[(int(x2), int(y2))] += 1
             continue
         if is_vertical and x1 == x2:
             lo, hi = sorted((y1, y2))
             vertical_by_col[int(x1)].append((int(lo), int(hi)))
-            point_count[(int(x1), int(y1))] += 1
-            point_count[(int(x2), int(y2))] += 1
             continue
         invalid_wire_count += 1
 
@@ -114,16 +120,9 @@ def _build_net_topology_record(net_id, net_route, max_gap=1):
     }
 
     if not merged_h and not merged_v:
+        if return_wire_count:
+            return None, int(raw_wire_count)
         return None
-
-    junction_points = sorted(
-        (int(x), int(y)) for (x, y), count in point_count.items() if count > 1
-    )
-    junction_array = (
-        np.asarray(junction_points, dtype=np.int32)
-        if junction_points
-        else np.zeros((0, 2), dtype=np.int32)
-    )
 
     num_horizontal_intervals = sum(len(intervals) for intervals in merged_h.values())
     num_vertical_intervals = sum(len(intervals) for intervals in merged_v.values())
@@ -134,14 +133,11 @@ def _build_net_topology_record(net_id, net_route, max_gap=1):
         _interval_total_length(intervals) for intervals in merged_v.values()
     )
 
-    return {
+    record = {
         "net_id": int(net_id),
         "net_name": net_route.get("net_name", "") or f"net_{net_id}",
         "horizontal_by_row": merged_h,
         "vertical_by_col": merged_v,
-        "horizontal_rows": np.asarray(sorted(merged_h.keys()), dtype=np.int32),
-        "vertical_cols": np.asarray(sorted(merged_v.keys()), dtype=np.int32),
-        "junction_points": junction_array,
         "bbox": (
             int(bbox_x_lo if bbox_x_lo is not None else 0),
             int(bbox_y_lo if bbox_y_lo is not None else 0),
@@ -156,10 +152,19 @@ def _build_net_topology_record(net_id, net_route, max_gap=1):
         "invalid_wire_count": int(invalid_wire_count),
         "route_failed": bool(net_route.get("route_failed", False)),
     }
+    if return_wire_count:
+        return record, int(raw_wire_count)
+    return record
 
 
-def build_same_net_topology_cache(route_entries, placedb, max_gap=1):
-    net_name_to_id = _build_net_name_to_id(placedb)
+def build_same_net_topology_cache(route_entries, placedb, max_gap=1, profile_enabled=False):
+    profile_active = l_shape_profile_enabled(profile_enabled)
+    with profile_scope(
+        profile_enabled,
+        "same_net_topology_cache.build_net_name_to_id",
+        logger=logger,
+    ):
+        net_name_to_id = _build_net_name_to_id(placedb)
     net_topologies = {}
     route_entry_meta = {}
     num_route_failed_nets = 0
@@ -171,7 +176,13 @@ def build_same_net_topology_cache(route_entries, placedb, max_gap=1):
     max_intervals_per_net = 0
     invalid_wire_count = 0
 
+    route_loop_timer = profile_start(profile_enabled)
+    meta_elapsed_s = 0.0
+    wire_count_elapsed_s = 0.0
+    record_build_elapsed_s = 0.0
+    stats_elapsed_s = 0.0
     for net_route in route_entries or []:
+        meta_start = time.perf_counter() if profile_active else None
         if bool(net_route.get("route_failed", False)):
             num_route_failed_nets += 1
         net_name = net_route.get("net_name", "")
@@ -183,7 +194,18 @@ def build_same_net_topology_cache(route_entries, placedb, max_gap=1):
                 unknown_name_count += 1
                 continue
         entries = net_route.get("entries", []) or []
-        wire_entry_count = sum(1 for entry in entries if entry.get("type", "") == "wire")
+        if profile_active:
+            meta_elapsed_s += time.perf_counter() - meta_start
+            record_build_start = time.perf_counter()
+        record, wire_entry_count = _build_net_topology_record(
+            int(net_id),
+            net_route,
+            max_gap=max_gap,
+            return_wire_count=True,
+        )
+        if profile_active:
+            record_build_elapsed_s += time.perf_counter() - record_build_start
+            meta_start = time.perf_counter()
         route_entry_meta[int(net_id)] = {
             "net_id": int(net_id),
             "net_name": net_route.get("net_name", "") or f"net_{net_id}",
@@ -191,9 +213,11 @@ def build_same_net_topology_cache(route_entries, placedb, max_gap=1):
             "entry_count": int(len(entries)),
             "wire_entry_count": int(wire_entry_count),
         }
-        record = _build_net_topology_record(int(net_id), net_route, max_gap=max_gap)
+        if profile_active:
+            meta_elapsed_s += time.perf_counter() - meta_start
         if record is None:
             continue
+        stats_start = time.perf_counter() if profile_active else None
         net_topologies[int(net_id)] = record
         total_segments_h += int(record["num_horizontal_intervals"])
         total_segments_v += int(record["num_vertical_intervals"])
@@ -204,6 +228,20 @@ def build_same_net_topology_cache(route_entries, placedb, max_gap=1):
             max_intervals_per_net,
             int(record["num_horizontal_intervals"]) + int(record["num_vertical_intervals"]),
         )
+        if profile_active:
+            stats_elapsed_s += time.perf_counter() - stats_start
+    profile_end(
+        profile_enabled,
+        route_loop_timer,
+        "same_net_topology_cache.route_loop",
+        logger=logger,
+        route_nets=len(route_entries or []),
+        topo_nets=len(net_topologies),
+        meta_ms=f"{meta_elapsed_s * 1000.0:.3f}",
+        wire_count_ms=f"{wire_count_elapsed_s * 1000.0:.3f}",
+        record_build_ms=f"{record_build_elapsed_s * 1000.0:.3f}",
+        stats_ms=f"{stats_elapsed_s * 1000.0:.3f}",
+    )
 
     stats = {
         "route_grid_shape": _route_grid_shape(placedb),
@@ -247,6 +285,7 @@ def pack_same_net_topology_cache_for_cpp(
     yl,
     route_bin_size_x,
     route_bin_size_y,
+    profile_enabled=False,
 ):
     if not isinstance(topo_cache, dict):
         return None
@@ -264,6 +303,15 @@ def pack_same_net_topology_cache_for_cpp(
     cached_key = topo_cache.get(_CPP_PACK_CACHE_META_KEY)
     cached_pack = topo_cache.get(_CPP_PACK_CACHE_KEY)
     if cached_key == pack_key and isinstance(cached_pack, dict):
+        profile_end(
+            profile_enabled,
+            profile_start(profile_enabled),
+            "same_net_topo_scoring.pack_cpp_cache_hit",
+            logger=logger,
+            nets=int(cached_pack["net_ids"].size),
+            h_segments=int(cached_pack["h_x1"].size),
+            v_segments=int(cached_pack["v_x"].size),
+        )
         return cached_pack
 
     net_ids = []
@@ -275,35 +323,68 @@ def pack_same_net_topology_cache_for_cpp(
     v_x = []
     v_y1 = []
     v_y2 = []
+    route_grid_shape = topo_cache.get("route_grid_shape", (0, 0))
+    try:
+        route_num_bins_x = max(int(route_grid_shape[0]), 0)
+        route_num_bins_y = max(int(route_grid_shape[1]), 0)
+    except Exception:
+        route_num_bins_x = 0
+        route_num_bins_y = 0
+    x_centers = np.float32(xl) + (
+        np.arange(route_num_bins_x, dtype=np.float32) + np.float32(0.5)
+    ) * np.float32(route_bin_size_x)
+    y_centers = np.float32(yl) + (
+        np.arange(route_num_bins_y, dtype=np.float32) + np.float32(0.5)
+    ) * np.float32(route_bin_size_y)
+    x_center_count = int(x_centers.size)
+    y_center_count = int(y_centers.size)
 
+    pack_timer = profile_start(profile_enabled)
+    loop_elapsed_s = 0.0
+    array_elapsed_s = 0.0
+    loop_start = time.perf_counter() if l_shape_profile_enabled(profile_enabled) else None
     for net_id in sorted(net_topologies.keys()):
         record = net_topologies[net_id]
         net_ids.append(int(net_id))
 
         h_count = 0
         for row_idx in sorted(record.get("horizontal_by_row", {}).keys()):
-            seg_y = _grid_center(row_idx, yl, route_bin_size_y)
+            seg_y = y_centers[row_idx] if 0 <= row_idx < y_center_count else _grid_center(row_idx, yl, route_bin_size_y)
             intervals = record["horizontal_by_row"][row_idx]
             for int_lo, int_hi in intervals:
-                h_x1.append(_grid_center(int_lo, xl, route_bin_size_x))
+                h_x1.append(x_centers[int_lo] if 0 <= int_lo < x_center_count else _grid_center(int_lo, xl, route_bin_size_x))
                 h_y.append(seg_y)
-                h_x2.append(_grid_center(int_hi, xl, route_bin_size_x))
+                h_x2.append(x_centers[int_hi] if 0 <= int_hi < x_center_count else _grid_center(int_hi, xl, route_bin_size_x))
                 h_count += 1
         h_seg_offsets.append(h_seg_offsets[-1] + h_count)
 
         v_count = 0
         for col_idx in sorted(record.get("vertical_by_col", {}).keys()):
-            seg_x = _grid_center(col_idx, xl, route_bin_size_x)
+            seg_x = x_centers[col_idx] if 0 <= col_idx < x_center_count else _grid_center(col_idx, xl, route_bin_size_x)
             intervals = record["vertical_by_col"][col_idx]
             for int_lo, int_hi in intervals:
                 v_x.append(seg_x)
-                v_y1.append(_grid_center(int_lo, yl, route_bin_size_y))
-                v_y2.append(_grid_center(int_hi, yl, route_bin_size_y))
+                v_y1.append(y_centers[int_lo] if 0 <= int_lo < y_center_count else _grid_center(int_lo, yl, route_bin_size_y))
+                v_y2.append(y_centers[int_hi] if 0 <= int_hi < y_center_count else _grid_center(int_hi, yl, route_bin_size_y))
                 v_count += 1
         v_seg_offsets.append(v_seg_offsets[-1] + v_count)
+    if loop_start is not None:
+        loop_elapsed_s = time.perf_counter() - loop_start
+
+    array_start = time.perf_counter() if l_shape_profile_enabled(profile_enabled) else None
+    net_ids_np = np.asarray(net_ids, dtype=np.int32)
+    if net_ids_np.size:
+        max_net_id = int(net_ids_np.max())
+        net_index_by_id = np.full(max_net_id + 1, -1, dtype=np.int32)
+        valid_net_ids = net_ids_np >= 0
+        if valid_net_ids.any():
+            net_index_by_id[net_ids_np[valid_net_ids]] = np.nonzero(valid_net_ids)[0].astype(np.int32)
+    else:
+        net_index_by_id = np.zeros(0, dtype=np.int32)
 
     packed = {
-        "net_ids": np.asarray(net_ids, dtype=np.int32),
+        "net_ids": net_ids_np,
+        "net_index_by_id": net_index_by_id,
         "h_seg_offsets": np.asarray(h_seg_offsets, dtype=np.int32),
         "v_seg_offsets": np.asarray(v_seg_offsets, dtype=np.int32),
         "h_x1": np.asarray(h_x1, dtype=np.float32),
@@ -313,8 +394,21 @@ def pack_same_net_topology_cache_for_cpp(
         "v_y1": np.asarray(v_y1, dtype=np.float32),
         "v_y2": np.asarray(v_y2, dtype=np.float32),
     }
+    if array_start is not None:
+        array_elapsed_s = time.perf_counter() - array_start
     topo_cache[_CPP_PACK_CACHE_META_KEY] = pack_key
     topo_cache[_CPP_PACK_CACHE_KEY] = packed
+    profile_end(
+        profile_enabled,
+        pack_timer,
+        "same_net_topo_scoring.pack_cpp",
+        logger=logger,
+        nets=int(packed["net_ids"].size),
+        h_segments=int(packed["h_x1"].size),
+        v_segments=int(packed["v_x"].size),
+        loop_ms=f"{loop_elapsed_s * 1000.0:.3f}",
+        array_ms=f"{array_elapsed_s * 1000.0:.3f}",
+    )
     logger.info(
         "Packed per-net topology cache for C++: nets=%d h_segments=%d v_segments=%d",
         int(packed["net_ids"].size),
@@ -930,51 +1024,76 @@ def _compute_diagonal_split_topo_costs_cpp(
     max_distance=0.0,
     device=None,
     dtype=torch.float32,
+    profile_enabled=False,
+    collect_stats=True,
 ):
     if same_net_topo_scoring_cpp is None:
         return None
 
-    packed = pack_same_net_topology_cache_for_cpp(
-        topo_cache,
-        xl=xl,
-        yl=yl,
-        route_bin_size_x=route_bin_size_x,
-        route_bin_size_y=route_bin_size_y,
-    )
+    with profile_scope(
+        profile_enabled,
+        "same_net_topo_scoring.pack_cpp_lookup",
+        logger=logger,
+    ):
+        packed = pack_same_net_topology_cache_for_cpp(
+            topo_cache,
+            xl=xl,
+            yl=yl,
+            route_bin_size_x=route_bin_size_x,
+            route_bin_size_y=route_bin_size_y,
+            profile_enabled=profile_enabled,
+        )
     if not isinstance(packed, dict):
         return None
 
     try:
-        topo_cost_h_np, topo_cost_v_np, topo_observed_mask_np, stats = same_net_topo_scoring_cpp.forward(
-            packed["net_ids"],
-            packed["h_seg_offsets"],
-            packed["v_seg_offsets"],
-            packed["h_x1"],
-            packed["h_y"],
-            packed["h_x2"],
-            packed["v_x"],
-            packed["v_y1"],
-            packed["v_y2"],
-            _to_numpy_int_array(edge_net_ids),
-            _to_numpy_float_array(x1),
-            _to_numpy_float_array(y1),
-            _to_numpy_float_array(x2),
-            _to_numpy_float_array(y2),
-            float(sigma),
-            float(min_support),
-            float(max_distance),
-        )
+        with profile_scope(
+            profile_enabled,
+            "same_net_topo_scoring.cpp_forward",
+            logger=logger,
+            diag_edges=len(edge_net_ids) if edge_net_ids is not None else 0,
+            nets=int(packed["net_ids"].size),
+            h_segments=int(packed["h_x1"].size),
+            v_segments=int(packed["v_x"].size),
+        ):
+            topo_cost_h_np, topo_cost_v_np, topo_observed_mask_np, stats = same_net_topo_scoring_cpp.forward(
+                packed["net_ids"],
+                packed["net_index_by_id"],
+                packed["h_seg_offsets"],
+                packed["v_seg_offsets"],
+                packed["h_x1"],
+                packed["h_y"],
+                packed["h_x2"],
+                packed["v_x"],
+                packed["v_y1"],
+                packed["v_y2"],
+                _to_numpy_int_array(edge_net_ids),
+                _to_numpy_float_array(x1),
+                _to_numpy_float_array(y1),
+                _to_numpy_float_array(x2),
+                _to_numpy_float_array(y2),
+                float(sigma),
+                float(min_support),
+                float(max_distance),
+                bool(collect_stats),
+            )
     except Exception:
         logger.exception("C++ per-net topology scoring failed; falling back to Python kernel.")
         return None
 
-    topo_cost_h = torch.as_tensor(np.asarray(topo_cost_h_np, dtype=np.float32), dtype=dtype, device=device)
-    topo_cost_v = torch.as_tensor(np.asarray(topo_cost_v_np, dtype=np.float32), dtype=dtype, device=device)
-    topo_observed_mask = torch.as_tensor(
-        np.asarray(topo_observed_mask_np, dtype=np.bool_),
-        dtype=torch.bool,
-        device=device,
-    )
+    with profile_scope(
+        profile_enabled,
+        "same_net_topo_scoring.to_torch",
+        logger=logger,
+        diag_edges=len(edge_net_ids) if edge_net_ids is not None else 0,
+    ):
+        topo_cost_h = torch.as_tensor(np.asarray(topo_cost_h_np, dtype=np.float32), dtype=dtype, device=device)
+        topo_cost_v = torch.as_tensor(np.asarray(topo_cost_v_np, dtype=np.float32), dtype=dtype, device=device)
+        topo_observed_mask = torch.as_tensor(
+            np.asarray(topo_observed_mask_np, dtype=np.bool_),
+            dtype=torch.bool,
+            device=device,
+        )
     stats = dict(stats or {})
     stats.setdefault("diag_edges", int(len(edge_net_ids) if edge_net_ids is not None else 0))
     stats.setdefault("edges_with_topology", 0)
@@ -997,6 +1116,13 @@ def _compute_diagonal_split_topo_costs_cpp(
     stats.setdefault("missing_topology_top_nets", [])
     stats.setdefault("zero_support_top_nets", [])
     stats.setdefault("weak_support_top_nets", [])
+    stats.setdefault("zero_zero_edges", 0)
+    stats.setdefault("observed_zero_zero_edges", 0)
+    stats.setdefault("unobserved_zero_zero_edges", 0)
+    stats.setdefault("exact_equal_edges", 0)
+    stats.setdefault("hv_path_observed_edges", 0)
+    stats.setdefault("vh_path_observed_edges", 0)
+    stats.setdefault("both_paths_observed_edges", 0)
     stats["backend"] = "cpp"
     return topo_cost_h, topo_cost_v, topo_observed_mask, stats
 
@@ -1019,6 +1145,8 @@ def compute_diagonal_split_topo_costs(
     device=None,
     dtype=torch.float32,
     use_cpp=True,
+    profile_enabled=False,
+    collect_stats=True,
 ):
     if use_cpp:
         cpp_result = _compute_diagonal_split_topo_costs_cpp(
@@ -1037,27 +1165,35 @@ def compute_diagonal_split_topo_costs(
             max_distance=max_distance,
             device=device,
             dtype=dtype,
+            profile_enabled=profile_enabled,
+            collect_stats=collect_stats,
         )
         if cpp_result is not None:
             return cpp_result
 
-    topo_cost_h, topo_cost_v, topo_observed_mask, stats = _compute_diagonal_split_topo_costs_python(
-        edge_net_ids,
-        x1,
-        y1,
-        x2,
-        y2,
-        topo_cache,
-        xl=xl,
-        yl=yl,
-        route_bin_size_x=route_bin_size_x,
-        route_bin_size_y=route_bin_size_y,
-        sigma=sigma,
-        min_support=min_support,
-        max_distance=max_distance,
-        device=device,
-        dtype=dtype,
-    )
+    with profile_scope(
+        profile_enabled,
+        "same_net_topo_scoring.python_kernel",
+        logger=logger,
+        diag_edges=len(edge_net_ids) if edge_net_ids is not None else 0,
+    ):
+        topo_cost_h, topo_cost_v, topo_observed_mask, stats = _compute_diagonal_split_topo_costs_python(
+            edge_net_ids,
+            x1,
+            y1,
+            x2,
+            y2,
+            topo_cache,
+            xl=xl,
+            yl=yl,
+            route_bin_size_x=route_bin_size_x,
+            route_bin_size_y=route_bin_size_y,
+            sigma=sigma,
+            min_support=min_support,
+            max_distance=max_distance,
+            device=device,
+            dtype=dtype,
+        )
     if isinstance(stats, dict):
         stats["backend"] = "python"
     return topo_cost_h, topo_cost_v, topo_observed_mask, stats

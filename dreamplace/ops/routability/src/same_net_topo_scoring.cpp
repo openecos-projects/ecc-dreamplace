@@ -6,7 +6,6 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -234,6 +233,7 @@ inline scalar_t quantile_from_sorted(const std::vector<scalar_t>& values, scalar
 
 py::tuple forward(
     py::array_t<int32_t, py::array::c_style | py::array::forcecast> net_ids,
+    py::array_t<int32_t, py::array::c_style | py::array::forcecast> net_index_by_id,
     py::array_t<int32_t, py::array::c_style | py::array::forcecast> h_seg_offsets,
     py::array_t<int32_t, py::array::c_style | py::array::forcecast> v_seg_offsets,
     py::array_t<float, py::array::c_style | py::array::forcecast> h_x1,
@@ -249,8 +249,10 @@ py::tuple forward(
     py::array_t<float, py::array::c_style | py::array::forcecast> edge_y2,
     float sigma,
     float min_support,
-    float max_distance) {
+    float max_distance,
+    bool collect_stats = true) {
   auto net_ids_v = net_ids.unchecked<1>();
+  auto net_index_by_id_v = net_index_by_id.unchecked<1>();
   auto h_seg_offsets_v = h_seg_offsets.unchecked<1>();
   auto v_seg_offsets_v = v_seg_offsets.unchecked<1>();
   auto h_x1_v = h_x1.unchecked<1>();
@@ -272,25 +274,25 @@ py::tuple forward(
     throw std::runtime_error("same_net_topo_scoring_cpp: offset array length must be num_nets + 1");
   }
 
-  std::unordered_map<int32_t, int32_t> net_index_by_id;
-  net_index_by_id.reserve(num_nets * 2 + 1);
-  for (std::size_t idx = 0; idx < num_nets; ++idx) {
-    net_index_by_id[net_ids_v(idx)] = static_cast<int32_t>(idx);
-  }
+  std::size_t net_index_by_id_size = static_cast<std::size_t>(net_index_by_id_v.shape(0));
 
   py::array_t<float> topo_cost_h(num_edges);
   py::array_t<float> topo_cost_v(num_edges);
   py::array_t<uint8_t> topo_observed_mask(num_edges);
+  std::fill(topo_cost_h.mutable_data(), topo_cost_h.mutable_data() + num_edges, 0.0f);
+  std::fill(topo_cost_v.mutable_data(), topo_cost_v.mutable_data() + num_edges, 0.0f);
+  std::fill(
+      topo_observed_mask.mutable_data(),
+      topo_observed_mask.mutable_data() + num_edges,
+      static_cast<uint8_t>(0));
   auto topo_cost_h_v = topo_cost_h.mutable_unchecked<1>();
   auto topo_cost_v_v = topo_cost_v.mutable_unchecked<1>();
   auto topo_observed_mask_v = topo_observed_mask.mutable_unchecked<1>();
-  for (std::size_t i = 0; i < num_edges; ++i) {
-    topo_cost_h_v(i) = 0.0f;
-    topo_cost_v_v(i) = 0.0f;
-    topo_observed_mask_v(i) = static_cast<uint8_t>(0);
-  }
 
-  std::vector<float> gap_values(num_edges, 0.0f);
+  std::vector<float> gap_values;
+  if (collect_stats) {
+    gap_values.assign(num_edges, 0.0f);
+  }
   int num_threads = 1;
 #ifdef _OPENMP
   num_threads = omp_get_max_threads();
@@ -312,11 +314,17 @@ py::tuple forward(
 #pragma omp for schedule(dynamic, 64)
 #endif
     for (std::size_t edge_id = 0; edge_id < num_edges; ++edge_id) {
-      auto it = net_index_by_id.find(edge_net_ids_v(edge_id));
-      if (it == net_index_by_id.end()) {
+      int32_t edge_net_id = edge_net_ids_v(edge_id);
+      if (edge_net_id < 0 || static_cast<std::size_t>(edge_net_id) >= net_index_by_id_size) {
         continue;
       }
-      local.edges_with_topology += 1;
+      int32_t net_index = net_index_by_id_v(static_cast<std::size_t>(edge_net_id));
+      if (net_index < 0 || static_cast<std::size_t>(net_index) >= num_nets) {
+        continue;
+      }
+      if (collect_stats) {
+        local.edges_with_topology += 1;
+      }
 
       float ex1 = edge_x1_v(edge_id);
       float ey1 = edge_y1_v(edge_id);
@@ -336,7 +344,6 @@ py::tuple forward(
       float score_h = 0.0f;
       float score_v = 0.0f;
       int observed_piece_count = 0;
-      int32_t net_index = it->second;
 
       int32_t h_begin = h_seg_offsets_v(net_index);
       int32_t h_end = h_seg_offsets_v(net_index + 1);
@@ -352,7 +359,7 @@ py::tuple forward(
           float aff_v = horizontal_leg_affinity(piece, ey2, ex1, ex2, sigma, max_distance);
           float support_h_piece = piece_len * alpha_h * aff_h;
           float support_v_piece = piece_len * alpha_v * aff_v;
-          if (support_h_piece > 0.0 || support_v_piece > 0.0) {
+          if (collect_stats && (support_h_piece > 0.0 || support_v_piece > 0.0)) {
             observed_piece_count += 1;
           }
           score_h += support_h_piece;
@@ -374,7 +381,7 @@ py::tuple forward(
           float aff_v = vertical_leg_affinity(piece, ex1, ey1, ey2, sigma, max_distance);
           float support_h_piece = piece_len * alpha_h * aff_h;
           float support_v_piece = piece_len * alpha_v * aff_v;
-          if (support_h_piece > 0.0 || support_v_piece > 0.0) {
+          if (collect_stats && (support_h_piece > 0.0 || support_v_piece > 0.0)) {
             observed_piece_count += 1;
           }
           score_h += support_h_piece;
@@ -382,14 +389,16 @@ py::tuple forward(
         }
       }
 
-      if (score_h > min_support) {
-        local.hv_path_observed_edges += 1;
-      }
-      if (score_v > min_support) {
-        local.vh_path_observed_edges += 1;
-      }
-      if (score_h > min_support && score_v > min_support) {
-        local.both_paths_observed_edges += 1;
+      if (collect_stats) {
+        if (score_h > min_support) {
+          local.hv_path_observed_edges += 1;
+        }
+        if (score_v > min_support) {
+          local.vh_path_observed_edges += 1;
+        }
+        if (score_h > min_support && score_v > min_support) {
+          local.both_paths_observed_edges += 1;
+        }
       }
 
       float total_support = score_h + score_v;
@@ -399,24 +408,28 @@ py::tuple forward(
         topo_cost_h_v(edge_id) = -std::log(weight_h + 1e-12f);
         topo_cost_v_v(edge_id) = -std::log(weight_v + 1e-12f);
         topo_observed_mask_v(edge_id) = static_cast<uint8_t>(1);
-        local.edges_with_observed_intervals += 1;
+        if (collect_stats) {
+          local.edges_with_observed_intervals += 1;
+        }
       }
 
-      float cost_h = topo_cost_h_v(edge_id);
-      float cost_v = topo_cost_v_v(edge_id);
-      float gap = std::abs(cost_h - cost_v);
-      gap_values[edge_id] = gap;
-      local.gap_sum += gap;
-      if (gap <= kTieTol) {
-        local.tie_count += 1;
-      }
-      if (gap <= kEps) {
-        local.exact_equal_edges += 1;
-      }
-      if (std::abs(cost_h) <= kEps && std::abs(cost_v) <= kEps) {
-        local.zero_zero_edges += 1;
-        if (observed_piece_count > 0) {
-          local.observed_zero_zero_edges += 1;
+      if (collect_stats) {
+        float cost_h = topo_cost_h_v(edge_id);
+        float cost_v = topo_cost_v_v(edge_id);
+        float gap = std::abs(cost_h - cost_v);
+        gap_values[edge_id] = gap;
+        local.gap_sum += gap;
+        if (gap <= kTieTol) {
+          local.tie_count += 1;
+        }
+        if (gap <= kEps) {
+          local.exact_equal_edges += 1;
+        }
+        if (std::abs(cost_h) <= kEps && std::abs(cost_v) <= kEps) {
+          local.zero_zero_edges += 1;
+          if (observed_piece_count > 0) {
+            local.observed_zero_zero_edges += 1;
+          }
         }
       }
     }
@@ -436,36 +449,41 @@ py::tuple forward(
     stats_acc.both_paths_observed_edges += local.both_paths_observed_edges;
   }
 
-  std::vector<float> sorted_gaps = gap_values;
-  std::sort(sorted_gaps.begin(), sorted_gaps.end());
-  std::vector<float> nonzero_gaps;
-  nonzero_gaps.reserve(sorted_gaps.size());
-  for (float gap : sorted_gaps) {
-    if (gap > kEps) {
-      nonzero_gaps.push_back(gap);
-    }
-  }
-
   py::dict stats;
   stats["diag_edges"] = py::int_(static_cast<long>(num_edges));
   stats["edges_with_topology"] = py::int_(stats_acc.edges_with_topology);
   stats["edges_with_observed_intervals"] = py::int_(stats_acc.edges_with_observed_intervals);
-  stats["mean_gap"] = py::float_(num_edges > 0 ? stats_acc.gap_sum / static_cast<float>(num_edges) : 0.0f);
-  stats["tie_ratio"] = py::float_(num_edges > 0 ? static_cast<float>(stats_acc.tie_count) / static_cast<float>(num_edges) : 0.0f);
   stats["sigma"] = py::float_(sigma);
   stats["min_support"] = py::float_(min_support);
   stats["max_distance"] = py::float_(max_distance);
-  stats["zero_zero_edges"] = py::int_(stats_acc.zero_zero_edges);
-  stats["observed_zero_zero_edges"] = py::int_(stats_acc.observed_zero_zero_edges);
-  stats["unobserved_zero_zero_edges"] = py::int_(stats_acc.zero_zero_edges - stats_acc.observed_zero_zero_edges);
-  stats["exact_equal_edges"] = py::int_(stats_acc.exact_equal_edges);
-  stats["hv_path_observed_edges"] = py::int_(stats_acc.hv_path_observed_edges);
-  stats["vh_path_observed_edges"] = py::int_(stats_acc.vh_path_observed_edges);
-  stats["both_paths_observed_edges"] = py::int_(stats_acc.both_paths_observed_edges);
-  stats["gap_p50"] = py::float_(quantile_from_sorted(sorted_gaps, 0.5));
-  stats["gap_p90"] = py::float_(quantile_from_sorted(sorted_gaps, 0.9));
-  stats["nonzero_gap_edges"] = py::int_(static_cast<long>(nonzero_gaps.size()));
-  stats["nonzero_gap_p50"] = py::float_(quantile_from_sorted(nonzero_gaps, 0.5));
+  if (collect_stats) {
+    std::vector<float> sorted_gaps = gap_values;
+    std::sort(sorted_gaps.begin(), sorted_gaps.end());
+    std::vector<float> nonzero_gaps;
+    nonzero_gaps.reserve(sorted_gaps.size());
+    for (float gap : sorted_gaps) {
+      if (gap > kEps) {
+        nonzero_gaps.push_back(gap);
+      }
+    }
+
+    stats["mean_gap"] = py::float_(num_edges > 0 ? stats_acc.gap_sum / static_cast<float>(num_edges) : 0.0f);
+    stats["tie_ratio"] = py::float_(num_edges > 0 ? static_cast<float>(stats_acc.tie_count) / static_cast<float>(num_edges) : 0.0f);
+    stats["zero_zero_edges"] = py::int_(stats_acc.zero_zero_edges);
+    stats["observed_zero_zero_edges"] = py::int_(stats_acc.observed_zero_zero_edges);
+    stats["unobserved_zero_zero_edges"] = py::int_(stats_acc.zero_zero_edges - stats_acc.observed_zero_zero_edges);
+    stats["exact_equal_edges"] = py::int_(stats_acc.exact_equal_edges);
+    stats["hv_path_observed_edges"] = py::int_(stats_acc.hv_path_observed_edges);
+    stats["vh_path_observed_edges"] = py::int_(stats_acc.vh_path_observed_edges);
+    stats["both_paths_observed_edges"] = py::int_(stats_acc.both_paths_observed_edges);
+    stats["gap_p50"] = py::float_(quantile_from_sorted(sorted_gaps, 0.5));
+    stats["gap_p90"] = py::float_(quantile_from_sorted(sorted_gaps, 0.9));
+    stats["nonzero_gap_edges"] = py::int_(static_cast<long>(nonzero_gaps.size()));
+    stats["nonzero_gap_p50"] = py::float_(quantile_from_sorted(nonzero_gaps, 0.5));
+  } else {
+    stats["mean_gap"] = py::float_(0.0f);
+    stats["tie_ratio"] = py::float_(0.0f);
+  }
 
   return py::make_tuple(topo_cost_h, topo_cost_v, topo_observed_mask, stats);
 }

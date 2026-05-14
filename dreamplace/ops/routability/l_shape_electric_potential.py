@@ -26,6 +26,7 @@ if configure.compile_configurations["CUDA_FOUND"] == "TRUE":
 
 from .l_shape_electric_overflow import SegmentDensityMapFunction
 from .plot_map import plot_density_map, plot_potential_map
+from .profile_timing import profile_end, profile_scope, profile_start
 
 import torch.nn.functional as F
 
@@ -65,6 +66,15 @@ class SegmentElectricPotentialFunction(Function):
     last_field_map_x = None
     last_field_map_y = None
     last_overflow_map = None  # for pseudo wire force
+    last_density_map = None
+    last_density_map_h = None
+    last_density_map_v = None
+    last_rho_map = None
+    last_rho_map_h = None
+    last_rho_map_v = None
+    last_energy = None
+    last_energy_h = None
+    last_energy_v = None
     
     @staticmethod
     def forward(
@@ -114,6 +124,18 @@ class SegmentElectricPotentialFunction(Function):
         Compute electric potential energy for segments.
         """
         tt = time.time()
+        profile_enabled = bool(getattr(SegmentElectricPotentialFunction, "profile_enabled", False))
+        ctx.profile_enabled = profile_enabled
+        profile_timer = profile_start(profile_enabled, tensor=segment_pos)
+        SegmentElectricPotentialFunction.last_density_map = None
+        SegmentElectricPotentialFunction.last_density_map_h = None
+        SegmentElectricPotentialFunction.last_density_map_v = None
+        SegmentElectricPotentialFunction.last_rho_map = None
+        SegmentElectricPotentialFunction.last_rho_map_h = None
+        SegmentElectricPotentialFunction.last_rho_map_v = None
+        SegmentElectricPotentialFunction.last_energy = None
+        SegmentElectricPotentialFunction.last_energy_h = None
+        SegmentElectricPotentialFunction.last_energy_v = None
 
         def _prepare_optional_map(value):
             if not isinstance(value, torch.Tensor):
@@ -283,6 +305,7 @@ class SegmentElectricPotentialFunction(Function):
             and target_density_v.dim() == 2
         )
 
+        density_timer = profile_start(profile_enabled, tensor=segment_pos)
         if hv_split:
             mask_h = segment_is_horizontal.to(torch.bool)
             mask_v = ~mask_h
@@ -291,6 +314,8 @@ class SegmentElectricPotentialFunction(Function):
             density_map_h = _compute_density_map(prepared_h)
             density_map_v = _compute_density_map(prepared_v)
             density_map = density_map_h + density_map_v
+            SegmentElectricPotentialFunction.last_density_map_h = density_map_h.detach()
+            SegmentElectricPotentialFunction.last_density_map_v = density_map_v.detach()
         else:
             prepared_h = None
             prepared_v = None
@@ -318,6 +343,16 @@ class SegmentElectricPotentialFunction(Function):
                 deterministic_flag,
                 sorted_segment_map
             )
+        SegmentElectricPotentialFunction.last_density_map = density_map.detach()
+        profile_end(
+            profile_enabled,
+            density_timer,
+            "electric.forward.density_map",
+            tensor=segment_pos,
+            logger=logger,
+            segments=num_segments,
+            hv_split=int(hv_split),
+        )
 
         # plot density map
         # plot_density_map(density_map, 
@@ -438,8 +473,15 @@ class SegmentElectricPotentialFunction(Function):
                 fix_usage_map_v,
             )
 
-            _, field_map_x_h, field_map_y_h, energy_h = _compute_field_and_energy(rho_map_h)
-            _, field_map_x_v, field_map_y_v, energy_v = _compute_field_and_energy(rho_map_v)
+            with profile_scope(
+                profile_enabled,
+                "electric.forward.field_energy",
+                tensor=segment_pos,
+                logger=logger,
+                mode="hv_split",
+            ):
+                _, field_map_x_h, field_map_y_h, energy_h = _compute_field_and_energy(rho_map_h)
+                _, field_map_x_v, field_map_y_v, energy_v = _compute_field_and_energy(rho_map_v)
 
             ctx.hv_split_active = True
             ctx.h_split_data = prepared_h
@@ -454,6 +496,12 @@ class SegmentElectricPotentialFunction(Function):
             energy = energy_h + energy_v
             rho_map = rho_map_h + rho_map_v
             overflow_map = overflow_map_h + overflow_map_v
+            SegmentElectricPotentialFunction.last_rho_map_h = rho_map_h.detach()
+            SegmentElectricPotentialFunction.last_rho_map_v = rho_map_v.detach()
+            SegmentElectricPotentialFunction.last_rho_map = rho_map.detach()
+            SegmentElectricPotentialFunction.last_energy_h = energy_h.detach()
+            SegmentElectricPotentialFunction.last_energy_v = energy_v.detach()
+            SegmentElectricPotentialFunction.last_energy = energy.detach()
 
             logger.debug(
                 "Blockage rho(split,track): occ_ratio_h=%.4f occ_ratio_v=%.4f util_h_max=%.2f util_v_max=%.2f "
@@ -491,9 +539,18 @@ class SegmentElectricPotentialFunction(Function):
                 supply_original_map,
                 planar_fix_usage_map,
             )
-            rho_map_normalized, field_map_x, field_map_y, energy = _compute_field_and_energy(rho_map)
+            with profile_scope(
+                profile_enabled,
+                "electric.forward.field_energy",
+                tensor=segment_pos,
+                logger=logger,
+                mode="planar",
+            ):
+                rho_map_normalized, field_map_x, field_map_y, energy = _compute_field_and_energy(rho_map)
             ctx.field_map_x = field_map_x
             ctx.field_map_y = field_map_y
+            SegmentElectricPotentialFunction.last_rho_map = rho_map.detach()
+            SegmentElectricPotentialFunction.last_energy = energy.detach()
 
             logger.debug(
                 "Blockage rho(planar,track): occ_ratio=%.4f util_mean=%.2f util_max=%.2f "
@@ -651,6 +708,16 @@ class SegmentElectricPotentialFunction(Function):
             if 'overflow_map' in locals():
                 SegmentElectricPotentialFunction.last_overflow_map = overflow_map.detach()
         
+        profile_end(
+            profile_enabled,
+            profile_timer,
+            "electric.forward.total",
+            tensor=segment_pos,
+            logger=logger,
+            segments=num_segments,
+            hv_split=int(hv_split),
+            directional_split=int(directional_split),
+        )
         return energy
     
     @staticmethod
@@ -659,6 +726,8 @@ class SegmentElectricPotentialFunction(Function):
         Compute gradients using electric force.
         """
         tt = time.time()
+        profile_enabled = bool(getattr(ctx, "profile_enabled", False))
+        profile_timer = profile_start(profile_enabled, tensor=grad_output)
 
         def _electric_force_subset(field_map_x, field_map_y, split_data):
             if split_data is None or split_data["num_segments"] == 0:
@@ -771,6 +840,15 @@ class SegmentElectricPotentialFunction(Function):
         if grad_output.is_cuda:
             torch.cuda.synchronize()
         logger.debug(f"Segment electric potential backward: {(time.time() - tt) * 1000:.2f} ms")
+        profile_end(
+            profile_enabled,
+            profile_timer,
+            "electric.backward.total",
+            tensor=grad_output,
+            logger=logger,
+            segments=ctx.num_segments,
+            hv_split=int(getattr(ctx, "hv_split_active", False)),
+        )
         
         # Return gradients (only for segment_pos, others are None)
         return (output,) + (None,) * 46
@@ -811,7 +889,8 @@ class LShapeElectricPotential(nn.Module):
         fix_usage_map_v=None,
         padding=0,
         deterministic_flag=True,
-        fast_mode=False
+        fast_mode=False,
+        profile_enabled=False
     ):
         """
         Initialize L-shape electric potential module.
@@ -840,6 +919,7 @@ class LShapeElectricPotential(nn.Module):
         self.deterministic_flag = deterministic_flag
         self.last_demand_supply_ratio = None
         self.fast_mode = fast_mode
+        self.profile_enabled = bool(profile_enabled)
         self.blockage_initial_density = True
         
         if isinstance(target_density, torch.Tensor):
@@ -1341,6 +1421,7 @@ class LShapeElectricPotential(nn.Module):
             segment_weight = segment_weight.to(segment_pos.device)
         
         # Compute electric potential
+        SegmentElectricPotentialFunction.profile_enabled = self.profile_enabled
         energy = SegmentElectricPotentialFunction.apply(
             segment_pos,
             segment_size_x,
@@ -1549,7 +1630,8 @@ def create_l_shape_electric_potential(
     fix_usage_map_v=None,
     padding=0,
     deterministic_flag=True,
-    fast_mode=False
+    fast_mode=False,
+    profile_enabled=False
 ):
     """
     Factory function to create LShapeElectricPotential.
@@ -1595,5 +1677,6 @@ def create_l_shape_electric_potential(
         fix_usage_map_v=fix_usage_map_v,
         padding=padding,
         deterministic_flag=deterministic_flag,
-        fast_mode=fast_mode
+        fast_mode=fast_mode,
+        profile_enabled=profile_enabled,
     )

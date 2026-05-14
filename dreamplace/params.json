@@ -375,6 +375,30 @@
         "description": "maximum allowed l_shape_routability_weight after scheduling or legacy update",
         "default": 1.0
     },
+    "l_shape_profile_flag": {
+        "description": "enable scoped timing logs for diff/soft-L routability profiling; inserts CUDA synchronizations around timed regions",
+        "default": 0
+    },
+    "l_shape_edge_net_ids_cache_flag": {
+        "description": "whether cache per-edge net ids used by soft-L same-net topology scoring; disable for profiling or QoR isolation",
+        "default": 1
+    },
+    "l_shape_debug_hash_flag": {
+        "description": "enable debug tensor hashes for soft-L routability divergence localization",
+        "default": 0
+    },
+    "l_shape_debug_hash_start_iter": {
+        "description": "first global placement iteration to emit soft-L debug tensor hashes; negative means no lower bound",
+        "default": 337
+    },
+    "l_shape_debug_hash_end_iter": {
+        "description": "last global placement iteration to emit soft-L debug tensor hashes; negative means no upper bound",
+        "default": 345
+    },
+    "l_shape_debug_hash_sample": {
+        "description": "number of tensor elements sampled for debug hashes; 0 hashes full tensors",
+        "default": 4096
+    },
     "soft_l_adaptive_tau": {
         "description": "whether adapt soft-L temperature from the current batch median absolute H/V cost gap",
         "default": 1

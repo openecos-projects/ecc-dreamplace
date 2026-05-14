@@ -869,7 +869,8 @@ class BasicPlace(nn.Module):
             flat_net2pin_start_map=data_collections.flat_net2pin_start_map.to(
                 device).cpu(),
             # pin2node_map=data_collections.pin2node_map,
-            ignore_net_degree=params.ignore_net_degree)
+            ignore_net_degree=params.ignore_net_degree,
+            deterministic_flag=getattr(params, "deterministic_flag", False))
 
         return steiner_topo_for_pin_op
 

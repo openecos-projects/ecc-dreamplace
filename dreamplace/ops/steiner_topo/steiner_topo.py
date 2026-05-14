@@ -8,6 +8,7 @@ import torch
 from torch import nn
 from torch.autograd import Function
 import logging
+import bisect
 
 import dreamplace.ops.steiner_topo.steiner_topo_cpp as steiner_topo_cpp
 import dreamplace.configure as configure
@@ -21,13 +22,14 @@ logger = logging.getLogger(__name__)
 class SteinerTopoFunction(Function):
     @staticmethod
     def forward(ctx, pos, pin_relate_x, pin_relate_y,
-                net_vertex_start, num_vertices):
+                net_vertex_start, num_vertices, deterministic_flag=False):
 
         updated_newx, updated_newy = steiner_topo_cpp.forward(
             pos,
             pin_relate_x.contiguous(),
             pin_relate_y.contiguous(),
-            num_vertices
+            num_vertices,
+            bool(deterministic_flag)
         )
 
         ctx.save_for_backward(pos,
@@ -50,7 +52,35 @@ class SteinerTopoFunction(Function):
             pin_relate_y
         )
 
-        return grad_pos, None, None, None, None, None, None
+        return grad_pos, None, None, None, None, None
+
+
+class SteinerTopoDeterministicFunction(Function):
+    @staticmethod
+    def forward(ctx, pos, pin_relate_x, pin_relate_y, num_vertices):
+        num_pins = pos.numel() // 2
+        relate_x = pin_relate_x[:num_vertices].contiguous()
+        relate_y = pin_relate_y[:num_vertices].contiguous()
+        idx_x = relate_x.to(dtype=torch.long)
+        idx_y = relate_y.to(dtype=torch.long)
+
+        updated_newx = pos[:num_pins].index_select(0, idx_x).contiguous()
+        updated_newy = pos[num_pins:].index_select(0, idx_y).contiguous()
+
+        ctx.save_for_backward(pos, relate_x, relate_y)
+        return updated_newx, updated_newy
+
+    @staticmethod
+    def backward(ctx, grad_newx, grad_newy):
+        pos, pin_relate_x, pin_relate_y = ctx.saved_tensors
+        grad_pos = steiner_topo_cpp.backward(
+            grad_newx.contiguous(),
+            grad_newy.contiguous(),
+            pos,
+            pin_relate_x,
+            pin_relate_y
+        )
+        return grad_pos, None, None, None
 
 
 class SteinerTopo(nn.Module):
@@ -66,7 +96,8 @@ class SteinerTopo(nn.Module):
                  flat_net2pin_map,
                  flat_net2pin_start_map,
                  ignore_net_degree=None,
-                 algorithm="FLUTE"):
+                 algorithm="FLUTE",
+                 deterministic_flag=False):
         super(SteinerTopo, self).__init__()
         # Register buffers
         self.register_buffer('flat_net2pin_map', flat_net2pin_map.contiguous())
@@ -91,6 +122,7 @@ class SteinerTopo(nn.Module):
         self.num_vertices = None
 
         self.algorithm = algorithm
+        self.deterministic_flag = bool(deterministic_flag)
         self.last_edge_geometry_stats = None
         
         # L方向相关
@@ -105,12 +137,21 @@ class SteinerTopo(nn.Module):
             raise RuntimeError(
                 "SteinerTopo topology not initialized. Call rebuild_tree and update_topology first.")
 
+        if self.deterministic_flag:
+            return SteinerTopoDeterministicFunction.apply(
+                pos,
+                self.pin_relate_x,
+                self.pin_relate_y,
+                self.num_vertices
+            )
+
         updated_newx, updated_newy = SteinerTopoFunction.apply(
             pos,
             self.pin_relate_x,
             self.pin_relate_y,
             self.net_vertex_start,
-            self.num_vertices
+            self.num_vertices,
+            self.deterministic_flag
         )
         # outputs = (
         #     updated_newx,
@@ -142,6 +183,110 @@ class SteinerTopo(nn.Module):
         self.flat_pin_to_start = self.flat_pin_to_start.contiguous()
         self.net_flat_topo_sort = self.net_flat_topo_sort.contiguous()
         self.net_flat_topo_sort_start = self.net_flat_topo_sort_start.contiguous()
+        self._sanitize_pin_relate_indices()
+
+    def _sanitize_pin_relate_indices(self):
+        if (
+            self.pin_relate_x is None
+            or self.pin_relate_y is None
+            or self.newx is None
+            or self.newy is None
+            or self.net_steiner_start is None
+            or self.flat_net2pin_map is None
+            or self.flat_net2pin_start_map is None
+        ):
+            return
+
+        if self.net_steiner_start.numel() == 0:
+            return
+
+        num_pins = int(self.net_steiner_start[0].item())
+        num_vertices = int(self.num_vertices or self.pin_relate_x.numel())
+        if num_pins <= 0 or num_vertices <= 0:
+            return
+
+        net_steiner_start = self.net_steiner_start.detach().cpu().to(torch.long).tolist()
+        flat_net2pin = self.flat_net2pin_map.detach().cpu().to(torch.long).tolist()
+        flat_net2pin_start = self.flat_net2pin_start_map.detach().cpu().to(torch.long).tolist()
+        newx = self.newx.detach().cpu().tolist()
+        newy = self.newy.detach().cpu().tolist()
+
+        def fallback_pin(vertex_id, axis):
+            vertex_id = int(vertex_id)
+            if 0 <= vertex_id < num_pins:
+                return vertex_id
+
+            net_id = bisect.bisect_right(net_steiner_start, vertex_id) - 1
+            if (
+                net_id < 0
+                or net_id + 1 >= len(net_steiner_start)
+                or vertex_id < net_steiner_start[net_id]
+                or vertex_id >= net_steiner_start[net_id + 1]
+                or net_id + 1 >= len(flat_net2pin_start)
+            ):
+                return 0
+
+            pin_begin = int(flat_net2pin_start[net_id])
+            pin_end = int(flat_net2pin_start[net_id + 1])
+            pins = [
+                int(pin_id)
+                for pin_id in flat_net2pin[pin_begin:pin_end]
+                if 0 <= int(pin_id) < num_pins
+            ]
+            if not pins:
+                return 0
+
+            primary = newx if axis == "x" else newy
+            secondary = newy if axis == "x" else newx
+            target_primary = primary[vertex_id] if 0 <= vertex_id < len(primary) else 0.0
+            target_secondary = secondary[vertex_id] if 0 <= vertex_id < len(secondary) else 0.0
+            return min(
+                pins,
+                key=lambda pin_id: (
+                    abs(primary[pin_id] - target_primary),
+                    abs(secondary[pin_id] - target_secondary),
+                    pin_id,
+                ),
+            )
+
+        def sanitize_one(relate_tensor, axis):
+            relate_cpu = relate_tensor.detach().cpu().to(torch.long)
+            invalid_mask = (relate_cpu < 0) | (relate_cpu >= num_pins)
+            invalid_indices = invalid_mask.nonzero(as_tuple=False).reshape(-1).tolist()
+            if not invalid_indices:
+                return 0
+
+            relate_values = relate_cpu.tolist()
+            fixed_values = []
+            for vertex_id in invalid_indices:
+                value = int(relate_values[vertex_id])
+                seen = set()
+                while num_pins <= value < num_vertices and value not in seen:
+                    seen.add(value)
+                    value = int(relate_values[value])
+                if not (0 <= value < num_pins):
+                    value = fallback_pin(vertex_id, axis)
+                fixed_values.append(value)
+
+            index_tensor = torch.tensor(
+                invalid_indices, dtype=torch.long, device=relate_tensor.device
+            )
+            value_tensor = torch.tensor(
+                fixed_values, dtype=relate_tensor.dtype, device=relate_tensor.device
+            )
+            relate_tensor[index_tensor] = value_tensor
+            return len(invalid_indices)
+
+        fixed_x = sanitize_one(self.pin_relate_x, "x")
+        fixed_y = sanitize_one(self.pin_relate_y, "y")
+        if fixed_x or fixed_y:
+            logger.warning(
+                "Sanitized invalid Steiner relate indices: x=%d y=%d num_pins=%d num_vertices=%d",
+                fixed_x,
+                fixed_y,
+                num_pins,
+                num_vertices,
+            )
 
     def _collect_edge_geometry_stats(self, edge_from, edge_to, x_coords, y_coords, eps=1e-4):
         def _empty_stats(total_edges=0):
@@ -357,7 +502,8 @@ class SteinerTopo(nn.Module):
             pos,
             self.flat_net2pin_map,
             self.flat_net2pin_start_map,
-            self.ignore_net_degree
+            self.ignore_net_degree,
+            self.deterministic_flag
         )
 
         self.update_cache(new_outputs_tuple)

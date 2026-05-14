@@ -26,13 +26,15 @@ import json
 import os
 import sys
 import time
+
+os.environ.setdefault('eda_tool', "iEDA")
+os.environ.setdefault('CUDA_LAUNCH_BLOCKING', '0')
+os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
+
 import torch
 import random
 import numpy as np
 import logging
-
-os.environ['eda_tool'] = "iEDA"
-os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
 
 # for consistency between python2 and python3
 root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -57,7 +59,11 @@ from tools.iEDA.module.io import IEDAIO
 
 
 
-def seed_all(seed):
+def seed_all(seed, deterministic=False):
+    deterministic = bool(deterministic)
+    if deterministic:
+        os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     random.seed(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
     np.random.seed(seed)
@@ -66,6 +72,15 @@ def seed_all(seed):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
+    if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
+        torch.backends.cuda.matmul.allow_tf32 = False
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.allow_tf32 = False
+    if hasattr(torch, "use_deterministic_algorithms"):
+        try:
+            torch.use_deterministic_algorithms(deterministic, warn_only=True)
+        except TypeError:
+            torch.use_deterministic_algorithms(deterministic)
 
 
 class PlacementEngine:
@@ -96,7 +111,10 @@ class PlacementEngine:
             logging.critical("running in evaluation mode")
 
         # seed for reproducibility
-        seed_all(self.params.random_seed)
+        seed_all(
+            self.params.random_seed,
+            deterministic=getattr(self.params, "deterministic_flag", False),
+        )
 
         # control multithreading
         os.environ["OMP_NUM_THREADS"] = "%d" % (self.params.num_threads)

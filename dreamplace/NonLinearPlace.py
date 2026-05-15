@@ -47,7 +47,7 @@ from dreamplace.ops.routability.leiden_clustering import (
 from dreamplace.ops.routability import xplace_inflation_controller
 
 
-def _write_back_autodmp_pos_to_ieda(pos, params, placedb):
+def _extract_autodmp_movable_lpos(pos, params, placedb):
     if pos.is_cuda:
         pos_cpu = pos.detach().cpu().numpy().copy()
     else:
@@ -63,7 +63,63 @@ def _write_back_autodmp_pos_to_ieda(pos, params, placedb):
     unscale_factor = 1.0 / params.scale_factor
     node_x = node_x * unscale_factor + params.shift_factor[0]
     node_y = node_y * unscale_factor + params.shift_factor[1]
+    return node_x, node_y
+
+
+def _write_back_autodmp_pos_to_ieda(pos, params, placedb):
+    node_x, node_y = _extract_autodmp_movable_lpos(pos, params, placedb)
     placedb.write_placement_back(node_x, node_y)
+
+
+def _build_gpugr_parser_cache_inputs(pos, params, placedb):
+    node_x, node_y = _extract_autodmp_movable_lpos(pos, params, placedb)
+    def std_round(values):
+        values = np.asarray(values)
+        return np.where(values >= 0.0, np.floor(values + 0.5), np.ceil(values - 0.5))
+
+    node_lpos = np.stack([std_round(node_x), std_round(node_y)], axis=1).astype(np.float32, copy=False)
+    node_names = _get_gpugr_parser_cache_node_names(placedb)
+    return node_lpos, node_names
+
+
+def _get_gpugr_parser_cache_node_names(placedb):
+    placedb_node_names = getattr(placedb, "node_names", [])
+    if len(placedb_node_names) < placedb.num_movable_nodes:
+        raise ValueError(
+            "gpugr parser cache requires placedb.node_names for all movable nodes; "
+            f"got {len(placedb_node_names)} names for {placedb.num_movable_nodes} movable nodes"
+        )
+    cache_key = (
+        id(placedb_node_names),
+        int(placedb.num_movable_nodes),
+        int(len(placedb_node_names)),
+    )
+    cache = getattr(placedb, "_gpugr_parser_cache_node_names_cache", None)
+    if isinstance(cache, dict) and cache.get("key") == cache_key:
+        return cache["names"]
+    node_names = tuple(
+        _normalize_placedb_name(name)
+        for name in placedb_node_names[: placedb.num_movable_nodes]
+    )
+    setattr(
+        placedb,
+        "_gpugr_parser_cache_node_names_cache",
+        {
+            "key": cache_key,
+            "names": node_names,
+        },
+    )
+    return node_names
+
+
+def _get_cached_gpugr_operator(placedb):
+    from tools.iEDA.module.gpugr import IEDAGPUGR
+
+    gpugr_op = getattr(placedb, "_autodmp_gpugr_op", None)
+    if gpugr_op is None:
+        gpugr_op = IEDAGPUGR(dir_workspace=placedb.data_manager.dir_workspace)
+        setattr(placedb, "_autodmp_gpugr_op", gpugr_op)
+    return gpugr_op
 
 
 def _compute_gpugr_route_grid_like_xplace(params, placedb):
@@ -98,6 +154,50 @@ def _compute_gpugr_route_grid_like_xplace(params, placedb):
         route_ysize,
     )
     return route_xsize, route_ysize
+
+
+def _normalize_placedb_name(name):
+    if isinstance(name, bytes):
+        return name.decode("utf-8")
+    if hasattr(name, "decode"):
+        try:
+            return name.decode("utf-8")
+        except Exception:
+            pass
+    return str(name)
+
+
+def _build_gpugr_topology_net_name_to_id(placedb):
+    net_names = getattr(placedb, "net_names", [])
+    cache_key = (id(net_names), int(len(net_names)))
+    cache = getattr(placedb, "_gpugr_topology_net_name_to_id_cache", None)
+    if isinstance(cache, dict) and cache.get("key") == cache_key:
+        return cache["mapping"]
+    mapping = {}
+    for net_id, net_name in enumerate(net_names):
+        mapping[_normalize_placedb_name(net_name)] = int(net_id)
+    setattr(
+        placedb,
+        "_gpugr_topology_net_name_to_id_cache",
+        {
+            "key": cache_key,
+            "mapping": mapping,
+        },
+    )
+    return mapping
+
+
+def _build_gpugr_topology_pack_geometry(placedb, route_xsize, route_ysize):
+    xl = float(getattr(placedb, "routing_grid_xl", placedb.xl))
+    yl = float(getattr(placedb, "routing_grid_yl", placedb.yl))
+    xh = float(getattr(placedb, "routing_grid_xh", placedb.xh))
+    yh = float(getattr(placedb, "routing_grid_yh", placedb.yh))
+    return (
+        xl,
+        yl,
+        (xh - xl) / float(max(int(route_xsize), 1)),
+        (yh - yl) / float(max(int(route_ysize), 1)),
+    )
 
 
 def _resample_xy_map(map_xy, target_x, target_y):
@@ -449,10 +549,6 @@ def _resolve_l_shape_wire_width(placedb, route_xsize=None, route_ysize=None, fal
 
 
 def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
-    from tools.iEDA.module.gpugr import IEDAGPUGR
-
-    with profile_scope(params, "gpugr_prepare.write_back_pos", tensor=pos):
-        _write_back_autodmp_pos_to_ieda(pos, params, placedb)
     with profile_scope(params, "gpugr_prepare.sync_route_grid", tensor=pos):
         route_xsize, route_ysize = _sync_gpugr_route_grid_to_autodmp(
             params,
@@ -461,8 +557,54 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
         )
     l_shape_num_bins_x = int(getattr(params, "num_bins_x", placedb.num_bins_x))
     l_shape_num_bins_y = int(getattr(params, "num_bins_y", placedb.num_bins_y))
+    topology_xl, topology_yl, topology_bin_size_x, topology_bin_size_y = _build_gpugr_topology_pack_geometry(
+        placedb,
+        route_xsize,
+        route_ysize,
+    )
+    need_route_entries = (
+        bool(getattr(params, "l_direction_use_gpugr", False))
+        and not _should_skip_resolver_l_direction_for_soft(params)
+    )
+    need_route_entries = need_route_entries or bool(getattr(params, "gpugr_l_direction_save_artifacts", 0))
+    need_route_entries = need_route_entries or bool(getattr(params, "l_shape_plot_flag", 0))
 
-    gpugr_op = IEDAGPUGR(dir_workspace=placedb.data_manager.dir_workspace)
+    parser_cache_enable = bool(getattr(params, "gpugr_parser_cache_enable", False))
+    parser_cache_node_lpos = None
+    parser_cache_node_names = None
+    gpugr_op = _get_cached_gpugr_operator(placedb)
+    if parser_cache_enable:
+        with profile_scope(params, "gpugr_prepare.parser_cache_inputs", tensor=pos):
+            parser_cache_node_lpos, parser_cache_node_names = _build_gpugr_parser_cache_inputs(
+                pos,
+                params,
+                placedb,
+            )
+    parser_cache_hit_for_writeback = False
+    if parser_cache_enable and parser_cache_node_names is not None and parser_cache_node_lpos is not None:
+        with profile_scope(params, "gpugr_prepare.parser_cache_hit_check"):
+            parser_cache_hit_for_writeback = gpugr_op.parser_cache_would_hit(
+                design_name=params.design_name(),
+                node_names=parser_cache_node_names,
+                node_count=len(parser_cache_node_names),
+            )
+    with profile_scope(
+        params,
+        "gpugr_prepare.write_back_pos",
+        tensor=pos,
+        skipped=1 if parser_cache_hit_for_writeback else 0,
+    ):
+        if not parser_cache_hit_for_writeback:
+            _write_back_autodmp_pos_to_ieda(pos, params, placedb)
+
+    parser_cache_fallback_before_export = None
+    if parser_cache_hit_for_writeback:
+        def parser_cache_fallback_before_export():
+            with profile_scope(params, "gpugr_prepare.parser_cache_fallback_write_back_pos", tensor=pos):
+                _write_back_autodmp_pos_to_ieda(pos, params, placedb)
+
+    with profile_scope(params, "gpugr_prepare.topology_net_name_to_id", tensor=pos):
+        topology_net_name_to_id = _build_gpugr_topology_net_name_to_id(placedb)
     with profile_scope(
         params,
         "gpugr_prepare.run_gpugr",
@@ -480,24 +622,46 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
             skip_m1_route=True,
             keep_temp_def=False,
             save_artifacts=bool(getattr(params, "gpugr_l_direction_save_artifacts", 0)),
-            include_route_entries=True,
+            include_route_entries=need_route_entries,
+            include_topology_pack=True,
+            topology_net_name_to_id=topology_net_name_to_id,
+            topology_max_gap=1,
+            topology_xl=topology_xl,
+            topology_yl=topology_yl,
+            topology_bin_size_x=topology_bin_size_x,
+            topology_bin_size_y=topology_bin_size_y,
+            parser_cache_enable=parser_cache_enable,
+            parser_cache_node_lpos=parser_cache_node_lpos,
+            parser_cache_node_names=parser_cache_node_names,
+            parser_cache_fallback_before_export=parser_cache_fallback_before_export,
+            profile_enabled=bool(getattr(params, "l_shape_profile_flag", False)),
+            profile_prefix="gpugr_prepare.run_gpugr",
         )
 
     maps = result["maps"]
     metrics = result["metrics"]
     route_entries = result.get("route_entries", [])
-    total_entries = sum(len(net.get("entries", [])) for net in route_entries)
+    gpugr_topology_stats = result.get("same_net_topology_stats", {})
+    total_entries = int(
+        gpugr_topology_stats.get(
+            "total_entry_count",
+            sum(len(net.get("entries", [])) for net in route_entries),
+        )
+    )
+    route_nets = int(gpugr_topology_stats.get("num_route_entry_nets", len(route_entries)))
     with profile_scope(
         params,
         "gpugr_prepare.same_net_topology_cache",
         tensor=pos,
-        route_nets=len(route_entries),
+        route_nets=route_nets,
         route_entries=total_entries,
     ):
         same_net_topo_cache, same_net_topo_stats = build_same_net_topology_cache(
             route_entries,
             placedb,
             profile_enabled=params,
+            prebuilt_cache=result.get("same_net_topology_cache", {}),
+            prebuilt_stats=gpugr_topology_stats,
         )
 
     with profile_scope(params, "gpugr_prepare.map_to_device", tensor=pos):
@@ -574,7 +738,7 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
         route_ysize,
         l_shape_num_bins_x,
         l_shape_num_bins_y,
-        len(route_entries),
+        route_nets,
         total_entries,
         supply_map.min().item(),
         supply_map.max().item(),

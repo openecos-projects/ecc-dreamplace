@@ -295,6 +295,10 @@
         "description": "whether save gpugr artifacts when l_direction_use_gpugr is enabled",
         "default": 0
     },
+    "gpugr_parser_cache_enable": {
+        "description": "whether keep the Xplace gpugr parser DB alive and update movable coordinates by instance name between diff refreshes",
+        "default": 1
+    },
     "gpugr_final_eval_flag": {
         "description": "whether run a final gpugr evaluation after placement finishes, similar to Xplace final_route_eval",
         "default": 0

@@ -447,7 +447,87 @@ def _build_same_net_topology_cache_cpp(
     return cache, stats
 
 
-def build_same_net_topology_cache(route_entries, placedb, max_gap=1, profile_enabled=False):
+def _build_same_net_topology_cache_prebuilt(
+    prebuilt_cache,
+    prebuilt_stats,
+    placedb,
+    *,
+    profile_enabled=False,
+):
+    if same_net_topo_scoring_cpp is None or not isinstance(prebuilt_cache, dict):
+        return None
+
+    needs_python_cache = bool(getattr(profile_enabled, "l_shape_plot_flag", 0))
+    if needs_python_cache and not prebuilt_cache.get("net_topologies"):
+        return None
+
+    packed = prebuilt_cache.get(_CPP_PACK_CACHE_KEY)
+    if not isinstance(packed, dict):
+        return None
+
+    geometry = _route_grid_pack_geometry(placedb)
+    if geometry is None:
+        return None
+
+    pack_key = tuple(float(v) for v in geometry)
+    cached_key = prebuilt_cache.get(_CPP_PACK_CACHE_META_KEY)
+    try:
+        cached_key = tuple(float(v) for v in cached_key)
+    except Exception:
+        return None
+    if cached_key != pack_key:
+        logger.warning(
+            "Ignore prebuilt same-net topology cache because geometry key mismatches: prebuilt=%s expected=%s",
+            cached_key,
+            pack_key,
+        )
+        return None
+
+    cache = dict(prebuilt_cache)
+    cache.setdefault("route_grid_shape", _route_grid_shape(placedb))
+    cache.setdefault("net_topologies", {})
+    cache.setdefault("route_entry_meta", {})
+    cache.setdefault("num_nets_with_topology", int(packed["net_ids"].size))
+    cache.setdefault("num_segments_h", int(packed["h_x1"].size))
+    cache.setdefault("num_segments_v", int(packed["v_x"].size))
+    cache.setdefault("compact_topology_cache", True)
+
+    stats = dict(prebuilt_stats or {})
+    stats.setdefault("route_grid_shape", _route_grid_shape(placedb))
+    stats.setdefault("num_route_entry_nets", 0)
+    stats.setdefault("num_nets_with_topology", int(cache.get("num_nets_with_topology", 0)))
+    stats.setdefault("num_route_failed_nets", 0)
+    stats.setdefault("unknown_name_count", 0)
+    stats.setdefault("num_segments_h", int(cache.get("num_segments_h", 0)))
+    stats.setdefault("num_segments_v", int(cache.get("num_segments_v", 0)))
+    stats.setdefault("total_horizontal_length", 0)
+    stats.setdefault("total_vertical_length", 0)
+    stats.setdefault("total_entry_count", 0)
+    stats.setdefault("wire_entry_count", int(stats.get("num_segments_h", 0)) + int(stats.get("num_segments_v", 0)))
+    stats.setdefault("invalid_wire_count", 0)
+    stats.setdefault("max_intervals_per_net", 0)
+    stats["backend"] = stats.get("backend", "gpugr_packed")
+    _log_topology_cache_stats(stats)
+    return cache, stats
+
+
+def build_same_net_topology_cache(
+    route_entries,
+    placedb,
+    max_gap=1,
+    profile_enabled=False,
+    prebuilt_cache=None,
+    prebuilt_stats=None,
+):
+    prebuilt_result = _build_same_net_topology_cache_prebuilt(
+        prebuilt_cache,
+        prebuilt_stats,
+        placedb,
+        profile_enabled=profile_enabled,
+    )
+    if prebuilt_result is not None:
+        return prebuilt_result
+
     with profile_scope(
         profile_enabled,
         "same_net_topology_cache.build_net_name_to_id",

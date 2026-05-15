@@ -553,14 +553,36 @@ class LShapeSegmentOp:
         
         # 缓存拓扑结构（不随pos变化）
         self._cached_topology = None
-        # 缓存输入的hash，用于检测EGR更新
+        # 缓存输入签名，用于检测EGR/GPUGR拓扑更新
+        self._cached_input_key = None
         self._cached_input_hash = None
     
     def reset_cache(self):
         """重置拓扑缓存，在EGR重新运行后调用"""
         self._cached_topology = None
+        self._cached_input_key = None
         self._cached_input_hash = None
         logger.info("LShapeSegmentOp cache reset")
+
+    def _tensor_fast_key(self, tensor):
+        if not isinstance(tensor, torch.Tensor):
+            return ("none", 0, 0, 0, 0)
+        values = tensor.detach()
+        return (
+            str(values.dtype),
+            str(values.device),
+            int(values.numel()),
+            int(values.data_ptr()) if values.numel() > 0 else 0,
+            int(getattr(tensor, "_version", 0)),
+        )
+
+    def _compute_input_key(self, flat_from, flat_to, l_directions):
+        """Compute a cheap exact-enough cache key for stable tensor topology objects."""
+        return (
+            self._tensor_fast_key(flat_from),
+            self._tensor_fast_key(flat_to),
+            self._tensor_fast_key(l_directions),
+        )
     
     def _tensor_content_digest(self, tensor):
         if not isinstance(tensor, torch.Tensor):
@@ -992,20 +1014,23 @@ class LShapeSegmentOp:
         """
         device = newx.device
         
-        # 计算输入hash，检测EGR是否重新运行
-        current_hash = self._compute_input_hash(flat_from, flat_to, l_directions)
+        # 计算输入签名，检测EGR/GPUGR是否重新运行。内容hash只在cache miss时计算，
+        # 避免每次forward重复扫描大规模edge tensor。
+        current_key = self._compute_input_key(flat_from, flat_to, l_directions)
         
         # 检查是否需要重新计算拓扑
         need_recompute_topo = (
             self._cached_topology is None or
-            self._cached_input_hash != current_hash
+            self._cached_input_key != current_key
         )
         
         if need_recompute_topo:
+            current_hash = self._compute_input_hash(flat_from, flat_to, l_directions)
             # 预计算拓扑（只需一次，或EGR更新后重新计算）
             self._cached_topology = self._compute_topology(
                 flat_from, flat_to, l_directions, len(newx), device
             )
+            self._cached_input_key = current_key
             self._cached_input_hash = current_hash
             logger.info(
                 "Computed topology: %d valid edges (hash=%s)",

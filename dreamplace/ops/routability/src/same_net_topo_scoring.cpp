@@ -5,7 +5,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <map>
 #include <limits>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -28,6 +30,30 @@ struct Piece {
   scalar_t y1;
   scalar_t x2;
   scalar_t y2;
+};
+
+struct IntInterval {
+  int lo = 0;
+  int hi = 0;
+};
+
+struct TopologyRecord {
+  int net_id = -1;
+  std::string net_name;
+  std::map<int, std::vector<IntInterval>> horizontal_by_row;
+  std::map<int, std::vector<IntInterval>> vertical_by_col;
+  int bbox_x_lo = 0;
+  int bbox_y_lo = 0;
+  int bbox_x_hi = 0;
+  int bbox_y_hi = 0;
+  bool bbox_initialized = false;
+  int num_horizontal_intervals = 0;
+  int num_vertical_intervals = 0;
+  int total_horizontal_length = 0;
+  int total_vertical_length = 0;
+  int raw_wire_count = 0;
+  int invalid_wire_count = 0;
+  bool route_failed = false;
 };
 
 struct LocalStats {
@@ -229,6 +255,401 @@ inline scalar_t quantile_from_sorted(const std::vector<scalar_t>& values, scalar
   std::size_t hi = static_cast<std::size_t>(std::ceil(pos));
   scalar_t frac = pos - static_cast<scalar_t>(lo);
   return values[lo] * (1.0f - frac) + values[hi] * frac;
+}
+
+inline py::object dict_get_or_none(const py::dict& dict, const char* key) {
+  py::str py_key(key);
+  if (dict.contains(py_key)) {
+    return py::reinterpret_borrow<py::object>(dict[py_key]);
+  }
+  return py::none();
+}
+
+inline std::string object_to_string(py::handle obj) {
+  if (obj.is_none()) {
+    return "";
+  }
+  if (py::isinstance<py::bytes>(obj)) {
+    return py::reinterpret_borrow<py::bytes>(obj).cast<std::string>();
+  }
+  return py::str(obj).cast<std::string>();
+}
+
+inline std::string dict_string_or(const py::dict& dict, const char* key, const std::string& default_value = "") {
+  py::object value = dict_get_or_none(dict, key);
+  if (value.is_none()) {
+    return default_value;
+  }
+  return object_to_string(value);
+}
+
+inline int dict_int_or(const py::dict& dict, const char* key, int default_value = 0) {
+  py::object value = dict_get_or_none(dict, key);
+  if (value.is_none()) {
+    return default_value;
+  }
+  return value.cast<int>();
+}
+
+inline bool dict_bool_or(const py::dict& dict, const char* key, bool default_value = false) {
+  py::object value = dict_get_or_none(dict, key);
+  if (value.is_none()) {
+    return default_value;
+  }
+  return value.cast<bool>();
+}
+
+inline void merge_normalized_int_intervals(std::vector<IntInterval>& intervals, int max_gap) {
+  if (intervals.size() <= 1) {
+    return;
+  }
+  std::sort(intervals.begin(), intervals.end(), [](const IntInterval& a, const IntInterval& b) {
+    if (a.lo != b.lo) {
+      return a.lo < b.lo;
+    }
+    return a.hi < b.hi;
+  });
+
+  std::vector<IntInterval> merged;
+  merged.reserve(intervals.size());
+  IntInterval current = intervals.front();
+  for (std::size_t i = 1; i < intervals.size(); ++i) {
+    const IntInterval& next = intervals[i];
+    if (next.lo <= current.hi + max_gap) {
+      if (next.hi > current.hi) {
+        current.hi = next.hi;
+      }
+    } else {
+      merged.push_back(current);
+      current = next;
+    }
+  }
+  merged.push_back(current);
+  intervals.swap(merged);
+}
+
+inline int interval_total_length(const std::vector<IntInterval>& intervals) {
+  int total = 0;
+  for (const IntInterval& interval : intervals) {
+    total += interval.hi - interval.lo;
+  }
+  return total;
+}
+
+template <typename T>
+py::array_t<T> vector_to_numpy(const std::vector<T>& values) {
+  py::array_t<T> result(values.size());
+  auto result_v = result.template mutable_unchecked<1>();
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    result_v(i) = values[i];
+  }
+  return result;
+}
+
+inline py::dict intervals_by_axis_to_python(const std::map<int, std::vector<IntInterval>>& intervals_by_axis) {
+  py::dict result;
+  for (const auto& [axis_idx, intervals] : intervals_by_axis) {
+    py::list py_intervals;
+    for (const IntInterval& interval : intervals) {
+      py_intervals.append(py::make_tuple(interval.lo, interval.hi));
+    }
+    result[py::int_(axis_idx)] = py_intervals;
+  }
+  return result;
+}
+
+inline py::dict topology_record_to_python(const TopologyRecord& record) {
+  py::dict result;
+  result["net_id"] = py::int_(record.net_id);
+  result["net_name"] = py::str(record.net_name);
+  result["horizontal_by_row"] = intervals_by_axis_to_python(record.horizontal_by_row);
+  result["vertical_by_col"] = intervals_by_axis_to_python(record.vertical_by_col);
+  result["bbox"] = py::make_tuple(record.bbox_x_lo, record.bbox_y_lo, record.bbox_x_hi, record.bbox_y_hi);
+  result["num_horizontal_intervals"] = py::int_(record.num_horizontal_intervals);
+  result["num_vertical_intervals"] = py::int_(record.num_vertical_intervals);
+  result["total_horizontal_length"] = py::int_(record.total_horizontal_length);
+  result["total_vertical_length"] = py::int_(record.total_vertical_length);
+  result["raw_wire_count"] = py::int_(record.raw_wire_count);
+  result["invalid_wire_count"] = py::int_(record.invalid_wire_count);
+  result["route_failed"] = py::bool_(record.route_failed);
+  return result;
+}
+
+inline bool finalize_topology_record(TopologyRecord& record, int max_gap) {
+  for (auto it = record.horizontal_by_row.begin(); it != record.horizontal_by_row.end();) {
+    merge_normalized_int_intervals(it->second, max_gap);
+    if (it->second.empty()) {
+      it = record.horizontal_by_row.erase(it);
+    } else {
+      record.num_horizontal_intervals += static_cast<int>(it->second.size());
+      record.total_horizontal_length += interval_total_length(it->second);
+      ++it;
+    }
+  }
+  for (auto it = record.vertical_by_col.begin(); it != record.vertical_by_col.end();) {
+    merge_normalized_int_intervals(it->second, max_gap);
+    if (it->second.empty()) {
+      it = record.vertical_by_col.erase(it);
+    } else {
+      record.num_vertical_intervals += static_cast<int>(it->second.size());
+      record.total_vertical_length += interval_total_length(it->second);
+      ++it;
+    }
+  }
+  return record.num_horizontal_intervals > 0 || record.num_vertical_intervals > 0;
+}
+
+inline float grid_center(int coord_idx, float origin, float step) {
+  return origin + (static_cast<float>(coord_idx) + 0.5f) * step;
+}
+
+py::dict pack_topology_records(
+    const std::map<int, TopologyRecord>& records,
+    double xl,
+    double yl,
+    double route_bin_size_x,
+    double route_bin_size_y) {
+  std::vector<int32_t> net_ids;
+  std::vector<int32_t> h_seg_offsets;
+  std::vector<int32_t> v_seg_offsets;
+  std::vector<float> h_x1;
+  std::vector<float> h_y;
+  std::vector<float> h_x2;
+  std::vector<float> v_x;
+  std::vector<float> v_y1;
+  std::vector<float> v_y2;
+
+  net_ids.reserve(records.size());
+  h_seg_offsets.reserve(records.size() + 1);
+  v_seg_offsets.reserve(records.size() + 1);
+  h_seg_offsets.push_back(0);
+  v_seg_offsets.push_back(0);
+
+  float xl_f = static_cast<float>(xl);
+  float yl_f = static_cast<float>(yl);
+  float route_bin_size_x_f = static_cast<float>(route_bin_size_x);
+  float route_bin_size_y_f = static_cast<float>(route_bin_size_y);
+  int max_net_id = -1;
+
+  for (const auto& [net_id, record] : records) {
+    net_ids.push_back(static_cast<int32_t>(net_id));
+    max_net_id = std::max(max_net_id, net_id);
+
+    int32_t h_count = 0;
+    for (const auto& [row_idx, intervals] : record.horizontal_by_row) {
+      float seg_y = grid_center(row_idx, yl_f, route_bin_size_y_f);
+      for (const IntInterval& interval : intervals) {
+        h_x1.push_back(grid_center(interval.lo, xl_f, route_bin_size_x_f));
+        h_y.push_back(seg_y);
+        h_x2.push_back(grid_center(interval.hi, xl_f, route_bin_size_x_f));
+        ++h_count;
+      }
+    }
+    h_seg_offsets.push_back(h_seg_offsets.back() + h_count);
+
+    int32_t v_count = 0;
+    for (const auto& [col_idx, intervals] : record.vertical_by_col) {
+      float seg_x = grid_center(col_idx, xl_f, route_bin_size_x_f);
+      for (const IntInterval& interval : intervals) {
+        v_x.push_back(seg_x);
+        v_y1.push_back(grid_center(interval.lo, yl_f, route_bin_size_y_f));
+        v_y2.push_back(grid_center(interval.hi, yl_f, route_bin_size_y_f));
+        ++v_count;
+      }
+    }
+    v_seg_offsets.push_back(v_seg_offsets.back() + v_count);
+  }
+
+  std::vector<int32_t> net_index_by_id;
+  if (max_net_id >= 0) {
+    net_index_by_id.assign(static_cast<std::size_t>(max_net_id) + 1, static_cast<int32_t>(-1));
+    for (std::size_t index = 0; index < net_ids.size(); ++index) {
+      int32_t net_id = net_ids[index];
+      if (net_id >= 0) {
+        net_index_by_id[static_cast<std::size_t>(net_id)] = static_cast<int32_t>(index);
+      }
+    }
+  }
+
+  py::dict packed;
+  packed["net_ids"] = vector_to_numpy(net_ids);
+  packed["net_index_by_id"] = vector_to_numpy(net_index_by_id);
+  packed["h_seg_offsets"] = vector_to_numpy(h_seg_offsets);
+  packed["v_seg_offsets"] = vector_to_numpy(v_seg_offsets);
+  packed["h_x1"] = vector_to_numpy(h_x1);
+  packed["h_y"] = vector_to_numpy(h_y);
+  packed["h_x2"] = vector_to_numpy(h_x2);
+  packed["v_x"] = vector_to_numpy(v_x);
+  packed["v_y1"] = vector_to_numpy(v_y1);
+  packed["v_y2"] = vector_to_numpy(v_y2);
+  return packed;
+}
+
+py::tuple build_topology_cache(
+    py::iterable route_entries,
+    py::dict net_name_to_id,
+    py::tuple route_grid_shape,
+    int max_gap,
+    double xl,
+    double yl,
+    double route_bin_size_x,
+    double route_bin_size_y,
+    bool build_packed,
+    bool build_python_cache) {
+  std::map<int, TopologyRecord> native_topologies;
+  py::dict py_topologies;
+  py::dict route_entry_meta;
+
+  int num_route_entry_nets = 0;
+  int num_route_failed_nets = 0;
+  int unknown_name_count = 0;
+  int total_segments_h = 0;
+  int total_segments_v = 0;
+  int total_length_h = 0;
+  int total_length_v = 0;
+  int max_intervals_per_net = 0;
+  int invalid_wire_count = 0;
+
+  for (py::handle net_obj : route_entries) {
+    ++num_route_entry_nets;
+    py::dict net_route = py::reinterpret_borrow<py::dict>(net_obj);
+    bool route_failed = dict_bool_or(net_route, "route_failed", false);
+    if (route_failed) {
+      ++num_route_failed_nets;
+    }
+
+    std::string net_name = dict_string_or(net_route, "net_name", "");
+    int net_id = -1;
+    py::str net_name_key(net_name);
+    if (net_name_to_id.contains(net_name_key)) {
+      net_id = net_name_to_id[net_name_key].cast<int>();
+    } else {
+      net_id = dict_int_or(net_route, "net_id", -1);
+      if (net_id < 0) {
+        ++unknown_name_count;
+        continue;
+      }
+    }
+
+    py::object entries_obj = dict_get_or_none(net_route, "entries");
+    bool has_entries = !entries_obj.is_none();
+    std::size_t entry_count = has_entries ? static_cast<std::size_t>(py::len(entries_obj)) : 0;
+
+    TopologyRecord record;
+    record.net_id = net_id;
+    record.net_name = net_name.empty() ? ("net_" + std::to_string(net_id)) : net_name;
+    record.route_failed = route_failed;
+
+    if (has_entries) {
+      for (py::handle entry_obj : entries_obj) {
+        py::dict entry = py::reinterpret_borrow<py::dict>(entry_obj);
+        if (dict_string_or(entry, "type", "") != "wire") {
+          continue;
+        }
+        ++record.raw_wire_count;
+
+        int x1 = dict_int_or(entry, "grid_x1", 0);
+        int y1 = dict_int_or(entry, "grid_y1", 0);
+        int x2 = dict_int_or(entry, "grid_x2", 0);
+        int y2 = dict_int_or(entry, "grid_y2", 0);
+        std::string orientation = dict_string_or(entry, "orientation", "");
+        bool is_horizontal = orientation == "H" || y1 == y2;
+        bool is_vertical = orientation == "V" || x1 == x2;
+
+        if (!record.bbox_initialized) {
+          record.bbox_x_lo = x1;
+          record.bbox_y_lo = y1;
+          record.bbox_x_hi = x1;
+          record.bbox_y_hi = y1;
+          record.bbox_initialized = true;
+        } else {
+          record.bbox_x_lo = std::min(record.bbox_x_lo, std::min(x1, x2));
+          record.bbox_y_lo = std::min(record.bbox_y_lo, std::min(y1, y2));
+          record.bbox_x_hi = std::max(record.bbox_x_hi, std::max(x1, x2));
+          record.bbox_y_hi = std::max(record.bbox_y_hi, std::max(y1, y2));
+        }
+
+        if (is_horizontal && y1 == y2) {
+          int lo = std::min(x1, x2);
+          int hi = std::max(x1, x2);
+          record.horizontal_by_row[y1].push_back({lo, hi});
+          continue;
+        }
+        if (is_vertical && x1 == x2) {
+          int lo = std::min(y1, y2);
+          int hi = std::max(y1, y2);
+          record.vertical_by_col[x1].push_back({lo, hi});
+          continue;
+        }
+        ++record.invalid_wire_count;
+      }
+    }
+
+    if (build_python_cache) {
+      py::dict meta;
+      meta["net_id"] = py::int_(net_id);
+      meta["net_name"] = py::str(record.net_name);
+      meta["route_failed"] = py::bool_(route_failed);
+      meta["entry_count"] = py::int_(static_cast<int>(entry_count));
+      meta["wire_entry_count"] = py::int_(record.raw_wire_count);
+      route_entry_meta[py::int_(net_id)] = meta;
+    }
+
+    if (!finalize_topology_record(record, max_gap)) {
+      continue;
+    }
+
+    native_topologies[net_id] = record;
+    if (build_python_cache) {
+      py_topologies[py::int_(net_id)] = topology_record_to_python(record);
+    }
+    total_segments_h += record.num_horizontal_intervals;
+    total_segments_v += record.num_vertical_intervals;
+    total_length_h += record.total_horizontal_length;
+    total_length_v += record.total_vertical_length;
+    invalid_wire_count += record.invalid_wire_count;
+    max_intervals_per_net = std::max(
+        max_intervals_per_net,
+        record.num_horizontal_intervals + record.num_vertical_intervals);
+  }
+
+  int route_num_bins_x = route_grid_shape.size() > 0 ? route_grid_shape[0].cast<int>() : 0;
+  int route_num_bins_y = route_grid_shape.size() > 1 ? route_grid_shape[1].cast<int>() : 0;
+  py::tuple py_route_grid_shape = py::make_tuple(route_num_bins_x, route_num_bins_y);
+
+  py::dict stats;
+  stats["route_grid_shape"] = py_route_grid_shape;
+  stats["num_route_entry_nets"] = py::int_(num_route_entry_nets);
+  stats["num_nets_with_topology"] = py::int_(static_cast<int>(native_topologies.size()));
+  stats["num_route_failed_nets"] = py::int_(num_route_failed_nets);
+  stats["unknown_name_count"] = py::int_(unknown_name_count);
+  stats["num_segments_h"] = py::int_(total_segments_h);
+  stats["num_segments_v"] = py::int_(total_segments_v);
+  stats["total_horizontal_length"] = py::int_(total_length_h);
+  stats["total_vertical_length"] = py::int_(total_length_v);
+  stats["invalid_wire_count"] = py::int_(invalid_wire_count);
+  stats["max_intervals_per_net"] = py::int_(max_intervals_per_net);
+  stats["backend"] = py::str("cpp");
+
+  py::dict cache;
+  cache["route_grid_shape"] = py_route_grid_shape;
+  cache["net_topologies"] = py_topologies;
+  cache["route_entry_meta"] = route_entry_meta;
+  cache["num_nets_with_topology"] = py::int_(static_cast<int>(native_topologies.size()));
+  cache["num_segments_h"] = py::int_(total_segments_h);
+  cache["num_segments_v"] = py::int_(total_segments_v);
+  cache["compact_topology_cache"] = py::bool_(!build_python_cache);
+  if (build_packed && !native_topologies.empty()) {
+    cache["_same_net_topo_cpp_pack_key"] = py::make_tuple(xl, yl, route_bin_size_x, route_bin_size_y);
+    cache["_same_net_topo_cpp_packed"] = pack_topology_records(
+        native_topologies,
+        xl,
+        yl,
+        route_bin_size_x,
+        route_bin_size_y);
+  }
+
+  return py::make_tuple(cache, stats);
 }
 
 py::tuple forward(
@@ -492,4 +913,18 @@ py::tuple forward(
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward", &forward, "Same-net diagonal split topology scoring (CPU)");
+  m.def(
+      "build_topology_cache",
+      &build_topology_cache,
+      "Build same-net topology cache from route entries (CPU)",
+      py::arg("route_entries"),
+      py::arg("net_name_to_id"),
+      py::arg("route_grid_shape"),
+      py::arg("max_gap") = 1,
+      py::arg("xl") = 0.0,
+      py::arg("yl") = 0.0,
+      py::arg("route_bin_size_x") = 1.0,
+      py::arg("route_bin_size_y") = 1.0,
+      py::arg("build_packed") = false,
+      py::arg("build_python_cache") = true);
 }

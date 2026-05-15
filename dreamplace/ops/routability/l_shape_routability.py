@@ -167,6 +167,8 @@ class LShapeRoutabilityOp(nn.Module):
         )
         self._soft_l_debug_call_count = 0
         self.blockage_initial_density = True
+        self._cached_fallback_l_directions = None
+        self._cached_fallback_l_directions_key = None
 
         directional_track_widths = (
             self.density_mode == "electric"
@@ -504,6 +506,7 @@ class LShapeRoutabilityOp(nn.Module):
             if hasattr(self.segment_builder, "reset_cache"):
                 self.segment_builder.reset_cache()
             self._clear_soft_edge_topology_cache()
+            self._clear_fallback_l_directions_cache()
             self.cached_soft_debug = None
             self._soft_l_debug_call_count = 0
             self.cached_density_map = None
@@ -535,6 +538,7 @@ class LShapeRoutabilityOp(nn.Module):
         self._cached_edge_net_ids = None
         self._cached_edge_net_ids_key = None
         self._clear_soft_edge_topology_cache()
+        self._clear_fallback_l_directions_cache()
         if hasattr(self.segment_builder, "reset_cache"):
             self.segment_builder.reset_cache()
         if isinstance(self.cached_soft_debug, dict):
@@ -626,6 +630,30 @@ class LShapeRoutabilityOp(nn.Module):
     def _clear_soft_edge_topology_cache(self):
         self._cached_soft_edge_topology = None
         self._cached_soft_edge_topology_key = None
+
+    def _clear_fallback_l_directions_cache(self):
+        self._cached_fallback_l_directions = None
+        self._cached_fallback_l_directions_key = None
+
+    def _get_fallback_l_directions(self, num_edges, fallback_direction, device):
+        key = (int(num_edges), int(fallback_direction), str(device))
+        cached = self._cached_fallback_l_directions
+        if (
+            key == self._cached_fallback_l_directions_key
+            and isinstance(cached, torch.Tensor)
+            and int(cached.numel()) == int(num_edges)
+            and cached.device == device
+        ):
+            return cached
+        l_directions = torch.full(
+            (int(num_edges),),
+            int(fallback_direction),
+            dtype=torch.int32,
+            device=device,
+        )
+        self._cached_fallback_l_directions_key = key
+        self._cached_fallback_l_directions = l_directions
+        return l_directions
 
     def _soft_edge_topology_cache_key(self, flat_pin_from, flat_pin_to, num_vertices, device):
         return (
@@ -1617,9 +1645,10 @@ class LShapeRoutabilityOp(nn.Module):
             logger.debug(f"Using EGR L-directions: {len(l_directions)} edges")
         else:
             fallback_direction = UNKNOWN if self.soft_l_assignment else H_FIRST
-            l_directions = torch.full(
-                (flat_pin_from.numel(),), fallback_direction,
-                dtype=torch.int32, device=newx.device  # CPU
+            l_directions = self._get_fallback_l_directions(
+                flat_pin_from.numel(),
+                fallback_direction,
+                newx.device,
             )
             logger.debug(
                 "No L-direction info, using default %s",
@@ -1816,21 +1845,19 @@ class LShapeRoutabilityOp(nn.Module):
                 dtype=pos.dtype, device=device
             )
         
-        # 确保边信息在正确的设备上
-        if flat_pin_from.device != device:
-            flat_pin_from = flat_pin_from.to(device)
-        if flat_pin_to.device != device:
-            flat_pin_to = flat_pin_to.to(device)
-        
+        # Keep edge topology tensors on their stable source device. Soft scoring
+        # moves local views as needed; this lets overflow probing and forward
+        # share edge-net and segment-topology caches across a refresh.
         if use_l_direction and hasattr(steiner_topo_op, 'edge_l_directions') and steiner_topo_op.edge_l_directions is not None:
             l_directions = steiner_topo_op.edge_l_directions
-            if l_directions.device != device:
-                l_directions = l_directions.to(device)
+            if l_directions.device != flat_pin_from.device:
+                l_directions = l_directions.to(flat_pin_from.device)
         else:
             fallback_direction = UNKNOWN if self.soft_l_assignment else H_FIRST
-            l_directions = torch.full(
-                (flat_pin_from.numel(),), fallback_direction,
-                dtype=torch.int32, device=device
+            l_directions = self._get_fallback_l_directions(
+                flat_pin_from.numel(),
+                fallback_direction,
+                flat_pin_from.device,
             )
         
         soft_l_weights = None

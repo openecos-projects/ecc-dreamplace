@@ -1,6 +1,6 @@
 import logging
 import time
-from collections import Counter, defaultdict
+from collections import Counter
 
 import numpy as np
 import torch
@@ -33,9 +33,26 @@ def _normalize_net_name(net_name):
 
 
 def _build_net_name_to_id(placedb):
+    net_names = getattr(placedb, "net_names", [])
+    try:
+        cache_key = (id(net_names), len(net_names))
+    except TypeError:
+        cache_key = None
+    if cache_key is not None:
+        cached_key = getattr(placedb, "_same_net_topology_name_to_id_key", None)
+        cached_mapping = getattr(placedb, "_same_net_topology_name_to_id", None)
+        if cached_key == cache_key and isinstance(cached_mapping, dict):
+            return cached_mapping
+
     mapping = {}
-    for net_id, net_name in enumerate(getattr(placedb, "net_names", [])):
+    for net_id, net_name in enumerate(net_names):
         mapping[_normalize_net_name(net_name)] = int(net_id)
+    if cache_key is not None:
+        try:
+            placedb._same_net_topology_name_to_id_key = cache_key
+            placedb._same_net_topology_name_to_id = mapping
+        except Exception:
+            pass
     return mapping
 
 
@@ -56,6 +73,27 @@ def _merge_intervals(intervals, max_gap=1):
     return [tuple(item) for item in merged]
 
 
+def _merge_normalized_int_intervals(intervals, max_gap=1):
+    if not intervals:
+        return []
+    if len(intervals) == 1:
+        return [intervals[0]]
+
+    intervals.sort()
+    max_gap = int(max_gap)
+    cur_lo, cur_hi = intervals[0]
+    merged = []
+    for lo, hi in intervals[1:]:
+        if lo <= cur_hi + max_gap:
+            if hi > cur_hi:
+                cur_hi = hi
+        else:
+            merged.append((cur_lo, cur_hi))
+            cur_lo, cur_hi = lo, hi
+    merged.append((cur_lo, cur_hi))
+    return merged
+
+
 def _interval_total_length(intervals):
     total = 0
     for lo, hi in intervals:
@@ -69,10 +107,52 @@ def _route_grid_shape(placedb):
     return (num_x, num_y)
 
 
-def _build_net_topology_record(net_id, net_route, max_gap=1, return_wire_count=False):
-    entries = net_route.get("entries", []) or []
-    horizontal_by_row = defaultdict(list)
-    vertical_by_col = defaultdict(list)
+def _route_grid_pack_geometry(placedb):
+    route_num_bins_x, route_num_bins_y = _route_grid_shape(placedb)
+    if route_num_bins_x <= 0 or route_num_bins_y <= 0:
+        return None
+    try:
+        xl = float(getattr(placedb, "routing_grid_xl", placedb.xl))
+        yl = float(getattr(placedb, "routing_grid_yl", placedb.yl))
+        xh = float(getattr(placedb, "routing_grid_xh", placedb.xh))
+        yh = float(getattr(placedb, "routing_grid_yh", placedb.yh))
+    except Exception:
+        return None
+    return (
+        xl,
+        yl,
+        (xh - xl) / float(route_num_bins_x),
+        (yh - yl) / float(route_num_bins_y),
+    )
+
+
+def _log_topology_cache_stats(stats):
+    logger.info(
+        "Built per-net topology cache: nets=%d/%d segments_h=%d segments_v=%d route_failed=%d unknown_names=%d invalid_wires=%d max_intervals_per_net=%d",
+        int(stats.get("num_nets_with_topology", 0)),
+        int(stats.get("num_route_entry_nets", 0)),
+        int(stats.get("num_segments_h", 0)),
+        int(stats.get("num_segments_v", 0)),
+        int(stats.get("num_route_failed_nets", 0)),
+        int(stats.get("unknown_name_count", 0)),
+        int(stats.get("invalid_wire_count", 0)),
+        int(stats.get("max_intervals_per_net", 0)),
+    )
+
+
+def _build_net_topology_record(
+    net_id,
+    net_route,
+    max_gap=1,
+    return_wire_count=False,
+    *,
+    entries=None,
+    net_name=None,
+    route_failed=None,
+):
+    entries = (net_route.get("entries", []) if entries is None else entries) or []
+    horizontal_by_row = {}
+    vertical_by_col = {}
     invalid_wire_count = 0
     raw_wire_count = 0
 
@@ -82,39 +162,60 @@ def _build_net_topology_record(net_id, net_route, max_gap=1, return_wire_count=F
     bbox_y_hi = None
 
     for entry in entries:
-        if entry.get("type", "") != "wire":
+        entry_get = entry.get
+        if entry_get("type", "") != "wire":
             continue
         raw_wire_count += 1
-        x1 = int(entry.get("grid_x1", 0))
-        y1 = int(entry.get("grid_y1", 0))
-        x2 = int(entry.get("grid_x2", 0))
-        y2 = int(entry.get("grid_y2", 0))
-        orientation = entry.get("orientation", "")
+        x1 = int(entry_get("grid_x1", 0))
+        y1 = int(entry_get("grid_y1", 0))
+        x2 = int(entry_get("grid_x2", 0))
+        y2 = int(entry_get("grid_y2", 0))
+        orientation = entry_get("orientation", "")
         is_horizontal = orientation == "H" or y1 == y2
         is_vertical = orientation == "V" or x1 == x2
 
-        bbox_x_lo = x1 if bbox_x_lo is None else min(bbox_x_lo, x1, x2)
-        bbox_y_lo = y1 if bbox_y_lo is None else min(bbox_y_lo, y1, y2)
-        bbox_x_hi = x1 if bbox_x_hi is None else max(bbox_x_hi, x1, x2)
-        bbox_y_hi = y1 if bbox_y_hi is None else max(bbox_y_hi, y1, y2)
+        if bbox_x_lo is None:
+            bbox_x_lo = x1
+            bbox_y_lo = y1
+            bbox_x_hi = x1
+            bbox_y_hi = y1
+        else:
+            bbox_x_lo = min(bbox_x_lo, x1, x2)
+            bbox_y_lo = min(bbox_y_lo, y1, y2)
+            bbox_x_hi = max(bbox_x_hi, x1, x2)
+            bbox_y_hi = max(bbox_y_hi, y1, y2)
 
         if is_horizontal and y1 == y2:
-            lo, hi = sorted((x1, x2))
-            horizontal_by_row[int(y1)].append((int(lo), int(hi)))
+            if x1 <= x2:
+                lo, hi = x1, x2
+            else:
+                lo, hi = x2, x1
+            intervals = horizontal_by_row.get(y1)
+            if intervals is None:
+                horizontal_by_row[y1] = [(lo, hi)]
+            else:
+                intervals.append((lo, hi))
             continue
         if is_vertical and x1 == x2:
-            lo, hi = sorted((y1, y2))
-            vertical_by_col[int(x1)].append((int(lo), int(hi)))
+            if y1 <= y2:
+                lo, hi = y1, y2
+            else:
+                lo, hi = y2, y1
+            intervals = vertical_by_col.get(x1)
+            if intervals is None:
+                vertical_by_col[x1] = [(lo, hi)]
+            else:
+                intervals.append((lo, hi))
             continue
         invalid_wire_count += 1
 
     merged_h = {
-        int(y_idx): _merge_intervals(intervals, max_gap=max_gap)
+        int(y_idx): _merge_normalized_int_intervals(intervals, max_gap=max_gap)
         for y_idx, intervals in horizontal_by_row.items()
         if intervals
     }
     merged_v = {
-        int(x_idx): _merge_intervals(intervals, max_gap=max_gap)
+        int(x_idx): _merge_normalized_int_intervals(intervals, max_gap=max_gap)
         for x_idx, intervals in vertical_by_col.items()
         if intervals
     }
@@ -135,7 +236,7 @@ def _build_net_topology_record(net_id, net_route, max_gap=1, return_wire_count=F
 
     record = {
         "net_id": int(net_id),
-        "net_name": net_route.get("net_name", "") or f"net_{net_id}",
+        "net_name": (net_route.get("net_name", "") if net_name is None else net_name) or f"net_{net_id}",
         "horizontal_by_row": merged_h,
         "vertical_by_col": merged_v,
         "bbox": (
@@ -150,20 +251,22 @@ def _build_net_topology_record(net_id, net_route, max_gap=1, return_wire_count=F
         "total_vertical_length": int(total_vertical_length),
         "raw_wire_count": int(raw_wire_count),
         "invalid_wire_count": int(invalid_wire_count),
-        "route_failed": bool(net_route.get("route_failed", False)),
+        "route_failed": bool(net_route.get("route_failed", False) if route_failed is None else route_failed),
     }
     if return_wire_count:
         return record, int(raw_wire_count)
     return record
 
 
-def build_same_net_topology_cache(route_entries, placedb, max_gap=1, profile_enabled=False):
+def _build_same_net_topology_cache_python(
+    route_entries,
+    placedb,
+    max_gap=1,
+    profile_enabled=False,
+    net_name_to_id=None,
+):
     profile_active = l_shape_profile_enabled(profile_enabled)
-    with profile_scope(
-        profile_enabled,
-        "same_net_topology_cache.build_net_name_to_id",
-        logger=logger,
-    ):
+    if net_name_to_id is None:
         net_name_to_id = _build_net_name_to_id(placedb)
     net_topologies = {}
     route_entry_meta = {}
@@ -183,17 +286,19 @@ def build_same_net_topology_cache(route_entries, placedb, max_gap=1, profile_ena
     stats_elapsed_s = 0.0
     for net_route in route_entries or []:
         meta_start = time.perf_counter() if profile_active else None
-        if bool(net_route.get("route_failed", False)):
+        net_route_get = net_route.get
+        route_failed = bool(net_route_get("route_failed", False))
+        if route_failed:
             num_route_failed_nets += 1
-        net_name = net_route.get("net_name", "")
+        net_name = net_route_get("net_name", "")
         if net_name in net_name_to_id:
             net_id = net_name_to_id[net_name]
         else:
-            net_id = int(net_route.get("net_id", -1))
+            net_id = int(net_route_get("net_id", -1))
             if net_id < 0:
                 unknown_name_count += 1
                 continue
-        entries = net_route.get("entries", []) or []
+        entries = net_route_get("entries", []) or []
         if profile_active:
             meta_elapsed_s += time.perf_counter() - meta_start
             record_build_start = time.perf_counter()
@@ -202,14 +307,17 @@ def build_same_net_topology_cache(route_entries, placedb, max_gap=1, profile_ena
             net_route,
             max_gap=max_gap,
             return_wire_count=True,
+            entries=entries,
+            net_name=net_name,
+            route_failed=route_failed,
         )
         if profile_active:
             record_build_elapsed_s += time.perf_counter() - record_build_start
             meta_start = time.perf_counter()
         route_entry_meta[int(net_id)] = {
             "net_id": int(net_id),
-            "net_name": net_route.get("net_name", "") or f"net_{net_id}",
-            "route_failed": bool(net_route.get("route_failed", False)),
+            "net_name": net_name or f"net_{net_id}",
+            "route_failed": route_failed,
             "entry_count": int(len(entries)),
             "wire_entry_count": int(wire_entry_count),
         }
@@ -241,6 +349,7 @@ def build_same_net_topology_cache(route_entries, placedb, max_gap=1, profile_ena
         wire_count_ms=f"{wire_count_elapsed_s * 1000.0:.3f}",
         record_build_ms=f"{record_build_elapsed_s * 1000.0:.3f}",
         stats_ms=f"{stats_elapsed_s * 1000.0:.3f}",
+        backend="python",
     )
 
     stats = {
@@ -255,6 +364,7 @@ def build_same_net_topology_cache(route_entries, placedb, max_gap=1, profile_ena
         "total_vertical_length": int(total_length_v),
         "invalid_wire_count": int(invalid_wire_count),
         "max_intervals_per_net": int(max_intervals_per_net),
+        "backend": "python",
     }
     cache = {
         "route_grid_shape": stats["route_grid_shape"],
@@ -264,18 +374,104 @@ def build_same_net_topology_cache(route_entries, placedb, max_gap=1, profile_ena
         "num_segments_h": stats["num_segments_h"],
         "num_segments_v": stats["num_segments_v"],
     }
-    logger.info(
-        "Built per-net topology cache: nets=%d/%d segments_h=%d segments_v=%d route_failed=%d unknown_names=%d invalid_wires=%d max_intervals_per_net=%d",
-        stats["num_nets_with_topology"],
-        stats["num_route_entry_nets"],
-        stats["num_segments_h"],
-        stats["num_segments_v"],
-        stats["num_route_failed_nets"],
-        stats["unknown_name_count"],
-        stats["invalid_wire_count"],
-        stats["max_intervals_per_net"],
-    )
+    _log_topology_cache_stats(stats)
     return cache, stats
+
+
+def _build_same_net_topology_cache_cpp(
+    route_entries,
+    placedb,
+    *,
+    net_name_to_id,
+    max_gap=1,
+    profile_enabled=False,
+):
+    if same_net_topo_scoring_cpp is None or not hasattr(same_net_topo_scoring_cpp, "build_topology_cache"):
+        return None
+
+    route_entries = route_entries or []
+    geometry = _route_grid_pack_geometry(placedb)
+    build_packed = geometry is not None
+    if geometry is None:
+        xl, yl, route_bin_size_x, route_bin_size_y = 0.0, 0.0, 1.0, 1.0
+    else:
+        xl, yl, route_bin_size_x, route_bin_size_y = geometry
+    build_python_cache = bool(getattr(profile_enabled, "l_shape_plot_flag", 0)) or not build_packed
+
+    route_loop_timer = profile_start(profile_enabled)
+    try:
+        cache, stats = same_net_topo_scoring_cpp.build_topology_cache(
+            route_entries,
+            net_name_to_id,
+            _route_grid_shape(placedb),
+            int(max_gap),
+            float(xl),
+            float(yl),
+            float(route_bin_size_x),
+            float(route_bin_size_y),
+            bool(build_packed),
+            bool(build_python_cache),
+        )
+    except Exception:
+        logger.exception("C++ per-net topology cache build failed; falling back to Python builder.")
+        return None
+
+    cache = dict(cache or {})
+    stats = dict(stats or {})
+    stats.setdefault("route_grid_shape", _route_grid_shape(placedb))
+    stats.setdefault("num_route_entry_nets", int(len(route_entries)))
+    stats.setdefault("num_nets_with_topology", int(cache.get("num_nets_with_topology", 0)))
+    stats.setdefault("num_route_failed_nets", 0)
+    stats.setdefault("unknown_name_count", 0)
+    stats.setdefault("num_segments_h", int(cache.get("num_segments_h", 0)))
+    stats.setdefault("num_segments_v", int(cache.get("num_segments_v", 0)))
+    stats.setdefault("total_horizontal_length", 0)
+    stats.setdefault("total_vertical_length", 0)
+    stats.setdefault("invalid_wire_count", 0)
+    stats.setdefault("max_intervals_per_net", 0)
+    stats["backend"] = "cpp"
+    profile_end(
+        profile_enabled,
+        route_loop_timer,
+        "same_net_topology_cache.route_loop",
+        logger=logger,
+        route_nets=len(route_entries),
+        topo_nets=int(stats.get("num_nets_with_topology", 0)),
+        h_segments=int(stats.get("num_segments_h", 0)),
+        v_segments=int(stats.get("num_segments_v", 0)),
+        prepacked=int(build_packed),
+        compact=int(not build_python_cache),
+        backend="cpp",
+    )
+    _log_topology_cache_stats(stats)
+    return cache, stats
+
+
+def build_same_net_topology_cache(route_entries, placedb, max_gap=1, profile_enabled=False):
+    with profile_scope(
+        profile_enabled,
+        "same_net_topology_cache.build_net_name_to_id",
+        logger=logger,
+    ):
+        net_name_to_id = _build_net_name_to_id(placedb)
+
+    cpp_result = _build_same_net_topology_cache_cpp(
+        route_entries,
+        placedb,
+        net_name_to_id=net_name_to_id,
+        max_gap=max_gap,
+        profile_enabled=profile_enabled,
+    )
+    if cpp_result is not None:
+        return cpp_result
+
+    return _build_same_net_topology_cache_python(
+        route_entries,
+        placedb,
+        max_gap=max_gap,
+        profile_enabled=profile_enabled,
+        net_name_to_id=net_name_to_id,
+    )
 
 
 def pack_same_net_topology_cache_for_cpp(
@@ -288,10 +484,6 @@ def pack_same_net_topology_cache_for_cpp(
     profile_enabled=False,
 ):
     if not isinstance(topo_cache, dict):
-        return None
-
-    net_topologies = topo_cache.get("net_topologies", {})
-    if not net_topologies:
         return None
 
     pack_key = (
@@ -313,6 +505,10 @@ def pack_same_net_topology_cache_for_cpp(
             v_segments=int(cached_pack["v_x"].size),
         )
         return cached_pack
+
+    net_topologies = topo_cache.get("net_topologies", {})
+    if not net_topologies:
+        return None
 
     net_ids = []
     h_seg_offsets = [0]

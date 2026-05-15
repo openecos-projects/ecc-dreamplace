@@ -555,13 +555,15 @@ class LShapeSegmentOp:
         self._cached_topology = None
         # 缓存输入的hash，用于检测EGR更新
         self._cached_input_hash = None
+        self._cached_soft_geometry = None
     
     def reset_cache(self):
         """重置拓扑缓存，在EGR重新运行后调用"""
         self._cached_topology = None
         self._cached_input_hash = None
+        self._cached_soft_geometry = None
         logger.info("LShapeSegmentOp cache reset")
-    
+
     def _tensor_content_digest(self, tensor):
         if not isinstance(tensor, torch.Tensor):
             return ("none", 0, "none")
@@ -841,7 +843,7 @@ class LShapeSegmentOp:
             'num_segments': num_segments
         }
 
-    def _compute_segments_soft(self, newx, newy, topo, soft_l_weights):
+    def _compute_segments_soft(self, newx, newy, topo, soft_l_weights, soft_geometry=None):
         """
         使用 soft H/V 权重生成候选 segment
         """
@@ -850,16 +852,53 @@ class LShapeSegmentOp:
         if not topo['valid']:
             return self._empty_segment_result(dtype, device)
 
-        valid_from = topo['valid_from']
-        valid_to = topo['valid_to']
-        valid_edge_idx = topo['valid_edge_idx']
-        valid_mask = topo['valid_mask']
-        if valid_from.device != device:
-            valid_from = valid_from.to(device)
-            valid_to = valid_to.to(device)
-            valid_edge_idx = valid_edge_idx.to(device)
-        if valid_mask.device != device:
-            valid_mask = valid_mask.to(device)
+        soft_geometry = soft_geometry if isinstance(soft_geometry, dict) else None
+        if soft_geometry and soft_geometry.get("valid_mask") is not None:
+            valid_mask = soft_geometry["valid_mask"]
+            valid_from = soft_geometry["valid_from"]
+            valid_to = soft_geometry["valid_to"]
+            valid_edge_idx = soft_geometry["valid_edge_idx"]
+            x1 = soft_geometry["x1"]
+            y1 = soft_geometry["y1"]
+            x2 = soft_geometry["x2"]
+            y2 = soft_geometry["y2"]
+            is_horizontal_line = soft_geometry["is_horizontal_line"]
+            is_vertical_line = soft_geometry["is_vertical_line"]
+            is_straight = soft_geometry["is_straight"]
+            is_diagonal = soft_geometry["is_diagonal"]
+            if valid_mask.device != device:
+                valid_mask = valid_mask.to(device)
+                valid_from = valid_from.to(device)
+                valid_to = valid_to.to(device)
+                valid_edge_idx = valid_edge_idx.to(device)
+                x1 = x1.to(device)
+                y1 = y1.to(device)
+                x2 = x2.to(device)
+                y2 = y2.to(device)
+                is_horizontal_line = is_horizontal_line.to(device)
+                is_vertical_line = is_vertical_line.to(device)
+                is_straight = is_straight.to(device)
+                is_diagonal = is_diagonal.to(device)
+        else:
+            valid_from = topo['valid_from']
+            valid_to = topo['valid_to']
+            valid_edge_idx = topo['valid_edge_idx']
+            valid_mask = topo['valid_mask']
+            if valid_from.device != device:
+                valid_from = valid_from.to(device)
+                valid_to = valid_to.to(device)
+                valid_edge_idx = valid_edge_idx.to(device)
+            if valid_mask.device != device:
+                valid_mask = valid_mask.to(device)
+            x1 = self._gather_vertices(newx, topo, 'valid_from')
+            y1 = self._gather_vertices(newy, topo, 'valid_from')
+            x2 = self._gather_vertices(newx, topo, 'valid_to')
+            y2 = self._gather_vertices(newy, topo, 'valid_to')
+            is_horizontal_line = torch.abs(y1 - y2) < 1e-4
+            is_vertical_line = torch.abs(x1 - x2) < 1e-4
+            is_straight = is_horizontal_line | is_vertical_line
+            is_diagonal = ~is_straight
+
         if soft_l_weights.device != device:
             soft_l_weights = soft_l_weights.to(device)
 
@@ -872,16 +911,6 @@ class LShapeSegmentOp:
         fallback = torch.full_like(valid_soft, 0.5)
         valid_soft = torch.where(weight_sum > 1e-12, valid_soft / weight_sum.clamp_min(1e-12), fallback)
 
-        x1 = self._gather_vertices(newx, topo, 'valid_from')
-        y1 = self._gather_vertices(newy, topo, 'valid_from')
-        x2 = self._gather_vertices(newx, topo, 'valid_to')
-        y2 = self._gather_vertices(newy, topo, 'valid_to')
-
-        is_horizontal_line = torch.abs(y1 - y2) < 1e-4
-        is_vertical_line = torch.abs(x1 - x2) < 1e-4
-        is_straight = is_horizontal_line | is_vertical_line
-        is_diagonal = ~is_straight
-
         all_llx = []
         all_lly = []
         all_size_x = []
@@ -890,57 +919,82 @@ class LShapeSegmentOp:
         all_is_h = []
         all_weight = []
 
-        def append_group(llx, lly, size_x, size_y, edge_idx, is_h, weight, valid):
-            if valid.any():
-                all_llx.append(llx[valid])
-                all_lly.append(lly[valid])
-                all_size_x.append(size_x[valid])
-                all_size_y.append(size_y[valid])
-                all_edge_idx.append(edge_idx[valid])
-                all_is_h.append(is_h[valid])
-                all_weight.append(weight[valid])
-
-        straight_llx, straight_lly, straight_size_x, straight_size_y, straight_is_h = self._create_segment_batch(
-            x1, y1, x2, y2
-        )
-        append_group(
-            straight_llx,
-            straight_lly,
-            straight_size_x,
-            straight_size_y,
-            valid_edge_idx,
-            straight_is_h,
-            torch.ones_like(straight_size_x),
-            is_straight,
-        )
+        def append_group(llx, lly, size_x, size_y, edge_idx, is_h, weight):
+            if llx.numel() == 0:
+                return
+            all_llx.append(llx)
+            all_lly.append(lly)
+            all_size_x.append(size_x)
+            all_size_y.append(size_y)
+            all_edge_idx.append(edge_idx)
+            all_is_h.append(is_h)
+            all_weight.append(weight)
 
         h_weight = valid_soft[:, 0]
         v_weight = valid_soft[:, 1]
         min_weight = max(self.soft_min_weight, 0.0)
 
-        h_corner_x = x2
-        h_corner_y = y1
-        h_seg1_llx, h_seg1_lly, h_seg1_size_x, h_seg1_size_y, h_seg1_is_h = self._create_segment_batch(
-            x1, y1, h_corner_x, h_corner_y
-        )
-        h_seg2_llx, h_seg2_lly, h_seg2_size_x, h_seg2_size_y, h_seg2_is_h = self._create_segment_batch(
-            h_corner_x, h_corner_y, x2, y2
-        )
-        h_valid = is_diagonal & (h_weight > min_weight)
-        append_group(h_seg1_llx, h_seg1_lly, h_seg1_size_x, h_seg1_size_y, valid_edge_idx, h_seg1_is_h, h_weight, h_valid)
-        append_group(h_seg2_llx, h_seg2_lly, h_seg2_size_x, h_seg2_size_y, valid_edge_idx, h_seg2_is_h, h_weight, h_valid)
+        if is_straight.any():
+            straight_x1 = x1[is_straight]
+            straight_y1 = y1[is_straight]
+            straight_x2 = x2[is_straight]
+            straight_y2 = y2[is_straight]
+            straight_edge_idx = valid_edge_idx[is_straight]
+            straight_llx, straight_lly, straight_size_x, straight_size_y, straight_is_h = self._create_segment_batch(
+                straight_x1, straight_y1, straight_x2, straight_y2
+            )
+            append_group(
+                straight_llx,
+                straight_lly,
+                straight_size_x,
+                straight_size_y,
+                straight_edge_idx,
+                straight_is_h,
+                torch.ones_like(straight_size_x),
+            )
 
-        v_corner_x = x1
-        v_corner_y = y2
-        v_seg1_llx, v_seg1_lly, v_seg1_size_x, v_seg1_size_y, v_seg1_is_h = self._create_segment_batch(
-            x1, y1, v_corner_x, v_corner_y
-        )
-        v_seg2_llx, v_seg2_lly, v_seg2_size_x, v_seg2_size_y, v_seg2_is_h = self._create_segment_batch(
-            v_corner_x, v_corner_y, x2, y2
-        )
-        v_valid = is_diagonal & (v_weight > min_weight)
-        append_group(v_seg1_llx, v_seg1_lly, v_seg1_size_x, v_seg1_size_y, valid_edge_idx, v_seg1_is_h, v_weight, v_valid)
-        append_group(v_seg2_llx, v_seg2_lly, v_seg2_size_x, v_seg2_size_y, valid_edge_idx, v_seg2_is_h, v_weight, v_valid)
+        if is_diagonal.any():
+            diag_x1 = x1[is_diagonal]
+            diag_y1 = y1[is_diagonal]
+            diag_x2 = x2[is_diagonal]
+            diag_y2 = y2[is_diagonal]
+            diag_edge_idx = valid_edge_idx[is_diagonal]
+            diag_h_weight = h_weight[is_diagonal]
+            diag_v_weight = v_weight[is_diagonal]
+
+            h_valid = diag_h_weight > min_weight
+            if h_valid.any():
+                h_x1 = diag_x1[h_valid]
+                h_y1 = diag_y1[h_valid]
+                h_x2 = diag_x2[h_valid]
+                h_y2 = diag_y2[h_valid]
+                h_edge_idx = diag_edge_idx[h_valid]
+                h_weight_valid = diag_h_weight[h_valid]
+                h_seg1_llx, h_seg1_lly, h_seg1_size_x, h_seg1_size_y, h_seg1_is_h = self._create_segment_batch(
+                    h_x1, h_y1, h_x2, h_y1
+                )
+                h_seg2_llx, h_seg2_lly, h_seg2_size_x, h_seg2_size_y, h_seg2_is_h = self._create_segment_batch(
+                    h_x2, h_y1, h_x2, h_y2
+                )
+                append_group(h_seg1_llx, h_seg1_lly, h_seg1_size_x, h_seg1_size_y, h_edge_idx, h_seg1_is_h, h_weight_valid)
+                append_group(h_seg2_llx, h_seg2_lly, h_seg2_size_x, h_seg2_size_y, h_edge_idx, h_seg2_is_h, h_weight_valid)
+
+            v_valid = diag_v_weight > min_weight
+            if v_valid.any():
+                v_x1 = diag_x1[v_valid]
+                v_y1 = diag_y1[v_valid]
+                v_x2 = diag_x2[v_valid]
+                v_y2 = diag_y2[v_valid]
+                v_edge_idx = diag_edge_idx[v_valid]
+                v_weight_valid = diag_v_weight[v_valid]
+                v_seg1_llx, v_seg1_lly, v_seg1_size_x, v_seg1_size_y, v_seg1_is_h = self._create_segment_batch(
+                    v_x1, v_y1, v_x1, v_y2
+                )
+                v_seg2_llx, v_seg2_lly, v_seg2_size_x, v_seg2_size_y, v_seg2_is_h = self._create_segment_batch(
+                    v_x1, v_y2, v_x2, v_y2
+                )
+                append_group(v_seg1_llx, v_seg1_lly, v_seg1_size_x, v_seg1_size_y, v_edge_idx, v_seg1_is_h, v_weight_valid)
+                append_group(v_seg2_llx, v_seg2_lly, v_seg2_size_x, v_seg2_size_y, v_edge_idx, v_seg2_is_h, v_weight_valid)
 
         if not all_llx:
             return self._empty_segment_result(dtype, device)
@@ -979,7 +1033,7 @@ class LShapeSegmentOp:
             'num_segments': segment_llx.numel()
         }
 
-    def __call__(self, newx, newy, flat_from, flat_to, l_directions, soft_l_weights=None):
+    def __call__(self, newx, newy, flat_from, flat_to, l_directions, soft_l_weights=None, soft_geometry=None):
         """
         构建L形segments
         
@@ -1018,7 +1072,7 @@ class LShapeSegmentOp:
             result = self._compute_segments_hard(newx, newy, self._cached_topology, l_directions)
             mode_name = "hard"
         else:
-            result = self._compute_segments_soft(newx, newy, self._cached_topology, soft_l_weights)
+            result = self._compute_segments_soft(newx, newy, self._cached_topology, soft_l_weights, soft_geometry=soft_geometry)
             mode_name = "soft"
 
         # 只在第一次打印详细日志

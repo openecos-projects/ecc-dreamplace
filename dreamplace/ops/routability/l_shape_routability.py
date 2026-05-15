@@ -280,6 +280,7 @@ class LShapeRoutabilityOp(nn.Module):
         self._cached_edge_net_ids_key = None
         self._cached_soft_edge_topology = None
         self._cached_soft_edge_topology_key = None
+        self._cached_soft_geometry = None
         self.cached_density_map = None
         self.cached_density_map_h = None
         self.cached_density_map_v = None
@@ -626,6 +627,7 @@ class LShapeRoutabilityOp(nn.Module):
     def _clear_soft_edge_topology_cache(self):
         self._cached_soft_edge_topology = None
         self._cached_soft_edge_topology_key = None
+        self._cached_soft_geometry = None
 
     def _soft_edge_topology_cache_key(self, flat_pin_from, flat_pin_to, num_vertices, device):
         return (
@@ -1053,6 +1055,7 @@ class LShapeRoutabilityOp(nn.Module):
         dtype = newx.dtype
         num_edges = flat_pin_from.numel()
         weights = torch.zeros((num_edges, 2), dtype=dtype, device=device)
+        self._cached_soft_geometry = None
         profile_timer = profile_start(self.profile_enabled, tensor=newx)
 
         def _finish(result, **fields):
@@ -1109,6 +1112,24 @@ class LShapeRoutabilityOp(nn.Module):
             is_straight = is_horizontal_line | is_vertical_line
             is_diagonal = ~is_straight
             diag_edge_count = int(is_diagonal.sum().item())
+            if all_valid_edges:
+                valid_edge_idx = torch.arange(num_edges, device=device, dtype=torch.long)
+            else:
+                valid_edge_idx = torch.arange(num_edges, device=device, dtype=torch.long)[valid_mask]
+            self._cached_soft_geometry = {
+                "valid_mask": valid_mask,
+                "valid_from": valid_from,
+                "valid_to": valid_to,
+                "valid_edge_idx": valid_edge_idx,
+                "x1": x1,
+                "y1": y1,
+                "x2": x2,
+                "y2": y2,
+                "is_horizontal_line": is_horizontal_line,
+                "is_vertical_line": is_vertical_line,
+                "is_straight": is_straight,
+                "is_diagonal": is_diagonal,
+            }
 
             valid_weights = torch.zeros((valid_from.numel(), 2), dtype=dtype, device=device)
             valid_weights[:, 0] = 1.0  # straight edge fallback; soft mode only reads diagonal weights
@@ -1665,7 +1686,13 @@ class LShapeRoutabilityOp(nn.Module):
         # 6. 构建L形segments（在CPU上）
         with profile_scope(self.profile_enabled, "l_shape_op.segment_builder", tensor=pos, logger=logger):
             segment_result = self.segment_builder(
-                newx, newy, flat_pin_from, flat_pin_to, l_directions, soft_l_weights=soft_l_weights
+                newx,
+                newy,
+                flat_pin_from,
+                flat_pin_to,
+                l_directions,
+                soft_l_weights=soft_l_weights,
+                soft_geometry=self._cached_soft_geometry,
             )
         self._log_debug_hash("forward.segment_pos", segment_result.get("segment_pos"))
         self._log_debug_hash("forward.segment_size_x", segment_result.get("segment_size_x"))
@@ -1865,7 +1892,13 @@ class LShapeRoutabilityOp(nn.Module):
             self.cached_soft_debug = None
 
         segment_result = self.segment_builder(
-            newx, newy, flat_pin_from, flat_pin_to, l_directions, soft_l_weights=soft_l_weights
+            newx,
+            newy,
+            flat_pin_from,
+            flat_pin_to,
+            l_directions,
+            soft_l_weights=soft_l_weights,
+            soft_geometry=self._cached_soft_geometry,
         )
         
         if segment_result['num_segments'] == 0:

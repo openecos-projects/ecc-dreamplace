@@ -379,6 +379,18 @@
         "description": "maximum allowed l_shape_routability_weight after scheduling or legacy update",
         "default": 1.0
     },
+    "l_shape_log_verbose": {
+        "description": "verbosity for non-timing L-shape/Soft-L diagnostic logs: 0 keeps production logs quiet, 1 adds one-line refresh summaries, 2 enables detailed per-iteration and per-refresh diagnostics",
+        "default": 0
+    },
+    "l_shape_mask_debug": {
+        "description": "force periodic L-shape gradient mask diagnostics regardless of l_shape_log_verbose; disabled by default",
+        "default": 0
+    },
+    "l_shape_mask_debug_interval": {
+        "description": "iteration interval for L-shape gradient mask diagnostics when l_shape_mask_debug is enabled or l_shape_log_verbose >= 2",
+        "default": 20
+    },
     "l_shape_profile_flag": {
         "description": "enable scoped timing logs for diff/soft-L routability profiling; inserts CUDA synchronizations around timed regions",
         "default": 0

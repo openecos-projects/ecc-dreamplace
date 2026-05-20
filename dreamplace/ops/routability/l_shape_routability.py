@@ -38,6 +38,7 @@ from dreamplace.ops.routability.same_net_topo_scoring import (
     compute_diagonal_split_topo_costs,
 )
 from dreamplace.ops.routability.profile_timing import (
+    l_shape_log_verbose,
     profile_end,
     profile_scope,
     profile_start,
@@ -144,6 +145,7 @@ class LShapeRoutabilityOp(nn.Module):
             float(getattr(params, "soft_l_same_net_diag_split_max_distance", 0.0)), 0.0
         )
         self.profile_enabled = bool(getattr(params, "l_shape_profile_flag", False))
+        self.log_verbose = l_shape_log_verbose(params)
         self.deterministic_flag = _as_bool(getattr(params, "deterministic_flag", False))
         self.debug_hash_enabled = _as_bool(getattr(params, "l_shape_debug_hash_flag", False))
         self.debug_hash_start_iter = int(getattr(params, "l_shape_debug_hash_start_iter", -1))
@@ -189,14 +191,15 @@ class LShapeRoutabilityOp(nn.Module):
             use_vectorized=True,
             soft_min_weight=self.soft_l_min_weight,
             deterministic_backward=self.deterministic_flag,
+            log_verbose=self.log_verbose,
         )
-        if directional_track_widths:
+        if directional_track_widths and self.log_verbose >= 1:
             logger.info(
                 "Use directional track-space segment thickness for blockage initial density: width_h=%.4f width_v=%.4f",
                 self.wire_width_h,
                 self.wire_width_v,
             )
-        if self.soft_l_assignment:
+        if self.soft_l_assignment and self.log_verbose >= 1:
             logger.info(
                 "Soft L-assignment enabled: tau=%.3f adaptive_tau=%s adaptive_scale=%.3f prior=%s bias=%.3f min_weight=%.3f tie_delta=%.3f bg=%.3f self_ov=%.3f hotspot=%.3f hotspot_ramp=%.3f debug_interval=%d edge_net_ids_cache=%s",
                 self.soft_l_temperature,
@@ -213,13 +216,14 @@ class LShapeRoutabilityOp(nn.Module):
                 self.soft_l_debug_update_interval,
                 self.l_shape_edge_net_ids_cache_flag,
             )
-        logger.info(
-            "Per-net topology scoring enabled: kernel=diag_split_geometric topo_only=1 sigma=%.4f min_support=%.3e max_distance=%.4f cpp=1 overflow_density_deterministic=%s",
-            self.soft_l_same_net_diag_split_sigma,
-            self.soft_l_same_net_diag_split_min_support,
-            self.soft_l_same_net_diag_split_max_distance,
-            self.deterministic_flag,
-        )
+        if self.log_verbose >= 1:
+            logger.info(
+                "Per-net topology scoring enabled: kernel=diag_split_geometric topo_only=1 sigma=%.4f min_support=%.3e max_distance=%.4f cpp=1 overflow_density_deterministic=%s",
+                self.soft_l_same_net_diag_split_sigma,
+                self.soft_l_same_net_diag_split_min_support,
+                self.soft_l_same_net_diag_split_max_distance,
+                self.deterministic_flag,
+            )
         
         # 根据模式选择密度计算器
         if density_mode == "electric":
@@ -246,6 +250,7 @@ class LShapeRoutabilityOp(nn.Module):
                 # padding=1,  # 边界填充
                 fast_mode=False,
                 profile_enabled=self.profile_enabled,
+                log_verbose=self.log_verbose,
             )
             self.overflow_op = create_l_shape_electric_overflow(
                 placedb,
@@ -253,9 +258,11 @@ class LShapeRoutabilityOp(nn.Module):
                 num_bins_y=num_bins_y,
                 target_density=target_density,
                 deterministic_flag=self.deterministic_flag,
+                log_verbose=self.log_verbose,
                 # padding=1  # 边界填充
             )
-            logger.info(f"Using C++/CUDA electric potential for routability")
+            if self.log_verbose >= 1:
+                logger.info(f"Using C++/CUDA electric potential for routability")
         else:
             # Python RUDY密度
             self.density_op = SegmentDensityOp(
@@ -267,7 +274,8 @@ class LShapeRoutabilityOp(nn.Module):
                 num_bins_y=num_bins_y
             )
             self.overflow_op = None
-            logger.info(f"Using Python RUDY density for routability")
+            if self.log_verbose >= 1:
+                logger.info(f"Using Python RUDY density for routability")
         
         # 存储边界信息用于OOB检查（优先 routing grid）
         self.xl = getattr(placedb, "routing_grid_xl", placedb.xl)
@@ -512,24 +520,25 @@ class LShapeRoutabilityOp(nn.Module):
             self.cached_density_map = None
             self.cached_density_map_h = None
             self.cached_density_map_v = None
-            logger.info(
-                "Updated L-shape routing targets (density=%s, demand=%s, raw_wire=%s, density_h=%s, density_v=%s, demand_h=%s, demand_v=%s, raw_wire_h=%s, raw_wire_v=%s, supply_original=%s, supply_original_h=%s, supply_original_v=%s, fix_usage=%s, fix_usage_h=%s, fix_usage_v=%s).",
-                "set" if target_density is not None else "keep",
-                "set" if target_demand is not None else "clear",
-                "set" if raw_wire_demand_map is not None else "keep",
-                "set" if target_density_h is not None else "keep",
-                "set" if target_density_v is not None else "keep",
-                "set" if target_demand_h is not None else "keep",
-                "set" if target_demand_v is not None else "keep",
-                "set" if raw_wire_demand_map_h is not None else "keep",
-                "set" if raw_wire_demand_map_v is not None else "keep",
-                "set" if supply_original is not None else "keep",
-                "set" if supply_original_h is not None else "keep",
-                "set" if supply_original_v is not None else "keep",
-                "set" if fix_usage_map is not None else "keep",
-                "set" if fix_usage_map_h is not None else "keep",
-                "set" if fix_usage_map_v is not None else "keep",
-            )
+            if self.log_verbose >= 2:
+                logger.info(
+                    "Updated L-shape routing targets (density=%s, demand=%s, raw_wire=%s, density_h=%s, density_v=%s, demand_h=%s, demand_v=%s, raw_wire_h=%s, raw_wire_v=%s, supply_original=%s, supply_original_h=%s, supply_original_v=%s, fix_usage=%s, fix_usage_h=%s, fix_usage_v=%s).",
+                    "set" if target_density is not None else "keep",
+                    "set" if target_demand is not None else "clear",
+                    "set" if raw_wire_demand_map is not None else "keep",
+                    "set" if target_density_h is not None else "keep",
+                    "set" if target_density_v is not None else "keep",
+                    "set" if target_demand_h is not None else "keep",
+                    "set" if target_demand_v is not None else "keep",
+                    "set" if raw_wire_demand_map_h is not None else "keep",
+                    "set" if raw_wire_demand_map_v is not None else "keep",
+                    "set" if supply_original is not None else "keep",
+                    "set" if supply_original_h is not None else "keep",
+                    "set" if supply_original_v is not None else "keep",
+                    "set" if fix_usage_map is not None else "keep",
+                    "set" if fix_usage_map_h is not None else "keep",
+                    "set" if fix_usage_map_v is not None else "keep",
+                )
 
     def update_per_net_topology(self, topo_cache=None, topo_stats=None):
         self.per_net_topology_cache = topo_cache
@@ -551,15 +560,17 @@ class LShapeRoutabilityOp(nn.Module):
                 }
             )
         if topo_stats is None:
-            logger.info("Cleared per-net topology cache for L-shape routability op.")
+            if self.log_verbose >= 2:
+                logger.info("Cleared per-net topology cache for L-shape routability op.")
             return
-        logger.info(
-            "Updated per-net topology cache for L-shape routability op: nets=%d segments_h=%d segments_v=%d invalid_wires=%d",
-            int(topo_stats.get("num_nets_with_topology", 0)),
-            int(topo_stats.get("num_segments_h", 0)),
-            int(topo_stats.get("num_segments_v", 0)),
-            int(topo_stats.get("invalid_wire_count", 0)),
-        )
+        if self.log_verbose >= 2:
+            logger.info(
+                "Updated per-net topology cache for L-shape routability op: nets=%d segments_h=%d segments_v=%d invalid_wires=%d",
+                int(topo_stats.get("num_nets_with_topology", 0)),
+                int(topo_stats.get("num_segments_h", 0)),
+                int(topo_stats.get("num_segments_v", 0)),
+                int(topo_stats.get("invalid_wire_count", 0)),
+            )
 
     def update_same_net_topology(self, topo_cache=None, topo_stats=None):
         self.update_per_net_topology(topo_cache=topo_cache, topo_stats=topo_stats)
@@ -1212,6 +1223,7 @@ class LShapeRoutabilityOp(nn.Module):
                         dtype=dtype,
                         use_cpp=self.per_net_topology_use_cpp,
                         profile_enabled=self.profile_enabled,
+                        log_verbose=self.log_verbose,
                         collect_stats=should_update_soft_debug,
                     )
                 with profile_scope(

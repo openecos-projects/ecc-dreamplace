@@ -58,7 +58,7 @@ from dreamplace.ops.rc_timing.rc_timing import RCTiming
 from dreamplace.BasicPlace import PlaceDataCollection
 from tools.iEDA.module.sta import IEDASta
 from dreamplace.ops.routability.plot_map import plot_node_grad_directions
-from dreamplace.ops.routability.profile_timing import profile_scope
+from dreamplace.ops.routability.profile_timing import l_shape_log_verbose, profile_scope
 
 
 class PreconditionOp:
@@ -562,7 +562,7 @@ class PlaceObj(nn.Module):
         self.l_shape_last_sched_sigma = None
         self.l_shape_last_sched_iter_diff = None
         self.l_shape_last_sched_active = bool(self._l_shape_sched_active)
-        if self._l_shape_sched_active:
+        if self._l_shape_sched_active and l_shape_log_verbose(self.params) >= 1:
             logging.info(
                 "Start Xplace-style L-shape weight schedule at iteration %s "
                 "(route_iter_budget=%d, smooth_r=%.3f, half_iter=%d)",
@@ -627,9 +627,10 @@ class PlaceObj(nn.Module):
                     fix_usage_map=fix_usage_map,
                     fix_usage_map_h=fix_usage_map_h,
                     fix_usage_map_v=fix_usage_map_v,
-                )
+            )
             self.use_l_shape_routability = True
-            logging.info("L-shape routability already initialized; refreshed targets and re-enabled")
+            if l_shape_log_verbose(self.params) >= 1:
+                logging.info("L-shape routability already initialized; refreshed targets and re-enabled")
             return
         
         with profile_scope(
@@ -662,22 +663,23 @@ class PlaceObj(nn.Module):
             )
         self.use_l_shape_routability = True
         
-        if isinstance(target_density, torch.Tensor):
-            if isinstance(target_demand, torch.Tensor):
-                logging.info(f"L-shape routability initialized with routing supply/demand maps "
-                            f"(supply min={target_density.min():.1f}, max={target_density.max():.1f}; "
-                            f"demand min={target_demand.min():.1f}, max={target_demand.max():.1f}), "
-                            f"init_weight={self.l_shape_routability_weight.item():.2e}, "
-                            f"target_grad_ratio={self.l_shape_grad_target_ratio}")
+        if l_shape_log_verbose(self.params) >= 1:
+            if isinstance(target_density, torch.Tensor):
+                if isinstance(target_demand, torch.Tensor):
+                    logging.info(f"L-shape routability initialized with routing supply/demand maps "
+                                f"(supply min={target_density.min():.1f}, max={target_density.max():.1f}; "
+                                f"demand min={target_demand.min():.1f}, max={target_demand.max():.1f}), "
+                                f"init_weight={self.l_shape_routability_weight.item():.2e}, "
+                                f"target_grad_ratio={self.l_shape_grad_target_ratio}")
+                else:
+                    logging.info(f"L-shape routability initialized with routing supply map "
+                                f"(min={target_density.min():.1f}, max={target_density.max():.1f}), "
+                                f"init_weight={self.l_shape_routability_weight.item():.2e}, "
+                                f"target_grad_ratio={self.l_shape_grad_target_ratio}")
             else:
-                logging.info(f"L-shape routability initialized with routing supply map "
-                            f"(min={target_density.min():.1f}, max={target_density.max():.1f}), "
+                logging.info(f"L-shape routability initialized without a valid routing supply tensor, "
                             f"init_weight={self.l_shape_routability_weight.item():.2e}, "
                             f"target_grad_ratio={self.l_shape_grad_target_ratio}")
-        else:
-            logging.info(f"L-shape routability initialized without a valid routing supply tensor, "
-                        f"init_weight={self.l_shape_routability_weight.item():.2e}, "
-                        f"target_grad_ratio={self.l_shape_grad_target_ratio}")
     
     def l_shape_routability_obj(self, pos, use_l_direction=True):
         """
@@ -1858,7 +1860,10 @@ class PlaceObj(nn.Module):
         This is used after adding L-shape gradients so fixed/terminated nodes stay zero.
         """
         with torch.no_grad():
-            debug_mask = bool(getattr(self.params, "l_shape_mask_debug", True))
+            debug_mask = (
+                bool(getattr(self.params, "l_shape_mask_debug", False))
+                or l_shape_log_verbose(self.params) >= 2
+            )
             before_nonzero = 0
             if debug_mask:
                 before_nonzero = (grad.abs() > 0).sum().item()
@@ -2086,18 +2091,19 @@ class PlaceObj(nn.Module):
                         self._l_shape_sched_base_weight = float(base_weight)
                         self._l_shape_sched_initialized = True
                         self._l_shape_weight_initialized = True
-                        logging.info(
-                            "L-shape weight schedule calibrated at iter %d: "
-                            "target_weight=%.4e base_weight=%.4e density_weight=%.4e "
-                            "(base_grad=%.4e, l_shape_grad=%.4e, target_ratio=%.4f)",
-                            int(current_iteration),
-                            float(target_weight),
-                            float(base_weight),
-                            float(density_weight_scalar),
-                            base_grad_norm_value,
-                            l_shape_grad_norm_value,
-                            float(self.l_shape_grad_target_ratio),
-                        )
+                        if l_shape_log_verbose(self.params) >= 1:
+                            logging.info(
+                                "L-shape weight schedule calibrated at iter %d: "
+                                "target_weight=%.4e base_weight=%.4e density_weight=%.4e "
+                                "(base_grad=%.4e, l_shape_grad=%.4e, target_ratio=%.4f)",
+                                int(current_iteration),
+                                float(target_weight),
+                                float(base_weight),
+                                float(density_weight_scalar),
+                                base_grad_norm_value,
+                                l_shape_grad_norm_value,
+                                float(self.l_shape_grad_target_ratio),
+                            )
 
                     if self._l_shape_sched_active and self._l_shape_sched_initialized:
                         sched_active = True
@@ -2131,14 +2137,15 @@ class PlaceObj(nn.Module):
                         if sched_iter_diff > int(self.l_shape_num_route_iter):
                             self._l_shape_sched_active = False
                             sched_active = False
-                            logging.info(
-                                "End Xplace-style L-shape weight schedule at iter %d "
-                                "(dt=%d, sigma=%.4e, weight=%.4e)",
-                                int(current_iteration),
-                                int(sched_iter_diff),
-                                float(sched_sigma),
-                                float(current_weight),
-                            )
+                            if l_shape_log_verbose(self.params) >= 1:
+                                logging.info(
+                                    "End Xplace-style L-shape weight schedule at iter %d "
+                                    "(dt=%d, sigma=%.4e, weight=%.4e)",
+                                    int(current_iteration),
+                                    int(sched_iter_diff),
+                                    float(sched_sigma),
+                                    float(current_weight),
+                                )
                     else:
                         # Keep l-shape contribution disabled until the first valid
                         # schedule calibration instead of applying a placeholder weight.
@@ -2161,10 +2168,11 @@ class PlaceObj(nn.Module):
                     if not self._l_shape_weight_initialized:
                         new_weight = target_weight
                         self._l_shape_weight_initialized = True
-                        logging.info(
-                            f"L-shape weight auto-initialized: {new_weight:.4e} "
-                            f"(base_grad={base_grad_norm:.4e}, l_shape_grad={l_shape_grad_norm:.4e})"
-                        )
+                        if l_shape_log_verbose(self.params) >= 1:
+                            logging.info(
+                                f"L-shape weight auto-initialized: {new_weight:.4e} "
+                                f"(base_grad={base_grad_norm:.4e}, l_shape_grad={l_shape_grad_norm:.4e})"
+                            )
                     else:
                         new_weight = (1 - self.l_shape_weight_momentum) * old_weight + \
                                      self.l_shape_weight_momentum * target_weight
@@ -2245,13 +2253,14 @@ class PlaceObj(nn.Module):
 
                     # Diagnostic log
                     filler_rev_norm = (filler_force_x.norm(p=2)**2 + filler_force_y.norm(p=2)**2).sqrt()
-                    logging.info(
-                        f"FillerRevForce: rev_norm={filler_rev_norm:.4e}, "
-                        f"base_filler_norm={base_filler_norm:.4e}, "
-                        f"ratio={filler_rev_norm / (base_filler_norm + 1e-12):.4f}, "
-                        f"scale={filler_force_scale:.4e}, "
-                        f"num_fillers={num_nodes - num_physical}"
-                    )
+                    if l_shape_log_verbose(self.params) >= 2:
+                        logging.info(
+                            f"FillerRevForce: rev_norm={filler_rev_norm:.4e}, "
+                            f"base_filler_norm={base_filler_norm:.4e}, "
+                            f"ratio={filler_rev_norm / (base_filler_norm + 1e-12):.4f}, "
+                            f"scale={filler_force_scale:.4e}, "
+                            f"num_fillers={num_nodes - num_physical}"
+                        )
 
             # Filler pseudo wire force: Xplace-style, pull random fillers to most congested point
             if self.l_shape_filler_pseudo_wire_ratio > 0:
@@ -2322,11 +2331,12 @@ class PlaceObj(nn.Module):
                         pos.grad.data[filler_idx_x] -= force_x
                         pos.grad.data[filler_idx_y] -= force_y
 
-                        logging.info(
-                            f"FillerPseudoWire: selected={num_selected}, target=({target_x:.1f},{target_y:.1f}), "
-                            f"wa_wirelength={wa_wirelength.item():.4e}, "
-                            f"force_norm={(force_x.norm()**2 + force_y.norm()**2).sqrt():.4e}"
-                        )
+                        if l_shape_log_verbose(self.params) >= 2:
+                            logging.info(
+                                f"FillerPseudoWire: selected={num_selected}, target=({target_x:.1f},{target_y:.1f}), "
+                                f"wa_wirelength={wa_wirelength.item():.4e}, "
+                                f"force_norm={(force_x.norm()**2 + force_y.norm()**2).sqrt():.4e}"
+                            )
 
             with profile_scope(
                 self.params,

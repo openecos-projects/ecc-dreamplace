@@ -16,6 +16,30 @@ def l_shape_profile_enabled(params_or_enabled):
     return bool(getattr(params_or_enabled, "l_shape_profile_flag", False))
 
 
+def l_shape_log_verbose(params_or_level, default=0):
+    if isinstance(params_or_level, bool):
+        return 1 if params_or_level else 0
+    if isinstance(params_or_level, (int, float)):
+        return int(params_or_level)
+    raw_value = getattr(params_or_level, "l_shape_log_verbose", default)
+    if isinstance(raw_value, bool):
+        return 1 if raw_value else 0
+    if isinstance(raw_value, str):
+        value = raw_value.strip().lower()
+        if value in ("", "0", "false", "no", "off"):
+            return 0
+        if value in ("true", "yes", "on"):
+            return 1
+        try:
+            return int(float(value))
+        except ValueError:
+            return int(default)
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
 def _sync_cuda(tensor):
     if torch.is_tensor(tensor) and tensor.is_cuda:
         torch.cuda.synchronize(tensor.device)

@@ -537,6 +537,7 @@ class LShapeSegmentOp:
         use_vectorized=True,
         soft_min_weight=0.0,
         deterministic_backward=False,
+        log_verbose=0,
     ):
         self.wire_width = wire_width
         self.wire_width_h = float(wire_width if wire_width_h is None else wire_width_h)
@@ -545,6 +546,7 @@ class LShapeSegmentOp:
         self.use_vectorized = use_vectorized
         self.soft_min_weight = float(soft_min_weight)
         self.deterministic_backward = bool(deterministic_backward)
+        self.log_verbose = int(log_verbose)
         self.builder = LShapeSegmentBuilder(
             wire_width,
             wire_width_h=wire_width_h,
@@ -562,7 +564,8 @@ class LShapeSegmentOp:
         self._cached_topology = None
         self._cached_input_key = None
         self._cached_input_hash = None
-        logger.info("LShapeSegmentOp cache reset")
+        if self.log_verbose >= 2:
+            logger.info("LShapeSegmentOp cache reset")
 
     def _tensor_fast_key(self, tensor):
         if not isinstance(tensor, torch.Tensor):
@@ -1032,11 +1035,12 @@ class LShapeSegmentOp:
             )
             self._cached_input_key = current_key
             self._cached_input_hash = current_hash
-            logger.info(
-                "Computed topology: %d valid edges (hash=%s)",
-                self._cached_topology["num_valid"],
-                current_hash[0][2] if current_hash and current_hash[0] else "none",
-            )
+            if self.log_verbose >= 2:
+                logger.info(
+                    "Computed topology: %d valid edges (hash=%s)",
+                    self._cached_topology["num_valid"],
+                    current_hash[0][2] if current_hash and current_hash[0] else "none",
+                )
 
         # 快速计算segment坐标
         if soft_l_weights is None:
@@ -1047,7 +1051,7 @@ class LShapeSegmentOp:
             mode_name = "soft"
 
         # 只在第一次打印详细日志
-        if need_recompute_topo and result['num_segments'] > 0:
+        if self.log_verbose >= 2 and need_recompute_topo and result['num_segments'] > 0:
             logger.info(
                 f"Built {result['num_segments']} segments from {flat_from.numel()} edges (vectorized, mode={mode_name})"
             )

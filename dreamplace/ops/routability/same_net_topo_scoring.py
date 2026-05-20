@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from dreamplace.ops.routability.profile_timing import (
+    l_shape_log_verbose,
     l_shape_profile_enabled,
     profile_end,
     profile_scope,
@@ -126,7 +127,9 @@ def _route_grid_pack_geometry(placedb):
     )
 
 
-def _log_topology_cache_stats(stats):
+def _log_topology_cache_stats(stats, log_verbose=0):
+    if l_shape_log_verbose(log_verbose) < 2:
+        return
     logger.info(
         "Built per-net topology cache: nets=%d/%d segments_h=%d segments_v=%d route_failed=%d unknown_names=%d invalid_wires=%d max_intervals_per_net=%d",
         int(stats.get("num_nets_with_topology", 0)),
@@ -374,7 +377,7 @@ def _build_same_net_topology_cache_python(
         "num_segments_h": stats["num_segments_h"],
         "num_segments_v": stats["num_segments_v"],
     }
-    _log_topology_cache_stats(stats)
+    _log_topology_cache_stats(stats, profile_enabled)
     return cache, stats
 
 
@@ -443,7 +446,7 @@ def _build_same_net_topology_cache_cpp(
         compact=int(not build_python_cache),
         backend="cpp",
     )
-    _log_topology_cache_stats(stats)
+    _log_topology_cache_stats(stats, profile_enabled)
     return cache, stats
 
 
@@ -507,7 +510,7 @@ def _build_same_net_topology_cache_prebuilt(
     stats.setdefault("invalid_wire_count", 0)
     stats.setdefault("max_intervals_per_net", 0)
     stats["backend"] = stats.get("backend", "gpugr_packed")
-    _log_topology_cache_stats(stats)
+    _log_topology_cache_stats(stats, profile_enabled)
     return cache, stats
 
 
@@ -562,6 +565,7 @@ def pack_same_net_topology_cache_for_cpp(
     route_bin_size_x,
     route_bin_size_y,
     profile_enabled=False,
+    log_verbose=0,
 ):
     if not isinstance(topo_cache, dict):
         return None
@@ -685,12 +689,13 @@ def pack_same_net_topology_cache_for_cpp(
         loop_ms=f"{loop_elapsed_s * 1000.0:.3f}",
         array_ms=f"{array_elapsed_s * 1000.0:.3f}",
     )
-    logger.info(
-        "Packed per-net topology cache for C++: nets=%d h_segments=%d v_segments=%d",
-        int(packed["net_ids"].size),
-        int(packed["h_x1"].size),
-        int(packed["v_x"].size),
-    )
+    if l_shape_log_verbose(log_verbose) >= 2:
+        logger.info(
+            "Packed per-net topology cache for C++: nets=%d h_segments=%d v_segments=%d",
+            int(packed["net_ids"].size),
+            int(packed["h_x1"].size),
+            int(packed["v_x"].size),
+        )
     return packed
 
 
@@ -1301,6 +1306,7 @@ def _compute_diagonal_split_topo_costs_cpp(
     device=None,
     dtype=torch.float32,
     profile_enabled=False,
+    log_verbose=0,
     collect_stats=True,
 ):
     if same_net_topo_scoring_cpp is None:
@@ -1318,6 +1324,7 @@ def _compute_diagonal_split_topo_costs_cpp(
             route_bin_size_x=route_bin_size_x,
             route_bin_size_y=route_bin_size_y,
             profile_enabled=profile_enabled,
+            log_verbose=log_verbose,
         )
     if not isinstance(packed, dict):
         return None
@@ -1422,6 +1429,7 @@ def compute_diagonal_split_topo_costs(
     dtype=torch.float32,
     use_cpp=True,
     profile_enabled=False,
+    log_verbose=0,
     collect_stats=True,
 ):
     if use_cpp:
@@ -1442,6 +1450,7 @@ def compute_diagonal_split_topo_costs(
             device=device,
             dtype=dtype,
             profile_enabled=profile_enabled,
+            log_verbose=log_verbose,
             collect_stats=collect_stats,
         )
         if cpp_result is not None:

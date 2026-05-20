@@ -26,7 +26,7 @@ if configure.compile_configurations["CUDA_FOUND"] == "TRUE":
 
 from .l_shape_electric_overflow import SegmentDensityMapFunction
 from .plot_map import plot_density_map, plot_potential_map
-from .profile_timing import profile_end, profile_scope, profile_start
+from .profile_timing import l_shape_log_verbose, profile_end, profile_scope, profile_start
 
 import torch.nn.functional as F
 
@@ -424,13 +424,16 @@ class SegmentElectricPotentialFunction(Function):
                 ).detach().item()
             )
         SegmentElectricPotentialFunction.last_demand_supply_ratio = current_demand_supply_ratio
-        if isinstance(supply_original_map, torch.Tensor):
+        log_verbose = l_shape_log_verbose(
+            getattr(SegmentElectricPotentialFunction, "log_verbose", 0)
+        )
+        if log_verbose >= 2 and isinstance(supply_original_map, torch.Tensor):
             logger.info(
                 f"[L-shape supply/demand] density_seg_tracks_sum={(density_map.sum() / bin_area).item():.3e}, "
                 f"supply_original_sum={supply_original_map.sum().item():.3e}, "
                 f"ratio={current_demand_supply_ratio:.2f}"
             )
-        else:
+        elif log_verbose >= 2:
             logger.info(
                 f"[L-shape supply/demand] demand_sum={density_map.sum().item():.3e}, "
                 f"supply_sum={supply_map.sum().item():.3e}, "
@@ -890,7 +893,8 @@ class LShapeElectricPotential(nn.Module):
         padding=0,
         deterministic_flag=True,
         fast_mode=False,
-        profile_enabled=False
+        profile_enabled=False,
+        log_verbose=0,
     ):
         """
         Initialize L-shape electric potential module.
@@ -920,6 +924,7 @@ class LShapeElectricPotential(nn.Module):
         self.last_demand_supply_ratio = None
         self.fast_mode = fast_mode
         self.profile_enabled = bool(profile_enabled)
+        self.log_verbose = l_shape_log_verbose(log_verbose)
         self.blockage_initial_density = True
         
         if isinstance(target_density, torch.Tensor):
@@ -1138,11 +1143,12 @@ class LShapeElectricPotential(nn.Module):
                 dtype=self.bin_center_x.dtype
             )
         self.target_density = target_density
-        logger.info(
-            f"Set target_density from routing supply map: "
-            f"min={target_density.min():.3f}, max={target_density.max():.3f}, "
-            f"mean={target_density.mean():.3f}"
-        )
+        if self.log_verbose >= 2:
+            logger.info(
+                f"Set target_density from routing supply map: "
+                f"min={target_density.min():.3f}, max={target_density.max():.3f}, "
+                f"mean={target_density.mean():.3f}"
+            )
 
     def set_target_demand(self, target_demand):
         """
@@ -1166,9 +1172,10 @@ class LShapeElectricPotential(nn.Module):
             self.target_demand = target_demand
             if isinstance(self.area_per_track, torch.Tensor):
                 self.area_per_track.zero_()
-            logger.info(f"Set target_demand from routing demand map: "
-                       f"min={target_demand.min():.3f}, max={target_demand.max():.3f}, "
-                       f"mean={target_demand.mean():.3f}")
+            if self.log_verbose >= 2:
+                logger.info(f"Set target_demand from routing demand map: "
+                           f"min={target_demand.min():.3f}, max={target_demand.max():.3f}, "
+                           f"mean={target_demand.mean():.3f}")
         else:
             raise TypeError(
                 "LShapeElectricPotential requires target_demand to be a 2D routing demand tensor"
@@ -1191,12 +1198,13 @@ class LShapeElectricPotential(nn.Module):
         self.raw_wire_demand_map = raw_wire_demand_map
         if isinstance(self.area_per_track, torch.Tensor):
             self.area_per_track.zero_()
-        logger.info(
-            "Set raw_wire_demand_map from pure-wire routing demand map: min=%.3f, max=%.3f, mean=%.3f",
-            float(raw_wire_demand_map.min().item()),
-            float(raw_wire_demand_map.max().item()),
-            float(raw_wire_demand_map.mean().item()),
-        )
+        if self.log_verbose >= 2:
+            logger.info(
+                "Set raw_wire_demand_map from pure-wire routing demand map: min=%.3f, max=%.3f, mean=%.3f",
+                float(raw_wire_demand_map.min().item()),
+                float(raw_wire_demand_map.max().item()),
+                float(raw_wire_demand_map.mean().item()),
+            )
 
     def set_supply_original(self, supply_original):
         if not isinstance(supply_original, torch.Tensor):
@@ -1213,12 +1221,13 @@ class LShapeElectricPotential(nn.Module):
                 dtype=self.bin_center_x.dtype,
             )
         self.supply_original = supply_original
-        logger.info(
-            "Set supply_original from theoretical routing capacity map: min=%.3f, max=%.3f, mean=%.3f",
-            float(supply_original.min().item()),
-            float(supply_original.max().item()),
-            float(supply_original.mean().item()),
-        )
+        if self.log_verbose >= 2:
+            logger.info(
+                "Set supply_original from theoretical routing capacity map: min=%.3f, max=%.3f, mean=%.3f",
+                float(supply_original.min().item()),
+                float(supply_original.max().item()),
+                float(supply_original.mean().item()),
+            )
 
     def set_fix_usage_map(self, fix_usage_map):
         if not isinstance(fix_usage_map, torch.Tensor):
@@ -1235,12 +1244,13 @@ class LShapeElectricPotential(nn.Module):
                 dtype=self.bin_center_x.dtype,
             )
         self.fix_usage_map = fix_usage_map
-        logger.info(
-            "Set fix_usage_map from fixed routing usage map: min=%.3f, max=%.3f, mean=%.3f",
-            float(fix_usage_map.min().item()),
-            float(fix_usage_map.max().item()),
-            float(fix_usage_map.mean().item()),
-        )
+        if self.log_verbose >= 2:
+            logger.info(
+                "Set fix_usage_map from fixed routing usage map: min=%.3f, max=%.3f, mean=%.3f",
+                float(fix_usage_map.min().item()),
+                float(fix_usage_map.max().item()),
+                float(fix_usage_map.mean().item()),
+            )
 
     def set_directional_targets(
         self,
@@ -1422,6 +1432,7 @@ class LShapeElectricPotential(nn.Module):
         
         # Compute electric potential
         SegmentElectricPotentialFunction.profile_enabled = self.profile_enabled
+        SegmentElectricPotentialFunction.log_verbose = self.log_verbose
         energy = SegmentElectricPotentialFunction.apply(
             segment_pos,
             segment_size_x,
@@ -1631,7 +1642,8 @@ def create_l_shape_electric_potential(
     padding=0,
     deterministic_flag=True,
     fast_mode=False,
-    profile_enabled=False
+    profile_enabled=False,
+    log_verbose=0,
 ):
     """
     Factory function to create LShapeElectricPotential.
@@ -1679,4 +1691,5 @@ def create_l_shape_electric_potential(
         deterministic_flag=deterministic_flag,
         fast_mode=fast_mode,
         profile_enabled=profile_enabled,
+        log_verbose=log_verbose,
     )

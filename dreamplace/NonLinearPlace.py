@@ -39,7 +39,7 @@ from dreamplace.ops.routability.egr_resample import (
 from dreamplace.ops.routability.same_net_topo_scoring import (
     build_same_net_topology_cache,
 )
-from dreamplace.ops.routability.profile_timing import profile_scope
+from dreamplace.ops.routability.profile_timing import l_shape_log_verbose, profile_scope
 from dreamplace.ops.routability.leiden_clustering import (
     build_active_leiden_clusters,
     plot_modularity_clusters,
@@ -343,17 +343,18 @@ def _prepare_modularity_maps_from_gpugr(placedb, gpugr_congestion_map_op, pos, e
     )
     solver_diff_overflow_xy = solver_demand_xy - solver_capacity_xy
 
-    logging.info(
-        "Prepared modularity gpugr maps: skip_m1=%d solver_demand max=%.4f capacity max=%.4f ratio_ovfl max=%.4f diff_ovfl max=%.4f gpugr_ovfl max=%.4f local max=%.4f global max=%.4f",
-        int(skip_m1_route),
-        float(solver_demand_xy.max().item()) if solver_demand_xy.numel() else 0.0,
-        float(solver_capacity_xy.max().item()) if solver_capacity_xy.numel() else 0.0,
-        float(solver_ratio_overflow_xy.max().item()) if solver_ratio_overflow_xy.numel() else 0.0,
-        float(solver_diff_overflow_xy.max().item()) if solver_diff_overflow_xy.numel() else 0.0,
-        float(gpugr_overflow_xy.max().item()) if gpugr_overflow_xy.numel() else 0.0,
-        float(mov_usage_xy.max().item()) if mov_usage_xy.numel() else 0.0,
-        float(fix_usage_xy.max().item()) if fix_usage_xy.numel() else 0.0,
-    )
+    if l_shape_log_verbose(params) >= 2:
+        logging.info(
+            "Prepared modularity gpugr maps: skip_m1=%d solver_demand max=%.4f capacity max=%.4f ratio_ovfl max=%.4f diff_ovfl max=%.4f gpugr_ovfl max=%.4f local max=%.4f global max=%.4f",
+            int(skip_m1_route),
+            float(solver_demand_xy.max().item()) if solver_demand_xy.numel() else 0.0,
+            float(solver_capacity_xy.max().item()) if solver_capacity_xy.numel() else 0.0,
+            float(solver_ratio_overflow_xy.max().item()) if solver_ratio_overflow_xy.numel() else 0.0,
+            float(solver_diff_overflow_xy.max().item()) if solver_diff_overflow_xy.numel() else 0.0,
+            float(gpugr_overflow_xy.max().item()) if gpugr_overflow_xy.numel() else 0.0,
+            float(mov_usage_xy.max().item()) if mov_usage_xy.numel() else 0.0,
+            float(fix_usage_xy.max().item()) if fix_usage_xy.numel() else 0.0,
+        )
     return {
         "solver_demand_map": solver_demand_xy,
         "solver_capacity_map": solver_capacity_xy,
@@ -729,38 +730,40 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
         route_ysize=route_ysize,
     )
 
-    logging.info(
-        "Prepared gpugr L-shape inputs: route_grid=%dx%d l_shape_bins=%dx%d nets=%d entries=%d "
-        "supply[min=%.3f max=%.3f mean=%.3f] demand[min=%.3f max=%.3f mean=%.3f] "
-        "CHmax/top1/bin=%.1f%%/%.1f%%/%.2f%% CVmax/top1/bin=%.1f%%/%.1f%%/%.2f%% "
-        "#OvflNets=%d EstShorts=%.0f",
-        route_xsize,
-        route_ysize,
-        l_shape_num_bins_x,
-        l_shape_num_bins_y,
-        route_nets,
-        total_entries,
-        supply_map.min().item(),
-        supply_map.max().item(),
-        supply_map.mean().item(),
-        demand_map.min().item(),
-        demand_map.max().item(),
-        demand_map.mean().item(),
-        metrics["cg_map_h_raw_max"] * 100.0,
-        metrics["cg_map_h_raw_top1pct_mean"] * 100.0,
-        metrics["cg_map_h_raw_overflow_bin_ratio"] * 100.0,
-        metrics["cg_map_v_raw_max"] * 100.0,
-        metrics["cg_map_v_raw_top1pct_mean"] * 100.0,
-        metrics["cg_map_v_raw_overflow_bin_ratio"] * 100.0,
-        metrics["num_overflow_nets"],
-        metrics["gr_est_shorts"],
-    )
-    logging.info(
-        "Use gpugr capacity_map as L-shape supply_original: total_diff_vs_supply=%.3e h_diff=%.3e v_diff=%.3e",
-        float((supply_original_maps["supply_original"] - supply_map).abs().sum().item()),
-        float((supply_original_maps["supply_original_h"] - supply_map_h).abs().sum().item()),
-        float((supply_original_maps["supply_original_v"] - supply_map_v).abs().sum().item()),
-    )
+    if l_shape_log_verbose(params) >= 1:
+        logging.info(
+            "Prepared gpugr L-shape inputs: route_grid=%dx%d l_shape_bins=%dx%d nets=%d entries=%d "
+            "supply[min=%.3f max=%.3f mean=%.3f] demand[min=%.3f max=%.3f mean=%.3f] "
+            "CHmax/top1/bin=%.1f%%/%.1f%%/%.2f%% CVmax/top1/bin=%.1f%%/%.1f%%/%.2f%% "
+            "#OvflNets=%d EstShorts=%.0f",
+            route_xsize,
+            route_ysize,
+            l_shape_num_bins_x,
+            l_shape_num_bins_y,
+            route_nets,
+            total_entries,
+            supply_map.min().item(),
+            supply_map.max().item(),
+            supply_map.mean().item(),
+            demand_map.min().item(),
+            demand_map.max().item(),
+            demand_map.mean().item(),
+            metrics["cg_map_h_raw_max"] * 100.0,
+            metrics["cg_map_h_raw_top1pct_mean"] * 100.0,
+            metrics["cg_map_h_raw_overflow_bin_ratio"] * 100.0,
+            metrics["cg_map_v_raw_max"] * 100.0,
+            metrics["cg_map_v_raw_top1pct_mean"] * 100.0,
+            metrics["cg_map_v_raw_overflow_bin_ratio"] * 100.0,
+            metrics["num_overflow_nets"],
+            metrics["gr_est_shorts"],
+        )
+    if l_shape_log_verbose(params) >= 2:
+        logging.info(
+            "Use gpugr capacity_map as L-shape supply_original: total_diff_vs_supply=%.3e h_diff=%.3e v_diff=%.3e",
+            float((supply_original_maps["supply_original"] - supply_map).abs().sum().item()),
+            float((supply_original_maps["supply_original_h"] - supply_map_h).abs().sum().item()),
+            float((supply_original_maps["supply_original_v"] - supply_map_v).abs().sum().item()),
+        )
     return {
         "supply_map": supply_map,
         "demand_map": demand_map,
@@ -1590,6 +1593,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         getattr(model, "use_l_shape_routability", False)
                         or getattr(model, "l_shape_last_cost", None) is not None
                     ):
+                        cur_metric.l_shape_log_verbose = l_shape_log_verbose(params)
                         cur_metric.l_shape_target_ratio = float(
                             model.l_shape_grad_target_ratio
                         )
@@ -1853,7 +1857,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         )
                     logging.info(
                         "L-shape auto-disabled at iteration %d: "
-                        "LCost %.6e rebounded from best %.6e@iter=%s by %.2f%%, "
+                        "LShapeCostRaw %.6e rebounded from best %.6e@iter=%s by %.2f%%, "
                         "LGradRatio %.4f > LTargetRatio %.4f + %.4f, "
                         "ov_ema improvement %.3e.",
                         iteration,
@@ -2116,11 +2120,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             if _should_skip_resolver_l_direction_for_soft(params):
                                 steiner_topo_op.edge_l_directions = None
                                 l_directions = None
-                                logging.info(
-                                    "Skip resolver L-direction parsing because soft_l_assignment is enabled "
-                                    "and soft_l_use_resolver_prior is disabled; only routing supply/demand maps "
-                                    "will be refreshed."
-                                )
+                                if l_shape_log_verbose(params) >= 2:
+                                    logging.info(
+                                        "Skip resolver L-direction parsing because soft_l_assignment is enabled "
+                                        "and soft_l_use_resolver_prior is disabled; only routing supply/demand maps "
+                                        "will be refreshed."
+                                    )
                             else:
                                 l_directions = _resolve_l_directions_for_l_shape(
                                     params,
@@ -2261,11 +2266,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             model._l_shape_overflow_ema = None
                             model._l_shape_overflow_last = None
                             
-                            logging.info(f"L-shape routability enabled at iteration {iteration}, "
-                                        f"overflow={cur_metric.overflow[-1]:.4f}, "
-                                        f"threshold={float(getattr(model, '_l_shape_reenable_threshold', getattr(params, 'l_shape_overflow_threshold', 0.3))):.4f}, "
-                                        f"descend_streak={int(getattr(model, '_l_shape_reenable_descend_streak', 0))}, "
-                                        f"init time={((time.time() - t_l_shape_init) * 1000):.2f}ms")
+                            if l_shape_log_verbose(params) >= 1:
+                                logging.info(f"L-shape routability enabled at iteration {iteration}, "
+                                            f"overflow={cur_metric.overflow[-1]:.4f}, "
+                                            f"threshold={float(getattr(model, '_l_shape_reenable_threshold', getattr(params, 'l_shape_overflow_threshold', 0.3))):.4f}, "
+                                            f"descend_streak={int(getattr(model, '_l_shape_reenable_descend_streak', 0))}, "
+                                            f"init time={((time.time() - t_l_shape_init) * 1000):.2f}ms")
                             model._l_shape_reenable_last_overflow = None
                             model._l_shape_reenable_descend_streak = 0
                             
@@ -2445,11 +2451,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             if _should_skip_resolver_l_direction_for_soft(params):
                                 steiner_topo_op.edge_l_directions = None
                                 l_directions = None
-                                logging.info(
-                                    "Skip resolver L-direction parsing because soft_l_assignment is enabled "
-                                    "and soft_l_use_resolver_prior is disabled; only routing supply/demand maps "
-                                    "will be refreshed."
-                                )
+                                if l_shape_log_verbose(params) >= 2:
+                                    logging.info(
+                                        "Skip resolver L-direction parsing because soft_l_assignment is enabled "
+                                        "and soft_l_use_resolver_prior is disabled; only routing supply/demand maps "
+                                        "will be refreshed."
+                                    )
                             else:
                                 l_directions = _resolve_l_directions_for_l_shape(
                                     params,
@@ -2970,14 +2977,15 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                             cur_metric.l_shape_overflow_max_density = (
                                                 l_shape_max_density
                                             )
-                                            logging.info(
-                                                "L-shape overflow iter=%d: "
-                                                "ov_raw=%.6e, ov_ratio=%.6e, max_density=%.6f",
-                                                iteration,
-                                                l_shape_overflow,
-                                                overflow_ratio,
-                                                l_shape_max_density,
-                                            )
+                                            if l_shape_log_verbose(params) >= 1:
+                                                logging.info(
+                                                    "L-shape refresh iter=%d: "
+                                                    "ov_raw=%.6e, ov_ratio=%.6e, max_density=%.6f",
+                                                    iteration,
+                                                    l_shape_overflow,
+                                                    overflow_ratio,
+                                                    l_shape_max_density,
+                                                )
 
                                             beta = float(
                                                 getattr(
@@ -2993,13 +3001,14 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                             ):
                                                 model._l_shape_overflow_ema = overflow_ratio
                                                 model._l_shape_overflow_last = overflow_ratio
-                                                logging.info(
-                                                    "L-shape overflow outer-loop initialized: "
-                                                    "ov_raw=%.6e, ov_ratio=%.6e, target_ratio=%.4f",
-                                                    l_shape_overflow,
-                                                    overflow_ratio,
-                                                    model.l_shape_grad_target_ratio,
-                                                )
+                                                if l_shape_log_verbose(params) >= 1:
+                                                    logging.info(
+                                                        "L-shape overflow outer-loop initialized: "
+                                                        "ov_raw=%.6e, ov_ratio=%.6e, target_ratio=%.4f",
+                                                        l_shape_overflow,
+                                                        overflow_ratio,
+                                                        model.l_shape_grad_target_ratio,
+                                                    )
                                             else:
                                                 prev_ema = float(
                                                     model._l_shape_overflow_ema
@@ -3048,19 +3057,20 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                                         ratio_min, min(ratio_max, new_ratio)
                                                     )
                                                     model.l_shape_grad_target_ratio = new_ratio
-                                                    logging.info(
-                                                        "L-shape overflow outer-loop iter=%d: "
-                                                        "ov_raw=%.6e, ov_ratio=%.6e, ov_ema %.6e->%.6e, delta=%.3e, "
-                                                        "target_ratio %.4f->%.4f",
-                                                        iteration,
-                                                        l_shape_overflow,
-                                                        overflow_ratio,
-                                                        prev_ema,
-                                                        ema,
-                                                        delta,
-                                                        old_ratio,
-                                                        new_ratio,
-                                                    )
+                                                    if l_shape_log_verbose(params) >= 1:
+                                                        logging.info(
+                                                            "L-shape overflow outer-loop iter=%d: "
+                                                            "ov_raw=%.6e, ov_ratio=%.6e, ov_ema %.6e->%.6e, delta=%.3e, "
+                                                            "target_ratio %.4f->%.4f",
+                                                            iteration,
+                                                            l_shape_overflow,
+                                                            overflow_ratio,
+                                                            prev_ema,
+                                                            ema,
+                                                            delta,
+                                                            old_ratio,
+                                                            new_ratio,
+                                                        )
                                                 else:
                                                     logging.debug(
                                                         "L-shape overflow outer-loop iter=%d: "

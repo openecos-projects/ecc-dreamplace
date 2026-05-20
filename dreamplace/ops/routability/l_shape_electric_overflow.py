@@ -15,6 +15,7 @@ import dreamplace.ops.electric_potential.electric_potential_cpp as electric_pote
 import dreamplace.configure as configure
 if configure.compile_configurations["CUDA_FOUND"] == "TRUE":
     import dreamplace.ops.electric_potential.electric_potential_cuda as electric_potential_cuda
+from .profile_timing import l_shape_log_verbose
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +140,8 @@ class LShapeElectricOverflow(nn.Module):
         num_bins_x, num_bins_y,
         target_density=None,
         padding=0,
-        deterministic_flag=False
+        deterministic_flag=False,
+        log_verbose=0,
     ):
         """
         Initialize L-shape electric overflow module.
@@ -170,6 +172,7 @@ class LShapeElectricOverflow(nn.Module):
         self.target_density = target_density
         self.padding = padding
         self.deterministic_flag = deterministic_flag
+        self.log_verbose = l_shape_log_verbose(log_verbose)
         
         # Will be initialized on first forward pass
         self.bin_center_x = None
@@ -200,12 +203,13 @@ class LShapeElectricOverflow(nn.Module):
                 dtype=self.bin_center_x.dtype,
             )
         self.target_density = target_density
-        logger.info(
-            "Set overflow target_density: min=%.3f, max=%.3f, mean=%.3f",
-            target_density.min().item(),
-            target_density.max().item(),
-            target_density.mean().item(),
-        )
+        if self.log_verbose >= 2:
+            logger.info(
+                "Set overflow target_density: min=%.3f, max=%.3f, mean=%.3f",
+                target_density.min().item(),
+                target_density.max().item(),
+                target_density.mean().item(),
+            )
     
     def _init_bins(self, device, dtype):
         """Initialize bin centers and padding mask."""
@@ -445,7 +449,8 @@ def create_l_shape_electric_overflow(
     num_bins_y=64,
     target_density=None,
     padding=0,
-    deterministic_flag=False
+    deterministic_flag=False,
+    log_verbose=0,
 ):
     """
     Factory function to create LShapeElectricOverflow.
@@ -474,5 +479,6 @@ def create_l_shape_electric_overflow(
         num_bins_y=num_bins_y,
         target_density=target_density,
         padding=padding,
-        deterministic_flag=deterministic_flag
+        deterministic_flag=deterministic_flag,
+        log_verbose=log_verbose,
     )

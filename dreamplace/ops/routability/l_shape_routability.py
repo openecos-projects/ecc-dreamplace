@@ -1873,8 +1873,8 @@ class LShapeRoutabilityOp(nn.Module):
             )
         
         soft_l_weights = None
+        edge_net_ids = None
         if self.soft_l_assignment:
-            edge_net_ids = None
             if isinstance(self.per_net_topology_cache, dict):
                 with profile_scope(
                     self.profile_enabled,

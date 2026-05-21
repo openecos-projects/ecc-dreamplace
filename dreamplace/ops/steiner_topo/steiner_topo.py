@@ -185,6 +185,33 @@ class SteinerTopo(nn.Module):
         self.net_flat_topo_sort_start = self.net_flat_topo_sort_start.contiguous()
         self._sanitize_pin_relate_indices()
 
+    def load_ggr_topology_pack(self, pack, pin_pos):
+        from dreamplace.ops.steiner_topo.ggr_l_shape_topology import (
+            build_steiner_cache_from_ggr_pack,
+        )
+
+        cache_tuple, edge_l_directions, metadata = build_steiner_cache_from_ggr_pack(
+            pack,
+            pin_pos,
+        )
+        self.update_cache(cache_tuple)
+        self.edge_l_directions = edge_l_directions.contiguous()
+        self.last_edge_geometry_stats = self._collect_edge_geometry_stats(
+            self.flat_pin_from,
+            self.flat_pin_to,
+            self.newx,
+            self.newy,
+        )
+        logger.info(
+            "Loaded GGR L-shape topology pack: nets=%d pins=%d vertices=%d edges=%d",
+            int(metadata["num_nets"]),
+            int(metadata["num_pins"]),
+            int(metadata["num_vertices"]),
+            int(metadata["num_edges"]),
+        )
+        return self.net_flat_topo_sort, self.net_flat_topo_sort_start, self.pin_fa, \
+            self.flat_pin_to, self.flat_pin_to_start, self.flat_pin_from
+
     def _sanitize_pin_relate_indices(self):
         if (
             self.pin_relate_x is None

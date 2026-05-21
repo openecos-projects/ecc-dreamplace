@@ -40,6 +40,10 @@ from dreamplace.ops.routability.same_net_topo_scoring import (
     build_same_net_topology_cache,
 )
 from dreamplace.ops.routability.profile_timing import l_shape_log_verbose, profile_scope
+from dreamplace.ops.steiner_topo.ggr_l_shape_topology import (
+    use_ggr_l_shape_topology,
+    validate_ggr_l_shape_topology_params,
+)
 from dreamplace.ops.routability.leiden_clustering import (
     build_active_leiden_clusters,
     plot_modularity_clusters,
@@ -183,6 +187,26 @@ def _build_gpugr_topology_net_name_to_id(placedb):
             "key": cache_key,
             "mapping": mapping,
         },
+    )
+    return mapping
+
+
+def _build_gpugr_topology_pin_name_to_id(placedb):
+    pin_names = getattr(placedb, "pin_names", [])
+    cache_key = (id(pin_names), int(len(pin_names)))
+    cache = getattr(placedb, "_gpugr_topology_pin_name_to_id_cache", None)
+    if cache is not None and cache[0] == cache_key:
+        return cache[1]
+
+    mapping = {}
+    for pin_id, pin_name in enumerate(pin_names):
+        if isinstance(pin_name, bytes):
+            pin_name = pin_name.decode("utf-8")
+        mapping[str(pin_name)] = int(pin_id)
+    setattr(
+        placedb,
+        "_gpugr_topology_pin_name_to_id_cache",
+        (cache_key, mapping),
     )
     return mapping
 
@@ -563,9 +587,11 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
         route_xsize,
         route_ysize,
     )
+    need_l_shape_topology_pack = use_ggr_l_shape_topology(params)
     need_route_entries = (
         bool(getattr(params, "l_direction_use_gpugr", False))
         and not _should_skip_resolver_l_direction_for_soft(params)
+        and not need_l_shape_topology_pack
     )
     need_route_entries = need_route_entries or bool(getattr(params, "gpugr_l_direction_save_artifacts", 0))
     need_route_entries = need_route_entries or bool(getattr(params, "l_shape_plot_flag", 0))
@@ -606,6 +632,8 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
 
     with profile_scope(params, "gpugr_prepare.topology_net_name_to_id", tensor=pos):
         topology_net_name_to_id = _build_gpugr_topology_net_name_to_id(placedb)
+    with profile_scope(params, "gpugr_prepare.topology_pin_name_to_id", tensor=pos):
+        topology_pin_name_to_id = _build_gpugr_topology_pin_name_to_id(placedb)
     with profile_scope(
         params,
         "gpugr_prepare.run_gpugr",
@@ -625,7 +653,13 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
             save_artifacts=bool(getattr(params, "gpugr_l_direction_save_artifacts", 0)),
             include_route_entries=need_route_entries,
             include_topology_pack=True,
+            include_l_shape_topology_pack=need_l_shape_topology_pack,
             topology_net_name_to_id=topology_net_name_to_id,
+            topology_pin_name_to_id=topology_pin_name_to_id,
+            topology_flat_net2pin_map=getattr(placedb, "flat_net2pin_map", []),
+            topology_flat_net2pin_start_map=getattr(placedb, "flat_net2pin_start_map", []),
+            topology_num_pins=len(getattr(placedb, "pin_names", [])),
+            topology_num_nets=int(getattr(placedb, "num_nets", 0)),
             topology_max_gap=1,
             topology_xl=topology_xl,
             topology_yl=topology_yl,
@@ -789,6 +823,7 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
         "num_bins_y": l_shape_num_bins_y,
         "same_net_topo_cache": same_net_topo_cache,
         "same_net_topo_stats": same_net_topo_stats,
+        "l_shape_topology_pack": result.get("l_shape_topology_pack"),
         **supply_original_maps,
     }
 
@@ -1024,6 +1059,39 @@ def _resolve_l_directions_for_l_shape(
     logging.info("Resolve L directions from EGR guide: %s", egr_guide_path)
     with profile_scope(params, "l_direction.resolve_from_egr", tensor=pos):
         return steiner_topo_op.resolve_l_directions_from_egr(egr_guide_path)
+
+
+def _load_l_shape_topology_pack_from_gpugr(
+    params,
+    pos,
+    pin_pos_op,
+    steiner_topo_op,
+    data_collections,
+    l_shape_inputs,
+    profile_name,
+    iteration,
+):
+    topology_pack = None if l_shape_inputs is None else l_shape_inputs.get("l_shape_topology_pack")
+    if topology_pack is None:
+        raise RuntimeError(
+            "l_shape_use_ggr_topology requires GGR l_shape_topology_pack output"
+        )
+    with profile_scope(params, profile_name, tensor=pos, iteration=iteration):
+        with torch.no_grad():
+            pin_pos = pin_pos_op(pos)
+            if pin_pos.is_cuda:
+                pin_pos = pin_pos.cpu()
+            data_collections.net_flat_topo_sort, data_collections.net_flat_topo_sort_start, \
+                data_collections.pin_fa, data_collections.flat_pin_to, data_collections.flat_pin_to_start, \
+                data_collections.flat_pin_from = steiner_topo_op.load_ggr_topology_pack(
+                    topology_pack,
+                    pin_pos,
+                )
+    if steiner_topo_op.edge_l_directions is None:
+        raise RuntimeError(
+            "l_shape_use_ggr_topology requires edge_l_directions in GGR topology pack"
+        )
+    return steiner_topo_op.edge_l_directions
 
 
 class NonLinearPlace(BasicPlace.BasicPlace):
@@ -1316,6 +1384,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         """
         iteration = 0
         all_metrics = []
+        validate_ggr_l_shape_topology_params(params)
         if params.timing_opt_flag:
             timing_op = self.op_collections.timing_op
             time_unit = timing_op.timer.time_unit()
@@ -2080,22 +2149,13 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             # 首次启用L形routability
                             t_l_shape_init = time.time()
                             
-                            # Step 1: 更新Steiner树
-                            with profile_scope(params, "l_shape_init.rebuild_tree", tensor=pos, iteration=iteration):
-                                with torch.no_grad():
-                                    pin_pos = self.op_collections.pin_pos_op(pos)
-                                    if pin_pos.is_cuda:
-                                        pin_pos = pin_pos.cpu()
-                                    self.data_collections.net_flat_topo_sort, self.data_collections.net_flat_topo_sort_start, \
-                                        self.data_collections.pin_fa, self.data_collections.flat_pin_to, self.data_collections.flat_pin_to_start, \
-                                        self.data_collections.flat_pin_from = self.op_collections.steiner_topo_op.rebuild_tree(pin_pos)
-                            
                             L_shape_num_bins_x = params.num_bins_x
                             L_shape_num_bins_y = params.num_bins_y
 
+                            ggr_topology_mode = use_ggr_l_shape_topology(params)
                             gpugr_inputs = None
                             l_shape_inputs = None
-                            if getattr(params, "l_direction_use_gpugr", False):
+                            if ggr_topology_mode:
                                 gpugr_inputs = _prepare_l_shape_inputs_from_gpugr(
                                     params,
                                     placedb,
@@ -2103,21 +2163,50 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     model=model,
                                 )
                                 l_shape_inputs = gpugr_inputs
-                            else:
-                                l_shape_inputs = _prepare_l_shape_inputs_from_egr(
+                                l_directions = _load_l_shape_topology_pack_from_gpugr(
                                     params,
-                                    placedb,
                                     pos,
-                                    model=model,
+                                    self.op_collections.pin_pos_op,
+                                    self.op_collections.steiner_topo_op,
+                                    self.data_collections,
+                                    l_shape_inputs,
+                                    "l_shape_init.load_ggr_topology_pack",
+                                    iteration,
                                 )
+                            else:
+                                with profile_scope(params, "l_shape_init.rebuild_tree", tensor=pos, iteration=iteration):
+                                    with torch.no_grad():
+                                        pin_pos = self.op_collections.pin_pos_op(pos)
+                                        if pin_pos.is_cuda:
+                                            pin_pos = pin_pos.cpu()
+                                        self.data_collections.net_flat_topo_sort, self.data_collections.net_flat_topo_sort_start, \
+                                            self.data_collections.pin_fa, self.data_collections.flat_pin_to, self.data_collections.flat_pin_to_start, \
+                                            self.data_collections.flat_pin_from = self.op_collections.steiner_topo_op.rebuild_tree(pin_pos)
+                                if getattr(params, "l_direction_use_gpugr", False):
+                                    gpugr_inputs = _prepare_l_shape_inputs_from_gpugr(
+                                        params,
+                                        placedb,
+                                        pos,
+                                        model=model,
+                                    )
+                                    l_shape_inputs = gpugr_inputs
+                                else:
+                                    l_shape_inputs = _prepare_l_shape_inputs_from_egr(
+                                        params,
+                                        placedb,
+                                        pos,
+                                        model=model,
+                                    )
 
                             supply_map = l_shape_inputs["supply_map"]
                             demand_map = l_shape_inputs["demand_map"]
                             wire_width = l_shape_inputs["wire_width"]
 
-                            # Step 4: 解析路由器输出的 L 方向
+                            # Resolve L directions from the selected topology source.
                             steiner_topo_op = self.op_collections.steiner_topo_op
-                            if _should_skip_resolver_l_direction_for_soft(params):
+                            if ggr_topology_mode:
+                                l_directions = steiner_topo_op.edge_l_directions
+                            elif _should_skip_resolver_l_direction_for_soft(params):
                                 steiner_topo_op.edge_l_directions = None
                                 l_directions = None
                                 if l_shape_log_verbose(params) >= 2:
@@ -2232,7 +2321,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             
                             # exit(0)
                             
-                            # Step 5: 初始化L形routability模块
+                            # Initialize the L-shape routability operator.
 
                             with profile_scope(params, "l_shape_init.construct_op", tensor=pos, iteration=iteration):
                                 model.init_l_shape_routability(
@@ -2420,25 +2509,10 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             if model.l_shape_routability_op is not None:
                                 model.l_shape_routability_op.segment_builder.reset_cache()
                             
-                            with profile_scope(params, "l_shape_update.rebuild_tree", tensor=pos, iteration=iteration):
-                                with torch.no_grad():
-                                    pin_pos = self.op_collections.pin_pos_op(pos)
-                                    if pin_pos.is_cuda:
-                                        pin_pos = pin_pos.cpu()
-                                    self.data_collections.net_flat_topo_sort, self.data_collections.net_flat_topo_sort_start, \
-                                        self.data_collections.pin_fa, self.data_collections.flat_pin_to, self.data_collections.flat_pin_to_start, \
-                                        self.data_collections.flat_pin_from = self.op_collections.steiner_topo_op.rebuild_tree(pin_pos)
-                            
+                            ggr_topology_mode = use_ggr_l_shape_topology(params)
                             gpugr_inputs = None
                             l_shape_inputs = None
-                            if not getattr(params, "l_direction_use_gpugr", False):
-                                l_shape_inputs = _prepare_l_shape_inputs_from_egr(
-                                    params,
-                                    placedb,
-                                    pos,
-                                    model=model,
-                                )
-                            else:
+                            if ggr_topology_mode:
                                 gpugr_inputs = _prepare_l_shape_inputs_from_gpugr(
                                     params,
                                     placedb,
@@ -2446,9 +2520,45 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     model=model,
                                 )
                                 l_shape_inputs = gpugr_inputs
+                                l_directions = _load_l_shape_topology_pack_from_gpugr(
+                                    params,
+                                    pos,
+                                    self.op_collections.pin_pos_op,
+                                    self.op_collections.steiner_topo_op,
+                                    self.data_collections,
+                                    l_shape_inputs,
+                                    "l_shape_update.load_ggr_topology_pack",
+                                    iteration,
+                                )
+                            else:
+                                with profile_scope(params, "l_shape_update.rebuild_tree", tensor=pos, iteration=iteration):
+                                    with torch.no_grad():
+                                        pin_pos = self.op_collections.pin_pos_op(pos)
+                                        if pin_pos.is_cuda:
+                                            pin_pos = pin_pos.cpu()
+                                        self.data_collections.net_flat_topo_sort, self.data_collections.net_flat_topo_sort_start, \
+                                            self.data_collections.pin_fa, self.data_collections.flat_pin_to, self.data_collections.flat_pin_to_start, \
+                                            self.data_collections.flat_pin_from = self.op_collections.steiner_topo_op.rebuild_tree(pin_pos)
+                                if not getattr(params, "l_direction_use_gpugr", False):
+                                    l_shape_inputs = _prepare_l_shape_inputs_from_egr(
+                                        params,
+                                        placedb,
+                                        pos,
+                                        model=model,
+                                    )
+                                else:
+                                    gpugr_inputs = _prepare_l_shape_inputs_from_gpugr(
+                                        params,
+                                        placedb,
+                                        pos,
+                                        model=model,
+                                    )
+                                    l_shape_inputs = gpugr_inputs
 
                             steiner_topo_op = self.op_collections.steiner_topo_op
-                            if _should_skip_resolver_l_direction_for_soft(params):
+                            if ggr_topology_mode:
+                                l_directions = steiner_topo_op.edge_l_directions
+                            elif _should_skip_resolver_l_direction_for_soft(params):
                                 steiner_topo_op.edge_l_directions = None
                                 l_directions = None
                                 if l_shape_log_verbose(params) >= 2:

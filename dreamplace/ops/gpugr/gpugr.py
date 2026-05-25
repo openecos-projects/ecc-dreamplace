@@ -98,6 +98,7 @@ class GPUGR(object):
             cpp_log_level=int(getattr(self.params, "gpugr_area_adjust_cpp_log_level", 2)),
             keep_temp_def=bool(getattr(self.params, "gpugr_area_adjust_keep_temp_def", 0)),
             save_artifacts=save_artifacts,
+            backend=getattr(self.params, "gpugr_backend", "auto"),
         )
         self.last_result = result
         self.last_route_grid = (route_xsize, route_ysize)

@@ -255,6 +255,10 @@
         "description": "rrrIters passed to gpugr when gpugr_first_inflation_exit is enabled",
         "default": 0
     },
+    "gpugr_backend": {
+        "description": "GGR backend selection: auto chooses cuda when available and cpu_pr otherwise; cuda requires a CUDA-capable gpugr build; cpu_pr supports pattern routing with rrrIters=0",
+        "default": "auto"
+    },
     "adjust_gpugr_area_flag": {
         "description": "whether use Xplace gpugr overflow map to guide area adjustment",
         "default": 0

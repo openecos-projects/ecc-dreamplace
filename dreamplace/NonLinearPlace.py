@@ -671,6 +671,7 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
             parser_cache_fallback_before_export=parser_cache_fallback_before_export,
             profile_enabled=bool(getattr(params, "l_shape_profile_flag", False)),
             profile_prefix="gpugr_prepare.run_gpugr",
+            backend=getattr(params, "gpugr_backend", "auto"),
         )
 
     maps = result["maps"]
@@ -872,6 +873,7 @@ def _run_gpugr_final_eval(params, placedb, pos):
         keep_temp_def=bool(getattr(params, "gpugr_final_eval_keep_temp_def", 0)),
         save_artifacts=bool(getattr(params, "gpugr_final_eval_save_artifacts", 1)),
         include_route_entries=False,
+        backend=getattr(params, "gpugr_backend", "auto"),
     )
     metrics = result["metrics"]
     logging.info(
@@ -983,6 +985,7 @@ def _run_gpugr_before_first_area_adjust_and_exit(params, placedb, pos, num_area_
         cpp_log_level=int(getattr(params, "gpugr_first_inflation_cpp_log_level", 2)),
         keep_temp_def=True,
         save_artifacts=True,
+        backend=getattr(params, "gpugr_backend", "auto"),
     )
     metrics = result["metrics"]
     logging.info(

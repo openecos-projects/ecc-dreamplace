@@ -66,6 +66,8 @@ filegroup(
         [
             "dreamplace/**/*.py",
             "pyproject.toml",
+            "thirdparty/NCTUgr.ICCAD2012/**",
+            "thirdparty/flute/lut.ICCAD2015/**",
         ],
         exclude = ["**/__pycache__/**"],
     ),

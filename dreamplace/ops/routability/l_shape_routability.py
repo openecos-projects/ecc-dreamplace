@@ -146,6 +146,9 @@ class LShapeRoutabilityOp(nn.Module):
         )
         self.profile_enabled = bool(getattr(params, "l_shape_profile_flag", False))
         self.log_verbose = l_shape_log_verbose(params)
+        self.capacity_al_enable = bool(
+            getattr(params, "l_shape_capacity_al_enable", False)
+        )
         self.deterministic_flag = _as_bool(getattr(params, "deterministic_flag", False))
         self.debug_hash_enabled = _as_bool(getattr(params, "l_shape_debug_hash_flag", False))
         self.debug_hash_start_iter = int(getattr(params, "l_shape_debug_hash_start_iter", -1))
@@ -251,6 +254,7 @@ class LShapeRoutabilityOp(nn.Module):
                 fast_mode=False,
                 profile_enabled=self.profile_enabled,
                 log_verbose=self.log_verbose,
+                capacity_al_enable=self.capacity_al_enable,
             )
             self.overflow_op = create_l_shape_electric_overflow(
                 placedb,
@@ -1547,7 +1551,15 @@ class LShapeRoutabilityOp(nn.Module):
             return self.overflow_op.compute_density_map(segment_pos, sx, sy, segment_weight=sw)
         return self.density_op(segment_pos, sx, sy, mode="density", segment_weight=sw)
 
-    def forward(self, pos, steiner_topo_op, pin_pos_op, use_l_direction=True):
+    def forward(
+        self,
+        pos,
+        steiner_topo_op,
+        pin_pos_op,
+        use_l_direction=True,
+        update_capacity_al_lambda=False,
+        placement_iteration_id=None,
+    ):
         """
         计算L形segment密度代价
         
@@ -1758,6 +1770,8 @@ class LShapeRoutabilityOp(nn.Module):
                     segment_size_y,
                     segment_is_horizontal,
                     segment_weight=segment_weight,
+                    update_capacity_al_lambda=update_capacity_al_lambda,
+                    placement_iteration_id=placement_iteration_id,
                 )
                 if self._debug_hash_active():
                     try:
@@ -2040,7 +2054,13 @@ class LShapeRoutabilityMixin:
             density_mode,
         )
     
-    def l_shape_routability_obj(self, pos, use_l_direction=True):
+    def l_shape_routability_obj(
+        self,
+        pos,
+        use_l_direction=True,
+        update_capacity_al_lambda=False,
+        placement_iteration_id=None,
+    ):
         """
         计算L形routability目标
         
@@ -2053,7 +2073,12 @@ class LShapeRoutabilityMixin:
         pin_pos_op = self.op_collections.pin_pos_op
         
         return self.l_shape_routability_op(
-            pos, steiner_topo_op, pin_pos_op, use_l_direction
+            pos,
+            steiner_topo_op,
+            pin_pos_op,
+            use_l_direction=use_l_direction,
+            update_capacity_al_lambda=update_capacity_al_lambda,
+            placement_iteration_id=placement_iteration_id,
         )
     
     def get_l_shape_density_map(self, pos, use_l_direction=True):

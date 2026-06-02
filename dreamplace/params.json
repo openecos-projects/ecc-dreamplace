@@ -295,6 +295,10 @@
         "description": "whether use GGR-exported L-shape topology pack instead of diff-side FLUTE refresh for L-shape routability",
         "default": 0
     },
+    "l_shape_capacity_al_enable": {
+        "description": "whether use per-routing-bin AL multiplier memory as the hard-GGR L-shape capacity-pressure source",
+        "default": 0
+    },
     "gpugr_l_direction_rrr_iters": {
         "description": "rrrIters passed to gpugr when l_direction_use_gpugr is enabled",
         "default": 0

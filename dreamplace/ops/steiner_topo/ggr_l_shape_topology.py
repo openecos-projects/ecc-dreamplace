@@ -34,6 +34,11 @@ def use_ggr_l_shape_topology(params):
 
 
 def validate_ggr_l_shape_topology_params(params):
+    capacity_al_enable = bool(getattr(params, "l_shape_capacity_al_enable", False))
+    if capacity_al_enable and not use_ggr_l_shape_topology(params):
+        raise RuntimeError(
+            "l_shape_capacity_al_enable requires l_shape_use_ggr_topology=1"
+        )
     if not use_ggr_l_shape_topology(params):
         return
     if not bool(getattr(params, "l_direction_use_gpugr", False)):
@@ -43,6 +48,12 @@ def validate_ggr_l_shape_topology_params(params):
     if bool(getattr(params, "soft_l_assignment", False)):
         raise RuntimeError(
             "l_shape_use_ggr_topology is incompatible with soft_l_assignment=1"
+        )
+    if capacity_al_enable and bool(
+        getattr(params, "l_shape_use_xplace_weight_schedule", True)
+    ):
+        raise RuntimeError(
+            "l_shape_capacity_al_enable requires l_shape_use_xplace_weight_schedule=0"
         )
 
 

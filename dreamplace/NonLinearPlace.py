@@ -1674,6 +1674,41 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     if overflow_ema is not None:
                         cur_metric.l_shape_overflow_ema = float(overflow_ema)
 
+                    al_summary = getattr(
+                        model, "l_shape_capacity_al_last_summary", None
+                    ) or {}
+                    al_field_map = {
+                        "l_shape_capacity_al_enabled": "enabled",
+                        "l_shape_capacity_al_updated": "updated",
+                        "l_shape_capacity_al_g_h_max": "g_h_max",
+                        "l_shape_capacity_al_g_v_max": "g_v_max",
+                        "l_shape_capacity_al_g_h_sum": "g_h_sum",
+                        "l_shape_capacity_al_g_v_sum": "g_v_sum",
+                        "l_shape_capacity_al_g_h_pos_ratio": "g_h_pos_ratio",
+                        "l_shape_capacity_al_g_v_pos_ratio": "g_v_pos_ratio",
+                        "l_shape_capacity_al_q_h_max": "q_h_max",
+                        "l_shape_capacity_al_q_v_max": "q_v_max",
+                        "l_shape_capacity_al_q_h_sum": "q_h_sum",
+                        "l_shape_capacity_al_q_v_sum": "q_v_sum",
+                        "l_shape_capacity_al_lambda_h_max": "lambda_h_max",
+                        "l_shape_capacity_al_lambda_v_max": "lambda_v_max",
+                        "l_shape_capacity_al_lambda_h_sum": "lambda_h_sum",
+                        "l_shape_capacity_al_lambda_v_sum": "lambda_v_sum",
+                        "l_shape_capacity_al_energy_h": "E_cap_smooth_h",
+                        "l_shape_capacity_al_energy_v": "E_cap_smooth_v",
+                        "l_shape_capacity_al_energy_total": "E_cap_smooth_total",
+                        "l_shape_capacity_al_pq_h_min": "Pq_h_min",
+                        "l_shape_capacity_al_pq_h_max": "Pq_h_max",
+                        "l_shape_capacity_al_pq_v_min": "Pq_v_min",
+                        "l_shape_capacity_al_pq_v_max": "Pq_v_max",
+                        "l_shape_capacity_al_active_memory_bins_h": "active_memory_bins_h",
+                        "l_shape_capacity_al_active_memory_bins_v": "active_memory_bins_v",
+                    }
+                    for metric_field, summary_field in al_field_map.items():
+                        value = al_summary.get(summary_field)
+                        if value is not None:
+                            setattr(cur_metric, metric_field, value)
+
                     soft_summary = getattr(model, "soft_l_last_summary", None) or {}
                     soft_field_map = {
                         "soft_l_diag_count": "diag_edge_count",
@@ -4150,6 +4185,31 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 "l_shape_overflow_ratio",
                 "l_shape_overflow_ema",
                 "l_shape_overflow_max_density",
+                "l_shape_capacity_al_enabled",
+                "l_shape_capacity_al_updated",
+                "l_shape_capacity_al_g_h_max",
+                "l_shape_capacity_al_g_v_max",
+                "l_shape_capacity_al_g_h_sum",
+                "l_shape_capacity_al_g_v_sum",
+                "l_shape_capacity_al_g_h_pos_ratio",
+                "l_shape_capacity_al_g_v_pos_ratio",
+                "l_shape_capacity_al_q_h_max",
+                "l_shape_capacity_al_q_v_max",
+                "l_shape_capacity_al_q_h_sum",
+                "l_shape_capacity_al_q_v_sum",
+                "l_shape_capacity_al_lambda_h_max",
+                "l_shape_capacity_al_lambda_v_max",
+                "l_shape_capacity_al_lambda_h_sum",
+                "l_shape_capacity_al_lambda_v_sum",
+                "l_shape_capacity_al_energy_h",
+                "l_shape_capacity_al_energy_v",
+                "l_shape_capacity_al_energy_total",
+                "l_shape_capacity_al_pq_h_min",
+                "l_shape_capacity_al_pq_h_max",
+                "l_shape_capacity_al_pq_v_min",
+                "l_shape_capacity_al_pq_v_max",
+                "l_shape_capacity_al_active_memory_bins_h",
+                "l_shape_capacity_al_active_memory_bins_v",
                 "soft_l_diag_count",
                 "soft_l_mean_cost_gap",
                 "soft_l_raw_cost_gap_p50",

@@ -5,7 +5,6 @@
 #         Gradients flow back through segment positions to cell positions
 #
 
-from doctest import FAIL_FAST
 import math
 import numpy as np
 import time
@@ -32,6 +31,39 @@ import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 _PLOT_ITER = 0
+
+
+def _scalar_stat(tensor, op_name, default=0.0):
+    if not torch.is_tensor(tensor) or tensor.numel() == 0:
+        return default
+    value = tensor.detach()
+    if op_name == "sum":
+        return float(value.sum().item())
+    if op_name == "max":
+        return float(value.max().item())
+    if op_name == "mean":
+        return float(value.mean().item())
+    if op_name == "min":
+        return float(value.min().item())
+    raise ValueError("unsupported stat op %s" % op_name)
+
+
+def _positive_count(tensor):
+    if not torch.is_tensor(tensor) or tensor.numel() == 0:
+        return 0
+    return int((tensor.detach() > 0).sum().item())
+
+
+def _tensor_identity(value):
+    if not torch.is_tensor(value):
+        return None
+    return (
+        tuple(int(dim) for dim in value.shape),
+        str(value.device),
+        str(value.dtype),
+        int(value.data_ptr()),
+        int(getattr(value, "_version", 0)),
+    )
 
 
 def _log_topk_bins(map_tensor, k, name, xl, yl, bin_size_x, bin_size_y):
@@ -118,7 +150,11 @@ class SegmentElectricPotentialFunction(Function):
         idct2,
         idct_idxst,
         idxst_idct,
-        fast_mode
+        fast_mode,
+        capacity_al_owner,
+        update_capacity_al_lambda,
+        placement_iteration_id,
+        capacity_al_reset_key,
     ):
         """
         Compute electric potential energy for segments.
@@ -234,20 +270,21 @@ class SegmentElectricPotentialFunction(Function):
             initial_density_tracks_local = fix_usage_local.clamp(min=0)
             capacity_tracks_local = supply_original_local
             occupancy_tracks_local = initial_density_tracks_local + density_seg_tracks_local
-            rho_tracks_local = occupancy_tracks_local
-            rho_centered_tracks_local = rho_tracks_local - rho_tracks_local.mean()
-            rho_map_local = rho_centered_tracks_local
+            residual_tracks_local = (
+                occupancy_tracks_local - capacity_tracks_local
+            ) / capacity_tracks_local.clamp(min=1e-6)
+            residual_centered_tracks_local = residual_tracks_local - residual_tracks_local.mean()
             overflow_map_local = (occupancy_tracks_local - capacity_tracks_local).clamp(min=0)
             utilization = occupancy_tracks_local / capacity_tracks_local.clamp(min=1e-6)
             return (
-                rho_map_local,
+                residual_tracks_local,
                 overflow_map_local,
                 utilization,
                 initial_density_tracks_local,
                 density_seg_tracks_local,
                 occupancy_tracks_local,
                 capacity_tracks_local,
-                rho_centered_tracks_local,
+                residual_centered_tracks_local,
             )
 
         def _compute_field_and_energy(rho_map_local):
@@ -262,11 +299,18 @@ class SegmentElectricPotentialFunction(Function):
             )
             if fast_mode:
                 energy_local = torch.zeros(1, dtype=segment_pos.dtype, device=segment_pos.device)
+                potential_map_local = torch.zeros_like(rho_map_local)
             else:
                 potential_map_local = idct2.forward(auv_local.mul(inv_wu2_plus_wv2))
                 potential_map_local.mul_(bin_area)
                 energy_local = potential_map_local.mul(rho_map_normalized_local).sum()
-            return rho_map_normalized_local, field_map_x_local, field_map_y_local, energy_local
+            return (
+                rho_map_normalized_local,
+                field_map_x_local,
+                field_map_y_local,
+                potential_map_local,
+                energy_local,
+            )
 
         target_density_h = None
         target_density_v = None
@@ -390,10 +434,9 @@ class SegmentElectricPotentialFunction(Function):
         M = num_bins_x
         N = num_bins_y
         
-        # Compute a signed rho map based on routing demand vs supply.
-        # Overflow remains as telemetry, but the Poisson solver should see
-        # both positive residuals (capacity pressure) and negative residuals
-        # (available resource).
+        # Compute a capacity-residual source from routing demand vs supply.
+        # Overflow remains as absolute-track telemetry, while the Poisson
+        # solver sees positive normalized capacity violation only.
         bin_area = bin_size_x * bin_size_y
         if not isinstance(target_density, torch.Tensor) or target_density.dim() != 2:
             raise TypeError(
@@ -455,7 +498,7 @@ class SegmentElectricPotentialFunction(Function):
                 density_seg_tracks_h,
                 occupancy_tracks_h,
                 capacity_tracks_h,
-                rho_centered_tracks_h,
+                residual_centered_tracks_h,
             ) = _compute_blockage_track_rho_components(
                 density_map_h,
                 supply_original_h,
@@ -469,12 +512,24 @@ class SegmentElectricPotentialFunction(Function):
                 density_seg_tracks_v,
                 occupancy_tracks_v,
                 capacity_tracks_v,
-                rho_centered_tracks_v,
+                residual_centered_tracks_v,
             ) = _compute_blockage_track_rho_components(
                 density_map_v,
                 supply_original_v,
                 fix_usage_map_v,
             )
+            if getattr(capacity_al_owner, "capacity_al_enable", False):
+                rho_map_h, rho_map_v = capacity_al_owner._capacity_al_source_maps(
+                    g_h=rho_map_h,
+                    g_v=rho_map_v,
+                    update_lambda=bool(update_capacity_al_lambda),
+                    placement_iteration_id=placement_iteration_id,
+                    reset_key=capacity_al_reset_key,
+                )
+            elif capacity_al_owner is not None:
+                capacity_al_owner.last_al_stats = {"enabled": False}
+            rho_map_h = rho_map_h.clamp(min=0)
+            rho_map_v = rho_map_v.clamp(min=0)
 
             with profile_scope(
                 profile_enabled,
@@ -483,8 +538,8 @@ class SegmentElectricPotentialFunction(Function):
                 logger=logger,
                 mode="hv_split",
             ):
-                _, field_map_x_h, field_map_y_h, energy_h = _compute_field_and_energy(rho_map_h)
-                _, field_map_x_v, field_map_y_v, energy_v = _compute_field_and_energy(rho_map_v)
+                _, field_map_x_h, field_map_y_h, potential_map_h, energy_h = _compute_field_and_energy(rho_map_h)
+                _, field_map_x_v, field_map_y_v, potential_map_v, energy_v = _compute_field_and_energy(rho_map_v)
 
             ctx.hv_split_active = True
             ctx.h_split_data = prepared_h
@@ -505,25 +560,74 @@ class SegmentElectricPotentialFunction(Function):
             SegmentElectricPotentialFunction.last_energy_h = energy_h.detach()
             SegmentElectricPotentialFunction.last_energy_v = energy_v.detach()
             SegmentElectricPotentialFunction.last_energy = energy.detach()
+            if getattr(capacity_al_owner, "capacity_al_enable", False):
+                capacity_al_owner.last_al_stats.update(
+                    {
+                        "E_cap_smooth_h": float(energy_h.detach().item()),
+                        "E_cap_smooth_v": float(energy_v.detach().item()),
+                        "E_cap_smooth_total": float(energy.detach().item()),
+                        "Pq_h_min": _scalar_stat(potential_map_h, "min"),
+                        "Pq_h_max": _scalar_stat(potential_map_h, "max"),
+                        "Pq_h_sum": _scalar_stat(potential_map_h, "sum"),
+                        "Pq_v_min": _scalar_stat(potential_map_v, "min"),
+                        "Pq_v_max": _scalar_stat(potential_map_v, "max"),
+                        "Pq_v_sum": _scalar_stat(potential_map_v, "sum"),
+                    }
+                )
+                if log_verbose >= 2:
+                    logger.info(
+                        "L-shape capacity AL: iter=%s update=%s reset=%s "
+                        "g_h_max=%.4e g_v_max=%.4e g_h_sum=%.4e g_v_sum=%.4e "
+                        "g_h_pos_bins=%d/%d g_v_pos_bins=%d/%d "
+                        "g_h_pos_ratio=%.4f g_v_pos_ratio=%.4f "
+                        "q_h_max=%.4e q_v_max=%.4e "
+                        "lambda_h_max=%.4e lambda_v_max=%.4e E_h=%.4e E_v=%.4e "
+                        "Pq_h_min=%.4e Pq_v_min=%.4e "
+                        "active_memory_bins_h=%d active_memory_bins_v=%d "
+                        "(negative Pq values can occur from the DCT/Poisson gauge)",
+                        str(placement_iteration_id),
+                        str(capacity_al_owner.last_al_stats.get("updated")),
+                        str(capacity_al_owner.last_al_stats.get("reset_reason")),
+                        float(capacity_al_owner.last_al_stats.get("g_h_max", 0.0)),
+                        float(capacity_al_owner.last_al_stats.get("g_v_max", 0.0)),
+                        float(capacity_al_owner.last_al_stats.get("g_h_sum", 0.0)),
+                        float(capacity_al_owner.last_al_stats.get("g_v_sum", 0.0)),
+                        int(capacity_al_owner.last_al_stats.get("g_h_pos_bins", 0)),
+                        int(capacity_al_owner.last_al_stats.get("g_h_bins", 0)),
+                        int(capacity_al_owner.last_al_stats.get("g_v_pos_bins", 0)),
+                        int(capacity_al_owner.last_al_stats.get("g_v_bins", 0)),
+                        float(capacity_al_owner.last_al_stats.get("g_h_pos_ratio", 0.0)),
+                        float(capacity_al_owner.last_al_stats.get("g_v_pos_ratio", 0.0)),
+                        float(capacity_al_owner.last_al_stats.get("q_h_max", 0.0)),
+                        float(capacity_al_owner.last_al_stats.get("q_v_max", 0.0)),
+                        float(capacity_al_owner.last_al_stats.get("lambda_h_max", 0.0)),
+                        float(capacity_al_owner.last_al_stats.get("lambda_v_max", 0.0)),
+                        float(energy_h.detach().item()),
+                        float(energy_v.detach().item()),
+                        float(capacity_al_owner.last_al_stats.get("Pq_h_min", 0.0)),
+                        float(capacity_al_owner.last_al_stats.get("Pq_v_min", 0.0)),
+                        int(capacity_al_owner.last_al_stats.get("active_memory_bins_h", 0)),
+                        int(capacity_al_owner.last_al_stats.get("active_memory_bins_v", 0)),
+                    )
 
             logger.debug(
-                "Blockage rho(split,track): occ_ratio_h=%.4f occ_ratio_v=%.4f util_h_max=%.2f util_v_max=%.2f "
-                "rho_center_pos_bins_h=%d/%d rho_center_neg_bins_h=%d/%d overflow_bins_h=%d/%d "
-                "rho_center_pos_bins_v=%d/%d rho_center_neg_bins_v=%d/%d overflow_bins_v=%d/%d",
+                "Blockage residual-source(split,track): occ_ratio_h=%.4f occ_ratio_v=%.4f util_h_max=%.2f util_v_max=%.2f "
+                "residual_center_pos_bins_h=%d/%d residual_center_neg_bins_h=%d/%d overflow_bins_h=%d/%d "
+                "residual_center_pos_bins_v=%d/%d residual_center_neg_bins_v=%d/%d overflow_bins_v=%d/%d",
                 float(occupancy_tracks_h.sum().item() / capacity_tracks_h.sum().clamp(min=1e-6).item()) if capacity_tracks_h.numel() > 0 else 0.0,
                 float(occupancy_tracks_v.sum().item() / capacity_tracks_v.sum().clamp(min=1e-6).item()) if capacity_tracks_v.numel() > 0 else 0.0,
                 float(utilization_h.max().item()) if utilization_h.numel() > 0 else 0.0,
                 float(utilization_v.max().item()) if utilization_v.numel() > 0 else 0.0,
-                int((rho_centered_tracks_h > 0).sum().item()),
-                int(rho_centered_tracks_h.numel()),
-                int((rho_centered_tracks_h < 0).sum().item()),
-                int(rho_centered_tracks_h.numel()),
+                int((residual_centered_tracks_h > 0).sum().item()),
+                int(residual_centered_tracks_h.numel()),
+                int((residual_centered_tracks_h < 0).sum().item()),
+                int(residual_centered_tracks_h.numel()),
                 int((overflow_map_h > 0).sum().item()),
                 int(overflow_map_h.numel()),
-                int((rho_centered_tracks_v > 0).sum().item()),
-                int(rho_centered_tracks_v.numel()),
-                int((rho_centered_tracks_v < 0).sum().item()),
-                int(rho_centered_tracks_v.numel()),
+                int((residual_centered_tracks_v > 0).sum().item()),
+                int(residual_centered_tracks_v.numel()),
+                int((residual_centered_tracks_v < 0).sum().item()),
+                int(residual_centered_tracks_v.numel()),
                 int((overflow_map_v > 0).sum().item()),
                 int(overflow_map_v.numel()),
             )
@@ -536,12 +640,19 @@ class SegmentElectricPotentialFunction(Function):
                 density_seg_tracks,
                 occupancy_tracks,
                 capacity_tracks,
-                rho_centered_tracks,
+                residual_centered_tracks,
             ) = _compute_blockage_track_rho_components(
                 density_map,
                 supply_original_map,
                 planar_fix_usage_map,
             )
+            if getattr(capacity_al_owner, "capacity_al_enable", False):
+                raise RuntimeError(
+                    "l_shape_capacity_al_enable requires H/V capacity and fixed-usage maps"
+                )
+            elif capacity_al_owner is not None:
+                capacity_al_owner.last_al_stats = {"enabled": False}
+            rho_map = rho_map.clamp(min=0)
             with profile_scope(
                 profile_enabled,
                 "electric.forward.field_energy",
@@ -549,22 +660,22 @@ class SegmentElectricPotentialFunction(Function):
                 logger=logger,
                 mode="planar",
             ):
-                rho_map_normalized, field_map_x, field_map_y, energy = _compute_field_and_energy(rho_map)
+                rho_map_normalized, field_map_x, field_map_y, potential_map, energy = _compute_field_and_energy(rho_map)
             ctx.field_map_x = field_map_x
             ctx.field_map_y = field_map_y
             SegmentElectricPotentialFunction.last_rho_map = rho_map.detach()
             SegmentElectricPotentialFunction.last_energy = energy.detach()
 
             logger.debug(
-                "Blockage rho(planar,track): occ_ratio=%.4f util_mean=%.2f util_max=%.2f "
-                "rho_center_pos_bins=%d/%d rho_center_neg_bins=%d/%d overflow_bins=%d/%d",
+                "Blockage residual-source(planar,track): occ_ratio=%.4f util_mean=%.2f util_max=%.2f "
+                "residual_center_pos_bins=%d/%d residual_center_neg_bins=%d/%d overflow_bins=%d/%d",
                 float(occupancy_tracks.sum().item() / capacity_tracks.sum().clamp(min=1e-6).item()) if capacity_tracks.numel() > 0 else 0.0,
                 float(utilization.mean().item()) if utilization.numel() > 0 else 0.0,
                 float(utilization.max().item()) if utilization.numel() > 0 else 0.0,
-                int((rho_centered_tracks > 0).sum().item()),
-                int(rho_centered_tracks.numel()),
-                int((rho_centered_tracks < 0).sum().item()),
-                int(rho_centered_tracks.numel()),
+                int((residual_centered_tracks > 0).sum().item()),
+                int(residual_centered_tracks.numel()),
+                int((residual_centered_tracks < 0).sum().item()),
+                int(residual_centered_tracks.numel()),
                 int((overflow_map > 0).sum().item()),
                 int(overflow_map.numel()),
             )
@@ -854,7 +965,7 @@ class SegmentElectricPotentialFunction(Function):
         )
         
         # Return gradients (only for segment_pos, others are None)
-        return (output,) + (None,) * 46
+        return (output,) + (None,) * 48
 
 
 class LShapeElectricPotential(nn.Module):
@@ -895,6 +1006,7 @@ class LShapeElectricPotential(nn.Module):
         fast_mode=False,
         profile_enabled=False,
         log_verbose=0,
+        capacity_al_enable=False,
     ):
         """
         Initialize L-shape electric potential module.
@@ -926,6 +1038,19 @@ class LShapeElectricPotential(nn.Module):
         self.profile_enabled = bool(profile_enabled)
         self.log_verbose = l_shape_log_verbose(log_verbose)
         self.blockage_initial_density = True
+        self.capacity_al_enable = bool(capacity_al_enable)
+        self._capacity_al_rho = 1.0
+        self._capacity_al_lambda_max = 1.0
+        self._capacity_al_positive_step = 0.10
+        self._capacity_al_negative_step = 0.50
+        self.lambda_h = None
+        self.lambda_v = None
+        self._capacity_al_reset_key = None
+        self._capacity_al_last_update_iter = None
+        self._capacity_al_last_reset_reason = None
+        self._capacity_al_reset_count = 0
+        self._capacity_al_update_count = 0
+        self.last_al_stats = {}
         
         if isinstance(target_density, torch.Tensor):
             self.register_buffer('target_density', target_density)
@@ -1014,6 +1139,207 @@ class LShapeElectricPotential(nn.Module):
         self.idct2 = None
         self.idct_idxst = None
         self.idxst_idct = None
+
+    def reset_capacity_al_state(self, reason="manual"):
+        self.lambda_h = None
+        self.lambda_v = None
+        self._capacity_al_reset_key = None
+        self._capacity_al_last_update_iter = None
+        self._capacity_al_last_reset_reason = str(reason)
+        self._capacity_al_reset_count += 1
+        if self.log_verbose >= 1:
+            logger.info("L-shape capacity AL reset: reason=%s", reason)
+
+    def _capacity_al_key_from_maps(
+        self,
+        supply_h,
+        supply_v,
+        fix_usage_h,
+        fix_usage_v,
+        extra_key=None,
+    ):
+        return (
+            _tensor_identity(supply_h),
+            _tensor_identity(supply_v),
+            _tensor_identity(fix_usage_h),
+            _tensor_identity(fix_usage_v),
+            extra_key,
+        )
+
+    def _ensure_capacity_al_state(self, g_h, g_v, reset_key):
+        if reset_key != self._capacity_al_reset_key:
+            self.lambda_h = None
+            self.lambda_v = None
+            self._capacity_al_reset_key = reset_key
+            self._capacity_al_last_update_iter = None
+            self._capacity_al_last_reset_reason = "constraint_identity_changed"
+            self._capacity_al_reset_count += 1
+            if self.log_verbose >= 1:
+                logger.info(
+                    "L-shape capacity AL reset: reason=constraint_identity_changed"
+                )
+
+        need_reset = (
+            self.lambda_h is None
+            or self.lambda_v is None
+            or self.lambda_h.shape != g_h.shape
+            or self.lambda_v.shape != g_v.shape
+            or self.lambda_h.device != g_h.device
+            or self.lambda_v.device != g_v.device
+            or self.lambda_h.dtype != g_h.dtype
+            or self.lambda_v.dtype != g_v.dtype
+        )
+        if need_reset:
+            self.lambda_h = torch.zeros_like(g_h, requires_grad=False).detach()
+            self.lambda_v = torch.zeros_like(g_v, requires_grad=False).detach()
+            self._capacity_al_last_update_iter = None
+            if self._capacity_al_last_reset_reason is None:
+                self._capacity_al_last_reset_reason = "shape_device_dtype_changed"
+            if self.log_verbose >= 1:
+                logger.info(
+                    "L-shape capacity AL reset: reason=shape_device_dtype_changed "
+                    "shape_h=%s shape_v=%s dtype=%s device=%s",
+                    tuple(int(dim) for dim in g_h.shape),
+                    tuple(int(dim) for dim in g_v.shape),
+                    str(g_h.dtype),
+                    str(g_h.device),
+                )
+        else:
+            self.lambda_h = self.lambda_h.detach()
+            self.lambda_v = self.lambda_v.detach()
+
+    def _capacity_al_state_matches(self, g_h, g_v, reset_key):
+        return (
+            reset_key == self._capacity_al_reset_key
+            and self.lambda_h is not None
+            and self.lambda_v is not None
+            and self.lambda_h.shape == g_h.shape
+            and self.lambda_v.shape == g_v.shape
+            and self.lambda_h.device == g_h.device
+            and self.lambda_v.device == g_v.device
+            and self.lambda_h.dtype == g_h.dtype
+            and self.lambda_v.dtype == g_v.dtype
+        )
+
+    def _update_capacity_al_lambda(self, g_h, g_v, placement_iteration_id):
+        if placement_iteration_id is None:
+            raise RuntimeError(
+                "capacity AL lambda update requires placement_iteration_id"
+            )
+        iteration = int(placement_iteration_id)
+        if self._capacity_al_last_update_iter == iteration:
+            return False
+
+        with torch.no_grad():
+            for lambda_map, residual in (
+                (self.lambda_h, g_h.detach()),
+                (self.lambda_v, g_v.detach()),
+            ):
+                clipped = residual.clamp(min=-1.0, max=1.0)
+                delta = (
+                    self._capacity_al_positive_step * torch.relu(clipped)
+                    + self._capacity_al_negative_step * torch.minimum(
+                        clipped, torch.zeros_like(clipped)
+                    )
+                )
+                lambda_map.add_(self._capacity_al_rho * delta)
+                lambda_map.clamp_(min=0.0, max=self._capacity_al_lambda_max)
+
+        self._capacity_al_last_update_iter = iteration
+        self._capacity_al_update_count += 1
+        return True
+
+    def _capacity_al_source_maps(
+        self,
+        g_h,
+        g_v,
+        *,
+        update_lambda=False,
+        placement_iteration_id=None,
+        reset_key=None,
+    ):
+        g_h_detached = g_h.detach()
+        g_v_detached = g_v.detach()
+        if not self.capacity_al_enable:
+            self.last_al_stats = {
+                "enabled": False,
+                "source_h_max": _scalar_stat(torch.relu(g_h_detached), "max"),
+                "source_v_max": _scalar_stat(torch.relu(g_v_detached), "max"),
+            }
+            return torch.relu(g_h), torch.relu(g_v)
+
+        if update_lambda:
+            self._ensure_capacity_al_state(g_h_detached, g_v_detached, reset_key)
+            lambda_h_t = self.lambda_h.detach().clone()
+            lambda_v_t = self.lambda_v.detach().clone()
+            reset_reason = self._capacity_al_last_reset_reason
+        elif self._capacity_al_state_matches(g_h_detached, g_v_detached, reset_key):
+            lambda_h_t = self.lambda_h.detach().clone()
+            lambda_v_t = self.lambda_v.detach().clone()
+            reset_reason = self._capacity_al_last_reset_reason
+        else:
+            lambda_h_t = torch.zeros_like(g_h_detached)
+            lambda_v_t = torch.zeros_like(g_v_detached)
+            reset_reason = "read_only_missing_or_stale_state"
+        q_h = torch.relu(lambda_h_t + self._capacity_al_rho * g_h)
+        q_v = torch.relu(lambda_v_t + self._capacity_al_rho * g_v)
+
+        updated = False
+        if update_lambda:
+            updated = self._update_capacity_al_lambda(
+                g_h_detached,
+                g_v_detached,
+                placement_iteration_id,
+            )
+
+        q_h_detached = q_h.detach()
+        q_v_detached = q_v.detach()
+        active_memory_h = (q_h_detached > 0) & (g_h_detached <= 0)
+        active_memory_v = (q_v_detached > 0) & (g_v_detached <= 0)
+        g_h_pos_bins = _positive_count(g_h_detached)
+        g_v_pos_bins = _positive_count(g_v_detached)
+        g_h_bins = int(g_h_detached.numel())
+        g_v_bins = int(g_v_detached.numel())
+        self.last_al_stats = {
+            "enabled": True,
+            "rho": float(self._capacity_al_rho),
+            "lambda_max": float(self._capacity_al_lambda_max),
+            "updated": bool(updated),
+            "placement_iteration_id": (
+                None if placement_iteration_id is None else int(placement_iteration_id)
+            ),
+            "last_update_iter": self._capacity_al_last_update_iter,
+            "update_count": int(self._capacity_al_update_count),
+            "reset_count": int(self._capacity_al_reset_count),
+            "reset_reason": reset_reason,
+            "g_h_max": _scalar_stat(torch.relu(g_h_detached), "max"),
+            "g_v_max": _scalar_stat(torch.relu(g_v_detached), "max"),
+            "g_h_sum": _scalar_stat(torch.relu(g_h_detached), "sum"),
+            "g_v_sum": _scalar_stat(torch.relu(g_v_detached), "sum"),
+            "g_h_pos_bins": g_h_pos_bins,
+            "g_v_pos_bins": g_v_pos_bins,
+            "g_h_bins": g_h_bins,
+            "g_v_bins": g_v_bins,
+            "g_h_pos_ratio": float(g_h_pos_bins) / max(float(g_h_bins), 1.0),
+            "g_v_pos_ratio": float(g_v_pos_bins) / max(float(g_v_bins), 1.0),
+            "q_h_max": _scalar_stat(q_h_detached, "max"),
+            "q_v_max": _scalar_stat(q_v_detached, "max"),
+            "q_h_sum": _scalar_stat(q_h_detached, "sum"),
+            "q_v_sum": _scalar_stat(q_v_detached, "sum"),
+            "q_h_pos_bins": _positive_count(q_h_detached),
+            "q_v_pos_bins": _positive_count(q_v_detached),
+            "lambda_h_max": _scalar_stat(lambda_h_t, "max"),
+            "lambda_v_max": _scalar_stat(lambda_v_t, "max"),
+            "lambda_h_sum": _scalar_stat(lambda_h_t, "sum"),
+            "lambda_v_sum": _scalar_stat(lambda_v_t, "sum"),
+            "lambda_h_next_max": _scalar_stat(self.lambda_h, "max"),
+            "lambda_v_next_max": _scalar_stat(self.lambda_v, "max"),
+            "lambda_h_next_sum": _scalar_stat(self.lambda_h, "sum"),
+            "lambda_v_next_sum": _scalar_stat(self.lambda_v, "sum"),
+            "active_memory_bins_h": int(active_memory_h.sum().item()),
+            "active_memory_bins_v": int(active_memory_v.sum().item()),
+        }
+        return q_h, q_v
     
     def _init_bins(self, device, dtype):
         """Initialize bin centers and padding mask."""
@@ -1143,6 +1469,7 @@ class LShapeElectricPotential(nn.Module):
                 dtype=self.bin_center_x.dtype
             )
         self.target_density = target_density
+        self.reset_capacity_al_state("target_density_changed")
         if self.log_verbose >= 2:
             logger.info(
                 f"Set target_density from routing supply map: "
@@ -1170,6 +1497,7 @@ class LShapeElectricPotential(nn.Module):
                     dtype=self.bin_center_x.dtype
                 )
             self.target_demand = target_demand
+            self.reset_capacity_al_state("target_demand_changed")
             if isinstance(self.area_per_track, torch.Tensor):
                 self.area_per_track.zero_()
             if self.log_verbose >= 2:
@@ -1196,6 +1524,7 @@ class LShapeElectricPotential(nn.Module):
                 dtype=self.bin_center_x.dtype,
             )
         self.raw_wire_demand_map = raw_wire_demand_map
+        self.reset_capacity_al_state("raw_wire_demand_changed")
         if isinstance(self.area_per_track, torch.Tensor):
             self.area_per_track.zero_()
         if self.log_verbose >= 2:
@@ -1221,6 +1550,7 @@ class LShapeElectricPotential(nn.Module):
                 dtype=self.bin_center_x.dtype,
             )
         self.supply_original = supply_original
+        self.reset_capacity_al_state("supply_original_changed")
         if self.log_verbose >= 2:
             logger.info(
                 "Set supply_original from theoretical routing capacity map: min=%.3f, max=%.3f, mean=%.3f",
@@ -1244,6 +1574,7 @@ class LShapeElectricPotential(nn.Module):
                 dtype=self.bin_center_x.dtype,
             )
         self.fix_usage_map = fix_usage_map
+        self.reset_capacity_al_state("fix_usage_changed")
         if self.log_verbose >= 2:
             logger.info(
                 "Set fix_usage_map from fixed routing usage map: min=%.3f, max=%.3f, mean=%.3f",
@@ -1292,6 +1623,8 @@ class LShapeElectricPotential(nn.Module):
                     dtype=self.bin_center_x.dtype,
                 )
             setattr(self, name, value)
+        if any(value is not None for value in updates.values()):
+            self.reset_capacity_al_state("directional_targets_changed")
     
     def _init_dct(self, device, dtype):
         """Initialize DCT related parameters."""
@@ -1384,7 +1717,16 @@ class LShapeElectricPotential(nn.Module):
             sorted_segment_map
         )
     
-    def forward(self, segment_pos, segment_size_x, segment_size_y, segment_is_horizontal=None, segment_weight=None):
+    def forward(
+        self,
+        segment_pos,
+        segment_size_x,
+        segment_size_y,
+        segment_is_horizontal=None,
+        segment_weight=None,
+        update_capacity_al_lambda=False,
+        placement_iteration_id=None,
+    ):
         """
         Compute electric potential energy for routing segments.
         
@@ -1429,6 +1771,31 @@ class LShapeElectricPotential(nn.Module):
             segment_is_horizontal = segment_is_horizontal.to(segment_pos.device)
         if isinstance(segment_weight, torch.Tensor) and segment_weight.device != segment_pos.device:
             segment_weight = segment_weight.to(segment_pos.device)
+        if self.capacity_al_enable:
+            required_maps = (
+                self.supply_original_h,
+                self.supply_original_v,
+                self.fix_usage_map_h,
+                self.fix_usage_map_v,
+            )
+            if not all(isinstance(value, torch.Tensor) for value in required_maps):
+                raise RuntimeError(
+                    "l_shape_capacity_al_enable requires H/V capacity and fixed-usage maps"
+                )
+            if not (
+                isinstance(segment_is_horizontal, torch.Tensor)
+                and int(segment_is_horizontal.numel()) == int(num_segments)
+            ):
+                raise RuntimeError(
+                    "l_shape_capacity_al_enable requires H/V segment directions"
+                )
+        capacity_al_reset_key = self._capacity_al_key_from_maps(
+            self.supply_original_h,
+            self.supply_original_v,
+            self.fix_usage_map_h,
+            self.fix_usage_map_v,
+            extra_key=(bool(self.capacity_al_enable),),
+        )
         
         # Compute electric potential
         SegmentElectricPotentialFunction.profile_enabled = self.profile_enabled
@@ -1484,7 +1851,11 @@ class LShapeElectricPotential(nn.Module):
             self.idct2,
             self.idct_idxst,
             self.idxst_idct,
-            self.fast_mode
+            self.fast_mode,
+            self,
+            bool(update_capacity_al_lambda),
+            placement_iteration_id,
+            capacity_al_reset_key,
         )
         self.last_demand_supply_ratio = getattr(
             SegmentElectricPotentialFunction,
@@ -1644,6 +2015,7 @@ def create_l_shape_electric_potential(
     fast_mode=False,
     profile_enabled=False,
     log_verbose=0,
+    capacity_al_enable=False,
 ):
     """
     Factory function to create LShapeElectricPotential.
@@ -1692,4 +2064,5 @@ def create_l_shape_electric_potential(
         fast_mode=fast_mode,
         profile_enabled=profile_enabled,
         log_verbose=log_verbose,
+        capacity_al_enable=capacity_al_enable,
     )

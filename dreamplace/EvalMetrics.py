@@ -90,6 +90,31 @@ class EvalMetrics(object):
         self.l_shape_overflow_ratio = None
         self.l_shape_overflow_ema = None
         self.l_shape_overflow_max_density = None
+        self.l_shape_capacity_al_enabled = None
+        self.l_shape_capacity_al_updated = None
+        self.l_shape_capacity_al_g_h_max = None
+        self.l_shape_capacity_al_g_v_max = None
+        self.l_shape_capacity_al_g_h_sum = None
+        self.l_shape_capacity_al_g_v_sum = None
+        self.l_shape_capacity_al_g_h_pos_ratio = None
+        self.l_shape_capacity_al_g_v_pos_ratio = None
+        self.l_shape_capacity_al_q_h_max = None
+        self.l_shape_capacity_al_q_v_max = None
+        self.l_shape_capacity_al_q_h_sum = None
+        self.l_shape_capacity_al_q_v_sum = None
+        self.l_shape_capacity_al_lambda_h_max = None
+        self.l_shape_capacity_al_lambda_v_max = None
+        self.l_shape_capacity_al_lambda_h_sum = None
+        self.l_shape_capacity_al_lambda_v_sum = None
+        self.l_shape_capacity_al_energy_h = None
+        self.l_shape_capacity_al_energy_v = None
+        self.l_shape_capacity_al_energy_total = None
+        self.l_shape_capacity_al_pq_h_min = None
+        self.l_shape_capacity_al_pq_h_max = None
+        self.l_shape_capacity_al_pq_v_min = None
+        self.l_shape_capacity_al_pq_v_max = None
+        self.l_shape_capacity_al_active_memory_bins_h = None
+        self.l_shape_capacity_al_active_memory_bins_v = None
         self.l_shape_log_verbose = 0
         self.soft_l_diag_count = None
         self.soft_l_mean_cost_gap = None
@@ -208,6 +233,34 @@ class EvalMetrics(object):
                 content += ", LOvEma %.6E" % (self.l_shape_overflow_ema)
             if self.l_shape_overflow_max_density is not None:
                 content += ", LMaxDen %.6E" % (self.l_shape_overflow_max_density)
+            if self.l_shape_capacity_al_energy_total is not None:
+                content += ", LCapALE %.6E" % (
+                    self.l_shape_capacity_al_energy_total
+                )
+            if self.l_shape_capacity_al_q_h_max is not None:
+                content += ", LCapALQHMax %.6E" % (
+                    self.l_shape_capacity_al_q_h_max
+                )
+            if self.l_shape_capacity_al_lambda_h_max is not None:
+                content += ", LCapALLamHMax %.6E" % (
+                    self.l_shape_capacity_al_lambda_h_max
+                )
+            if self.l_shape_capacity_al_g_h_sum is not None:
+                content += ", LCapALGHSum %.6E" % (
+                    self.l_shape_capacity_al_g_h_sum
+                )
+            if self.l_shape_capacity_al_g_h_pos_ratio is not None:
+                content += ", LCapALGHRatio %.4f" % (
+                    self.l_shape_capacity_al_g_h_pos_ratio
+                )
+            if self.l_shape_capacity_al_g_v_sum is not None:
+                content += ", LCapALGVSum %.6E" % (
+                    self.l_shape_capacity_al_g_v_sum
+                )
+            if self.l_shape_capacity_al_g_v_pos_ratio is not None:
+                content += ", LCapALGVRatio %.4f" % (
+                    self.l_shape_capacity_al_g_v_pos_ratio
+                )
             if self.soft_l_diag_count is not None:
                 content += ", SoftDiag %d" % (self.soft_l_diag_count)
             if self.soft_l_mean_cost_gap is not None:

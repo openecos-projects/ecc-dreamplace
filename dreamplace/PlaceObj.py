@@ -473,6 +473,7 @@ class PlaceObj(nn.Module):
         self.l_shape_last_sched_sigma = None
         self.l_shape_last_sched_iter_diff = None
         self.l_shape_last_sched_active = None
+        self.l_shape_capacity_al_last_summary = {}
         self.soft_l_last_summary = {}
         self._l_shape_auto_disabled = False
         self._l_shape_auto_disable_state = {}
@@ -494,6 +495,7 @@ class PlaceObj(nn.Module):
         self.l_shape_last_sched_sigma = None
         self.l_shape_last_sched_iter_diff = None
         self.l_shape_last_sched_active = None
+        self.l_shape_capacity_al_last_summary = {}
 
     @staticmethod
     def _telemetry_scalar(value):
@@ -681,7 +683,13 @@ class PlaceObj(nn.Module):
                             f"init_weight={self.l_shape_routability_weight.item():.2e}, "
                             f"target_grad_ratio={self.l_shape_grad_target_ratio}")
     
-    def l_shape_routability_obj(self, pos, use_l_direction=True):
+    def l_shape_routability_obj(
+        self,
+        pos,
+        use_l_direction=True,
+        update_capacity_al_lambda=False,
+        placement_iteration_id=None,
+    ):
         """
         计算L形routability代价
         
@@ -710,6 +718,8 @@ class PlaceObj(nn.Module):
                 self.op_collections.steiner_topo_op,
                 self.op_collections.pin_pos_op,
                 use_l_direction=use_l_direction,
+                update_capacity_al_lambda=update_capacity_al_lambda,
+                placement_iteration_id=placement_iteration_id,
             )
     
     def get_l_shape_density_map(self, pos, use_l_direction=True):
@@ -2002,6 +2012,7 @@ class PlaceObj(nn.Module):
         self.l_shape_last_sched_sigma = None
         self.l_shape_last_sched_iter_diff = None
         self.l_shape_last_sched_active = None
+        self.l_shape_capacity_al_last_summary = {}
         self.soft_l_last_summary = {}
         
         # ========== L形Routability梯度 ==========
@@ -2033,7 +2044,14 @@ class PlaceObj(nn.Module):
                 logger=logging,
                 iteration=current_iteration,
             ):
-                l_shape_cost = self.l_shape_routability_obj(pos, use_l_direction=True)
+                l_shape_cost = self.l_shape_routability_obj(
+                    pos,
+                    use_l_direction=True,
+                    update_capacity_al_lambda=bool(
+                        getattr(self.params, "l_shape_capacity_al_enable", False)
+                    ),
+                    placement_iteration_id=current_iteration,
+                )
             with profile_scope(
                 self.params,
                 "place_obj.l_shape_cost_backward",
@@ -2374,6 +2392,50 @@ class PlaceObj(nn.Module):
                 int(sched_iter_diff) if sched_iter_diff is not None else None
             )
             self.l_shape_last_sched_active = bool(sched_active)
+            density_op = getattr(self.l_shape_routability_op, "density_op", None)
+            al_stats = getattr(density_op, "last_al_stats", None)
+            if isinstance(al_stats, dict):
+                self.l_shape_capacity_al_last_summary = {
+                    key: self._telemetry_scalar(value)
+                    for key, value in al_stats.items()
+                    if key != "reset_reason"
+                }
+                reset_reason = al_stats.get("reset_reason")
+                if reset_reason is not None:
+                    self.l_shape_capacity_al_last_summary["reset_reason"] = str(
+                        reset_reason
+                    )
+                if (
+                    al_stats.get("enabled")
+                    and l_shape_log_verbose(self.params) >= 2
+                ):
+                    logging.info(
+                        "L-shape capacity AL telemetry: "
+                        "base_grad_norm=%.4e l_shape_grad_norm=%.4e "
+                        "l_shape_routability_weight=%.4e weighted_grad_ratio=%s "
+                        "E_total=%s q_h_max=%s q_v_max=%s lambda_h_max=%s lambda_v_max=%s",
+                        base_grad_norm_value,
+                        l_shape_grad_norm_value,
+                        current_weight,
+                        str(grad_ratio_value),
+                        str(
+                            self.l_shape_capacity_al_last_summary.get(
+                                "E_cap_smooth_total"
+                            )
+                        ),
+                        str(self.l_shape_capacity_al_last_summary.get("q_h_max")),
+                        str(self.l_shape_capacity_al_last_summary.get("q_v_max")),
+                        str(
+                            self.l_shape_capacity_al_last_summary.get(
+                                "lambda_h_max"
+                            )
+                        ),
+                        str(
+                            self.l_shape_capacity_al_last_summary.get(
+                                "lambda_v_max"
+                            )
+                        ),
+                    )
             soft_debug = getattr(self.l_shape_routability_op, "cached_soft_debug", None)
             if isinstance(soft_debug, dict):
                 self.soft_l_last_summary = {
@@ -2404,7 +2466,6 @@ class PlaceObj(nn.Module):
                         "same_net_topo_exact_equal_edges",
                     )
                 }
-                density_op = getattr(self.l_shape_routability_op, "density_op", None)
                 self.soft_l_last_summary["current_demand_supply_ratio"] = (
                     self._telemetry_scalar(
                         getattr(density_op, "last_demand_supply_ratio", None)

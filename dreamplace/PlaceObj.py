@@ -101,92 +101,111 @@ class PreconditionOp:
         It is tricky for this parameter to increase.
         """
         with torch.no_grad():
-            # The preconditioning step in python is time-consuming, as in each gradient
-            # pass, the total net weight should be re-calculated.
-            # sum_pin_weights_in_nodes = self.op_collections.pws_op(
-            #     self.data_collections.net_weights
-            # )
-            if density_weight.size(0) == 1:
-                precond = (
-                    # sum_pin_weights_in_nodes
-                    0 + self.alpha * density_weight * self.data_collections.node_areas
-                )
-            else:
-                # only precondition the non fence region
-                node_areas = self.data_collections.node_areas.clone()
-
-                mask = self.data_collections.node2fence_region_map[
-                    : self.placedb.num_movable_nodes
-                ] >= len(self.placedb.regions)
-                node_areas[: self.placedb.num_movable_nodes].masked_scatter_(
-                    mask,
-                    node_areas[: self.placedb.num_movable_nodes][mask]
-                    * density_weight[-1],
-                )
-                filler_beg, filler_end = self.placedb.filler_start_map[-2:]
-                node_areas[
-                    self.placedb.num_nodes
-                    - self.placedb.num_filler_nodes
-                    + filler_beg : self.placedb.num_nodes
-                    - self.placedb.num_filler_nodes
-                    + filler_end
-                ] *= density_weight[-1]
-                precond = sum_pin_weights_in_nodes + self.alpha * node_areas
-
-            precond.clamp_(min=1.0)
-            grad[self.placedb.num_movable_nodes : self.placedb.num_physical_nodes] = 0
-            grad[
-                self.placedb.num_nodes
-                + self.placedb.num_movable_nodes : self.placedb.num_nodes
-                + self.placedb.num_physical_nodes
-            ] = 0
-            grad[0 : self.placedb.num_nodes].div_(precond)
-            grad[self.placedb.num_nodes : self.placedb.num_nodes * 2].div_(precond)
-            # grad = grad.view(2, -1)
-            # grad[0, self.placedb.num_movable_nodes:self.placedb.num_nodes] = 0
-            # grad[1, self.placedb.num_movable_nodes:self.placedb.num_nodes] = 0
-            # grad = grad.view(-1)
-            # stop gradients for terminated electric field
-            if update_mask is not None:
-                grad = grad.view(2, -1)
-                update_mask = ~update_mask
-                movable_mask = update_mask[self.movablenode2fence_region_map_clamp]
-                filler_mask = update_mask[self.filler2fence_region_map]
-                grad[0, : self.placedb.num_movable_nodes].masked_fill_(movable_mask, 0)
-                grad[1, : self.placedb.num_movable_nodes].masked_fill_(movable_mask, 0)
-                grad[
-                    0, self.placedb.num_nodes - self.placedb.num_filler_nodes :
-                ].masked_fill_(filler_mask, 0)
-                grad[
-                    1, self.placedb.num_nodes - self.placedb.num_filler_nodes :
-                ].masked_fill_(filler_mask, 0)
-                grad = grad.view(-1)
-            if fix_nodes_mask is not None:
-                grad = grad.view(2, -1)
-                grad[0, : self.placedb.num_movable_nodes].masked_fill_(
-                    fix_nodes_mask[: self.placedb.num_movable_nodes], 0
-                )
-                grad[1, : self.placedb.num_movable_nodes].masked_fill_(
-                    fix_nodes_mask[: self.placedb.num_movable_nodes], 0
-                )
-                grad = grad.view(-1)
-            self.iteration += 1
-
-            # only work in benchmarks without fence region, assume overflow has been updated
-            if (
-                len(self.placedb.regions) > 0
-                and self.overflows
-                and self.overflows[-1].max() < 0.3
-                and self.alpha < 1024
-            ):
-                if (self.iteration % 20) == 0:
-                    self.alpha *= 2
-                    logging.info(
-                        "preconditioning alpha = %g, best_overflow %g, overflow %g"
-                        % (self.alpha, self.best_overflow, self.overflows[-1])
-                    )
-
+            precond = self._build_precondition(density_weight)
+            self._apply_precondition_to_grad(
+                grad, precond, update_mask=update_mask, fix_nodes_mask=fix_nodes_mask
+            )
+            self._advance_state()
         return grad
+
+    def apply_components(
+        self, grads, density_weight, update_mask=None, fix_nodes_mask=None
+    ):
+        """Precondition multiple gradient components with one shared state step."""
+        with torch.no_grad():
+            precond = self._build_precondition(density_weight)
+            outputs = []
+            for grad in grads:
+                component = grad.clone()
+                self._apply_precondition_to_grad(
+                    component,
+                    precond,
+                    update_mask=update_mask,
+                    fix_nodes_mask=fix_nodes_mask,
+                )
+                outputs.append(component)
+            self._advance_state()
+        return outputs
+
+    def _build_precondition(self, density_weight):
+        # The original pin-weight precondition term is disabled in this branch.
+        if density_weight.size(0) == 1:
+            precond = self.alpha * density_weight * self.data_collections.node_areas
+        else:
+            # only precondition the non fence region
+            node_areas = self.data_collections.node_areas.clone()
+
+            mask = self.data_collections.node2fence_region_map[
+                : self.placedb.num_movable_nodes
+            ] >= len(self.placedb.regions)
+            node_areas[: self.placedb.num_movable_nodes].masked_scatter_(
+                mask,
+                node_areas[: self.placedb.num_movable_nodes][mask]
+                * density_weight[-1],
+            )
+            filler_beg, filler_end = self.placedb.filler_start_map[-2:]
+            node_areas[
+                self.placedb.num_nodes
+                - self.placedb.num_filler_nodes
+                + filler_beg : self.placedb.num_nodes
+                - self.placedb.num_filler_nodes
+                + filler_end
+            ] *= density_weight[-1]
+            precond = self.alpha * node_areas
+
+        return precond.clamp(min=1.0)
+
+    def _apply_precondition_to_grad(
+        self, grad, precond, update_mask=None, fix_nodes_mask=None
+    ):
+        grad[self.placedb.num_movable_nodes : self.placedb.num_physical_nodes] = 0
+        grad[
+            self.placedb.num_nodes
+            + self.placedb.num_movable_nodes : self.placedb.num_nodes
+            + self.placedb.num_physical_nodes
+        ] = 0
+        grad[0 : self.placedb.num_nodes].div_(precond)
+        grad[self.placedb.num_nodes : self.placedb.num_nodes * 2].div_(precond)
+        # stop gradients for terminated electric field
+        if update_mask is not None:
+            grad2 = grad.view(2, -1)
+            stop_mask = ~update_mask
+            movable_mask = stop_mask[self.movablenode2fence_region_map_clamp]
+            filler_mask = stop_mask[self.filler2fence_region_map]
+            grad2[0, : self.placedb.num_movable_nodes].masked_fill_(movable_mask, 0)
+            grad2[1, : self.placedb.num_movable_nodes].masked_fill_(movable_mask, 0)
+            grad2[
+                0, self.placedb.num_nodes - self.placedb.num_filler_nodes :
+            ].masked_fill_(filler_mask, 0)
+            grad2[
+                1, self.placedb.num_nodes - self.placedb.num_filler_nodes :
+            ].masked_fill_(filler_mask, 0)
+        if fix_nodes_mask is not None:
+            grad2 = grad.view(2, -1)
+            grad2[0, : self.placedb.num_movable_nodes].masked_fill_(
+                fix_nodes_mask[: self.placedb.num_movable_nodes], 0
+            )
+            grad2[1, : self.placedb.num_movable_nodes].masked_fill_(
+                fix_nodes_mask[: self.placedb.num_movable_nodes], 0
+            )
+        return grad
+
+    def _advance_state(self):
+        self.iteration += 1
+
+        # only work in benchmarks without fence region, assume overflow has been updated
+        if (
+            len(self.placedb.regions) > 0
+            and self.overflows
+            and self.overflows[-1].max() < 0.3
+            and self.alpha < 1024
+        ):
+            if (self.iteration % 20) == 0:
+                self.alpha *= 2
+                logging.info(
+                    "preconditioning alpha = %g, best_overflow %g, overflow %g"
+                    % (self.alpha, self.best_overflow, self.overflows[-1])
+                )
 
 
 class PlaceObj(nn.Module):
@@ -425,7 +444,15 @@ class PlaceObj(nn.Module):
             device=self.data_collections.pos[0].device,
         )
         # 目标：L-shape梯度范数占density梯度范数的比例
-        self.l_shape_grad_target_ratio = getattr(params, 'l_shape_grad_target_ratio', 0.3) 
+        l_shape_grad_target_ratio = float(
+            getattr(params, "l_shape_grad_target_ratio", 0.2)
+        )
+        l_shape_grad_target_ratio_max = max(
+            0.0, float(getattr(params, "l_shape_grad_target_ratio_max", 0.2))
+        )
+        self.l_shape_grad_target_ratio = max(
+            0.0, min(l_shape_grad_target_ratio_max, l_shape_grad_target_ratio)
+        )
         # Filler reverse force: push fillers toward congested areas using L-shape field
         self.l_shape_filler_reverse_force = float(
             getattr(params, "l_shape_filler_reverse_force", 0.0)
@@ -467,6 +494,7 @@ class PlaceObj(nn.Module):
         self.l_shape_last_sched_weight = None
         self.l_shape_last_cap_active = None
         self.l_shape_last_base_grad_norm = None
+        self.l_shape_last_grad_raw_norm = None
         self.l_shape_last_grad_norm = None
         self.l_shape_last_grad_ratio = None
         self.l_shape_last_sched_base_weight = None
@@ -474,6 +502,7 @@ class PlaceObj(nn.Module):
         self.l_shape_last_sched_iter_diff = None
         self.l_shape_last_sched_active = None
         self.l_shape_capacity_al_last_summary = {}
+        self.l_shape_macro_exclusion_last_summary = {}
         self.soft_l_last_summary = {}
         self._l_shape_auto_disabled = False
         self._l_shape_auto_disable_state = {}
@@ -490,12 +519,16 @@ class PlaceObj(nn.Module):
         self.l_shape_last_target_weight = None
         self.l_shape_last_sched_weight = None
         self.l_shape_last_cap_active = None
+        self.l_shape_last_base_grad_norm = None
+        self.l_shape_last_grad_raw_norm = None
+        self.l_shape_last_grad_norm = None
         self.l_shape_last_grad_ratio = None
         self.l_shape_last_sched_base_weight = None
         self.l_shape_last_sched_sigma = None
         self.l_shape_last_sched_iter_diff = None
         self.l_shape_last_sched_active = None
         self.l_shape_capacity_al_last_summary = {}
+        self.l_shape_macro_exclusion_last_summary = {}
 
     @staticmethod
     def _telemetry_scalar(value):
@@ -551,6 +584,18 @@ class PlaceObj(nn.Module):
         lhs = 1.0 - logistic(iteration_diff, smooth_r, route_iter_budget - half_iter)
         rhs = logistic(iteration_diff, smooth_r, half_iter)
         return max(lhs + rhs - 1.0, 0.0)
+
+    @staticmethod
+    def _compute_l_shape_target_weight(
+        base_grad_norm_value, l_shape_grad_norm_value, target_ratio
+    ):
+        if base_grad_norm_value <= 1e-10 or l_shape_grad_norm_value <= 1e-10:
+            return None
+        return (
+            float(target_ratio)
+            * float(base_grad_norm_value)
+            / (float(l_shape_grad_norm_value) + 1e-12)
+        )
 
     def start_l_shape_weight_schedule(self, iteration):
         self.set_l_shape_outer_iteration(iteration)
@@ -1989,16 +2034,20 @@ class PlaceObj(nn.Module):
         ):
             obj.backward()
         assert torch.isnan(pos.grad).any() == False, "Gradient contains NaN"
-        with profile_scope(
-            profile_active,
-            "place_obj.base_precondition",
-            tensor=pos.grad,
-            logger=logging,
-            iteration=self._l_shape_outer_iteration,
-        ):
-            self.op_collections.precondition_op(
-                pos.grad, self.density_weight, self.update_mask, self.fix_nodes_mask
-            )
+        l_shape_active = (
+            self.use_l_shape_routability and self.l_shape_routability_op is not None
+        )
+        if not l_shape_active:
+            with profile_scope(
+                profile_active,
+                "place_obj.base_precondition",
+                tensor=pos.grad,
+                logger=logging,
+                iteration=self._l_shape_outer_iteration,
+            ):
+                self.op_collections.precondition_op(
+                    pos.grad, self.density_weight, self.update_mask, self.fix_nodes_mask
+                )
         self.l_shape_last_cost = None
         self.l_shape_last_weighted_cost = None
         self.l_shape_last_weight = None
@@ -2006,6 +2055,7 @@ class PlaceObj(nn.Module):
         self.l_shape_last_sched_weight = None
         self.l_shape_last_cap_active = None
         self.l_shape_last_base_grad_norm = None
+        self.l_shape_last_grad_raw_norm = None
         self.l_shape_last_grad_norm = None
         self.l_shape_last_grad_ratio = None
         self.l_shape_last_sched_base_weight = None
@@ -2016,22 +2066,20 @@ class PlaceObj(nn.Module):
         self.soft_l_last_summary = {}
         
         # ========== L形Routability梯度 ==========
-        if self.use_l_shape_routability and self.l_shape_routability_op is not None:
-            # 保存 wirelength + density 的梯度
+        if l_shape_active:
+            # 保存 wirelength + density 的 raw 梯度，后面与 L-shape 梯度共享 precondition
             current_iteration = self._l_shape_outer_iteration
             debug_hash_op = (
                 self.l_shape_routability_op
                 if hasattr(self.l_shape_routability_op, "log_debug_hash")
                 else None
             )
-            base_grad = pos.grad.data.clone()
-            base_grad_norm = base_grad.norm(p=2)
-            base_grad_norm_value = float(base_grad_norm.item())
+            base_grad_raw = pos.grad.data.clone()
             if debug_hash_op is not None:
                 debug_hash_op.log_debug_hash(
-                    "place_obj.base_grad",
-                    base_grad,
-                    norm="%.9e" % base_grad_norm_value,
+                    "place_obj.base_grad_raw",
+                    base_grad_raw,
+                    norm="%.9e" % float(base_grad_raw.norm(p=2).item()),
                 )
             
             pos.grad.zero_()
@@ -2063,17 +2111,48 @@ class PlaceObj(nn.Module):
             
             # 获取原始 L-shape 梯度范数
             l_shape_grad_raw = pos.grad.data.clone()
-            l_shape_grad_norm = l_shape_grad_raw.norm(p=2)
-            l_shape_grad_norm_value = float(l_shape_grad_norm.item())
+            l_shape_grad_raw_norm = l_shape_grad_raw.norm(p=2)
+            l_shape_grad_raw_norm_value = float(l_shape_grad_raw_norm.item())
             if debug_hash_op is not None:
                 debug_hash_op.log_debug_hash(
                     "place_obj.l_shape_grad_raw",
                     l_shape_grad_raw,
+                    norm="%.9e" % l_shape_grad_raw_norm_value,
+                )
+            with profile_scope(
+                profile_active,
+                "place_obj.shared_precondition",
+                tensor=pos.grad,
+                logger=logging,
+                iteration=current_iteration,
+            ):
+                base_grad, l_shape_grad = (
+                    self.op_collections.precondition_op.apply_components(
+                        [base_grad_raw, l_shape_grad_raw],
+                        self.density_weight,
+                        self.update_mask,
+                        self.fix_nodes_mask,
+                    )
+                )
+            base_grad_norm = base_grad.norm(p=2)
+            l_shape_grad_norm = l_shape_grad.norm(p=2)
+            base_grad_norm_value = float(base_grad_norm.item())
+            l_shape_grad_norm_value = float(l_shape_grad_norm.item())
+            if debug_hash_op is not None:
+                debug_hash_op.log_debug_hash(
+                    "place_obj.base_grad_preconditioned",
+                    base_grad,
+                    norm="%.9e" % base_grad_norm_value,
+                )
+                debug_hash_op.log_debug_hash(
+                    "place_obj.l_shape_grad_preconditioned",
+                    l_shape_grad,
                     norm="%.9e" % l_shape_grad_norm_value,
                 )
             target_weight_value = None
             sched_weight_value = None
             cap_active = False
+            pos.grad.data.copy_(l_shape_grad)
 
             current_weight = float(self.l_shape_routability_weight.item())
             density_weight_scalar = self._get_l_shape_density_weight_scalar()
@@ -2094,13 +2173,14 @@ class PlaceObj(nn.Module):
                         self._l_shape_sched_active
                         and not self._l_shape_sched_initialized
                         and current_iteration is not None
-                        and l_shape_grad_norm > 1e-10
-                        and base_grad_norm > 1e-10
+                        and l_shape_grad_norm_value > 1e-10
+                        and base_grad_norm_value > 1e-10
                     ):
-                        target_weight = (
-                            self.l_shape_grad_target_ratio * base_grad_norm
-                            / (l_shape_grad_norm + 1e-12)
-                        ).item()
+                        target_weight = self._compute_l_shape_target_weight(
+                            base_grad_norm_value,
+                            l_shape_grad_norm_value,
+                            self.l_shape_grad_target_ratio,
+                        )
                         base_weight = target_weight / max(density_weight_scalar, 1e-12)
                         base_weight = max(
                             self.l_shape_weight_min,
@@ -2137,9 +2217,10 @@ class PlaceObj(nn.Module):
                         sched_weight_value = float(
                             density_weight_scalar * sched_base_weight
                         ) * float(sched_sigma)
-                        target_weight_value = float(
-                            self.l_shape_grad_target_ratio * base_grad_norm_value
-                            / (l_shape_grad_norm_value + 1e-12)
+                        target_weight_value = self._compute_l_shape_target_weight(
+                            base_grad_norm_value,
+                            l_shape_grad_norm_value,
+                            self.l_shape_grad_target_ratio,
                         )
                         new_weight = sched_weight_value
                         if target_weight_value is not None and new_weight > target_weight_value:
@@ -2175,11 +2256,12 @@ class PlaceObj(nn.Module):
             else:
                 # 自适应调整权重
                 # 目标: l_shape_grad_norm * weight ≈ target_ratio * base_grad_norm
-                if l_shape_grad_norm > 1e-10 and base_grad_norm > 1e-10:
-                    target_weight = (
-                        self.l_shape_grad_target_ratio * base_grad_norm
-                        / l_shape_grad_norm
-                    ).item()
+                if l_shape_grad_norm_value > 1e-10 and base_grad_norm_value > 1e-10:
+                    target_weight = self._compute_l_shape_target_weight(
+                        base_grad_norm_value,
+                        l_shape_grad_norm_value,
+                        self.l_shape_grad_target_ratio,
+                    )
                     target_weight_value = float(target_weight)
                     old_weight = current_weight
 
@@ -2189,7 +2271,7 @@ class PlaceObj(nn.Module):
                         if l_shape_log_verbose(self.params) >= 1:
                             logging.info(
                                 f"L-shape weight auto-initialized: {new_weight:.4e} "
-                                f"(base_grad={base_grad_norm:.4e}, l_shape_grad={l_shape_grad_norm:.4e})"
+                                f"(base_grad={base_grad_norm_value:.4e}, l_shape_grad={l_shape_grad_norm_value:.4e})"
                             )
                     else:
                         new_weight = (1 - self.l_shape_weight_momentum) * old_weight + \
@@ -2205,8 +2287,8 @@ class PlaceObj(nn.Module):
                     pos.grad.data.mul_(current_weight)
 
                     logging.debug(f"L-shape: cost={l_shape_cost.item():.4e}, "
-                                 f"grad_norm={l_shape_grad_norm:.4e}, "
-                                 f"base_grad_norm={base_grad_norm:.4e}, "
+                                 f"grad_norm={l_shape_grad_norm_value:.4e}, "
+                                 f"base_grad_norm={base_grad_norm_value:.4e}, "
                                  f"weight={old_weight:.4e}->{new_weight:.4e}")
                 else:
                     pos.grad.data.mul_(current_weight)
@@ -2380,6 +2462,7 @@ class PlaceObj(nn.Module):
             self.l_shape_last_sched_weight = sched_weight_value
             self.l_shape_last_cap_active = bool(cap_active)
             self.l_shape_last_base_grad_norm = base_grad_norm_value
+            self.l_shape_last_grad_raw_norm = l_shape_grad_raw_norm_value
             self.l_shape_last_grad_norm = l_shape_grad_norm_value
             self.l_shape_last_grad_ratio = grad_ratio_value
             self.l_shape_last_sched_base_weight = (
@@ -2412,10 +2495,12 @@ class PlaceObj(nn.Module):
                     logging.info(
                         "L-shape capacity AL telemetry: "
                         "base_grad_norm=%.4e l_shape_grad_norm=%.4e "
+                        "l_shape_grad_raw_norm=%.4e "
                         "l_shape_routability_weight=%.4e weighted_grad_ratio=%s "
                         "E_total=%s q_h_max=%s q_v_max=%s lambda_h_max=%s lambda_v_max=%s",
                         base_grad_norm_value,
                         l_shape_grad_norm_value,
+                        l_shape_grad_raw_norm_value,
                         current_weight,
                         str(grad_ratio_value),
                         str(
@@ -2433,6 +2518,86 @@ class PlaceObj(nn.Module):
                         str(
                             self.l_shape_capacity_al_last_summary.get(
                                 "lambda_v_max"
+                            )
+                        ),
+                    )
+            macro_stats = getattr(density_op, "last_macro_exclusion_stats", None)
+            if isinstance(macro_stats, dict):
+                self.l_shape_macro_exclusion_last_summary = {
+                    key: self._telemetry_scalar(value)
+                    for key, value in macro_stats.items()
+                    if key != "sources"
+                }
+                if (
+                    macro_stats.get("macro_exclusion_enabled")
+                    and l_shape_log_verbose(self.params) >= 2
+                ):
+                    logging.info(
+                        "L-shape macro exclusion telemetry: "
+                        "macro_count=%s macro_source_active_bins=%s "
+                        "macro_body_bins=%s macro_halo_bins=%s "
+                        "macro_source_max=%s macro_source_sum=%s "
+                        "macro_usage_bins=%s macro_usage_max=%s macro_usage_sum=%s "
+                        "macro_source_grid_shape=%s macro_source_coordinate_system=%s "
+                        "macro_set_source=%s",
+                        str(
+                            self.l_shape_macro_exclusion_last_summary.get(
+                                "macro_count"
+                            )
+                        ),
+                        str(
+                            self.l_shape_macro_exclusion_last_summary.get(
+                                "macro_source_active_bins"
+                            )
+                        ),
+                        str(
+                            self.l_shape_macro_exclusion_last_summary.get(
+                                "macro_body_bins"
+                            )
+                        ),
+                        str(
+                            self.l_shape_macro_exclusion_last_summary.get(
+                                "macro_halo_bins"
+                            )
+                        ),
+                        str(
+                            self.l_shape_macro_exclusion_last_summary.get(
+                                "macro_source_max"
+                            )
+                        ),
+                        str(
+                            self.l_shape_macro_exclusion_last_summary.get(
+                                "macro_source_sum"
+                            )
+                        ),
+                        str(
+                            self.l_shape_macro_exclusion_last_summary.get(
+                                "macro_usage_active_bins"
+                            )
+                        ),
+                        str(
+                            self.l_shape_macro_exclusion_last_summary.get(
+                                "macro_usage_max"
+                            )
+                        ),
+                        str(
+                            self.l_shape_macro_exclusion_last_summary.get(
+                                "macro_usage_sum"
+                            )
+                        ),
+                        str(
+                            self.l_shape_macro_exclusion_last_summary.get(
+                                "macro_source_grid_shape"
+                            )
+                        ),
+                        str(
+                            self.l_shape_macro_exclusion_last_summary.get(
+                                "macro_source_coordinate_system"
+                            )
+                        ),
+                        str(
+                            self.l_shape_macro_exclusion_last_summary.get(
+                                "macro_set_source"
                             )
                         ),
                     )

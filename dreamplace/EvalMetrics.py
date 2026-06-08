@@ -79,6 +79,7 @@ class EvalMetrics(object):
         self.l_shape_sched_weight = None
         self.l_shape_cap_active = None
         self.l_shape_base_grad_norm = None
+        self.l_shape_grad_raw_norm = None
         self.l_shape_grad_norm = None
         self.l_shape_grad_ratio = None
         self.l_shape_sched_base_weight = None
@@ -115,6 +116,22 @@ class EvalMetrics(object):
         self.l_shape_capacity_al_pq_v_max = None
         self.l_shape_capacity_al_active_memory_bins_h = None
         self.l_shape_capacity_al_active_memory_bins_v = None
+        self.l_shape_macro_exclusion_enabled = None
+        self.l_shape_macro_exclusion_macro_count = None
+        self.l_shape_macro_exclusion_body_bins = None
+        self.l_shape_macro_exclusion_halo_bins = None
+        self.l_shape_macro_exclusion_active_bins = None
+        self.l_shape_macro_exclusion_source_max = None
+        self.l_shape_macro_exclusion_source_sum = None
+        self.l_shape_macro_exclusion_body_source_max = None
+        self.l_shape_macro_exclusion_body_source_sum = None
+        self.l_shape_macro_exclusion_halo_source_max = None
+        self.l_shape_macro_exclusion_halo_source_sum = None
+        self.l_shape_macro_exclusion_usage_max = None
+        self.l_shape_macro_exclusion_usage_sum = None
+        self.l_shape_macro_exclusion_usage_bins = None
+        self.l_shape_macro_exclusion_dominates_bins = None
+        self.l_shape_macro_exclusion_routing_dominates_bins = None
         self.l_shape_log_verbose = 0
         self.soft_l_diag_count = None
         self.soft_l_mean_cost_gap = None
@@ -213,6 +230,12 @@ class EvalMetrics(object):
                 content += ", LWCap %.6E" % (self.l_shape_target_weight)
             if self.l_shape_cap_active is not None:
                 content += ", LWCapAct %d" % (1 if self.l_shape_cap_active else 0)
+            if self.l_shape_base_grad_norm is not None:
+                content += ", LBaseGrad %.6E" % (self.l_shape_base_grad_norm)
+            if self.l_shape_grad_norm is not None:
+                content += ", LGrad %.6E" % (self.l_shape_grad_norm)
+            if self.l_shape_grad_raw_norm is not None:
+                content += ", LGradRaw %.6E" % (self.l_shape_grad_raw_norm)
             if self.l_shape_grad_ratio is not None:
                 content += ", LGradRatio %.4f" % (self.l_shape_grad_ratio)
             if self.l_shape_sched_base_weight is not None:
@@ -260,6 +283,26 @@ class EvalMetrics(object):
             if self.l_shape_capacity_al_g_v_pos_ratio is not None:
                 content += ", LCapALGVRatio %.4f" % (
                     self.l_shape_capacity_al_g_v_pos_ratio
+                )
+            if self.l_shape_macro_exclusion_macro_count is not None:
+                content += ", LMacroCnt %d" % (
+                    self.l_shape_macro_exclusion_macro_count
+                )
+            if self.l_shape_macro_exclusion_active_bins is not None:
+                content += ", LMacroBins %d" % (
+                    self.l_shape_macro_exclusion_active_bins
+                )
+            if self.l_shape_macro_exclusion_source_max is not None:
+                content += ", LMacroMax %.6E" % (
+                    self.l_shape_macro_exclusion_source_max
+                )
+            if self.l_shape_macro_exclusion_usage_sum is not None:
+                content += ", LMacroUsage %.6E" % (
+                    self.l_shape_macro_exclusion_usage_sum
+                )
+            if self.l_shape_macro_exclusion_usage_bins is not None:
+                content += ", LMacroUsageBins %d" % (
+                    self.l_shape_macro_exclusion_usage_bins
                 )
             if self.soft_l_diag_count is not None:
                 content += ", SoftDiag %d" % (self.soft_l_diag_count)

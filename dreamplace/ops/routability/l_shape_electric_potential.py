@@ -31,6 +31,14 @@ import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 _PLOT_ITER = 0
+_MACRO_BODY_SOURCE_STRENGTH = 1.0
+_MACRO_HALO_SOURCE_STRENGTH = 0.25
+_MACRO_HALO_X = 0.0
+_MACRO_HALO_Y = 0.0
+_MACRO_USAGE_REFERENCE_QUANTILE = 0.95
+_MACRO_SET_SOURCE = "fixed_macro_mask_heuristic"
+_MACRO_COORDINATE_SYSTEM = "autodmp_scaled"
+_BOUNDARY_SOURCE_REFERENCE_QUANTILE = 0.95
 
 
 def _scalar_stat(tensor, op_name, default=0.0):
@@ -54,6 +62,169 @@ def _positive_count(tensor):
     return int((tensor.detach() > 0).sum().item())
 
 
+def _finite_quantile(tensor, quantile, default=0.0):
+    if not torch.is_tensor(tensor) or tensor.numel() == 0:
+        return default
+    values = tensor.detach().reshape(-1)
+    values = values[torch.isfinite(values)]
+    if values.numel() == 0:
+        return default
+    return float(torch.quantile(values.to(dtype=torch.float32), float(quantile)).item())
+
+
+def compute_macro_fixed_usage(
+    macro_source_map,
+    capacity_tracks,
+    quantile=_MACRO_USAGE_REFERENCE_QUANTILE,
+):
+    if not torch.is_tensor(macro_source_map) or not torch.is_tensor(capacity_tracks):
+        return None, 0.0
+    if macro_source_map.shape != capacity_tracks.shape:
+        raise RuntimeError(
+            "macro source map shape %s does not match capacity map shape %s"
+            % (tuple(macro_source_map.shape), tuple(capacity_tracks.shape))
+        )
+    capacity_local = capacity_tracks.clamp(min=0)
+    macro_fraction = macro_source_map.to(
+        device=capacity_tracks.device, dtype=capacity_tracks.dtype
+    ).clamp(min=0, max=1)
+    if not bool((macro_fraction > 0).any().item()):
+        return torch.zeros_like(capacity_tracks), 0.0
+    positive_capacity = capacity_local[capacity_local > 0]
+    reference_p95 = _finite_quantile(
+        positive_capacity,
+        quantile,
+        default=0.0,
+    )
+    if reference_p95 <= 0.0:
+        return torch.zeros_like(capacity_tracks), reference_p95
+    cap_value = torch.as_tensor(
+        reference_p95,
+        dtype=capacity_tracks.dtype,
+        device=capacity_tracks.device,
+    )
+    usage_per_full_macro_bin = torch.minimum(capacity_local, cap_value)
+    return macro_fraction * usage_per_full_macro_bin, reference_p95
+
+
+def build_boundary_source_map(
+    num_bins_x,
+    num_bins_y,
+    *,
+    width_bins=0,
+    strength=0.0,
+    dtype=torch.float32,
+):
+    shape = (int(num_bins_x), int(num_bins_y))
+    source_map = torch.zeros(shape, dtype=dtype)
+    width = max(int(width_bins), 0)
+    strength = max(float(strength), 0.0)
+    enabled = width > 0 and strength > 0.0 and shape[0] > 0 and shape[1] > 0
+    if enabled:
+        width_x = min(width, shape[0])
+        width_y = min(width, shape[1])
+        source_map[:width_x, :] = strength
+        source_map[shape[0] - width_x :, :] = strength
+        source_map[:, :width_y] = strength
+        source_map[:, shape[1] - width_y :] = strength
+    stats = {
+        "boundary_source_enabled": bool(enabled),
+        "boundary_source_width_bins": width,
+        "boundary_source_strength": strength,
+        "boundary_source_active_bins": _positive_count(source_map),
+        "boundary_source_max": _scalar_stat(source_map, "max"),
+        "boundary_source_sum": _scalar_stat(source_map, "sum"),
+        "boundary_source_grid_shape": shape,
+    }
+    return source_map, stats
+
+
+def compute_boundary_fixed_usage(
+    boundary_source_map,
+    capacity_tracks,
+    quantile=_BOUNDARY_SOURCE_REFERENCE_QUANTILE,
+):
+    if not torch.is_tensor(boundary_source_map) or not torch.is_tensor(capacity_tracks):
+        return None, 0.0
+    if boundary_source_map.shape != capacity_tracks.shape:
+        raise RuntimeError(
+            "boundary source map shape %s does not match capacity map shape %s"
+            % (tuple(boundary_source_map.shape), tuple(capacity_tracks.shape))
+        )
+    capacity_local = capacity_tracks.clamp(min=0)
+    boundary_fraction = boundary_source_map.to(
+        device=capacity_tracks.device, dtype=capacity_tracks.dtype
+    ).clamp(min=0, max=1)
+    if not bool((boundary_fraction > 0).any().item()):
+        return torch.zeros_like(capacity_tracks), 0.0
+    positive_capacity = capacity_local[capacity_local > 0]
+    reference_p95 = _finite_quantile(
+        positive_capacity,
+        quantile,
+        default=0.0,
+    )
+    if reference_p95 <= 0.0:
+        return torch.zeros_like(capacity_tracks), reference_p95
+    cap_value = torch.as_tensor(
+        reference_p95,
+        dtype=capacity_tracks.dtype,
+        device=capacity_tracks.device,
+    )
+    usage_per_full_boundary_bin = torch.minimum(capacity_local, cap_value)
+    return boundary_fraction * usage_per_full_boundary_bin, reference_p95
+
+
+def compute_track_rho_components(
+    density_seg_area,
+    supply_original,
+    fix_usage,
+    bin_area,
+    macro_source_map=None,
+    boundary_source_map=None,
+):
+    density_seg_tracks = density_seg_area / bin_area
+    base_fixed_usage = fix_usage.clamp(min=0)
+    capacity_tracks = supply_original
+    macro_usage, macro_usage_reference_p95 = compute_macro_fixed_usage(
+        macro_source_map,
+        capacity_tracks,
+    )
+    if macro_usage is None:
+        macro_usage = torch.zeros_like(base_fixed_usage)
+        macro_usage_reference_p95 = 0.0
+    boundary_usage, boundary_usage_reference_p95 = compute_boundary_fixed_usage(
+        boundary_source_map,
+        capacity_tracks,
+    )
+    if boundary_usage is None:
+        boundary_usage = torch.zeros_like(base_fixed_usage)
+        boundary_usage_reference_p95 = 0.0
+    initial_density_tracks = base_fixed_usage + macro_usage + boundary_usage
+    occupancy_tracks = initial_density_tracks + density_seg_tracks
+    residual_tracks = (
+        occupancy_tracks - capacity_tracks
+    ) / capacity_tracks.clamp(min=1e-6)
+    residual_centered_tracks = residual_tracks - residual_tracks.mean()
+    overflow_map = (occupancy_tracks - capacity_tracks).clamp(min=0)
+    utilization = occupancy_tracks / capacity_tracks.clamp(min=1e-6)
+    return {
+        "rho_map": residual_tracks,
+        "residual_tracks": residual_tracks,
+        "overflow_map": overflow_map,
+        "utilization": utilization,
+        "initial_density_tracks": initial_density_tracks,
+        "density_seg_tracks": density_seg_tracks,
+        "occupancy_tracks": occupancy_tracks,
+        "capacity_tracks": capacity_tracks,
+        "residual_centered_tracks": residual_centered_tracks,
+        "base_fixed_usage": base_fixed_usage,
+        "macro_usage": macro_usage,
+        "macro_usage_reference_p95": float(macro_usage_reference_p95),
+        "boundary_usage": boundary_usage,
+        "boundary_usage_reference_p95": float(boundary_usage_reference_p95),
+    }
+
+
 def _tensor_identity(value):
     if not torch.is_tensor(value):
         return None
@@ -64,6 +235,20 @@ def _tensor_identity(value):
         int(value.data_ptr()),
         int(getattr(value, "_version", 0)),
     )
+
+
+def _to_numpy_1d(value):
+    if value is None:
+        return None
+    if torch.is_tensor(value):
+        return value.detach().cpu().numpy().reshape(-1)
+    return np.asarray(value).reshape(-1)
+
+
+def _placedb_scalar_array_value(value, index):
+    if torch.is_tensor(value):
+        return float(value.detach().cpu().reshape(-1)[int(index)].item())
+    return float(np.asarray(value).reshape(-1)[int(index)])
 
 
 def _log_topk_bins(map_tensor, k, name, xl, yl, bin_size_x, bin_size_y):
@@ -85,6 +270,259 @@ def _log_topk_bins(map_tensor, k, name, xl, yl, bin_size_x, bin_size_y):
         y = yl + (iy + 0.5) * bin_size_y
         entries.append(f"({ix},{iy}) xy=({x:.3f},{y:.3f}) v={v:.3e}")
     logger.info(f"[L-shape topk] {name} top{len(entries)}: " + "; ".join(entries))
+
+
+def _fixed_macro_indices_from_placedb(placedb):
+    macro_idx = _to_numpy_1d(getattr(placedb, "fixed_macro_idx", None))
+    if macro_idx is None:
+        raise RuntimeError(
+            "fixed macro exclusion requires placedb.fixed_macro_idx from the fixed macro heuristic"
+        )
+    macro_idx = macro_idx.astype(np.int64, copy=False)
+
+    fixed_mask = _to_numpy_1d(getattr(placedb, "fixed_macro_mask", None))
+    fixed_slice = getattr(placedb, "fixed_slice", None)
+    if fixed_mask is None or fixed_slice is None:
+        raise RuntimeError(
+            "fixed macro exclusion requires placedb.fixed_macro_mask and placedb.fixed_slice"
+        )
+    expected_idx = (
+        int(fixed_slice.start)
+        + np.nonzero(fixed_mask.astype(bool, copy=False))[0].astype(np.int64)
+    )
+    if macro_idx.shape != expected_idx.shape or not np.array_equal(macro_idx, expected_idx):
+        raise RuntimeError(
+            "placedb.fixed_macro_idx must match fixed_macro_mask indexed relative to fixed_slice"
+        )
+    return macro_idx
+
+
+def build_fixed_macro_source_maps(
+    placedb,
+    xl,
+    yl,
+    bin_size_x,
+    bin_size_y,
+    num_bins_x,
+    num_bins_y,
+    *,
+    body_strength=_MACRO_BODY_SOURCE_STRENGTH,
+    halo_strength=_MACRO_HALO_SOURCE_STRENGTH,
+    halo_x=_MACRO_HALO_X,
+    halo_y=_MACRO_HALO_Y,
+    dtype=torch.float32,
+):
+    macro_idx = _fixed_macro_indices_from_placedb(placedb)
+    shape = (int(num_bins_x), int(num_bins_y))
+    body_map = torch.zeros(shape, dtype=dtype)
+    halo_map = torch.zeros(shape, dtype=dtype)
+    bin_area = max(float(bin_size_x) * float(bin_size_y), 1.0e-30)
+
+    node_x = getattr(placedb, "node_x")
+    node_y = getattr(placedb, "node_y")
+    node_size_x = getattr(placedb, "node_size_x")
+    node_size_y = getattr(placedb, "node_size_y")
+
+    def apply_box(box, target):
+        x_l, y_l, x_h, y_h = box
+        if x_h <= x_l or y_h <= y_l:
+            return
+        ix0 = max(int(math.floor((x_l - xl) / bin_size_x)), 0)
+        ix1 = min(int(math.ceil((x_h - xl) / bin_size_x)), num_bins_x)
+        iy0 = max(int(math.floor((y_l - yl) / bin_size_y)), 0)
+        iy1 = min(int(math.ceil((y_h - yl) / bin_size_y)), num_bins_y)
+        for ix in range(ix0, ix1):
+            bin_x_l = xl + ix * bin_size_x
+            bin_x_h = bin_x_l + bin_size_x
+            overlap_x = max(0.0, min(x_h, bin_x_h) - max(x_l, bin_x_l))
+            if overlap_x <= 0.0:
+                continue
+            for iy in range(iy0, iy1):
+                bin_y_l = yl + iy * bin_size_y
+                bin_y_h = bin_y_l + bin_size_y
+                overlap_y = max(0.0, min(y_h, bin_y_h) - max(y_l, bin_y_l))
+                if overlap_y <= 0.0:
+                    continue
+                fraction = min(max((overlap_x * overlap_y) / bin_area, 0.0), 1.0)
+                if fraction > float(target[ix, iy].item()):
+                    target[ix, iy] = fraction
+
+    for macro_id in macro_idx:
+        macro_id = int(macro_id)
+        x_l = _placedb_scalar_array_value(node_x, macro_id)
+        y_l = _placedb_scalar_array_value(node_y, macro_id)
+        x_h = x_l + _placedb_scalar_array_value(node_size_x, macro_id)
+        y_h = y_l + _placedb_scalar_array_value(node_size_y, macro_id)
+        apply_box((x_l, y_l, x_h, y_h), body_map)
+        if halo_x > 0.0 or halo_y > 0.0:
+            halo_box = (
+                x_l - float(halo_x),
+                y_l - float(halo_y),
+                x_h + float(halo_x),
+                y_h + float(halo_y),
+            )
+            apply_box(halo_box, halo_map)
+
+    body_mask = body_map.clone()
+    halo_map = (halo_map - body_mask).clamp(min=0.0)
+    body_map.mul_(float(body_strength))
+    halo_map.mul_(float(halo_strength))
+    source_map = torch.maximum(body_map, halo_map)
+    stats = {
+        "macro_exclusion_enabled": True,
+        "macro_count": int(macro_idx.shape[0]),
+        "macro_body_bins": _positive_count(body_map),
+        "macro_halo_bins": _positive_count(halo_map),
+        "macro_body_source_max": _scalar_stat(body_map, "max"),
+        "macro_body_source_sum": _scalar_stat(body_map, "sum"),
+        "macro_halo_source_max": _scalar_stat(halo_map, "max"),
+        "macro_halo_source_sum": _scalar_stat(halo_map, "sum"),
+        "macro_source_max": _scalar_stat(source_map, "max"),
+        "macro_source_sum": _scalar_stat(source_map, "sum"),
+        "macro_source_active_bins": _positive_count(source_map),
+        "macro_source_grid_shape": shape,
+        "macro_source_coordinate_system": _MACRO_COORDINATE_SYSTEM,
+        "macro_set_source": _MACRO_SET_SOURCE,
+    }
+    return body_map, halo_map, source_map, stats
+
+
+def _tensor_like(value, reference):
+    if torch.is_tensor(value):
+        return value.to(device=reference.device, dtype=reference.dtype)
+    return torch.as_tensor(value, device=reference.device, dtype=reference.dtype)
+
+
+def _empty_fixed_macro_overlap_stats(placedb, macro_count, movable_count):
+    return {
+        "fixed_macro_overlap_enabled": True,
+        "fixed_macro_overlap_macro_count": int(macro_count),
+        "fixed_macro_overlap_movable_count": int(movable_count),
+        "fixed_macro_overlap_area": 0.0,
+        "fixed_macro_overlap_area_ratio": 0.0,
+        "fixed_macro_overlap_cell_count": 0,
+        "fixed_macro_overlap_pair_count": 0,
+        "fixed_macro_overlap_max_area": 0.0,
+        "fixed_macro_overlap_mean_area": 0.0,
+        "fixed_macro_overlap_coordinate_system": _MACRO_COORDINATE_SYSTEM,
+        "fixed_macro_overlap_macro_set_source": _MACRO_SET_SOURCE,
+    }
+
+
+def compute_fixed_macro_overlap_stats(pos, node_size_x, node_size_y, placedb):
+    macro_idx = _fixed_macro_indices_from_placedb(placedb)
+    movable_count = int(getattr(placedb, "num_movable_nodes", 0))
+    if not torch.is_tensor(pos):
+        pos = torch.as_tensor(pos, dtype=torch.float32)
+    num_pos_nodes = int(pos.numel() // 2)
+    movable_count = min(movable_count, num_pos_nodes)
+    if movable_count <= 0 or macro_idx.shape[0] == 0:
+        return _empty_fixed_macro_overlap_stats(
+            placedb, macro_idx.shape[0], movable_count
+        )
+
+    sizes_x = _tensor_like(node_size_x, pos).reshape(-1)
+    sizes_y = _tensor_like(node_size_y, pos).reshape(-1)
+    movable_count = min(movable_count, int(sizes_x.numel()), int(sizes_y.numel()))
+    if movable_count <= 0:
+        return _empty_fixed_macro_overlap_stats(
+            placedb, macro_idx.shape[0], movable_count
+        )
+
+    movable_x_l = pos[:movable_count].reshape(-1)
+    movable_y_l = pos[num_pos_nodes : num_pos_nodes + movable_count].reshape(-1)
+    movable_x_h = movable_x_l + sizes_x[:movable_count]
+    movable_y_h = movable_y_l + sizes_y[:movable_count]
+    movable_area = (sizes_x[:movable_count] * sizes_y[:movable_count]).clamp(
+        min=0.0
+    ).sum()
+
+    per_cell_overlap = torch.zeros_like(movable_x_l)
+    total_overlap = torch.zeros((), device=pos.device, dtype=pos.dtype)
+    max_pair_overlap = torch.zeros((), device=pos.device, dtype=pos.dtype)
+    pair_count = 0
+
+    node_x = getattr(placedb, "node_x")
+    node_y = getattr(placedb, "node_y")
+    macro_size_x = getattr(placedb, "node_size_x")
+    macro_size_y = getattr(placedb, "node_size_y")
+    for macro_id in macro_idx:
+        macro_id = int(macro_id)
+        macro_x_l = _placedb_scalar_array_value(node_x, macro_id)
+        macro_y_l = _placedb_scalar_array_value(node_y, macro_id)
+        macro_x_h = macro_x_l + _placedb_scalar_array_value(macro_size_x, macro_id)
+        macro_y_h = macro_y_l + _placedb_scalar_array_value(macro_size_y, macro_id)
+        overlap_x = (
+            torch.minimum(movable_x_h, torch.tensor(macro_x_h, device=pos.device, dtype=pos.dtype))
+            - torch.maximum(movable_x_l, torch.tensor(macro_x_l, device=pos.device, dtype=pos.dtype))
+        ).clamp(min=0.0)
+        overlap_y = (
+            torch.minimum(movable_y_h, torch.tensor(macro_y_h, device=pos.device, dtype=pos.dtype))
+            - torch.maximum(movable_y_l, torch.tensor(macro_y_l, device=pos.device, dtype=pos.dtype))
+        ).clamp(min=0.0)
+        overlap = overlap_x * overlap_y
+        positive = overlap > 0
+        if bool(positive.any().item()):
+            pair_count += int(positive.sum().item())
+            total_overlap = total_overlap + overlap.sum()
+            max_pair_overlap = torch.maximum(max_pair_overlap, overlap.max())
+            per_cell_overlap = per_cell_overlap + overlap
+
+    overlap_cells = int((per_cell_overlap > 0).sum().item())
+    overlap_area = float(total_overlap.detach().cpu().item())
+    movable_area_value = float(movable_area.detach().cpu().item())
+    mean_area = overlap_area / overlap_cells if overlap_cells > 0 else 0.0
+    area_ratio = (
+        overlap_area / movable_area_value if movable_area_value > 0.0 else 0.0
+    )
+    return {
+        "fixed_macro_overlap_enabled": True,
+        "fixed_macro_overlap_macro_count": int(macro_idx.shape[0]),
+        "fixed_macro_overlap_movable_count": int(movable_count),
+        "fixed_macro_overlap_area": overlap_area,
+        "fixed_macro_overlap_area_ratio": area_ratio,
+        "fixed_macro_overlap_cell_count": overlap_cells,
+        "fixed_macro_overlap_pair_count": int(pair_count),
+        "fixed_macro_overlap_max_area": float(max_pair_overlap.detach().cpu().item()),
+        "fixed_macro_overlap_mean_area": mean_area,
+        "fixed_macro_overlap_coordinate_system": _MACRO_COORDINATE_SYSTEM,
+        "fixed_macro_overlap_macro_set_source": _MACRO_SET_SOURCE,
+    }
+
+
+def compute_movable_displacement_stats(pos_before, pos_after, placedb):
+    if not torch.is_tensor(pos_before):
+        pos_before = torch.as_tensor(pos_before, dtype=torch.float32)
+    pos_after = _tensor_like(pos_after, pos_before).reshape(-1)
+    pos_before = pos_before.reshape(-1)
+    num_pos_nodes = int(min(pos_before.numel(), pos_after.numel()) // 2)
+    movable_count = min(int(getattr(placedb, "num_movable_nodes", 0)), num_pos_nodes)
+    if movable_count <= 0:
+        return {
+            "movable_displacement_movable_count": 0,
+            "movable_displacement_moved_count": 0,
+            "movable_displacement_max": 0.0,
+            "movable_displacement_mean": 0.0,
+            "movable_displacement_sum": 0.0,
+            "movable_displacement_rms": 0.0,
+        }
+
+    dx = pos_after[:movable_count] - pos_before[:movable_count]
+    dy = (
+        pos_after[num_pos_nodes : num_pos_nodes + movable_count]
+        - pos_before[num_pos_nodes : num_pos_nodes + movable_count]
+    )
+    distance = torch.sqrt(dx * dx + dy * dy)
+    return {
+        "movable_displacement_movable_count": int(movable_count),
+        "movable_displacement_moved_count": int((distance > 1.0e-6).sum().item()),
+        "movable_displacement_max": float(distance.max().detach().cpu().item()),
+        "movable_displacement_mean": float(distance.mean().detach().cpu().item()),
+        "movable_displacement_sum": float(distance.sum().detach().cpu().item()),
+        "movable_displacement_rms": float(
+            torch.sqrt((distance * distance).mean()).detach().cpu().item()
+        ),
+    }
 
 
 class SegmentElectricPotentialFunction(Function):
@@ -266,25 +704,34 @@ class SegmentElectricPotentialFunction(Function):
             supply_original_local,
             fix_usage_local,
         ):
-            density_seg_tracks_local = density_seg_area_local / bin_area
-            initial_density_tracks_local = fix_usage_local.clamp(min=0)
-            capacity_tracks_local = supply_original_local
-            occupancy_tracks_local = initial_density_tracks_local + density_seg_tracks_local
-            residual_tracks_local = (
-                occupancy_tracks_local - capacity_tracks_local
-            ) / capacity_tracks_local.clamp(min=1e-6)
-            residual_centered_tracks_local = residual_tracks_local - residual_tracks_local.mean()
-            overflow_map_local = (occupancy_tracks_local - capacity_tracks_local).clamp(min=0)
-            utilization = occupancy_tracks_local / capacity_tracks_local.clamp(min=1e-6)
+            macro_source_local = None
+            if capacity_al_owner is not None and hasattr(capacity_al_owner, "_macro_source_for"):
+                macro_source_local = capacity_al_owner._macro_source_for(supply_original_local)
+            boundary_source_local = None
+            if capacity_al_owner is not None and hasattr(capacity_al_owner, "_boundary_source_for"):
+                boundary_source_local = capacity_al_owner._boundary_source_for(supply_original_local)
+            components = compute_track_rho_components(
+                density_seg_area_local,
+                supply_original_local,
+                fix_usage_local,
+                bin_area,
+                macro_source_map=macro_source_local,
+                boundary_source_map=boundary_source_local,
+            )
             return (
-                residual_tracks_local,
-                overflow_map_local,
-                utilization,
-                initial_density_tracks_local,
-                density_seg_tracks_local,
-                occupancy_tracks_local,
-                capacity_tracks_local,
-                residual_centered_tracks_local,
+                components["rho_map"],
+                components["overflow_map"],
+                components["utilization"],
+                components["initial_density_tracks"],
+                components["density_seg_tracks"],
+                components["occupancy_tracks"],
+                components["capacity_tracks"],
+                components["residual_centered_tracks"],
+                components["base_fixed_usage"],
+                components["macro_usage"],
+                components["macro_usage_reference_p95"],
+                components["boundary_usage"],
+                components["boundary_usage_reference_p95"],
             )
 
         def _compute_field_and_energy(rho_map_local):
@@ -499,6 +946,11 @@ class SegmentElectricPotentialFunction(Function):
                 occupancy_tracks_h,
                 capacity_tracks_h,
                 residual_centered_tracks_h,
+                base_fixed_usage_h,
+                macro_usage_h,
+                macro_usage_reference_p95_h,
+                boundary_usage_h,
+                boundary_usage_reference_p95_h,
             ) = _compute_blockage_track_rho_components(
                 density_map_h,
                 supply_original_h,
@@ -513,6 +965,11 @@ class SegmentElectricPotentialFunction(Function):
                 occupancy_tracks_v,
                 capacity_tracks_v,
                 residual_centered_tracks_v,
+                base_fixed_usage_v,
+                macro_usage_v,
+                macro_usage_reference_p95_v,
+                boundary_usage_v,
+                boundary_usage_reference_p95_v,
             ) = _compute_blockage_track_rho_components(
                 density_map_v,
                 supply_original_v,
@@ -530,6 +987,28 @@ class SegmentElectricPotentialFunction(Function):
                 capacity_al_owner.last_al_stats = {"enabled": False}
             rho_map_h = rho_map_h.clamp(min=0)
             rho_map_v = rho_map_v.clamp(min=0)
+            if capacity_al_owner is not None and hasattr(
+                capacity_al_owner, "_record_macro_occupancy_stats"
+            ):
+                capacity_al_owner._record_macro_occupancy_stats(
+                    source_name="h,v",
+                    base_fixed_usage_h=base_fixed_usage_h,
+                    base_fixed_usage_v=base_fixed_usage_v,
+                    macro_usage_h=macro_usage_h,
+                    macro_usage_v=macro_usage_v,
+                    boundary_usage_h=boundary_usage_h,
+                    boundary_usage_v=boundary_usage_v,
+                    initial_density_tracks_h=initial_density_tracks_h,
+                    initial_density_tracks_v=initial_density_tracks_v,
+                    occupancy_tracks_h=occupancy_tracks_h,
+                    occupancy_tracks_v=occupancy_tracks_v,
+                    residual_h=rho_map_h,
+                    residual_v=rho_map_v,
+                    macro_usage_reference_p95_h=macro_usage_reference_p95_h,
+                    macro_usage_reference_p95_v=macro_usage_reference_p95_v,
+                    boundary_usage_reference_p95_h=boundary_usage_reference_p95_h,
+                    boundary_usage_reference_p95_v=boundary_usage_reference_p95_v,
+                )
 
             with profile_scope(
                 profile_enabled,
@@ -641,6 +1120,11 @@ class SegmentElectricPotentialFunction(Function):
                 occupancy_tracks,
                 capacity_tracks,
                 residual_centered_tracks,
+                base_fixed_usage,
+                macro_usage,
+                macro_usage_reference_p95,
+                boundary_usage,
+                boundary_usage_reference_p95,
             ) = _compute_blockage_track_rho_components(
                 density_map,
                 supply_original_map,
@@ -653,6 +1137,28 @@ class SegmentElectricPotentialFunction(Function):
             elif capacity_al_owner is not None:
                 capacity_al_owner.last_al_stats = {"enabled": False}
             rho_map = rho_map.clamp(min=0)
+            if capacity_al_owner is not None and hasattr(
+                capacity_al_owner, "_record_macro_occupancy_stats"
+            ):
+                capacity_al_owner._record_macro_occupancy_stats(
+                    source_name="planar",
+                    base_fixed_usage_h=base_fixed_usage,
+                    base_fixed_usage_v=None,
+                    macro_usage_h=macro_usage,
+                    macro_usage_v=None,
+                    boundary_usage_h=boundary_usage,
+                    boundary_usage_v=None,
+                    initial_density_tracks_h=initial_density_tracks,
+                    initial_density_tracks_v=None,
+                    occupancy_tracks_h=occupancy_tracks,
+                    occupancy_tracks_v=None,
+                    residual_h=rho_map,
+                    residual_v=None,
+                    macro_usage_reference_p95_h=macro_usage_reference_p95,
+                    macro_usage_reference_p95_v=0.0,
+                    boundary_usage_reference_p95_h=boundary_usage_reference_p95,
+                    boundary_usage_reference_p95_v=0.0,
+                )
             with profile_scope(
                 profile_enabled,
                 "electric.forward.field_energy",
@@ -1007,6 +1513,10 @@ class LShapeElectricPotential(nn.Module):
         profile_enabled=False,
         log_verbose=0,
         capacity_al_enable=False,
+        placedb=None,
+        boundary_source_enable=False,
+        boundary_source_width_bins=0,
+        boundary_source_strength=0.0,
     ):
         """
         Initialize L-shape electric potential module.
@@ -1051,6 +1561,8 @@ class LShapeElectricPotential(nn.Module):
         self._capacity_al_reset_count = 0
         self._capacity_al_update_count = 0
         self.last_al_stats = {}
+        self.last_macro_exclusion_stats = {}
+        self.last_boundary_source_stats = {}
         
         if isinstance(target_density, torch.Tensor):
             self.register_buffer('target_density', target_density)
@@ -1119,7 +1631,96 @@ class LShapeElectricPotential(nn.Module):
             'fix_usage_map_v',
             fix_usage_map_v if isinstance(fix_usage_map_v, torch.Tensor) else None,
         )
-
+        if placedb is None:
+            macro_body_source_map = torch.zeros(
+                self.num_bins_x, self.num_bins_y, dtype=torch.float32
+            )
+            macro_halo_source_map = torch.zeros_like(macro_body_source_map)
+            macro_source_map = torch.zeros_like(macro_body_source_map)
+            self.macro_exclusion_stats = {
+                "macro_exclusion_enabled": False,
+                "macro_count": 0,
+                "macro_body_bins": 0,
+                "macro_halo_bins": 0,
+                "macro_body_source_max": 0.0,
+                "macro_body_source_sum": 0.0,
+                "macro_halo_source_max": 0.0,
+                "macro_halo_source_sum": 0.0,
+                "macro_source_max": 0.0,
+                "macro_source_sum": 0.0,
+                "macro_source_active_bins": 0,
+                "macro_source_grid_shape": (self.num_bins_x, self.num_bins_y),
+                "macro_source_coordinate_system": _MACRO_COORDINATE_SYSTEM,
+                "macro_set_source": _MACRO_SET_SOURCE,
+            }
+        else:
+            (
+                macro_body_source_map,
+                macro_halo_source_map,
+                macro_source_map,
+                self.macro_exclusion_stats,
+            ) = build_fixed_macro_source_maps(
+                placedb,
+                self.xl,
+                self.yl,
+                self.bin_size_x,
+                self.bin_size_y,
+                self.num_bins_x,
+                self.num_bins_y,
+            )
+        self.register_buffer('macro_body_source_map', macro_body_source_map)
+        self.register_buffer('macro_halo_source_map', macro_halo_source_map)
+        self.register_buffer('macro_source_map', macro_source_map)
+        self.last_macro_exclusion_stats = dict(self.macro_exclusion_stats)
+        if bool(boundary_source_enable):
+            boundary_source_map, self.boundary_source_stats = build_boundary_source_map(
+                self.num_bins_x,
+                self.num_bins_y,
+                width_bins=boundary_source_width_bins,
+                strength=boundary_source_strength,
+            )
+        else:
+            boundary_source_map, self.boundary_source_stats = build_boundary_source_map(
+                self.num_bins_x,
+                self.num_bins_y,
+            )
+        self.register_buffer('boundary_source_map', boundary_source_map)
+        self.last_boundary_source_stats = dict(self.boundary_source_stats)
+        logger.info(
+            "L-shape macro exclusion: macro_exclusion_enabled=%s macro_count=%d "
+            "macro_body_bins=%d macro_halo_bins=%d macro_source_active_bins=%d "
+            "macro_body_source_max=%.4e macro_body_source_sum=%.4e "
+            "macro_halo_source_max=%.4e macro_halo_source_sum=%.4e "
+            "macro_source_max=%.4e macro_source_sum=%.4e "
+            "macro_source_grid_shape=%s macro_source_coordinate_system=%s "
+            "macro_set_source=%s",
+            str(self.macro_exclusion_stats.get("macro_exclusion_enabled")),
+            int(self.macro_exclusion_stats.get("macro_count", 0)),
+            int(self.macro_exclusion_stats.get("macro_body_bins", 0)),
+            int(self.macro_exclusion_stats.get("macro_halo_bins", 0)),
+            int(self.macro_exclusion_stats.get("macro_source_active_bins", 0)),
+            float(self.macro_exclusion_stats.get("macro_body_source_max", 0.0)),
+            float(self.macro_exclusion_stats.get("macro_body_source_sum", 0.0)),
+            float(self.macro_exclusion_stats.get("macro_halo_source_max", 0.0)),
+            float(self.macro_exclusion_stats.get("macro_halo_source_sum", 0.0)),
+            float(self.macro_exclusion_stats.get("macro_source_max", 0.0)),
+            float(self.macro_exclusion_stats.get("macro_source_sum", 0.0)),
+            str(self.macro_exclusion_stats.get("macro_source_grid_shape")),
+            str(self.macro_exclusion_stats.get("macro_source_coordinate_system")),
+            str(self.macro_exclusion_stats.get("macro_set_source")),
+        )
+        if self.log_verbose >= 1 or self.boundary_source_stats.get("boundary_source_enabled"):
+            logger.info(
+                "L-shape boundary source: enabled=%s width_bins=%d strength=%.4e "
+                "active_bins=%d source_max=%.4e source_sum=%.4e grid_shape=%s",
+                str(self.boundary_source_stats.get("boundary_source_enabled")),
+                int(self.boundary_source_stats.get("boundary_source_width_bins", 0)),
+                float(self.boundary_source_stats.get("boundary_source_strength", 0.0)),
+                int(self.boundary_source_stats.get("boundary_source_active_bins", 0)),
+                float(self.boundary_source_stats.get("boundary_source_max", 0.0)),
+                float(self.boundary_source_stats.get("boundary_source_sum", 0.0)),
+                str(self.boundary_source_stats.get("boundary_source_grid_shape")),
+            )
         # Persistent calibration factor (area per track), initialized on first forward
         self.register_buffer('area_per_track', torch.tensor(0.0))
         
@@ -1140,6 +1741,240 @@ class LShapeElectricPotential(nn.Module):
         self.idct_idxst = None
         self.idxst_idct = None
 
+    def _macro_source_for(self, reference):
+        if not isinstance(self.macro_source_map, torch.Tensor):
+            return None
+        if self.macro_source_map.shape != reference.shape:
+            raise RuntimeError(
+                "macro source map shape %s does not match routing source shape %s"
+                % (tuple(self.macro_source_map.shape), tuple(reference.shape))
+            )
+        return self.macro_source_map.to(device=reference.device, dtype=reference.dtype)
+
+    def _boundary_source_for(self, reference):
+        if not isinstance(self.boundary_source_map, torch.Tensor):
+            return None
+        if self.boundary_source_map.shape != reference.shape:
+            raise RuntimeError(
+                "boundary source map shape %s does not match routing source shape %s"
+                % (tuple(self.boundary_source_map.shape), tuple(reference.shape))
+            )
+        return self.boundary_source_map.to(device=reference.device, dtype=reference.dtype)
+
+    def _record_macro_occupancy_stats(
+        self,
+        *,
+        source_name,
+        base_fixed_usage_h,
+        base_fixed_usage_v,
+        macro_usage_h,
+        macro_usage_v,
+        boundary_usage_h,
+        boundary_usage_v,
+        initial_density_tracks_h,
+        initial_density_tracks_v,
+        occupancy_tracks_h,
+        occupancy_tracks_v,
+        residual_h,
+        residual_v,
+        macro_usage_reference_p95_h,
+        macro_usage_reference_p95_v,
+        boundary_usage_reference_p95_h,
+        boundary_usage_reference_p95_v,
+    ):
+        def _sum_optional(*values):
+            tensors = [value.detach() for value in values if torch.is_tensor(value)]
+            if not tensors:
+                return None
+            out = tensors[0]
+            for item in tensors[1:]:
+                out = out + item
+            return out
+
+        macro_usage_total = _sum_optional(macro_usage_h, macro_usage_v)
+        boundary_usage_total = _sum_optional(boundary_usage_h, boundary_usage_v)
+        base_fixed_total = _sum_optional(base_fixed_usage_h, base_fixed_usage_v)
+        initial_total = _sum_optional(initial_density_tracks_h, initial_density_tracks_v)
+        occupancy_total = _sum_optional(occupancy_tracks_h, occupancy_tracks_v)
+        residual_total = _sum_optional(residual_h, residual_v)
+        macro_active = (
+            macro_usage_total.detach() > 0
+            if torch.is_tensor(macro_usage_total)
+            else torch.zeros((), dtype=torch.bool)
+        )
+        stats = dict(self.macro_exclusion_stats)
+        stats.update(
+            {
+                "source_name": str(source_name),
+                "macro_injection_mode": "fixed_usage",
+                "macro_usage_reference_quantile": float(_MACRO_USAGE_REFERENCE_QUANTILE),
+                "macro_usage_reference_p95_h": float(macro_usage_reference_p95_h),
+                "macro_usage_reference_p95_v": float(macro_usage_reference_p95_v),
+                "macro_usage_reference_p95": max(
+                    float(macro_usage_reference_p95_h),
+                    float(macro_usage_reference_p95_v),
+                ),
+                "macro_usage_h_max": _scalar_stat(macro_usage_h, "max"),
+                "macro_usage_v_max": _scalar_stat(macro_usage_v, "max"),
+                "macro_usage_h_sum": _scalar_stat(macro_usage_h, "sum"),
+                "macro_usage_v_sum": _scalar_stat(macro_usage_v, "sum"),
+                "macro_usage_max": _scalar_stat(macro_usage_total, "max"),
+                "macro_usage_sum": _scalar_stat(macro_usage_total, "sum"),
+                "macro_usage_active_bins": _positive_count(macro_usage_total),
+                "boundary_source_enabled": bool(
+                    self.boundary_source_stats.get("boundary_source_enabled", False)
+                ),
+                "boundary_usage_reference_quantile": float(_BOUNDARY_SOURCE_REFERENCE_QUANTILE),
+                "boundary_usage_reference_p95_h": float(boundary_usage_reference_p95_h),
+                "boundary_usage_reference_p95_v": float(boundary_usage_reference_p95_v),
+                "boundary_usage_reference_p95": max(
+                    float(boundary_usage_reference_p95_h),
+                    float(boundary_usage_reference_p95_v),
+                ),
+                "boundary_usage_h_max": _scalar_stat(boundary_usage_h, "max"),
+                "boundary_usage_v_max": _scalar_stat(boundary_usage_v, "max"),
+                "boundary_usage_h_sum": _scalar_stat(boundary_usage_h, "sum"),
+                "boundary_usage_v_sum": _scalar_stat(boundary_usage_v, "sum"),
+                "boundary_usage_max": _scalar_stat(boundary_usage_total, "max"),
+                "boundary_usage_sum": _scalar_stat(boundary_usage_total, "sum"),
+                "boundary_usage_active_bins": _positive_count(boundary_usage_total),
+                "base_fixed_usage_sum": _scalar_stat(base_fixed_total, "sum"),
+                "initial_density_tracks_sum": _scalar_stat(initial_total, "sum"),
+                "occupancy_tracks_sum": _scalar_stat(occupancy_total, "sum"),
+                "residual_macro_bins_sum": (
+                    float(residual_total.detach()[macro_active].sum().item())
+                    if torch.is_tensor(residual_total)
+                    and torch.is_tensor(macro_active)
+                    and macro_active.numel() == residual_total.numel()
+                    and bool(macro_active.any().item())
+                    else 0.0
+                ),
+                "macro_dominates_bins": 0,
+                "routing_dominates_macro_bins": 0,
+            }
+        )
+        self.last_macro_exclusion_stats = stats
+        if self.log_verbose >= 2 and stats.get("macro_exclusion_enabled"):
+            logger.info(
+                "L-shape macro occupancy injection: source=%s macro_count=%d "
+                "macro_usage_bins=%d macro_usage_max=%.4e macro_usage_sum=%.4e "
+                "macro_usage_p95_h=%.4e macro_usage_p95_v=%.4e "
+                "boundary_usage_bins=%d boundary_usage_max=%.4e boundary_usage_sum=%.4e "
+                "base_fixed_sum=%.4e initial_fixed_sum=%.4e occupancy_sum=%.4e",
+                str(source_name),
+                int(stats.get("macro_count", 0)),
+                int(stats.get("macro_usage_active_bins", 0)),
+                float(stats.get("macro_usage_max", 0.0)),
+                float(stats.get("macro_usage_sum", 0.0)),
+                float(stats.get("macro_usage_reference_p95_h", 0.0)),
+                float(stats.get("macro_usage_reference_p95_v", 0.0)),
+                int(stats.get("boundary_usage_active_bins", 0)),
+                float(stats.get("boundary_usage_max", 0.0)),
+                float(stats.get("boundary_usage_sum", 0.0)),
+                float(stats.get("base_fixed_usage_sum", 0.0)),
+                float(stats.get("initial_density_tracks_sum", 0.0)),
+                float(stats.get("occupancy_tracks_sum", 0.0)),
+            )
+
+    def _merge_macro_source(self, source_map, source_name):
+        """Deprecated: macro exclusion is injected as fixed occupancy before AL."""
+        macro_source = self._macro_source_for(source_map)
+        if macro_source is None:
+            return source_map
+        source_before = source_map
+        macro_detached = macro_source.detach()
+        before_detached = source_before.detach()
+        macro_active = macro_detached > 0
+        routing_dominates = macro_active & (before_detached > 0)
+        stats = dict(self.macro_exclusion_stats)
+        stats.update(
+            {
+                "source_name": str(source_name),
+                "macro_injection_mode": "fixed_usage",
+                "source_before_macro_max": _scalar_stat(before_detached, "max"),
+                "source_before_macro_sum": _scalar_stat(before_detached, "sum"),
+                "source_after_macro_max": _scalar_stat(source_before.detach(), "max"),
+                "source_after_macro_sum": _scalar_stat(source_before.detach(), "sum"),
+                "macro_source_effective_min": 0.0,
+                "macro_source_effective_max": 0.0,
+                "macro_source_effective_sum": 0.0,
+                "macro_source_effective_scale": 0.0,
+                "macro_source_reference_p99": 0.0,
+                "macro_source_reference_quantile": 0.0,
+                "macro_source_reference_scale": 0.0,
+                "macro_source_min_effective_strength": 0.0,
+                "macro_dominates_bins": 0,
+                "routing_dominates_macro_bins": int(routing_dominates.sum().item()),
+                "macro_source_device": str(macro_source.device),
+                "macro_source_dtype": str(macro_source.dtype),
+            }
+        )
+        if isinstance(self.last_macro_exclusion_stats, dict):
+            sources = dict(self.last_macro_exclusion_stats.get("sources", {}))
+        else:
+            sources = {}
+        sources[str(source_name)] = dict(stats)
+        if len(sources) > 1:
+            stats["source_name"] = ",".join(sorted(sources))
+            stats["macro_dominates_bins"] = sum(
+                int(item.get("macro_dominates_bins", 0))
+                for item in sources.values()
+            )
+            stats["routing_dominates_macro_bins"] = sum(
+                int(item.get("routing_dominates_macro_bins", 0))
+                for item in sources.values()
+            )
+            stats["macro_source_effective_scale"] = max(
+                float(item.get("macro_source_effective_scale", 0.0))
+                for item in sources.values()
+            )
+            stats["macro_source_reference_p99"] = max(
+                float(item.get("macro_source_reference_p99", 0.0))
+                for item in sources.values()
+            )
+            stats["macro_source_effective_max"] = max(
+                float(item.get("macro_source_effective_max", 0.0))
+                for item in sources.values()
+            )
+            stats["macro_source_effective_sum"] = sum(
+                float(item.get("macro_source_effective_sum", 0.0))
+                for item in sources.values()
+            )
+        stats["sources"] = sources
+        self.last_macro_exclusion_stats = stats
+        if self.log_verbose >= 2:
+            logger.info(
+                "L-shape macro exclusion source merge skipped: source=%s macro_exclusion_enabled=%s "
+                "macro_count=%d macro_body_bins=%d macro_halo_bins=%d "
+                "macro_source_active_bins=%d macro_source_max=%.4e macro_source_sum=%.4e "
+                "macro_effective_scale=%.4e macro_effective_max=%.4e "
+                "macro_effective_sum=%.4e source_p99=%.4e "
+                "source_before_max=%.4e source_after_max=%.4e "
+                "macro_dominates_bins=%d routing_dominates_macro_bins=%d "
+                "macro_source_grid_shape=%s macro_source_coordinate_system=%s "
+                "macro_set_source=%s",
+                str(source_name),
+                str(stats.get("macro_exclusion_enabled")),
+                int(stats.get("macro_count", 0)),
+                int(stats.get("macro_body_bins", 0)),
+                int(stats.get("macro_halo_bins", 0)),
+                int(stats.get("macro_source_active_bins", 0)),
+                float(stats.get("macro_source_max", 0.0)),
+                float(stats.get("macro_source_sum", 0.0)),
+                float(stats.get("macro_source_effective_scale", 0.0)),
+                float(stats.get("macro_source_effective_max", 0.0)),
+                float(stats.get("macro_source_effective_sum", 0.0)),
+                float(stats.get("macro_source_reference_p99", 0.0)),
+                float(stats.get("source_before_macro_max", 0.0)),
+                float(stats.get("source_after_macro_max", 0.0)),
+                int(stats.get("macro_dominates_bins", 0)),
+                int(stats.get("routing_dominates_macro_bins", 0)),
+                str(stats.get("macro_source_grid_shape")),
+                str(stats.get("macro_source_coordinate_system")),
+                str(stats.get("macro_set_source")),
+            )
+        return source_map
+
     def reset_capacity_al_state(self, reason="manual"):
         self.lambda_h = None
         self.lambda_v = None
@@ -1156,6 +1991,7 @@ class LShapeElectricPotential(nn.Module):
         supply_v,
         fix_usage_h,
         fix_usage_v,
+        macro_source_map=None,
         extra_key=None,
     ):
         return (
@@ -1163,6 +1999,7 @@ class LShapeElectricPotential(nn.Module):
             _tensor_identity(supply_v),
             _tensor_identity(fix_usage_h),
             _tensor_identity(fix_usage_v),
+            _tensor_identity(macro_source_map),
             extra_key,
         )
 
@@ -1390,6 +2227,10 @@ class LShapeElectricPotential(nn.Module):
         self._init_optional_target_map('fix_usage_map', device, dtype)
         self._init_optional_target_map('fix_usage_map_h', device, dtype)
         self._init_optional_target_map('fix_usage_map_v', device, dtype)
+        self.macro_body_source_map = self.macro_body_source_map.to(device=device, dtype=dtype)
+        self.macro_halo_source_map = self.macro_halo_source_map.to(device=device, dtype=dtype)
+        self.macro_source_map = self.macro_source_map.to(device=device, dtype=dtype)
+        self.boundary_source_map = self.boundary_source_map.to(device=device, dtype=dtype)
         self.area_per_track = self.area_per_track.to(device=device, dtype=dtype)
     
     def _init_target_density(self, device, dtype):
@@ -1794,7 +2635,11 @@ class LShapeElectricPotential(nn.Module):
             self.supply_original_v,
             self.fix_usage_map_h,
             self.fix_usage_map_v,
-            extra_key=(bool(self.capacity_al_enable),),
+            macro_source_map=self.macro_source_map,
+            extra_key=(
+                bool(self.capacity_al_enable),
+                _tensor_identity(self.boundary_source_map),
+            ),
         )
         
         # Compute electric potential
@@ -1927,7 +2772,8 @@ class LShapeRoutabilityPotentialOp(nn.Module):
             target_demand=target_demand,
             padding=0,
             deterministic_flag=True,
-            fast_mode=False
+            fast_mode=False,
+            placedb=placedb,
         )
         
         # Import segment builder
@@ -2016,6 +2862,9 @@ def create_l_shape_electric_potential(
     profile_enabled=False,
     log_verbose=0,
     capacity_al_enable=False,
+    boundary_source_enable=False,
+    boundary_source_width_bins=0,
+    boundary_source_strength=0.0,
 ):
     """
     Factory function to create LShapeElectricPotential.
@@ -2065,4 +2914,8 @@ def create_l_shape_electric_potential(
         profile_enabled=profile_enabled,
         log_verbose=log_verbose,
         capacity_al_enable=capacity_al_enable,
+        boundary_source_enable=boundary_source_enable,
+        boundary_source_width_bins=boundary_source_width_bins,
+        boundary_source_strength=boundary_source_strength,
+        placedb=placedb,
     )

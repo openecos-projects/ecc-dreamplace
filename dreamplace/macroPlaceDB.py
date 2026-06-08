@@ -10,6 +10,7 @@
 
 import sys
 import os
+import csv
 import re
 import math
 import time
@@ -46,6 +47,8 @@ class MacroPlaceDB(object):
         self.num_terminals = 0  # number of terminals, essentially fixed macros
         # number of terminal_NIs that can be overlapped, essentially IO pins
         self.num_terminal_NIs = 0
+        self.num_place_blockages = 0  # synthetic placement blockages appended to fixed terminals
+        self.num_fixed_macro_excluded_place_blockages = 0
         self.node_name2id_map = {}  # node name to id map, cell name
         self.node_names = None  # 1D array, cell name
         self.node_x = None  # 1D array, cell position x
@@ -1005,6 +1008,7 @@ class MacroPlaceDB(object):
         self.num_physical_nodes = pydb.num_nodes
         self.num_terminals = pydb.num_terminals
         self.num_terminal_NIs = pydb.num_terminal_NIs
+        self.num_place_blockages = int(getattr(pydb, "num_place_blockages", 0))
         self.node_name2id_map = pydb.node_name2id_map
         self.node_names = np.array(pydb.node_names, dtype=np.string_)
         # If the placer directly takes a global placement solution,
@@ -1810,12 +1814,151 @@ row height = %g, site width = %g
         elif axis == "y":
             return self.row_height * op(v / self.row_height)
 
+    def _dump_fixed_macro_mask_debug(
+        self,
+        params,
+        node_areas,
+        movable_mean_area,
+        movable_min_height,
+        area_threshold_value,
+        height_threshold_value,
+        area_threshold,
+        height_threshold,
+    ):
+        def node_name(node_id):
+            if self.node_names is None:
+                return str(node_id)
+            name = self.node_names[node_id]
+            if isinstance(name, bytes):
+                return name.decode("utf-8", errors="replace")
+            return str(name)
+
+        area_den = max(float(movable_mean_area), 1.0e-30)
+        height_den = max(float(movable_min_height), 1.0e-30)
+        fixed_start = int(self.fixed_slice.start)
+        fixed_stop = int(self.fixed_slice.stop)
+        selected_rel = np.where(self.fixed_macro_mask)[0]
+        selected_count = int(selected_rel.shape[0])
+        fixed_count = int(max(fixed_stop - fixed_start, 0))
+
+        placement_blockage_mask = self._fixed_placement_blockage_mask()
+        excluded_place_blockages = int(
+            getattr(self, "num_fixed_macro_excluded_place_blockages", 0)
+        )
+
+        logging.info(
+            "Fixed macro heuristic mask: fixed_terminals=%d selected=%d "
+            "placement_blockages=%d excluded_place_blockages=%d "
+            "movable_mean_area=%.6g area_threshold_scale=%.6g "
+            "area_threshold=%.6g movable_min_height=%.6g "
+            "height_threshold_scale=%.6g height_threshold=%.6g",
+            fixed_count,
+            selected_count,
+            int(np.count_nonzero(placement_blockage_mask)),
+            excluded_place_blockages,
+            float(movable_mean_area),
+            float(area_threshold),
+            float(area_threshold_value),
+            float(movable_min_height),
+            float(height_threshold),
+            float(height_threshold_value),
+        )
+
+        if selected_count > 0:
+            preview = []
+            for rel_idx in selected_rel[:20]:
+                node_id = fixed_start + int(rel_idx)
+                area_ratio = float(node_areas[node_id]) / area_den
+                height_ratio = float(self.node_size_y[node_id]) / height_den
+                preview.append(
+                    "%d:%s area_ratio=%.3g height_ratio=%.3g "
+                    "xy=(%.6g,%.6g) size=(%.6g,%.6g)"
+                    % (
+                        node_id,
+                        node_name(node_id),
+                        area_ratio,
+                        height_ratio,
+                        float(self.node_x[node_id]),
+                        float(self.node_y[node_id]),
+                        float(self.node_size_x[node_id]),
+                        float(self.node_size_y[node_id]),
+                    )
+                )
+            logging.info(
+                "Fixed macro heuristic mask selected preview first %d/%d: %s",
+                len(preview),
+                selected_count,
+                "; ".join(preview),
+            )
+
+        result_dir = getattr(params, "result_dir", None)
+        if not result_dir:
+            return
+
+        out_dir = os.path.join(result_dir, "debug")
+        out_path = os.path.join(out_dir, "fixed_macro_mask_debug.csv")
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            with open(out_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(
+                    [
+                        "node_id",
+                        "fixed_rel_id",
+                        "node_name",
+                        "x",
+                        "y",
+                        "width",
+                        "height",
+                        "area",
+                        "area_ratio_to_movable_mean",
+                        "height_ratio_to_movable_min",
+                        "is_placement_blockage",
+                        "excluded_place_blockage",
+                        "is_fixed_macro",
+                    ]
+                )
+                for rel_idx, node_id in enumerate(range(fixed_start, fixed_stop)):
+                    is_placement_blockage = bool(placement_blockage_mask[rel_idx])
+                    writer.writerow(
+                        [
+                            node_id,
+                            rel_idx,
+                            node_name(node_id),
+                            float(self.node_x[node_id]),
+                            float(self.node_y[node_id]),
+                            float(self.node_size_x[node_id]),
+                            float(self.node_size_y[node_id]),
+                            float(node_areas[node_id]),
+                            float(node_areas[node_id]) / area_den,
+                            float(self.node_size_y[node_id]) / height_den,
+                            int(is_placement_blockage),
+                            int(is_placement_blockage and not self.fixed_macro_mask[rel_idx]),
+                            int(bool(self.fixed_macro_mask[rel_idx])),
+                        ]
+                    )
+            logging.info("Fixed macro heuristic mask debug CSV written to %s", out_path)
+        except Exception as e:
+            logging.warning("Failed to write fixed macro heuristic mask debug CSV: %s", e)
+
+    def _fixed_placement_blockage_mask(self):
+        fixed_count = max(int(self.fixed_slice.stop - self.fixed_slice.start), 0)
+        blockage_count = min(
+            max(int(getattr(self, "num_place_blockages", 0)), 0),
+            fixed_count,
+        )
+        mask = np.zeros(fixed_count, dtype=bool)
+        if blockage_count:
+            mask[fixed_count - blockage_count:] = True
+        return mask
+
     def update_macros(self, params, area_threshold=10, height_threshold=2):
         # set large cells as macros
         node_areas = self.node_size_x * self.node_size_y
-        mean_area = node_areas[self.movable_slice].mean() * area_threshold
-        row_height = self.node_size_y[self.movable_slice].min(
-        ) * height_threshold
+        movable_mean_area = node_areas[self.movable_slice].mean()
+        movable_min_height = self.node_size_y[self.movable_slice].min()
+        mean_area = movable_mean_area * area_threshold
+        row_height = movable_min_height * height_threshold
 
         # movable macros
         self.movable_macro_mask = (node_areas[self.movable_slice] > mean_area) & (
@@ -1829,10 +1972,25 @@ row height = %g, site width = %g
         self.fixed_macro_mask = (node_areas[self.fixed_slice] > mean_area) & (
             self.node_size_y[self.fixed_slice] > row_height
         )
+        placement_blockage_mask = self._fixed_placement_blockage_mask()
+        self.num_fixed_macro_excluded_place_blockages = int(
+            np.count_nonzero(self.fixed_macro_mask & placement_blockage_mask)
+        )
+        self.fixed_macro_mask = self.fixed_macro_mask & ~placement_blockage_mask
         self.fixed_macro_idx = (
             self.num_movable_nodes + np.where(self.fixed_macro_mask)[0]
         )
         self.num_fixed_macros = self.fixed_macro_idx.shape[0]
+        self._dump_fixed_macro_mask_debug(
+            params,
+            node_areas,
+            movable_mean_area,
+            movable_min_height,
+            mean_area,
+            row_height,
+            area_threshold,
+            height_threshold,
+        )
 
         macro_pin_offset_x_mean = []
         macro_pin_offset_y_mean = []

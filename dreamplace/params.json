@@ -299,6 +299,18 @@
         "description": "whether use per-routing-bin AL multiplier memory as the hard-GGR L-shape capacity-pressure source",
         "default": 0
     },
+    "l_shape_boundary_source_enable": {
+        "description": "whether add a fixed boundary-ring capacity-occupancy source to L-shape electric potential",
+        "default": 0
+    },
+    "l_shape_boundary_source_width_bins": {
+        "description": "number of L-shape bins in the boundary-ring fixed source",
+        "default": 1
+    },
+    "l_shape_boundary_source_strength": {
+        "description": "fraction of min(local capacity, capacity p95) occupied by the L-shape boundary-ring source",
+        "default": 0.5
+    },
     "gpugr_l_direction_rrr_iters": {
         "description": "rrrIters passed to gpugr when l_direction_use_gpugr is enabled",
         "default": 0
@@ -348,8 +360,12 @@
         "default": 0
     },
     "l_shape_grad_target_ratio": {
-        "description": "target ratio between weighted L-shape gradient norm and base wirelength+density gradient norm",
-        "default": 0.3
+        "description": "target ratio between weighted preconditioned L-shape gradient norm and preconditioned base wirelength+density gradient norm",
+        "default": 0.2
+    },
+    "l_shape_overflow_threshold": {
+        "description": "placement overflow threshold below which disabled L-shape diff/routability force is allowed to start or re-enable",
+        "default": 0.2
     },
     "l_shape_filler_reverse_force": {
         "description": "strength of filler reverse force: push fillers TOWARD congested areas using the L-shape Poisson field, so fillers occupy congested bins and density gradient locks real cells away; 0 disables",

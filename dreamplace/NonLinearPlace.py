@@ -40,6 +40,10 @@ from dreamplace.ops.routability.same_net_topo_scoring import (
     build_same_net_topology_cache,
 )
 from dreamplace.ops.routability.profile_timing import l_shape_log_verbose, profile_scope
+from dreamplace.ops.routability.l_shape_electric_potential import (
+    compute_fixed_macro_overlap_stats,
+    compute_movable_displacement_stats,
+)
 from dreamplace.ops.steiner_topo.ggr_l_shape_topology import (
     use_ggr_l_shape_topology,
     validate_ggr_l_shape_topology_params,
@@ -49,6 +53,30 @@ from dreamplace.ops.routability.leiden_clustering import (
     plot_modularity_clusters,
 )
 from dreamplace.ops.routability import xplace_inflation_controller
+
+
+def _snapshot_l_shape_forward_source():
+    from dreamplace.ops.routability.l_shape_electric_potential import (
+        SegmentElectricPotentialFunction,
+    )
+
+    return (
+        SegmentElectricPotentialFunction.last_rho_map,
+        SegmentElectricPotentialFunction.last_rho_map_h,
+        SegmentElectricPotentialFunction.last_rho_map_v,
+    )
+
+
+def _restore_l_shape_forward_source(snapshot):
+    from dreamplace.ops.routability.l_shape_electric_potential import (
+        SegmentElectricPotentialFunction,
+    )
+
+    (
+        SegmentElectricPotentialFunction.last_rho_map,
+        SegmentElectricPotentialFunction.last_rho_map_h,
+        SegmentElectricPotentialFunction.last_rho_map_v,
+    ) = snapshot
 
 
 def _extract_autodmp_movable_lpos(pos, params, placedb):
@@ -1649,6 +1677,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         "l_shape_sched_weight": "l_shape_last_sched_weight",
                         "l_shape_cap_active": "l_shape_last_cap_active",
                         "l_shape_base_grad_norm": "l_shape_last_base_grad_norm",
+                        "l_shape_grad_raw_norm": "l_shape_last_grad_raw_norm",
                         "l_shape_grad_norm": "l_shape_last_grad_norm",
                         "l_shape_grad_ratio": "l_shape_last_grad_ratio",
                         "l_shape_sched_base_weight": "l_shape_last_sched_base_weight",
@@ -1709,6 +1738,32 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         if value is not None:
                             setattr(cur_metric, metric_field, value)
 
+                    macro_summary = getattr(
+                        model, "l_shape_macro_exclusion_last_summary", None
+                    ) or {}
+                    macro_field_map = {
+                        "l_shape_macro_exclusion_enabled": "macro_exclusion_enabled",
+                        "l_shape_macro_exclusion_macro_count": "macro_count",
+                        "l_shape_macro_exclusion_body_bins": "macro_body_bins",
+                        "l_shape_macro_exclusion_halo_bins": "macro_halo_bins",
+                        "l_shape_macro_exclusion_active_bins": "macro_source_active_bins",
+                        "l_shape_macro_exclusion_source_max": "macro_source_max",
+                        "l_shape_macro_exclusion_source_sum": "macro_source_sum",
+                        "l_shape_macro_exclusion_body_source_max": "macro_body_source_max",
+                        "l_shape_macro_exclusion_body_source_sum": "macro_body_source_sum",
+                        "l_shape_macro_exclusion_halo_source_max": "macro_halo_source_max",
+                        "l_shape_macro_exclusion_halo_source_sum": "macro_halo_source_sum",
+                        "l_shape_macro_exclusion_usage_max": "macro_usage_max",
+                        "l_shape_macro_exclusion_usage_sum": "macro_usage_sum",
+                        "l_shape_macro_exclusion_usage_bins": "macro_usage_active_bins",
+                        "l_shape_macro_exclusion_dominates_bins": "macro_dominates_bins",
+                        "l_shape_macro_exclusion_routing_dominates_bins": "routing_dominates_macro_bins",
+                    }
+                    for metric_field, summary_field in macro_field_map.items():
+                        value = macro_summary.get(summary_field)
+                        if value is not None:
+                            setattr(cur_metric, metric_field, value)
+
                     soft_summary = getattr(model, "soft_l_last_summary", None) or {}
                     soft_field_map = {
                         "soft_l_diag_count": "diag_edge_count",
@@ -1753,7 +1808,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
                 def reset_l_shape_reenable_state():
                     base_threshold = float(
-                        getattr(params, "l_shape_overflow_threshold", 0.3)
+                        getattr(params, "l_shape_overflow_threshold", 0.2)
                     )
                     model._l_shape_reenable_threshold_base = base_threshold
                     model._l_shape_reenable_threshold = base_threshold
@@ -1785,7 +1840,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         getattr(
                             model,
                             "_l_shape_reenable_threshold_base",
-                            getattr(params, "l_shape_overflow_threshold", 0.3),
+                            getattr(params, "l_shape_overflow_threshold", 0.2),
                         )
                     )
                     current_threshold = float(
@@ -2141,7 +2196,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 getattr(
                                     model,
                                     "_l_shape_reenable_threshold",
-                                    getattr(params, "l_shape_overflow_threshold", 0.3),
+                                    getattr(params, "l_shape_overflow_threshold", 0.2),
                                 )
                             )
                             reenable_count = int(
@@ -2396,7 +2451,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             if l_shape_log_verbose(params) >= 1:
                                 logging.info(f"L-shape routability enabled at iteration {iteration}, "
                                             f"overflow={cur_metric.overflow[-1]:.4f}, "
-                                            f"threshold={float(getattr(model, '_l_shape_reenable_threshold', getattr(params, 'l_shape_overflow_threshold', 0.3))):.4f}, "
+                                            f"threshold={float(getattr(model, '_l_shape_reenable_threshold', getattr(params, 'l_shape_overflow_threshold', 0.2))):.4f}, "
                                             f"descend_streak={int(getattr(model, '_l_shape_reenable_descend_streak', 0))}, "
                                             f"init time={((time.time() - t_l_shape_init) * 1000):.2f}ms")
                             model._l_shape_reenable_last_overflow = None
@@ -2450,15 +2505,19 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     from dreamplace.ops.routability.l_shape_routability import (
                                         plot_l_shape_electric_overflow_map,
                                         plot_l_shape_initial_density_map,
+                                        plot_l_shape_macro_source_maps,
                                         plot_l_shape_electric_potential_map,
                                         plot_l_shape_supply_maps,
+                                        plot_l_shape_true_source_maps,
                                         plot_segment_density_map,
                                         plot_soft_l_intermediate,
                                         plot_soft_l_scoring_maps,
                                     )
                                     
                                     # 获取密度图
+                                    forward_source_snapshot = _snapshot_l_shape_forward_source()
                                     density_map = model.get_l_shape_density_map(pos, use_l_direction=True)
+                                    _restore_l_shape_forward_source(forward_source_snapshot)
                                     if density_map is not None:
                                         density_plot_path = os.path.join(
                                             params.result_dir, f"l_shape_density_iter{iteration}.png"
@@ -2502,6 +2561,26 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                         )
                                         logging.info(
                                             f"L-shape initial density plot saved to {initial_density_plot_path}"
+                                        )
+                                        source_plot_path = os.path.join(
+                                            params.result_dir, f"l_shape_source_iter{iteration}.png"
+                                        )
+                                        plot_l_shape_true_source_maps(
+                                            l_shape_op,
+                                            output_path=source_plot_path,
+                                            title_prefix=f"L-shape True Source (iter={iteration})",
+                                        )
+                                        logging.info(f"L-shape true source plot saved to {source_plot_path}")
+                                        macro_source_plot_path = os.path.join(
+                                            params.result_dir, f"l_shape_macro_source_iter{iteration}.png"
+                                        )
+                                        plot_l_shape_macro_source_maps(
+                                            l_shape_op,
+                                            output_path=macro_source_plot_path,
+                                            title_prefix=f"L-shape Macro Source (iter={iteration})",
+                                        )
+                                        logging.info(
+                                            f"L-shape macro source plot saved to {macro_source_plot_path}"
                                         )
                                         potential_plot_path = os.path.join(
                                             params.result_dir, f"l_shape_potential_iter{iteration}.png"
@@ -3195,7 +3274,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                                         getattr(
                                                             params,
                                                             "l_shape_grad_target_ratio_max",
-                                                            0.5,
+                                                            0.2,
                                                         )
                                                     )
                                                     if ratio_min > ratio_max:
@@ -3250,17 +3329,21 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     from dreamplace.ops.routability.l_shape_routability import (
                                         plot_l_shape_electric_overflow_map,
                                         plot_l_shape_initial_density_map,
+                                        plot_l_shape_macro_source_maps,
                                         plot_l_shape_electric_potential_map,
                                         plot_l_shape_supply_maps,
+                                        plot_l_shape_true_source_maps,
                                         plot_segment_density_map,
                                         plot_soft_l_intermediate,
                                         plot_soft_l_scoring_maps,
                                     )
                                     
                                     if density_map is None:
+                                        forward_source_snapshot = _snapshot_l_shape_forward_source()
                                         density_map = model.get_l_shape_density_map(
                                             pos, use_l_direction=True
                                         )
+                                        _restore_l_shape_forward_source(forward_source_snapshot)
                                     if density_map is not None:
                                         density_plot_path = os.path.join(
                                             params.result_dir, f"l_shape_density_iter{iteration}.png"
@@ -3298,6 +3381,22 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                             l_shape_op,
                                             output_path=initial_density_plot_path,
                                             title_prefix=f"L-shape Initial Density (iter={iteration})",
+                                        )
+                                        source_plot_path = os.path.join(
+                                            params.result_dir, f"l_shape_source_iter{iteration}.png"
+                                        )
+                                        plot_l_shape_true_source_maps(
+                                            l_shape_op,
+                                            output_path=source_plot_path,
+                                            title_prefix=f"L-shape True Source (iter={iteration})",
+                                        )
+                                        macro_source_plot_path = os.path.join(
+                                            params.result_dir, f"l_shape_macro_source_iter{iteration}.png"
+                                        )
+                                        plot_l_shape_macro_source_maps(
+                                            l_shape_op,
+                                            output_path=macro_source_plot_path,
+                                            title_prefix=f"L-shape Macro Source (iter={iteration})",
                                         )
                                         potential_plot_path = os.path.join(
                                             params.result_dir, f"l_shape_potential_iter{iteration}.png"
@@ -4178,6 +4277,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 "l_shape_weight",
                 "l_shape_target_weight",
                 "l_shape_base_grad_norm",
+                "l_shape_grad_raw_norm",
                 "l_shape_grad_norm",
                 "l_shape_grad_ratio",
                 "l_shape_target_ratio",
@@ -4210,6 +4310,22 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 "l_shape_capacity_al_pq_v_max",
                 "l_shape_capacity_al_active_memory_bins_h",
                 "l_shape_capacity_al_active_memory_bins_v",
+                "l_shape_macro_exclusion_enabled",
+                "l_shape_macro_exclusion_macro_count",
+                "l_shape_macro_exclusion_body_bins",
+                "l_shape_macro_exclusion_halo_bins",
+                "l_shape_macro_exclusion_active_bins",
+                "l_shape_macro_exclusion_source_max",
+                "l_shape_macro_exclusion_source_sum",
+                "l_shape_macro_exclusion_body_source_max",
+                "l_shape_macro_exclusion_body_source_sum",
+                "l_shape_macro_exclusion_halo_source_max",
+                "l_shape_macro_exclusion_halo_source_sum",
+                "l_shape_macro_exclusion_usage_max",
+                "l_shape_macro_exclusion_usage_sum",
+                "l_shape_macro_exclusion_usage_bins",
+                "l_shape_macro_exclusion_dominates_bins",
+                "l_shape_macro_exclusion_routing_dominates_bins",
                 "soft_l_diag_count",
                 "soft_l_mean_cost_gap",
                 "soft_l_raw_cost_gap_p50",
@@ -4356,6 +4472,65 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     params.macro_pin_halo_x = 0
                     params.macro_pin_halo_y = 0
 
+        fixed_macro_pre_legalization_pos = None
+        try:
+            fixed_macro_pre_legalization_pos = self.pos[0].detach().clone()
+            fixed_macro_overlap_stats = compute_fixed_macro_overlap_stats(
+                self.pos[0],
+                self.data_collections.node_size_x,
+                self.data_collections.node_size_y,
+                placedb,
+            )
+            for key, value in fixed_macro_overlap_stats.items():
+                processed_metrics["pre_legalization_%s" % key] = value
+            logging.info(
+                "Fixed macro overlap telemetry: stage=pre_legalization "
+                "macro_count=%d overlap_area=%.6E overlap_area_ratio=%.6E "
+                "overlap_cells=%d overlap_pairs=%d max_overlap_area=%.6E "
+                "coordinate_system=%s macro_set_source=%s",
+                int(
+                    fixed_macro_overlap_stats.get(
+                        "fixed_macro_overlap_macro_count", 0
+                    )
+                ),
+                float(fixed_macro_overlap_stats.get("fixed_macro_overlap_area", 0.0)),
+                float(
+                    fixed_macro_overlap_stats.get(
+                        "fixed_macro_overlap_area_ratio", 0.0
+                    )
+                ),
+                int(
+                    fixed_macro_overlap_stats.get(
+                        "fixed_macro_overlap_cell_count", 0
+                    )
+                ),
+                int(
+                    fixed_macro_overlap_stats.get(
+                        "fixed_macro_overlap_pair_count", 0
+                    )
+                ),
+                float(
+                    fixed_macro_overlap_stats.get(
+                        "fixed_macro_overlap_max_area", 0.0
+                    )
+                ),
+                str(
+                    fixed_macro_overlap_stats.get(
+                        "fixed_macro_overlap_coordinate_system", "unknown"
+                    )
+                ),
+                str(
+                    fixed_macro_overlap_stats.get(
+                        "fixed_macro_overlap_macro_set_source", "unknown"
+                    )
+                ),
+            )
+        except Exception as e:
+            logging.warning(
+                "Failed to compute fixed macro overlap telemetry before legalization: %s",
+                e,
+            )
+
         # legalization
         if params.legalize_flag:
             if params.macro_place_flag:
@@ -4364,6 +4539,82 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     self.op_collections.macro_legalize_op(self.pos[0]))
                 logging.info("Macro legalization takes %.3f seconds" %
                              (time.time() - tt))
+                try:
+                    fixed_macro_overlap_stats = compute_fixed_macro_overlap_stats(
+                        self.pos[0],
+                        self.data_collections.node_size_x,
+                        self.data_collections.node_size_y,
+                        placedb,
+                    )
+                    for key, value in fixed_macro_overlap_stats.items():
+                        processed_metrics["post_macro_legalization_%s" % key] = value
+                    if fixed_macro_pre_legalization_pos is not None:
+                        displacement_stats = compute_movable_displacement_stats(
+                            fixed_macro_pre_legalization_pos, self.pos[0], placedb
+                        )
+                        for key, value in displacement_stats.items():
+                            processed_metrics[
+                                "post_macro_legalization_%s" % key
+                            ] = value
+                    else:
+                        displacement_stats = {}
+                    logging.info(
+                        "Fixed macro overlap telemetry: stage=post_macro_legalization "
+                        "macro_count=%d overlap_area=%.6E overlap_area_ratio=%.6E "
+                        "overlap_cells=%d overlap_pairs=%d max_overlap_area=%.6E "
+                        "legalization_moved=%d legalization_disp_max=%.6E "
+                        "legalization_disp_mean=%.6E",
+                        int(
+                            fixed_macro_overlap_stats.get(
+                                "fixed_macro_overlap_macro_count", 0
+                            )
+                        ),
+                        float(
+                            fixed_macro_overlap_stats.get(
+                                "fixed_macro_overlap_area", 0.0
+                            )
+                        ),
+                        float(
+                            fixed_macro_overlap_stats.get(
+                                "fixed_macro_overlap_area_ratio", 0.0
+                            )
+                        ),
+                        int(
+                            fixed_macro_overlap_stats.get(
+                                "fixed_macro_overlap_cell_count", 0
+                            )
+                        ),
+                        int(
+                            fixed_macro_overlap_stats.get(
+                                "fixed_macro_overlap_pair_count", 0
+                            )
+                        ),
+                        float(
+                            fixed_macro_overlap_stats.get(
+                                "fixed_macro_overlap_max_area", 0.0
+                            )
+                        ),
+                        int(
+                            displacement_stats.get(
+                                "movable_displacement_moved_count", 0
+                            )
+                        ),
+                        float(
+                            displacement_stats.get(
+                                "movable_displacement_max", 0.0
+                            )
+                        ),
+                        float(
+                            displacement_stats.get(
+                                "movable_displacement_mean", 0.0
+                            )
+                        ),
+                    )
+                except Exception as e:
+                    logging.warning(
+                        "Failed to compute fixed macro overlap telemetry after macro legalization: %s",
+                        e,
+                    )
                 cur_metric = EvalMetrics.EvalMetrics(iteration)
                 all_metrics.append(cur_metric)
                 cur_metric.evaluate(
@@ -4377,6 +4628,85 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 self.op_collections.legalize_op(self.pos[0]))
             logging.info("legalization takes %.3f seconds" %
                          (time.time() - tt))
+            try:
+                fixed_macro_overlap_stats = compute_fixed_macro_overlap_stats(
+                    self.pos[0],
+                    self.data_collections.node_size_x,
+                    self.data_collections.node_size_y,
+                    placedb,
+                )
+                for key, value in fixed_macro_overlap_stats.items():
+                    processed_metrics["post_legalization_%s" % key] = value
+                if fixed_macro_pre_legalization_pos is not None:
+                    displacement_stats = compute_movable_displacement_stats(
+                        fixed_macro_pre_legalization_pos, self.pos[0], placedb
+                    )
+                    for key, value in displacement_stats.items():
+                        processed_metrics["post_legalization_%s" % key] = value
+                else:
+                    displacement_stats = {}
+                logging.info(
+                    "Fixed macro overlap telemetry: stage=post_legalization "
+                    "macro_count=%d overlap_area=%.6E overlap_area_ratio=%.6E "
+                    "overlap_cells=%d overlap_pairs=%d max_overlap_area=%.6E "
+                    "legalization_moved=%d legalization_disp_max=%.6E "
+                    "legalization_disp_mean=%.6E legalization_disp_sum=%.6E",
+                    int(
+                        fixed_macro_overlap_stats.get(
+                            "fixed_macro_overlap_macro_count", 0
+                        )
+                    ),
+                    float(
+                        fixed_macro_overlap_stats.get(
+                            "fixed_macro_overlap_area", 0.0
+                        )
+                    ),
+                    float(
+                        fixed_macro_overlap_stats.get(
+                            "fixed_macro_overlap_area_ratio", 0.0
+                        )
+                    ),
+                    int(
+                        fixed_macro_overlap_stats.get(
+                            "fixed_macro_overlap_cell_count", 0
+                        )
+                    ),
+                    int(
+                        fixed_macro_overlap_stats.get(
+                            "fixed_macro_overlap_pair_count", 0
+                        )
+                    ),
+                    float(
+                        fixed_macro_overlap_stats.get(
+                            "fixed_macro_overlap_max_area", 0.0
+                        )
+                    ),
+                    int(
+                        displacement_stats.get(
+                            "movable_displacement_moved_count", 0
+                        )
+                    ),
+                    float(
+                        displacement_stats.get(
+                            "movable_displacement_max", 0.0
+                        )
+                    ),
+                    float(
+                        displacement_stats.get(
+                            "movable_displacement_mean", 0.0
+                        )
+                    ),
+                    float(
+                        displacement_stats.get(
+                            "movable_displacement_sum", 0.0
+                        )
+                    ),
+                )
+            except Exception as e:
+                logging.warning(
+                    "Failed to compute fixed macro overlap telemetry after legalization: %s",
+                    e,
+                )
             cur_metric = EvalMetrics.EvalMetrics(iteration)
             all_metrics.append(cur_metric)
             cur_metric.evaluate(

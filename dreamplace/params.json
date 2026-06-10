@@ -423,6 +423,10 @@
         "description": "enable scoped timing logs for diff/soft-L routability profiling; inserts CUDA synchronizations around timed regions",
         "default": 0
     },
+    "l_shape_collect_edge_geometry_stats": {
+        "description": "collect diagnostic Steiner/GGR edge geometry statistics during topology rebuild/load; disabled by default to avoid production refresh overhead",
+        "default": 0
+    },
     "l_shape_edge_net_ids_cache_flag": {
         "description": "whether cache per-edge net ids used by soft-L same-net topology scoring; disable for profiling or QoR isolation",
         "default": 1

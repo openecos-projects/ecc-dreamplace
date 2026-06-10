@@ -239,6 +239,50 @@ def _build_gpugr_topology_pin_name_to_id(placedb):
     return mapping
 
 
+def _as_cached_gpugr_int64_array(placedb, attr_name, cache_name):
+    values = getattr(placedb, attr_name, None)
+    if values is None:
+        return np.asarray([], dtype=np.int64)
+
+    array = np.asarray(values)
+    cache_key = (
+        id(values),
+        tuple(array.shape),
+        str(array.dtype),
+        tuple(array.strides),
+        int(array.size),
+    )
+    cache = getattr(placedb, cache_name, None)
+    if isinstance(cache, dict) and cache.get("key") == cache_key:
+        return cache["array"]
+
+    int64_array = np.asarray(array, dtype=np.int64)
+    setattr(
+        placedb,
+        cache_name,
+        {
+            "key": cache_key,
+            "array": int64_array,
+        },
+    )
+    return int64_array
+
+
+def _build_gpugr_topology_flat_net2pin_inputs(placedb):
+    return (
+        _as_cached_gpugr_int64_array(
+            placedb,
+            "flat_net2pin_map",
+            "_gpugr_topology_flat_net2pin_map_int64_cache",
+        ),
+        _as_cached_gpugr_int64_array(
+            placedb,
+            "flat_net2pin_start_map",
+            "_gpugr_topology_flat_net2pin_start_map_int64_cache",
+        ),
+    )
+
+
 def _build_gpugr_topology_pack_geometry(placedb, route_xsize, route_ysize):
     xl = float(getattr(placedb, "routing_grid_xl", placedb.xl))
     yl = float(getattr(placedb, "routing_grid_yl", placedb.yl))
@@ -548,11 +592,11 @@ def _fallback_l_shape_wire_width(placedb, route_xsize=None, route_ysize=None, fa
 
 def _resolve_l_shape_wire_width(placedb, route_xsize=None, route_ysize=None, fallback_wire_width=None):
     raw_widths = getattr(placedb, "min_wire_widths", None)
-    widths = np.array(raw_widths, dtype=float) if raw_widths is not None and len(raw_widths) > 0 else np.array([], dtype=float)
+    widths = np.array(raw_widths, dtype=np.float32) if raw_widths is not None and len(raw_widths) > 0 else np.array([], dtype=np.float32)
     raw_h_caps = getattr(placedb, "unit_horizontal_capacities", None)
     raw_v_caps = getattr(placedb, "unit_vertical_capacities", None)
-    h_caps = np.array(raw_h_caps, dtype=float) if raw_h_caps is not None else np.array([], dtype=float)
-    v_caps = np.array(raw_v_caps, dtype=float) if raw_v_caps is not None else np.array([], dtype=float)
+    h_caps = np.array(raw_h_caps, dtype=np.float32) if raw_h_caps is not None else np.array([], dtype=np.float32)
+    v_caps = np.array(raw_v_caps, dtype=np.float32) if raw_v_caps is not None else np.array([], dtype=np.float32)
 
     def _finalize(value, source):
         wire_width = float(value)
@@ -616,6 +660,7 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
         route_ysize,
     )
     need_l_shape_topology_pack = use_ggr_l_shape_topology(params)
+    need_same_net_topology_pack = bool(getattr(params, "soft_l_assignment", False))
     need_route_entries = (
         bool(getattr(params, "l_direction_use_gpugr", False))
         and not _should_skip_resolver_l_direction_for_soft(params)
@@ -624,7 +669,7 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
     need_route_entries = need_route_entries or bool(getattr(params, "gpugr_l_direction_save_artifacts", 0))
     need_route_entries = need_route_entries or bool(getattr(params, "l_shape_plot_flag", 0))
 
-    parser_cache_enable = bool(getattr(params, "gpugr_parser_cache_enable", False))
+    parser_cache_enable = bool(getattr(params, "gpugr_parser_cache_enable", True))
     parser_cache_node_lpos = None
     parser_cache_node_names = None
     gpugr_op = _get_cached_gpugr_operator(placedb)
@@ -662,6 +707,10 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
         topology_net_name_to_id = _build_gpugr_topology_net_name_to_id(placedb)
     with profile_scope(params, "gpugr_prepare.topology_pin_name_to_id", tensor=pos):
         topology_pin_name_to_id = _build_gpugr_topology_pin_name_to_id(placedb)
+    with profile_scope(params, "gpugr_prepare.topology_flat_net2pin_inputs", tensor=pos):
+        topology_flat_net2pin_map, topology_flat_net2pin_start_map = (
+            _build_gpugr_topology_flat_net2pin_inputs(placedb)
+        )
     with profile_scope(
         params,
         "gpugr_prepare.run_gpugr",
@@ -680,12 +729,12 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
             keep_temp_def=False,
             save_artifacts=bool(getattr(params, "gpugr_l_direction_save_artifacts", 0)),
             include_route_entries=need_route_entries,
-            include_topology_pack=True,
+            include_topology_pack=need_same_net_topology_pack,
             include_l_shape_topology_pack=need_l_shape_topology_pack,
             topology_net_name_to_id=topology_net_name_to_id,
             topology_pin_name_to_id=topology_pin_name_to_id,
-            topology_flat_net2pin_map=getattr(placedb, "flat_net2pin_map", []),
-            topology_flat_net2pin_start_map=getattr(placedb, "flat_net2pin_start_map", []),
+            topology_flat_net2pin_map=topology_flat_net2pin_map,
+            topology_flat_net2pin_start_map=topology_flat_net2pin_start_map,
             topology_num_pins=len(getattr(placedb, "pin_names", [])),
             topology_num_nets=int(getattr(placedb, "num_nets", 0)),
             topology_max_gap=1,
@@ -719,14 +768,18 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
         tensor=pos,
         route_nets=route_nets,
         route_entries=total_entries,
+        skipped=0 if need_same_net_topology_pack else 1,
     ):
-        same_net_topo_cache, same_net_topo_stats = build_same_net_topology_cache(
-            route_entries,
-            placedb,
-            profile_enabled=params,
-            prebuilt_cache=result.get("same_net_topology_cache", {}),
-            prebuilt_stats=gpugr_topology_stats,
-        )
+        if need_same_net_topology_pack:
+            same_net_topo_cache, same_net_topo_stats = build_same_net_topology_cache(
+                route_entries,
+                placedb,
+                profile_enabled=params,
+                prebuilt_cache=result.get("same_net_topology_cache", {}),
+                prebuilt_stats=gpugr_topology_stats,
+            )
+        else:
+            same_net_topo_cache, same_net_topo_stats = None, {}
 
     with profile_scope(params, "gpugr_prepare.map_to_device", tensor=pos):
         capacity_map = maps["capacity_map"].detach().to(device=pos.device, dtype=pos.dtype)

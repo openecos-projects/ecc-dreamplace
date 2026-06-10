@@ -5,6 +5,7 @@ import sys
 import unittest
 import importlib.util
 from types import SimpleNamespace
+from unittest import mock
 
 import torch
 
@@ -137,6 +138,15 @@ class TestGGRLShapeTopologyPack(unittest.TestCase):
         self.assertGreater(float(pos.grad[1].item()), 0.0)
         self.assertLess(float(pos.grad[3].item()), 0.0)
         self.assertGreater(float(pos.grad[4].item()), 0.0)
+
+    def test_ggr_loader_skips_redundant_sanitize(self):
+        topo = self.make_topo()
+        pos = torch.tensor([0.0, 10.0, 20.0, 0.0, 10.0, 0.0], dtype=torch.float32)
+
+        with mock.patch.object(topo, "_sanitize_pin_relate_indices") as sanitize:
+            topo.load_ggr_topology_pack(tiny_pack(), pos)
+
+        sanitize.assert_not_called()
 
 
 if __name__ == "__main__":

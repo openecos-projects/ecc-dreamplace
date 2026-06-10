@@ -425,22 +425,117 @@ class LShapeCapacityALTest(unittest.TestCase):
             macro_source_map=op.macro_source_map,
         )
 
-        self.assertEqual(components["macro_usage"].dtype, capacity.dtype)
+        self.assertEqual(components["macro_usage"].dtype, torch.float32)
+        self.assertEqual(components["base_fixed_usage"].dtype, torch.float32)
+        self.assertEqual(components["initial_density_tracks"].dtype, torch.float32)
+        self.assertEqual(components["rho_map"].dtype, torch.float32)
         self.assertTrue(
             torch.equal(
                 components["macro_usage"],
-                torch.tensor([[10.0, 0.0], [15.0, 38.5]], dtype=torch.float64),
+                torch.tensor([[10.0, 0.0], [15.0, 38.5]], dtype=torch.float32),
             )
         )
-        self.assertTrue(torch.equal(components["base_fixed_usage"], fixed))
+        self.assertTrue(torch.equal(components["base_fixed_usage"], fixed.to(dtype=torch.float32)))
         self.assertTrue(
             torch.equal(
                 components["initial_density_tracks"],
-                fixed + components["macro_usage"],
+                fixed.to(dtype=torch.float32) + components["macro_usage"],
             )
         )
         self.assertAlmostEqual(components["macro_usage_reference_p95"], 38.5)
         self.assertAlmostEqual(float(components["residual_tracks"][0, 0]), 0.4)
+
+    def test_electric_potential_routing_buffers_are_normalized_to_float32(self):
+        shape = (2, 2)
+        capacity = torch.ones(shape, dtype=torch.float64)
+        demand = torch.zeros(shape, dtype=torch.float64)
+        fixed = torch.zeros(shape, dtype=torch.float64)
+        op = LShapeElectricPotential(
+            xl=0.0,
+            yl=0.0,
+            xh=2.0,
+            yh=2.0,
+            bin_size_x=1.0,
+            bin_size_y=1.0,
+            num_bins_x=2,
+            num_bins_y=2,
+            target_density=capacity,
+            target_demand=demand,
+            raw_wire_demand_map=demand,
+            supply_original=capacity,
+            target_density_h=capacity,
+            target_density_v=capacity,
+            target_demand_h=demand,
+            target_demand_v=demand,
+            raw_wire_demand_map_h=demand,
+            raw_wire_demand_map_v=demand,
+            supply_original_h=capacity,
+            supply_original_v=capacity,
+            fix_usage_map=fixed,
+            fix_usage_map_h=fixed,
+            fix_usage_map_v=fixed,
+            capacity_al_enable=True,
+            log_verbose=0,
+        )
+        for name in (
+            "target_density",
+            "target_demand",
+            "raw_wire_demand_map",
+            "supply_original",
+            "target_density_h",
+            "target_density_v",
+            "target_demand_h",
+            "target_demand_v",
+            "raw_wire_demand_map_h",
+            "raw_wire_demand_map_v",
+            "supply_original_h",
+            "supply_original_v",
+            "fix_usage_map",
+            "fix_usage_map_h",
+            "fix_usage_map_v",
+            "macro_body_source_map",
+            "macro_halo_source_map",
+            "macro_source_map",
+            "boundary_source_map",
+            "area_per_track",
+        ):
+            self.assertEqual(getattr(op, name).dtype, torch.float32, name)
+
+        op.set_target_density(capacity * 2.0)
+        op.set_target_demand(demand + 1.0)
+        op.set_raw_wire_demand_map(demand + 2.0)
+        op.set_supply_original(capacity * 3.0)
+        op.set_fix_usage_map(fixed + 0.25)
+        op.set_directional_targets(
+            target_density_h=capacity * 4.0,
+            target_density_v=capacity * 5.0,
+            target_demand_h=demand + 3.0,
+            target_demand_v=demand + 4.0,
+            raw_wire_demand_map_h=demand + 5.0,
+            raw_wire_demand_map_v=demand + 6.0,
+            supply_original_h=capacity * 6.0,
+            supply_original_v=capacity * 7.0,
+            fix_usage_map_h=fixed + 0.5,
+            fix_usage_map_v=fixed + 0.75,
+        )
+        for name in (
+            "target_density",
+            "target_demand",
+            "raw_wire_demand_map",
+            "supply_original",
+            "target_density_h",
+            "target_density_v",
+            "target_demand_h",
+            "target_demand_v",
+            "raw_wire_demand_map_h",
+            "raw_wire_demand_map_v",
+            "supply_original_h",
+            "supply_original_v",
+            "fix_usage_map",
+            "fix_usage_map_h",
+            "fix_usage_map_v",
+        ):
+            self.assertEqual(getattr(op, name).dtype, torch.float32, name)
 
     def test_macro_fixed_usage_can_be_computed_directly_for_direction(self):
         macro_source = torch.tensor(

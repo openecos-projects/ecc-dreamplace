@@ -97,7 +97,8 @@ class SteinerTopo(nn.Module):
                  flat_net2pin_start_map,
                  ignore_net_degree=None,
                  algorithm="FLUTE",
-                 deterministic_flag=False):
+                 deterministic_flag=False,
+                 collect_edge_geometry_stats=False):
         super(SteinerTopo, self).__init__()
         # Register buffers
         self.register_buffer('flat_net2pin_map', flat_net2pin_map.contiguous())
@@ -123,6 +124,7 @@ class SteinerTopo(nn.Module):
 
         self.algorithm = algorithm
         self.deterministic_flag = bool(deterministic_flag)
+        self.collect_edge_geometry_stats = bool(collect_edge_geometry_stats)
         self.last_edge_geometry_stats = None
         
         # L方向相关
@@ -165,7 +167,7 @@ class SteinerTopo(nn.Module):
         # )
         return updated_newx, updated_newy
 
-    def update_cache(self, build_tree_outputs):
+    def update_cache(self, build_tree_outputs, sanitize_pin_relate=True):
 
         (self.newx, self.newy, self.pin_relate_x, self.pin_relate_y,
             self.net_vertex_start, self.net_steiner_start,
@@ -183,7 +185,8 @@ class SteinerTopo(nn.Module):
         self.flat_pin_to_start = self.flat_pin_to_start.contiguous()
         self.net_flat_topo_sort = self.net_flat_topo_sort.contiguous()
         self.net_flat_topo_sort_start = self.net_flat_topo_sort_start.contiguous()
-        self._sanitize_pin_relate_indices()
+        if sanitize_pin_relate:
+            self._sanitize_pin_relate_indices()
 
     def load_ggr_topology_pack(self, pack, pin_pos):
         from dreamplace.ops.steiner_topo.ggr_l_shape_topology import (
@@ -194,14 +197,17 @@ class SteinerTopo(nn.Module):
             pack,
             pin_pos,
         )
-        self.update_cache(cache_tuple)
+        self.update_cache(cache_tuple, sanitize_pin_relate=False)
         self.edge_l_directions = edge_l_directions.contiguous()
-        self.last_edge_geometry_stats = self._collect_edge_geometry_stats(
-            self.flat_pin_from,
-            self.flat_pin_to,
-            self.newx,
-            self.newy,
-        )
+        if self.collect_edge_geometry_stats:
+            self.last_edge_geometry_stats = self._collect_edge_geometry_stats(
+                self.flat_pin_from,
+                self.flat_pin_to,
+                self.newx,
+                self.newy,
+            )
+        else:
+            self.last_edge_geometry_stats = None
         logger.info(
             "Loaded GGR L-shape topology pack: nets=%d pins=%d vertices=%d edges=%d",
             int(metadata["num_nets"]),
@@ -534,43 +540,46 @@ class SteinerTopo(nn.Module):
         )
 
         self.update_cache(new_outputs_tuple)
-        self.last_edge_geometry_stats = self._collect_edge_geometry_stats(
-            self.flat_pin_from,
-            self.flat_pin_to,
-            self.newx,
-            self.newy,
-        )
-        logger.info(
-            "FLUTE edge geometry: diagonal_edges=%d/%d (%.2f%%), straight_edges=%d, invalid_edges=%d, "
-            "mapped_edges=%d, unmapped_edges=%d | 2pin diagonal=%d/%d (%.2f%%) | "
-            "non2pin diagonal=%d/%d (%.2f%%) || net_ratio: 2pin=%d/%d (%.2f%%), "
-            "diag_nets=%d/%d (%.2f%%), 2pin_diag_nets=%d/%d (%.2f%%), non2pin_diag_nets=%d/%d (%.2f%%)",
-            self.last_edge_geometry_stats["diagonal_edges"],
-            self.last_edge_geometry_stats["valid_edges"],
-            self.last_edge_geometry_stats["diagonal_ratio"] * 100.0,
-            self.last_edge_geometry_stats["straight_edges"],
-            self.last_edge_geometry_stats["invalid_edges"],
-            self.last_edge_geometry_stats["mapped_edges"],
-            self.last_edge_geometry_stats["unmapped_edges"],
-            self.last_edge_geometry_stats["two_pin_diagonal_edges"],
-            self.last_edge_geometry_stats["two_pin_edges"],
-            self.last_edge_geometry_stats["two_pin_diagonal_ratio"] * 100.0,
-            self.last_edge_geometry_stats["non_two_pin_diagonal_edges"],
-            self.last_edge_geometry_stats["non_two_pin_edges"],
-            self.last_edge_geometry_stats["non_two_pin_diagonal_ratio"] * 100.0,
-            self.last_edge_geometry_stats["two_pin_nets"],
-            self.last_edge_geometry_stats["total_nets"],
-            self.last_edge_geometry_stats["two_pin_net_ratio"] * 100.0,
-            self.last_edge_geometry_stats["diagonal_nets"],
-            self.last_edge_geometry_stats["mapped_nets"],
-            self.last_edge_geometry_stats["net_diagonal_ratio"] * 100.0,
-            self.last_edge_geometry_stats["two_pin_diagonal_nets"],
-            self.last_edge_geometry_stats["two_pin_mapped_nets"],
-            self.last_edge_geometry_stats["two_pin_net_diagonal_ratio"] * 100.0,
-            self.last_edge_geometry_stats["non_two_pin_diagonal_nets"],
-            self.last_edge_geometry_stats["non_two_pin_mapped_nets"],
-            self.last_edge_geometry_stats["non_two_pin_net_diagonal_ratio"] * 100.0,
-        )
+        if self.collect_edge_geometry_stats:
+            self.last_edge_geometry_stats = self._collect_edge_geometry_stats(
+                self.flat_pin_from,
+                self.flat_pin_to,
+                self.newx,
+                self.newy,
+            )
+            logger.info(
+                "FLUTE edge geometry: diagonal_edges=%d/%d (%.2f%%), straight_edges=%d, invalid_edges=%d, "
+                "mapped_edges=%d, unmapped_edges=%d | 2pin diagonal=%d/%d (%.2f%%) | "
+                "non2pin diagonal=%d/%d (%.2f%%) || net_ratio: 2pin=%d/%d (%.2f%%), "
+                "diag_nets=%d/%d (%.2f%%), 2pin_diag_nets=%d/%d (%.2f%%), non2pin_diag_nets=%d/%d (%.2f%%)",
+                self.last_edge_geometry_stats["diagonal_edges"],
+                self.last_edge_geometry_stats["valid_edges"],
+                self.last_edge_geometry_stats["diagonal_ratio"] * 100.0,
+                self.last_edge_geometry_stats["straight_edges"],
+                self.last_edge_geometry_stats["invalid_edges"],
+                self.last_edge_geometry_stats["mapped_edges"],
+                self.last_edge_geometry_stats["unmapped_edges"],
+                self.last_edge_geometry_stats["two_pin_diagonal_edges"],
+                self.last_edge_geometry_stats["two_pin_edges"],
+                self.last_edge_geometry_stats["two_pin_diagonal_ratio"] * 100.0,
+                self.last_edge_geometry_stats["non_two_pin_diagonal_edges"],
+                self.last_edge_geometry_stats["non_two_pin_edges"],
+                self.last_edge_geometry_stats["non_two_pin_diagonal_ratio"] * 100.0,
+                self.last_edge_geometry_stats["two_pin_nets"],
+                self.last_edge_geometry_stats["total_nets"],
+                self.last_edge_geometry_stats["two_pin_net_ratio"] * 100.0,
+                self.last_edge_geometry_stats["diagonal_nets"],
+                self.last_edge_geometry_stats["mapped_nets"],
+                self.last_edge_geometry_stats["net_diagonal_ratio"] * 100.0,
+                self.last_edge_geometry_stats["two_pin_diagonal_nets"],
+                self.last_edge_geometry_stats["two_pin_mapped_nets"],
+                self.last_edge_geometry_stats["two_pin_net_diagonal_ratio"] * 100.0,
+                self.last_edge_geometry_stats["non_two_pin_diagonal_nets"],
+                self.last_edge_geometry_stats["non_two_pin_mapped_nets"],
+                self.last_edge_geometry_stats["non_two_pin_net_diagonal_ratio"] * 100.0,
+            )
+        else:
+            self.last_edge_geometry_stats = None
         return self.net_flat_topo_sort, self.net_flat_topo_sort_start, self.pin_fa, \
             self.flat_pin_to, self.flat_pin_to_start, self.flat_pin_from
 

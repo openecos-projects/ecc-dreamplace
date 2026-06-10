@@ -315,6 +315,13 @@ class LShapeRoutabilityOp(nn.Module):
         self.cached_density_map_v = None
         self.per_net_topology_cache = None
         self.per_net_topology_stats = None
+        self._ggr_fast_path_log_emitted = False
+        self._ggr_fast_path_warning_emitted = False
+        self._ggr_vertex_x_cache = None
+        self._ggr_vertex_y_cache = None
+        self._ggr_flat_from_cache = None
+        self._ggr_flat_to_cache = None
+        self._ggr_l_direction_cache = None
         self.target_density_h = target_density_h
         self.target_density_v = target_density_v
         self.target_demand_h = target_demand_h
@@ -391,7 +398,7 @@ class LShapeRoutabilityOp(nn.Module):
                 int(values.max().item()),
                 int(values.to(dtype=torch.int64).sum().item()),
             )
-        values_f = values.to(dtype=torch.float64)
+        values_f = values.to(dtype=torch.float32)
         return prefix + " numel=%d min=%.9e max=%.9e sum=%.9e mean=%.9e" % (
             int(values.numel()),
             float(values_f.min().item()),
@@ -535,6 +542,7 @@ class LShapeRoutabilityOp(nn.Module):
                 self.segment_builder.reset_cache()
             self._clear_soft_edge_topology_cache()
             self._clear_fallback_l_directions_cache()
+            self._clear_ggr_fast_path_cache()
             self.cached_soft_debug = None
             self._soft_l_debug_call_count = 0
             self.cached_density_map = None
@@ -568,6 +576,7 @@ class LShapeRoutabilityOp(nn.Module):
         self._cached_edge_net_ids_key = None
         self._clear_soft_edge_topology_cache()
         self._clear_fallback_l_directions_cache()
+        self._clear_ggr_fast_path_cache()
         if hasattr(self.segment_builder, "reset_cache"):
             self.segment_builder.reset_cache()
         if isinstance(self.cached_soft_debug, dict):
@@ -594,6 +603,143 @@ class LShapeRoutabilityOp(nn.Module):
 
     def update_same_net_topology(self, topo_cache=None, topo_stats=None):
         self.update_per_net_topology(topo_cache=topo_cache, topo_stats=topo_stats)
+
+    def _clear_ggr_fast_path_cache(self):
+        self._ggr_vertex_x_cache = None
+        self._ggr_vertex_y_cache = None
+        self._ggr_flat_from_cache = None
+        self._ggr_flat_to_cache = None
+        self._ggr_l_direction_cache = None
+
+    def _tensor_device_cache_key(self, tensor, device, dtype=None):
+        if not isinstance(tensor, torch.Tensor):
+            return None
+        values = tensor.detach()
+        target_dtype = dtype if dtype is not None else values.dtype
+        return (
+            str(values.dtype),
+            str(values.device),
+            int(values.numel()),
+            int(values.data_ptr()) if values.numel() > 0 else 0,
+            int(getattr(tensor, "_version", 0)),
+            str(device),
+            str(target_dtype),
+        )
+
+    def _cached_tensor_to_device(self, tensor, device, cache_attr, dtype=None):
+        key = self._tensor_device_cache_key(tensor, device, dtype=dtype)
+        cache = getattr(self, cache_attr, None)
+        if isinstance(cache, dict) and cache.get("key") == key:
+            return cache["tensor"]
+        value = tensor.detach().to(
+            device=device,
+            dtype=dtype if dtype is not None else tensor.dtype,
+        ).contiguous()
+        setattr(self, cache_attr, {"key": key, "tensor": value})
+        return value
+
+    def _cached_vertex_gather(self, relate, device, cache_attr):
+        key = self._tensor_device_cache_key(relate, device, dtype=torch.long)
+        key = key + (bool(self.deterministic_flag),)
+        cache = getattr(self, cache_attr, None)
+        if isinstance(cache, dict) and cache.get("key") == key:
+            return cache
+
+        indices = relate.detach().to(device=device, dtype=torch.long).contiguous()
+        plan = _build_gather_plan(indices) if self.deterministic_flag else None
+        cache = {"key": key, "indices": indices, "plan": plan}
+        setattr(self, cache_attr, cache)
+        return cache
+
+    def _gather_vertices_from_pins(self, pin_coord, relate, cache_attr):
+        cache = self._cached_vertex_gather(relate, pin_coord.device, cache_attr)
+        if self.deterministic_flag:
+            return _deterministic_gather_1d(pin_coord, cache["plan"]).contiguous()
+        return pin_coord.index_select(0, cache["indices"]).contiguous()
+
+    def _try_ggr_topology_fast_path(self, pin_pos, steiner_topo_op):
+        if not bool(getattr(self.params, "l_shape_use_ggr_topology", False)):
+            return None
+
+        pin_relate_x = getattr(steiner_topo_op, "pin_relate_x", None)
+        pin_relate_y = getattr(steiner_topo_op, "pin_relate_y", None)
+        flat_pin_from = getattr(steiner_topo_op, "flat_pin_from", None)
+        flat_pin_to = getattr(steiner_topo_op, "flat_pin_to", None)
+        edge_l_directions = getattr(steiner_topo_op, "edge_l_directions", None)
+        num_vertices = getattr(steiner_topo_op, "num_vertices", None)
+        if (
+            not isinstance(pin_relate_x, torch.Tensor)
+            or not isinstance(pin_relate_y, torch.Tensor)
+            or not isinstance(flat_pin_from, torch.Tensor)
+            or not isinstance(flat_pin_to, torch.Tensor)
+            or edge_l_directions is not None and not isinstance(edge_l_directions, torch.Tensor)
+            or num_vertices is None
+        ):
+            return None
+
+        num_vertices = int(num_vertices)
+        num_pins = pin_pos.numel() // 2
+        if num_vertices <= 0 or pin_relate_x.numel() < num_vertices or pin_relate_y.numel() < num_vertices:
+            return None
+
+        try:
+            with profile_scope(
+                self.profile_enabled,
+                "l_shape_op.ggr_topology_fast_path",
+                tensor=pin_pos,
+                logger=logger,
+                vertices=num_vertices,
+            ):
+                relate_x = pin_relate_x[:num_vertices]
+                relate_y = pin_relate_y[:num_vertices]
+                pin_x = pin_pos[:num_pins]
+                pin_y = pin_pos[num_pins:]
+                newx = self._gather_vertices_from_pins(
+                    pin_x,
+                    relate_x,
+                    "_ggr_vertex_x_cache",
+                )
+                newy = self._gather_vertices_from_pins(
+                    pin_y,
+                    relate_y,
+                    "_ggr_vertex_y_cache",
+                )
+
+                device = pin_pos.device
+                flat_pin_from = self._cached_tensor_to_device(
+                    flat_pin_from,
+                    device,
+                    "_ggr_flat_from_cache",
+                )
+                flat_pin_to = self._cached_tensor_to_device(
+                    flat_pin_to,
+                    device,
+                    "_ggr_flat_to_cache",
+                )
+                if edge_l_directions is not None:
+                    edge_l_directions = self._cached_tensor_to_device(
+                        edge_l_directions,
+                        device,
+                        "_ggr_l_direction_cache",
+                    )
+
+            if self.log_verbose >= 1 and not self._ggr_fast_path_log_emitted:
+                logger.info(
+                    "Using GGR topology GPU fast path for L-shape vertex gather: vertices=%d edges=%d deterministic=%s",
+                    num_vertices,
+                    int(flat_pin_from.numel()),
+                    self.deterministic_flag,
+                )
+                self._ggr_fast_path_log_emitted = True
+            return newx, newy, flat_pin_from, flat_pin_to, edge_l_directions
+        except Exception as exc:
+            if not self._ggr_fast_path_warning_emitted:
+                logger.warning(
+                    "Falling back to CPU Steiner topology path after GGR topology fast path failed: %s",
+                    exc,
+                )
+                self._ggr_fast_path_warning_emitted = True
+            return None
 
     def _build_vertex_to_net(self, steiner_topo_op, num_vertices):
         """Build vertex->net mapping for pins and Steiner points."""
@@ -1603,15 +1749,6 @@ class LShapeRoutabilityOp(nn.Module):
             )
             return cost
         
-        # ========== 关键修复: 保持梯度链完整 ==========
-        # steiner_topo_op 只支持CPU，所以我们需要：
-        # 1. 检查pos是否越界（仅movable）
-        # 2. 计算pin_pos（不再clamp）
-        # 3. 将pin_pos移到CPU (保持梯度)
-        # 4. 在CPU上调用steiner_topo_op
-        # 5. 在CPU上计算segments和density
-        # 6. 将结果移回CUDA
-        
         # 1. 检查pos是否越界（仅检查movable节点）
         num_nodes = pos.numel() // 2
         num_movable = min(self.placedb.num_movable_nodes, num_nodes)
@@ -1644,44 +1781,41 @@ class LShapeRoutabilityOp(nn.Module):
             pin_pos = torch.cat([pin_pos_x, pin_pos_y], dim=0)
         self._log_debug_hash("forward.pos", pos)
         self._log_debug_hash("forward.pin_pos", pin_pos)
-        
-        # 3. 将pin_pos移到CPU（保持梯度连接）
-        if pin_pos.is_cuda:
-            pin_pos_cpu = pin_pos.cpu()  # .cpu() 会创建 ToCopyBackward，梯度可以流回
+
+        fast_path = self._try_ggr_topology_fast_path(pin_pos, steiner_topo_op)
+        if fast_path is not None:
+            newx, newy, flat_pin_from, flat_pin_to, fast_l_directions = fast_path
         else:
-            pin_pos_cpu = pin_pos
-        
-        # 4. 调用steiner_topo_op (在CPU上)
-        with profile_scope(self.profile_enabled, "l_shape_op.steiner_topo", tensor=pos, logger=logger):
-            newx, newy = steiner_topo_op(pin_pos_cpu)
+            fast_l_directions = None
+            # steiner_topo_op only supports CPU in the legacy path. The CPU copy
+            # keeps autograd connected through ToCopyBackward.
+            if pin_pos.is_cuda:
+                pin_pos_cpu = pin_pos.cpu()
+            else:
+                pin_pos_cpu = pin_pos
+
+            with profile_scope(self.profile_enabled, "l_shape_op.steiner_topo", tensor=pos, logger=logger):
+                newx, newy = steiner_topo_op(pin_pos_cpu)
+            flat_pin_from = steiner_topo_op.flat_pin_from
+            flat_pin_to = steiner_topo_op.flat_pin_to
         self._log_debug_hash("forward.pin_relate_x", getattr(steiner_topo_op, "pin_relate_x", None))
         self._log_debug_hash("forward.pin_relate_y", getattr(steiner_topo_op, "pin_relate_y", None))
         self._log_debug_hash("forward.newx", newx)
         self._log_debug_hash("forward.newy", newy)
-                
-        # 5. 获取边信息（确保在CPU上）
-        flat_pin_from = steiner_topo_op.flat_pin_from
-        flat_pin_to = steiner_topo_op.flat_pin_to
-        
+
         if flat_pin_from is None or flat_pin_to is None:
             logger.warning("Steiner edges not available, returning zero cost")
             return _finish(
                 torch.zeros(1, dtype=pos.dtype, device=original_device, requires_grad=True),
                 segments=0,
             )
-        
-        # 确保边信息在CPU上（与newx, newy一致）
-        if flat_pin_from.is_cuda:
-            flat_pin_from = flat_pin_from.cpu()
-        if flat_pin_to.is_cuda:
-            flat_pin_to = flat_pin_to.cpu()
-        
+
         # 5. 获取L方向信息
-        if use_l_direction and hasattr(steiner_topo_op, 'edge_l_directions') and steiner_topo_op.edge_l_directions is not None:
+        if use_l_direction and fast_l_directions is not None:
+            l_directions = fast_l_directions
+            logger.debug(f"Using GGR L-directions: {len(l_directions)} edges")
+        elif use_l_direction and hasattr(steiner_topo_op, 'edge_l_directions') and steiner_topo_op.edge_l_directions is not None:
             l_directions = steiner_topo_op.edge_l_directions
-            # 确保L方向在CPU上
-            if l_directions.is_cuda:
-                l_directions = l_directions.cpu()
             logger.debug(f"Using EGR L-directions: {len(l_directions)} edges")
         else:
             fallback_direction = UNKNOWN if self.soft_l_assignment else H_FIRST
@@ -1865,22 +1999,26 @@ class LShapeRoutabilityOp(nn.Module):
         pin_pos_y = pin_pos[num_pins:].clamp(self.yl, self.yh)
         pin_pos = torch.cat([pin_pos_x, pin_pos_y], dim=0)
         
-        # steiner_topo_op要求CPU tensor
-        pin_pos_cpu = pin_pos.cpu() if pin_pos.is_cuda else pin_pos
-        newx, newy = steiner_topo_op(pin_pos_cpu)
+        fast_path = self._try_ggr_topology_fast_path(pin_pos, steiner_topo_op)
+        if fast_path is not None:
+            newx, newy, flat_pin_from, flat_pin_to, fast_l_directions = fast_path
+        else:
+            fast_l_directions = None
+            # steiner_topo_op requires CPU tensors in the legacy path.
+            pin_pos_cpu = pin_pos.cpu() if pin_pos.is_cuda else pin_pos
+            newx, newy = steiner_topo_op(pin_pos_cpu)
+            flat_pin_from = steiner_topo_op.flat_pin_from
+            flat_pin_to = steiner_topo_op.flat_pin_to
         self._log_debug_hash("get_density_map.pin_relate_x", getattr(steiner_topo_op, "pin_relate_x", None))
         self._log_debug_hash("get_density_map.pin_relate_y", getattr(steiner_topo_op, "pin_relate_y", None))
         self._log_debug_hash("get_density_map.newx", newx)
         self._log_debug_hash("get_density_map.newy", newy)
-        
-        # 将结果移回原设备
-        if device.type == 'cuda':
+
+        # 将 legacy CPU topology 结果移回原设备；fast path 已在目标设备上。
+        if fast_path is None and device.type == 'cuda':
             newx = newx.to(device)
             newy = newy.to(device)
-        
-        flat_pin_from = steiner_topo_op.flat_pin_from
-        flat_pin_to = steiner_topo_op.flat_pin_to
-        
+
         if flat_pin_from is None or flat_pin_to is None:
             return torch.zeros(
                 self.density_op.num_bins_x, self.density_op.num_bins_y,
@@ -1890,7 +2028,9 @@ class LShapeRoutabilityOp(nn.Module):
         # Keep edge topology tensors on their stable source device. Soft scoring
         # moves local views as needed; this lets overflow probing and forward
         # share edge-net and segment-topology caches across a refresh.
-        if use_l_direction and hasattr(steiner_topo_op, 'edge_l_directions') and steiner_topo_op.edge_l_directions is not None:
+        if use_l_direction and fast_l_directions is not None:
+            l_directions = fast_l_directions
+        elif use_l_direction and hasattr(steiner_topo_op, 'edge_l_directions') and steiner_topo_op.edge_l_directions is not None:
             l_directions = steiner_topo_op.edge_l_directions
             if l_directions.device != flat_pin_from.device:
                 l_directions = l_directions.to(flat_pin_from.device)

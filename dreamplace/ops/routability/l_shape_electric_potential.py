@@ -39,6 +39,20 @@ _MACRO_USAGE_REFERENCE_QUANTILE = 0.95
 _MACRO_SET_SOURCE = "fixed_macro_mask_heuristic"
 _MACRO_COORDINATE_SYSTEM = "autodmp_scaled"
 _BOUNDARY_SOURCE_REFERENCE_QUANTILE = 0.95
+_ROUTING_FLOAT_DTYPE = torch.float32
+
+
+def _routing_float32_tensor(value, device=None):
+    if value is None:
+        return None
+    if torch.is_tensor(value):
+        if device is None:
+            return value.to(dtype=_ROUTING_FLOAT_DTYPE)
+        return value.to(device=device, dtype=_ROUTING_FLOAT_DTYPE)
+    kwargs = {"dtype": _ROUTING_FLOAT_DTYPE}
+    if device is not None:
+        kwargs["device"] = device
+    return torch.as_tensor(value, **kwargs)
 
 
 def _scalar_stat(tensor, op_name, default=0.0):
@@ -182,6 +196,28 @@ def compute_track_rho_components(
     macro_source_map=None,
     boundary_source_map=None,
 ):
+    density_seg_area = _routing_float32_tensor(density_seg_area)
+    supply_original = _routing_float32_tensor(
+        supply_original,
+        device=density_seg_area.device,
+    )
+    fix_usage = _routing_float32_tensor(fix_usage, device=density_seg_area.device)
+    if torch.is_tensor(macro_source_map):
+        macro_source_map = _routing_float32_tensor(
+            macro_source_map,
+            device=density_seg_area.device,
+        )
+    if torch.is_tensor(boundary_source_map):
+        boundary_source_map = _routing_float32_tensor(
+            boundary_source_map,
+            device=density_seg_area.device,
+        )
+    bin_area = (
+        float(bin_area.detach().item())
+        if torch.is_tensor(bin_area)
+        else float(bin_area)
+    )
+    bin_area = max(bin_area, 1.0e-30)
     density_seg_tracks = density_seg_area / bin_area
     base_fixed_usage = fix_usage.clamp(min=0)
     capacity_tracks = supply_original
@@ -1565,7 +1601,7 @@ class LShapeElectricPotential(nn.Module):
         self.last_boundary_source_stats = {}
         
         if isinstance(target_density, torch.Tensor):
-            self.register_buffer('target_density', target_density)
+            self.register_buffer('target_density', _routing_float32_tensor(target_density))
         else:
             raise TypeError(
                 "LShapeElectricPotential requires target_density to be a 2D routing supply tensor"
@@ -1573,63 +1609,76 @@ class LShapeElectricPotential(nn.Module):
 
         # Store target_demand (2D tensor from the current routing-oracle demand map)
         if isinstance(target_demand, torch.Tensor):
-            self.register_buffer('target_demand', target_demand)
+            self.register_buffer('target_demand', _routing_float32_tensor(target_demand))
         else:
             raise TypeError(
                 "LShapeElectricPotential requires target_demand to be a 2D routing demand tensor"
             )
         self.register_buffer(
             'raw_wire_demand_map',
-            raw_wire_demand_map if isinstance(raw_wire_demand_map, torch.Tensor) else None,
+            _routing_float32_tensor(raw_wire_demand_map)
+            if isinstance(raw_wire_demand_map, torch.Tensor) else None,
         )
         self.register_buffer(
             'supply_original',
-            supply_original if isinstance(supply_original, torch.Tensor) else None,
+            _routing_float32_tensor(supply_original)
+            if isinstance(supply_original, torch.Tensor) else None,
         )
 
         self.register_buffer(
             'target_density_h',
-            target_density_h if isinstance(target_density_h, torch.Tensor) else None,
+            _routing_float32_tensor(target_density_h)
+            if isinstance(target_density_h, torch.Tensor) else None,
         )
         self.register_buffer(
             'target_density_v',
-            target_density_v if isinstance(target_density_v, torch.Tensor) else None,
+            _routing_float32_tensor(target_density_v)
+            if isinstance(target_density_v, torch.Tensor) else None,
         )
         self.register_buffer(
             'target_demand_h',
-            target_demand_h if isinstance(target_demand_h, torch.Tensor) else None,
+            _routing_float32_tensor(target_demand_h)
+            if isinstance(target_demand_h, torch.Tensor) else None,
         )
         self.register_buffer(
             'target_demand_v',
-            target_demand_v if isinstance(target_demand_v, torch.Tensor) else None,
+            _routing_float32_tensor(target_demand_v)
+            if isinstance(target_demand_v, torch.Tensor) else None,
         )
         self.register_buffer(
             'raw_wire_demand_map_h',
-            raw_wire_demand_map_h if isinstance(raw_wire_demand_map_h, torch.Tensor) else None,
+            _routing_float32_tensor(raw_wire_demand_map_h)
+            if isinstance(raw_wire_demand_map_h, torch.Tensor) else None,
         )
         self.register_buffer(
             'raw_wire_demand_map_v',
-            raw_wire_demand_map_v if isinstance(raw_wire_demand_map_v, torch.Tensor) else None,
+            _routing_float32_tensor(raw_wire_demand_map_v)
+            if isinstance(raw_wire_demand_map_v, torch.Tensor) else None,
         )
         self.register_buffer(
             'supply_original_h',
-            supply_original_h if isinstance(supply_original_h, torch.Tensor) else None,
+            _routing_float32_tensor(supply_original_h)
+            if isinstance(supply_original_h, torch.Tensor) else None,
         )
         self.register_buffer(
             'supply_original_v',
-            supply_original_v if isinstance(supply_original_v, torch.Tensor) else None,
+            _routing_float32_tensor(supply_original_v)
+            if isinstance(supply_original_v, torch.Tensor) else None,
         )
         self.register_buffer(
             'fix_usage_map',
-            fix_usage_map if isinstance(fix_usage_map, torch.Tensor) else None,
+            _routing_float32_tensor(fix_usage_map)
+            if isinstance(fix_usage_map, torch.Tensor) else None,
         )
         self.register_buffer(
             'fix_usage_map_h',
-            fix_usage_map_h if isinstance(fix_usage_map_h, torch.Tensor) else None,
+            _routing_float32_tensor(fix_usage_map_h)
+            if isinstance(fix_usage_map_h, torch.Tensor) else None,
         )
         self.register_buffer(
             'fix_usage_map_v',
-            fix_usage_map_v if isinstance(fix_usage_map_v, torch.Tensor) else None,
+            _routing_float32_tensor(fix_usage_map_v)
+            if isinstance(fix_usage_map_v, torch.Tensor) else None,
         )
         if placedb is None:
             macro_body_source_map = torch.zeros(
@@ -1722,7 +1771,7 @@ class LShapeElectricPotential(nn.Module):
                 str(self.boundary_source_stats.get("boundary_source_grid_shape")),
             )
         # Persistent calibration factor (area per track), initialized on first forward
-        self.register_buffer('area_per_track', torch.tensor(0.0))
+        self.register_buffer('area_per_track', torch.tensor(0.0, dtype=_ROUTING_FLOAT_DTYPE))
         
         # Will be initialized on first forward pass
         self.bin_center_x = None
@@ -2180,6 +2229,7 @@ class LShapeElectricPotential(nn.Module):
     
     def _init_bins(self, device, dtype):
         """Initialize bin centers and padding mask."""
+        dtype = _ROUTING_FLOAT_DTYPE
         # Bin centers
         self.bin_center_x = torch.arange(
             self.num_bins_x, device=device, dtype=dtype
@@ -2235,6 +2285,7 @@ class LShapeElectricPotential(nn.Module):
     
     def _init_target_density(self, device, dtype):
         """Initialize or convert target_density to proper tensor format."""
+        dtype = _ROUTING_FLOAT_DTYPE
         if not isinstance(self.target_density, torch.Tensor):
             raise TypeError(
                 "LShapeElectricPotential requires target_density to be a 2D routing supply tensor"
@@ -2253,6 +2304,7 @@ class LShapeElectricPotential(nn.Module):
 
     def _init_target_demand(self, device, dtype):
         """Initialize or convert target_demand to proper tensor format."""
+        dtype = _ROUTING_FLOAT_DTYPE
         if isinstance(self.target_demand, torch.Tensor):
             if self.target_demand.shape != (self.num_bins_x, self.num_bins_y):
                 logger.warning(f"target_demand shape {self.target_demand.shape} != "
@@ -2269,6 +2321,7 @@ class LShapeElectricPotential(nn.Module):
             )
 
     def _init_optional_target_map(self, name, device, dtype):
+        dtype = _ROUTING_FLOAT_DTYPE
         target_map = getattr(self, name, None)
         if target_map is None:
             return
@@ -2307,8 +2360,10 @@ class LShapeElectricPotential(nn.Module):
         if self.bin_center_x is not None:
             target_density = target_density.to(
                 device=self.bin_center_x.device,
-                dtype=self.bin_center_x.dtype
+                dtype=_ROUTING_FLOAT_DTYPE
             )
+        else:
+            target_density = _routing_float32_tensor(target_density)
         self.target_density = target_density
         self.reset_capacity_al_state("target_density_changed")
         if self.log_verbose >= 2:
@@ -2335,8 +2390,10 @@ class LShapeElectricPotential(nn.Module):
             if self.bin_center_x is not None:
                 target_demand = target_demand.to(
                     device=self.bin_center_x.device, 
-                    dtype=self.bin_center_x.dtype
+                    dtype=_ROUTING_FLOAT_DTYPE
                 )
+            else:
+                target_demand = _routing_float32_tensor(target_demand)
             self.target_demand = target_demand
             self.reset_capacity_al_state("target_demand_changed")
             if isinstance(self.area_per_track, torch.Tensor):
@@ -2362,8 +2419,10 @@ class LShapeElectricPotential(nn.Module):
         if self.bin_center_x is not None:
             raw_wire_demand_map = raw_wire_demand_map.to(
                 device=self.bin_center_x.device,
-                dtype=self.bin_center_x.dtype,
+                dtype=_ROUTING_FLOAT_DTYPE,
             )
+        else:
+            raw_wire_demand_map = _routing_float32_tensor(raw_wire_demand_map)
         self.raw_wire_demand_map = raw_wire_demand_map
         self.reset_capacity_al_state("raw_wire_demand_changed")
         if isinstance(self.area_per_track, torch.Tensor):
@@ -2388,8 +2447,10 @@ class LShapeElectricPotential(nn.Module):
         if self.bin_center_x is not None:
             supply_original = supply_original.to(
                 device=self.bin_center_x.device,
-                dtype=self.bin_center_x.dtype,
+                dtype=_ROUTING_FLOAT_DTYPE,
             )
+        else:
+            supply_original = _routing_float32_tensor(supply_original)
         self.supply_original = supply_original
         self.reset_capacity_al_state("supply_original_changed")
         if self.log_verbose >= 2:
@@ -2412,8 +2473,10 @@ class LShapeElectricPotential(nn.Module):
         if self.bin_center_x is not None:
             fix_usage_map = fix_usage_map.to(
                 device=self.bin_center_x.device,
-                dtype=self.bin_center_x.dtype,
+                dtype=_ROUTING_FLOAT_DTYPE,
             )
+        else:
+            fix_usage_map = _routing_float32_tensor(fix_usage_map)
         self.fix_usage_map = fix_usage_map
         self.reset_capacity_al_state("fix_usage_changed")
         if self.log_verbose >= 2:
@@ -2461,14 +2524,17 @@ class LShapeElectricPotential(nn.Module):
             if self.bin_center_x is not None:
                 value = value.to(
                     device=self.bin_center_x.device,
-                    dtype=self.bin_center_x.dtype,
+                    dtype=_ROUTING_FLOAT_DTYPE,
                 )
+            else:
+                value = _routing_float32_tensor(value)
             setattr(self, name, value)
         if any(value is not None for value in updates.values()):
             self.reset_capacity_al_state("directional_targets_changed")
     
     def _init_dct(self, device, dtype):
         """Initialize DCT related parameters."""
+        dtype = _ROUTING_FLOAT_DTYPE
         M = self.num_bins_x
         N = self.num_bins_y
         
@@ -2581,15 +2647,46 @@ class LShapeElectricPotential(nn.Module):
             energy: electric potential energy (scalar)
         """
         num_segments = segment_size_x.numel()
+        original_segment_dtype = segment_pos.dtype
+        if segment_pos.dtype != _ROUTING_FLOAT_DTYPE:
+            segment_pos = segment_pos.to(dtype=_ROUTING_FLOAT_DTYPE)
+        if segment_size_x.dtype != _ROUTING_FLOAT_DTYPE:
+            segment_size_x = segment_size_x.to(
+                device=segment_pos.device,
+                dtype=_ROUTING_FLOAT_DTYPE,
+            )
+        elif segment_size_x.device != segment_pos.device:
+            segment_size_x = segment_size_x.to(device=segment_pos.device)
+        if segment_size_y.dtype != _ROUTING_FLOAT_DTYPE:
+            segment_size_y = segment_size_y.to(
+                device=segment_pos.device,
+                dtype=_ROUTING_FLOAT_DTYPE,
+            )
+        elif segment_size_y.device != segment_pos.device:
+            segment_size_y = segment_size_y.to(device=segment_pos.device)
+        if isinstance(segment_weight, torch.Tensor):
+            segment_weight = segment_weight.to(
+                device=segment_pos.device,
+                dtype=_ROUTING_FLOAT_DTYPE,
+            )
         
         if num_segments == 0:
-            return torch.zeros(1, dtype=segment_pos.dtype, device=segment_pos.device, requires_grad=True)
+            return torch.zeros(1, dtype=_ROUTING_FLOAT_DTYPE, device=segment_pos.device, requires_grad=True)
         
         # Initialize on first call
-        if self.bin_center_x is None:
-            self._init_bins(segment_pos.device, segment_pos.dtype)
-        if self.dct2 is None:
-            self._init_dct(segment_pos.device, segment_pos.dtype)
+        if (
+            self.bin_center_x is None
+            or self.bin_center_x.device != segment_pos.device
+            or self.bin_center_x.dtype != _ROUTING_FLOAT_DTYPE
+        ):
+            self._init_bins(segment_pos.device, _ROUTING_FLOAT_DTYPE)
+        if (
+            self.dct2 is None
+            or self.exact_expkM is None
+            or self.exact_expkM.device != segment_pos.device
+            or self.exact_expkM.dtype != _ROUTING_FLOAT_DTYPE
+        ):
+            self._init_dct(segment_pos.device, _ROUTING_FLOAT_DTYPE)
         
         # Prepare segment data
         (
@@ -2610,8 +2707,12 @@ class LShapeElectricPotential(nn.Module):
 
         if isinstance(segment_is_horizontal, torch.Tensor) and segment_is_horizontal.device != segment_pos.device:
             segment_is_horizontal = segment_is_horizontal.to(segment_pos.device)
-        if isinstance(segment_weight, torch.Tensor) and segment_weight.device != segment_pos.device:
-            segment_weight = segment_weight.to(segment_pos.device)
+        if original_segment_dtype != _ROUTING_FLOAT_DTYPE and self.log_verbose >= 2:
+            logger.info(
+                "L-shape electric potential converted segment tensors from %s to %s",
+                str(original_segment_dtype),
+                str(_ROUTING_FLOAT_DTYPE),
+            )
         if self.capacity_al_enable:
             required_maps = (
                 self.supply_original_h,

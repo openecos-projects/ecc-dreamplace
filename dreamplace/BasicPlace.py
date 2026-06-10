@@ -870,7 +870,11 @@ class BasicPlace(nn.Module):
                 device).cpu(),
             # pin2node_map=data_collections.pin2node_map,
             ignore_net_degree=params.ignore_net_degree,
-            deterministic_flag=getattr(params, "deterministic_flag", False))
+            deterministic_flag=getattr(params, "deterministic_flag", False),
+            collect_edge_geometry_stats=(
+                bool(getattr(params, "l_shape_profile_flag", False))
+                or bool(getattr(params, "l_shape_collect_edge_geometry_stats", False))
+            ))
 
         return steiner_topo_for_pin_op
 

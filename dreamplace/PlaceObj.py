@@ -464,7 +464,7 @@ class PlaceObj(nn.Module):
         # 权重调整的平滑因子 (0~1, 越小越平滑)
         self.l_shape_weight_momentum = getattr(params, 'l_shape_weight_momentum', 0.1)
         self.l_shape_use_xplace_weight_schedule = bool(
-            getattr(params, "l_shape_use_xplace_weight_schedule", 1)
+            getattr(params, "l_shape_use_xplace_weight_schedule", 0)
         )
         self.l_shape_num_route_iter = int(
             getattr(params, "l_shape_num_route_iter", 200)

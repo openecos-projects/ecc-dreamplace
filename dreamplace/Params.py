@@ -124,12 +124,42 @@ class Params:
                 data[key] = value
         return data
 
+    @staticmethod
+    def _is_enabled(value):
+        if isinstance(value, str):
+            return value.strip().lower() not in ("", "0", "false", "no", "off")
+        return bool(value)
+
+    def apply_l_shape_routability_preset(self):
+        """
+        Fill conservative hard-GGR L-shape defaults only when L-shape routability
+        is enabled. Explicit user values are preserved.
+        """
+        if not self._is_enabled(getattr(self, "l_shape_routability_flag", False)):
+            return
+
+        defaults = {
+            "l_direction_use_gpugr": 1,
+            "l_shape_use_ggr_topology": 1,
+            "l_shape_capacity_al_enable": 1,
+            "soft_l_assignment": 0,
+            "l_shape_grad_target_ratio": 0.1,
+            "l_shape_grad_target_ratio_max": 0.1,
+            "l_shape_overflow_threshold": 0.2,
+            "l_shape_keep_during_inflation": 1,
+            "l_shape_use_xplace_weight_schedule": 0,
+        }
+        for key, value in defaults.items():
+            if not hasattr(self, key):
+                setattr(self, key, value)
+
     def fromJson(self, data):
         """
         @brief load from json
         """
         for key, value in data.items():
             self.__dict__[key] = value
+        self.apply_l_shape_routability_preset()
 
     def dump(self, filename):
         """
@@ -195,6 +225,7 @@ class Params:
             (k.lstrip("--"), v) for k, v in (arg.split("=") for arg in args)
         ):
             self.__dict__[key] = value
+        self.apply_l_shape_routability_preset()
 
     def update(self, params):
         """

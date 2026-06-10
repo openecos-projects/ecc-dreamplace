@@ -385,7 +385,7 @@
     },
     "l_shape_use_xplace_weight_schedule": {
         "description": "whether drive l_shape_routability_weight with a stage-wise Xplace-style schedule instead of per-iteration instant gradient matching",
-        "default": 1
+        "default": 0
     },
     "l_shape_num_route_iter": {
         "description": "route-opt window length for the Xplace-style L-shape weight schedule",

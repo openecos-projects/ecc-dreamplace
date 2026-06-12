@@ -23,5 +23,5 @@ unittest
 .cache
 *_unittest
 
-# Bazel
-bazel-*
+.direnv
+result

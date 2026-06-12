@@ -274,6 +274,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "auditwheel" },
+    { name = "scikit-build-core" },
 ]
 
 [package.metadata]
@@ -298,7 +299,10 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "auditwheel" }]
+dev = [
+    { name = "auditwheel" },
+    { name = "scikit-build-core", specifier = ">=0.12.2" },
+]
 
 [[package]]
 name = "entrypoint2"
@@ -886,6 +890,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pathspec"
+version = "1.1.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/5a/82/42f767fc1c1143d6fd36efb827202a2d997a375e160a71eb2888a925aac1/pathspec-1.1.1.tar.gz", hash = "sha256:17db5ecd524104a120e173814c90367a96a98d07c45b2e10c2f3919fff91bf5a", size = 135180, upload-time = "2026-04-27T01:46:08.907Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f1/d9/7fb5aa316bc299258e68c73ba3bddbc499654a07f151cba08f6153988714/pathspec-1.1.1-py3-none-any.whl", hash = "sha256:a00ce642f577bf7f473932318056212bc4f8bfdf53128c78bbd5af0b9b20b189", size = 57328, upload-time = "2026-04-27T01:46:07.06Z" },
+]
+
+[[package]]
 name = "patool"
 version = "4.0.4"
 source = { registry = "https://pypi.org/simple" }
@@ -1100,6 +1113,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/00/98/37d8f1712ffc8ff594b921a9ad649a195ebcebb22d54a7d189e5654ea1df/pyunpack-0.3.tar.gz", hash = "sha256:b9192665c3aa28eaeb2b01198a2f2f985d9a3ecce55f266a657b31cd337d3f12", size = 6420, upload-time = "2022-06-06T19:24:50.773Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/72/20/5a6dcb0d28529ce6efe850755994c80817279eecf08620003775fda3b914/pyunpack-0.3-py2.py3-none-any.whl", hash = "sha256:8f517cfc71215f37f74cf3a7668028828c68dc76f4d02e7a69f227ce978d51a3", size = 4092, upload-time = "2022-06-06T19:24:47.594Z" },
+]
+
+[[package]]
+name = "scikit-build-core"
+version = "0.12.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+    { name = "pathspec" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/28/cd/9ebb50029b6d8a3ee9e38cdce514ebd70190ec1edf28ab0a1f66d0b84670/scikit_build_core-0.12.2.tar.gz", hash = "sha256:562e0bbc9de1a354c87825ccf732080268d6582a0200f648e8c4a2dcb1e3736d", size = 303553, upload-time = "2026-03-05T18:25:57.666Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/49/b2f0fbe3165d55c02e7f9eec6a10685d518af0ef6e919ff2f589c2d15c85/scikit_build_core-0.12.2-py3-none-any.whl", hash = "sha256:6ea4730da400f9a998ec3287bd3ebc1d751fe45ad0a93451bead8618adbc02b1", size = 192625, upload-time = "2026-03-05T18:25:56.207Z" },
 ]
 
 [[package]]

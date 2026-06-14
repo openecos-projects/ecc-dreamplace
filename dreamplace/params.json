@@ -187,6 +187,10 @@
         "description": "whether enable routability optimization",
         "default": 0
     },
+    "ieda_m2_pg_rail_blockage_flag": {
+        "description": "whether convert iEDA VDD/VSS special-net shapes on the second routing layer into synthetic placement blockages",
+        "default": 1
+    },
     "route_num_bins_x": {
         "description": "number of routing grids/tiles",
         "default": 512

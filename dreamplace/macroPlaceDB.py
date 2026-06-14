@@ -289,17 +289,72 @@ class MacroPlaceDB(object):
             self.regions[i] -= box_shift_factor
             self.regions[i] *= scale_factor
 
+    @staticmethod
+    def _resolve_ieda_m2_pg_rail_blockage_flag(params):
+        value = getattr(params, "ieda_m2_pg_rail_blockage_flag", 1)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in ("1", "true", "yes", "on"):
+                return True
+            if normalized in ("0", "false", "no", "off"):
+                return False
+            raise ValueError(
+                "ieda_m2_pg_rail_blockage_flag must be a boolean-like value "
+                "(0/1, true/false, yes/no, on/off)"
+            )
+        if isinstance(value, (int, np.integer)):
+            if value in (0, 1):
+                return bool(value)
+        raise ValueError(
+            "ieda_m2_pg_rail_blockage_flag must be a boolean-like value "
+            "(0/1, true/false, yes/no, on/off)"
+        )
+
+    def _validate_place_blockage_bookkeeping(self):
+        blockage_count = int(getattr(self, "num_place_blockages", 0))
+        terminal_count = int(getattr(self, "num_terminals", 0))
+        if blockage_count < 0 or blockage_count > terminal_count:
+            raise RuntimeError(
+                "Invalid iEDA placement blockage bookkeeping: "
+                "num_place_blockages=%d num_terminals=%d"
+                % (blockage_count, terminal_count)
+            )
+
+    @staticmethod
+    def _log_ieda_m2_pg_rail_blockage_effect(include_m2_pg_rail_blockage, pydb):
+        if include_m2_pg_rail_blockage:
+            logging.info(
+                "PyPlaceDB M2 PG rail blockage rectangles added before union: %d",
+                int(getattr(pydb, "m2_pg_rail_blockage_rects", 0)),
+            )
+        else:
+            logging.info("PyPlaceDB M2 PG rail blockage conversion skipped")
+
     def setup_rawdb(self, params):
         self.dtype = datatypes[params.dtype]
         if self.pydb is None:
             ieda_dm = IEDAIO(self.data_manager.dir_workspace)
             self.get_dmInst_ptr = ieda_dm.get_dmInst_ptr()
+            include_m2_pg_rail_blockage = (
+                self._resolve_ieda_m2_pg_rail_blockage_flag(params)
+            )
+            logging.info(
+                "ieda_m2_pg_rail_blockage_flag resolved to %d",
+                int(include_m2_pg_rail_blockage),
+            )
             self.pydb = ieda_dm.pydb(
                 self.get_dmInst_ptr,
                 params.route_num_bins_x,
                 params.route_num_bins_y,
                 params.routability_opt_flag,
                 params.with_sta,
+                include_m2_pg_rail_blockage,
+            )
+            self._log_ieda_m2_pg_rail_blockage_effect(
+                include_m2_pg_rail_blockage,
+                self.pydb,
             )
 
     def init_db(self, params):
@@ -1009,6 +1064,7 @@ class MacroPlaceDB(object):
         self.num_terminals = pydb.num_terminals
         self.num_terminal_NIs = pydb.num_terminal_NIs
         self.num_place_blockages = int(getattr(pydb, "num_place_blockages", 0))
+        self._validate_place_blockage_bookkeeping()
         self.node_name2id_map = pydb.node_name2id_map
         self.node_names = np.array(pydb.node_names, dtype=np.string_)
         # If the placer directly takes a global placement solution,

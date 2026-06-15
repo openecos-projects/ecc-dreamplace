@@ -72,6 +72,8 @@ class EvalMetrics(object):
         self.weight_hpwl = None
         self.macro_overlap = None
         self.macro_overlap_weight = None
+        self.l_shape_fast_mode = None
+        self.l_shape_energy_valid = None
         self.l_shape_cost = None
         self.l_shape_weighted_cost = None
         self.l_shape_weight = None
@@ -217,9 +219,20 @@ class EvalMetrics(object):
         if self.macro_overlap_weight is not None:
             content += ", MacroOverlapWeight %.6E" % (
                 self.macro_overlap_weight)
-        if self.l_shape_cost is not None:
+        l_shape_energy_invalid = (
+            self.l_shape_fast_mode is not None
+            and bool(self.l_shape_fast_mode)
+            and self.l_shape_energy_valid is not None
+            and not bool(self.l_shape_energy_valid)
+        )
+        if l_shape_energy_invalid:
+            content += ", LShapeCostRaw N/A(fast_mode)"
+            content += ", LShapeCostWeighted N/A(fast_mode)"
+        elif self.l_shape_cost is not None:
             content += ", LShapeCostRaw %.6E" % (self.l_shape_cost)
-        if self.l_shape_weighted_cost is not None:
+            if self.l_shape_weighted_cost is not None:
+                content += ", LShapeCostWeighted %.6E" % (self.l_shape_weighted_cost)
+        elif self.l_shape_weighted_cost is not None:
             content += ", LShapeCostWeighted %.6E" % (self.l_shape_weighted_cost)
         if _as_log_verbose(self.l_shape_log_verbose) >= 2:
             if self.l_shape_weight is not None:

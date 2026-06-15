@@ -11,6 +11,9 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 AUTODMP_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "..", "..", ".."))
 if AUTODMP_ROOT not in sys.path:
     sys.path.insert(0, AUTODMP_ROOT)
+AIEDA_ROOT = os.path.abspath(os.path.join(AUTODMP_ROOT, "..", ".."))
+if AIEDA_ROOT not in sys.path:
+    sys.path.insert(0, AIEDA_ROOT)
 
 from dreamplace.ops.routability.l_shape_electric_potential import (
     LShapeElectricPotential,
@@ -31,9 +34,11 @@ from dreamplace.ops.routability.l_shape_routability import (
 from dreamplace.ops.steiner_topo.ggr_l_shape_topology import (
     validate_ggr_l_shape_topology_params,
 )
+from dreamplace.EvalMetrics import EvalMetrics
+from dreamplace.PlaceObj import PlaceObj
 
 
-def _make_op(enable=True):
+def _make_op(enable=True, fast_mode=False):
     shape = (2, 2)
     capacity = torch.ones(shape, dtype=torch.float32)
     demand = torch.zeros(shape, dtype=torch.float32)
@@ -59,6 +64,7 @@ def _make_op(enable=True):
         fix_usage_map=fixed,
         fix_usage_map_h=fixed,
         fix_usage_map_v=fixed,
+        fast_mode=fast_mode,
         capacity_al_enable=enable,
         log_verbose=0,
     )
@@ -106,7 +112,9 @@ def _forward_inputs(dtype=torch.float32):
     return segment_pos, segment_size_x, segment_size_y, segment_is_horizontal
 
 
-def _make_forward_op(enable=True, macro_source_value=0.0, capacity_value=0.01):
+def _make_forward_op(
+    enable=True, macro_source_value=0.0, capacity_value=0.01, fast_mode=False
+):
     shape = (4, 4)
     capacity = torch.ones(shape, dtype=torch.float32) * float(capacity_value)
     demand = torch.zeros(shape, dtype=torch.float32)
@@ -132,6 +140,7 @@ def _make_forward_op(enable=True, macro_source_value=0.0, capacity_value=0.01):
         fix_usage_map=fixed,
         fix_usage_map_h=fixed,
         fix_usage_map_v=fixed,
+        fast_mode=fast_mode,
         capacity_al_enable=enable,
         log_verbose=0,
     )
@@ -153,6 +162,68 @@ def _make_forward_op(enable=True, macro_source_value=0.0, capacity_value=0.01):
 
 
 class LShapeCapacityALTest(unittest.TestCase):
+    def _make_routability_op(self, *, fast_mode=None, capacity_al_enable=False):
+        shape = (2, 2)
+        capacity = torch.ones(shape, dtype=torch.float32)
+        demand = torch.zeros(shape, dtype=torch.float32)
+        fixed = torch.zeros(shape, dtype=torch.float32)
+        placedb = _make_placedb(
+            fixed_macro_mask=(True,),
+            node_x=(0.0, 0.0),
+            node_y=(0.0, 0.0),
+            node_size_x=(0.0, 1.0),
+            node_size_y=(0.0, 1.0),
+        )
+        params_kwargs = dict(
+            route_wire_width=0.0,
+            soft_l_assignment=False,
+            soft_l_use_resolver_prior=True,
+            soft_l_temperature=1.0,
+            soft_l_prior_bias=1.0,
+            soft_l_min_weight=0.05,
+            soft_l_tie_break_delta=0.10,
+            soft_l_background_weight=0.05,
+            soft_l_self_overflow_weight=0.5,
+            soft_l_hotspot_weight=2.0,
+            soft_l_hotspot_ramp_ratio=0.03,
+            soft_l_adaptive_tau=False,
+            soft_l_adaptive_scale=1.0,
+            soft_l_same_net_diag_split_sigma=1.0,
+            soft_l_same_net_diag_split_min_support=1e-6,
+            soft_l_same_net_diag_split_max_distance=0.0,
+            l_shape_profile_flag=False,
+            l_shape_capacity_al_enable=capacity_al_enable,
+            deterministic_flag=False,
+            l_shape_debug_hash_flag=False,
+            l_shape_debug_hash_start_iter=-1,
+            l_shape_debug_hash_end_iter=-1,
+            l_shape_debug_hash_sample=4096,
+            l_shape_edge_net_ids_cache_flag=1,
+            soft_l_debug_update_interval=10,
+            l_shape_log_verbose=0,
+        )
+        if fast_mode is not None:
+            params_kwargs["l_shape_fast_mode"] = fast_mode
+        params = types.SimpleNamespace(**params_kwargs)
+        return LShapeRoutabilityOp(
+            placedb,
+            params,
+            num_bins_x=2,
+            num_bins_y=2,
+            target_density=capacity,
+            target_demand=demand,
+            supply_original=capacity,
+            target_density_h=capacity,
+            target_density_v=capacity,
+            target_demand_h=demand,
+            target_demand_v=demand,
+            supply_original_h=capacity,
+            supply_original_v=capacity,
+            fix_usage_map=fixed,
+            fix_usage_map_h=fixed,
+            fix_usage_map_v=fixed,
+        )
+
     def test_fixed_macro_source_rasterizes_body_overlap(self):
         placedb = _make_placedb(
             fixed_macro_mask=(True, True),
@@ -883,6 +954,8 @@ class LShapeCapacityALTest(unittest.TestCase):
             params = json.load(f)
 
         self.assertIn("l_shape_capacity_al_enable", params)
+        self.assertIn("l_shape_fast_mode", params)
+        self.assertEqual(params["l_shape_fast_mode"]["default"], 0)
         self.assertIn("l_shape_overflow_threshold", params)
         self.assertEqual(params["l_shape_overflow_threshold"]["default"], 0.2)
         forbidden = (
@@ -897,6 +970,135 @@ class LShapeCapacityALTest(unittest.TestCase):
         )
         for name in forbidden:
             self.assertNotIn(name, params)
+
+    def test_routability_fast_mode_defaults_to_full_energy(self):
+        routability = self._make_routability_op()
+
+        self.assertFalse(routability.l_shape_fast_mode)
+        self.assertFalse(routability.density_op.fast_mode)
+        self.assertTrue(routability.density_op.energy_valid)
+
+    def test_routability_fast_mode_reaches_electric_potential(self):
+        routability = self._make_routability_op(fast_mode=1)
+
+        self.assertTrue(routability.l_shape_fast_mode)
+        self.assertTrue(routability.density_op.fast_mode)
+        self.assertFalse(routability.density_op.energy_valid)
+
+    def test_fast_mode_capacity_al_marks_energy_stats_invalid(self):
+        op = _make_forward_op(enable=True, fast_mode=True)
+        segment_pos, segment_size_x, segment_size_y, segment_is_horizontal = _forward_inputs()
+
+        energy = op(
+            segment_pos,
+            segment_size_x,
+            segment_size_y,
+            segment_is_horizontal,
+            update_capacity_al_lambda=True,
+            placement_iteration_id=11,
+        )
+        energy.backward()
+
+        self.assertEqual(float(energy.detach().item()), 0.0)
+        self.assertIsNotNone(segment_pos.grad)
+        self.assertGreater(float(segment_pos.grad.norm().item()), 0.0)
+        self.assertFalse(op.last_al_stats["energy_valid"])
+        self.assertIsNone(op.last_al_stats["E_cap_smooth_total"])
+        self.assertIsNone(op.last_al_stats["Pq_h_min"])
+        self.assertIsNone(op.last_al_stats["Pq_h_sum"])
+        self.assertIsNone(op.last_al_stats["Pq_v_sum"])
+        self.assertTrue(op.last_al_stats["updated"])
+        self.assertGreater(float(op.lambda_h.sum().item()), 0.0)
+
+    def test_full_energy_capacity_al_keeps_energy_stats_valid(self):
+        op = _make_forward_op(enable=True, fast_mode=False)
+        segment_pos, segment_size_x, segment_size_y, segment_is_horizontal = _forward_inputs()
+
+        energy = op(
+            segment_pos,
+            segment_size_x,
+            segment_size_y,
+            segment_is_horizontal,
+            update_capacity_al_lambda=True,
+            placement_iteration_id=11,
+        )
+        energy.backward()
+
+        self.assertTrue(op.energy_valid)
+        self.assertTrue(op.last_al_stats["energy_valid"])
+        self.assertIsInstance(op.last_al_stats["E_cap_smooth_total"], float)
+        self.assertIsInstance(op.last_al_stats["Pq_h_min"], float)
+        self.assertIsInstance(op.last_al_stats["Pq_h_sum"], float)
+        self.assertIsInstance(op.last_al_stats["Pq_v_sum"], float)
+        self.assertGreater(float(energy.detach().item()), 0.0)
+
+    def test_fast_mode_preserves_current_gradient_against_full_energy(self):
+        full_op = _make_forward_op(enable=False, fast_mode=False)
+        fast_op = _make_forward_op(enable=False, fast_mode=True)
+        segment_size_x = torch.tensor([1.0, 0.2], dtype=torch.float32)
+        segment_size_y = torch.tensor([0.2, 1.0], dtype=torch.float32)
+        segment_is_horizontal = torch.tensor([True, False])
+
+        pos_full = torch.tensor(
+            [0.2, 0.2, 2.2, 0.2], dtype=torch.float32, requires_grad=True
+        )
+        pos_fast = pos_full.detach().clone().requires_grad_(True)
+
+        full_energy = full_op(
+            pos_full,
+            segment_size_x,
+            segment_size_y,
+            segment_is_horizontal,
+        )
+        fast_energy = fast_op(
+            pos_fast,
+            segment_size_x,
+            segment_size_y,
+            segment_is_horizontal,
+        )
+        self.assertEqual(full_energy.dim(), 0)
+        self.assertEqual(fast_energy.dim(), 0)
+        full_energy.backward()
+        fast_energy.backward()
+
+        grad_full = pos_full.grad.detach()
+        grad_fast = pos_fast.grad.detach()
+        cosine = torch.nn.functional.cosine_similarity(
+            grad_full.view(1, -1), grad_fast.view(1, -1), dim=1
+        ).item()
+        rel_norm_diff = (
+            (grad_fast - grad_full).norm(p=2)
+            / max(float(grad_full.norm(p=2).item()), 1e-12)
+        ).item()
+
+        self.assertGreaterEqual(cosine, 0.999999)
+        self.assertLessEqual(rel_norm_diff, 1e-5)
+        self.assertFalse(fast_op.energy_valid)
+
+    def test_fast_mode_rejects_energy_based_gradient_diagnostics(self):
+        model = object.__new__(PlaceObj)
+        model.use_l_shape_routability = True
+        model.l_shape_routability_op = types.SimpleNamespace(
+            density_op=types.SimpleNamespace(fast_mode=True)
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "requires full L-shape energy"):
+            model.check_l_shape_gradient_direction(torch.zeros(4))
+        with self.assertRaisesRegex(RuntimeError, "requires full L-shape energy"):
+            model.check_l_shape_gradient_numerical(torch.zeros(4))
+
+    def test_eval_metrics_prints_fast_mode_cost_as_unavailable(self):
+        metric = EvalMetrics()
+        metric.l_shape_fast_mode = 1
+        metric.l_shape_energy_valid = 0
+        metric.l_shape_cost = None
+        metric.l_shape_weighted_cost = None
+
+        text = str(metric)
+
+        self.assertIn("LShapeCostRaw N/A(fast_mode)", text)
+        self.assertIn("LShapeCostWeighted N/A(fast_mode)", text)
+        self.assertNotIn("LShapeCostRaw 0.000000E+00", text)
 
     def test_capacity_al_requires_hard_ggr_mode(self):
         base = dict(

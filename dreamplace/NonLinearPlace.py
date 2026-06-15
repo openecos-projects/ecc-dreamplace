@@ -1722,7 +1722,16 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 moving_avg_window = max(min(model.Lsub_iteration // 2, 3), 1)
 
                 def attach_l_shape_telemetry(cur_metric):
+                    l_shape_metric_active = (
+                        getattr(model, "use_l_shape_routability", False)
+                        or getattr(model, "l_shape_last_cost", None) is not None
+                        or getattr(model, "l_shape_last_grad_norm", None) is not None
+                    )
+                    if not l_shape_metric_active:
+                        return
                     field_map = {
+                        "l_shape_fast_mode": "l_shape_fast_mode",
+                        "l_shape_energy_valid": "l_shape_energy_valid",
                         "l_shape_cost": "l_shape_last_cost",
                         "l_shape_weighted_cost": "l_shape_last_weighted_cost",
                         "l_shape_weight": "l_shape_last_weight",
@@ -1743,14 +1752,10 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         if value is not None:
                             setattr(cur_metric, metric_field, value)
 
-                    if (
-                        getattr(model, "use_l_shape_routability", False)
-                        or getattr(model, "l_shape_last_cost", None) is not None
-                    ):
-                        cur_metric.l_shape_log_verbose = l_shape_log_verbose(params)
-                        cur_metric.l_shape_target_ratio = float(
-                            model.l_shape_grad_target_ratio
-                        )
+                    cur_metric.l_shape_log_verbose = l_shape_log_verbose(params)
+                    cur_metric.l_shape_target_ratio = float(
+                        model.l_shape_grad_target_ratio
+                    )
 
                     overflow_ema = getattr(model, "_l_shape_overflow_ema", None)
                     if overflow_ema is not None:
@@ -1781,14 +1786,16 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         "l_shape_capacity_al_energy_total": "E_cap_smooth_total",
                         "l_shape_capacity_al_pq_h_min": "Pq_h_min",
                         "l_shape_capacity_al_pq_h_max": "Pq_h_max",
+                        "l_shape_capacity_al_pq_h_sum": "Pq_h_sum",
                         "l_shape_capacity_al_pq_v_min": "Pq_v_min",
                         "l_shape_capacity_al_pq_v_max": "Pq_v_max",
+                        "l_shape_capacity_al_pq_v_sum": "Pq_v_sum",
                         "l_shape_capacity_al_active_memory_bins_h": "active_memory_bins_h",
                         "l_shape_capacity_al_active_memory_bins_v": "active_memory_bins_v",
                     }
                     for metric_field, summary_field in al_field_map.items():
                         value = al_summary.get(summary_field)
-                        if value is not None:
+                        if value is not None or summary_field in al_summary:
                             setattr(cur_metric, metric_field, value)
 
                     macro_summary = getattr(
@@ -1966,6 +1973,14 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
                     l_shape_op = getattr(model, "l_shape_routability_op", None)
                     if l_shape_op is None or not getattr(l_shape_op, "soft_l_assignment", False):
+                        return
+                    if bool(getattr(model, "l_shape_fast_mode", False)) and not bool(
+                        getattr(model, "l_shape_energy_valid", True)
+                    ):
+                        if outer_update and l_shape_log_verbose(params) >= 1:
+                            logging.info(
+                                "Skip L-shape auto-disable cost-rebound check because l_shape_fast_mode invalidates scalar energy"
+                            )
                         return
 
                     current_cost = getattr(model, "l_shape_last_cost", None)
@@ -4325,6 +4340,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 "density": densities,
             }
             optional_metric_fields = [
+                "l_shape_fast_mode",
+                "l_shape_energy_valid",
                 "l_shape_cost",
                 "l_shape_weighted_cost",
                 "l_shape_weight",
@@ -4359,8 +4376,10 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 "l_shape_capacity_al_energy_total",
                 "l_shape_capacity_al_pq_h_min",
                 "l_shape_capacity_al_pq_h_max",
+                "l_shape_capacity_al_pq_h_sum",
                 "l_shape_capacity_al_pq_v_min",
                 "l_shape_capacity_al_pq_v_max",
+                "l_shape_capacity_al_pq_v_sum",
                 "l_shape_capacity_al_active_memory_bins_h",
                 "l_shape_capacity_al_active_memory_bins_v",
                 "l_shape_macro_exclusion_enabled",
@@ -4409,14 +4428,50 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     return value.detach().cpu().view(-1).tolist()
                 if isinstance(value, np.generic):
                     return value.item()
+                if isinstance(value, float) and not math.isfinite(value):
+                    return None
                 return value
 
+            fixed_when_l_shape_fields = {
+                "l_shape_fast_mode",
+                "l_shape_energy_valid",
+            }
+            energy_derived_metric_fields = {
+                "l_shape_cost",
+                "l_shape_weighted_cost",
+                "l_shape_capacity_al_energy_h",
+                "l_shape_capacity_al_energy_v",
+                "l_shape_capacity_al_energy_total",
+                "l_shape_capacity_al_pq_h_min",
+                "l_shape_capacity_al_pq_h_max",
+                "l_shape_capacity_al_pq_h_sum",
+                "l_shape_capacity_al_pq_v_min",
+                "l_shape_capacity_al_pq_v_max",
+                "l_shape_capacity_al_pq_v_sum",
+            }
+            l_shape_seen = any(
+                getattr(metric, "l_shape_fast_mode", None) is not None
+                or getattr(metric, "l_shape_energy_valid", None) is not None
+                for metric in metrics
+            )
+            l_shape_energy_invalid_seen = any(
+                getattr(metric, "l_shape_energy_valid", None) is not None
+                and not bool(getattr(metric, "l_shape_energy_valid"))
+                for metric in metrics
+            )
             for field_name in optional_metric_fields:
                 series = [
                     scalarize_metric_value(getattr(metric, field_name, None))
                     for metric in metrics
                 ]
-                if any(value is not None for value in series):
+                if (
+                    any(value is not None for value in series)
+                    or (l_shape_seen and field_name in fixed_when_l_shape_fields)
+                    or (
+                        l_shape_energy_invalid_seen
+                        and field_name in energy_derived_metric_fields
+                    )
+                ):
                     processed_metrics[field_name] = series
 
             # plot placement

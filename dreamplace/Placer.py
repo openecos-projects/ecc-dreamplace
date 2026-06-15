@@ -170,7 +170,6 @@ class PlacementEngine:
     def place(self):
         # solve placement
         tt = time.time()
-        self.params.plot_flag = True
         timer = None
         if self.params.timing_opt_flag:
             tt = time.time()

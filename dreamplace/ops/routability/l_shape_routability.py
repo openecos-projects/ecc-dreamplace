@@ -148,6 +148,7 @@ class LShapeRoutabilityOp(nn.Module):
         )
         self.profile_enabled = bool(getattr(params, "l_shape_profile_flag", False))
         self.log_verbose = l_shape_log_verbose(params)
+        self.l_shape_fast_mode = _as_bool(getattr(params, "l_shape_fast_mode", False))
         self.capacity_al_enable = bool(
             getattr(params, "l_shape_capacity_al_enable", False)
         )
@@ -264,7 +265,7 @@ class LShapeRoutabilityOp(nn.Module):
                 fix_usage_map_h=fix_usage_map_h,
                 fix_usage_map_v=fix_usage_map_v,
                 # padding=1,  # 边界填充
-                fast_mode=False,
+                fast_mode=self.l_shape_fast_mode,
                 profile_enabled=self.profile_enabled,
                 log_verbose=self.log_verbose,
                 capacity_al_enable=self.capacity_al_enable,
@@ -282,8 +283,15 @@ class LShapeRoutabilityOp(nn.Module):
                 # padding=1  # 边界填充
             )
             if self.log_verbose >= 1:
-                logger.info(f"Using C++/CUDA electric potential for routability")
+                logger.info(
+                    "Using C++/CUDA electric potential for routability (fast_mode=%d)",
+                    1 if self.l_shape_fast_mode else 0,
+                )
         else:
+            if self.l_shape_fast_mode and self.log_verbose >= 1:
+                logger.info(
+                    "l_shape_fast_mode is ignored for non-electric L-shape density mode"
+                )
             # Python RUDY密度
             self.density_op = SegmentDensityOp(
                 xl=placedb.xl,
@@ -3356,6 +3364,10 @@ def plot_l_shape_electric_potential_map(l_shape_op, output_path, title_prefix="L
     rho_map_v = plot_payload["source_map_v"]
     split_available = plot_payload["split_available"]
     density_op = plot_payload["density_op"]
+    if bool(getattr(density_op, "fast_mode", False)):
+        raise RuntimeError(
+            "L-shape electric potential plot requires full energy; disable l_shape_fast_mode"
+        )
 
     ref_tensor = getattr(density_op, "bin_center_x", None)
     if not isinstance(ref_tensor, torch.Tensor):

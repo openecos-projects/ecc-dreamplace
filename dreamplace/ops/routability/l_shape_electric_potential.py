@@ -581,6 +581,7 @@ class SegmentElectricPotentialFunction(Function):
     last_energy = None
     last_energy_h = None
     last_energy_v = None
+    last_energy_valid = True
     
     @staticmethod
     def forward(
@@ -646,6 +647,9 @@ class SegmentElectricPotentialFunction(Function):
         SegmentElectricPotentialFunction.last_energy = None
         SegmentElectricPotentialFunction.last_energy_h = None
         SegmentElectricPotentialFunction.last_energy_v = None
+        SegmentElectricPotentialFunction.last_energy_valid = not bool(fast_mode)
+        if capacity_al_owner is not None:
+            capacity_al_owner.energy_valid = not bool(fast_mode)
 
         def _prepare_optional_map(value):
             if not isinstance(value, torch.Tensor):
@@ -781,7 +785,7 @@ class SegmentElectricPotentialFunction(Function):
                 auv_local.mul(wv_by_wu2_plus_wv2_half)
             )
             if fast_mode:
-                energy_local = torch.zeros(1, dtype=segment_pos.dtype, device=segment_pos.device)
+                energy_local = torch.zeros((), dtype=segment_pos.dtype, device=segment_pos.device)
                 potential_map_local = torch.zeros_like(rho_map_local)
             else:
                 potential_map_local = idct2.forward(auv_local.mul(inv_wu2_plus_wv2))
@@ -1076,53 +1080,74 @@ class SegmentElectricPotentialFunction(Function):
             SegmentElectricPotentialFunction.last_energy_v = energy_v.detach()
             SegmentElectricPotentialFunction.last_energy = energy.detach()
             if getattr(capacity_al_owner, "capacity_al_enable", False):
-                capacity_al_owner.last_al_stats.update(
-                    {
-                        "E_cap_smooth_h": float(energy_h.detach().item()),
-                        "E_cap_smooth_v": float(energy_v.detach().item()),
-                        "E_cap_smooth_total": float(energy.detach().item()),
-                        "Pq_h_min": _scalar_stat(potential_map_h, "min"),
-                        "Pq_h_max": _scalar_stat(potential_map_h, "max"),
-                        "Pq_h_sum": _scalar_stat(potential_map_h, "sum"),
-                        "Pq_v_min": _scalar_stat(potential_map_v, "min"),
-                        "Pq_v_max": _scalar_stat(potential_map_v, "max"),
-                        "Pq_v_sum": _scalar_stat(potential_map_v, "sum"),
-                    }
-                )
+                energy_stats = {
+                    "energy_valid": not bool(fast_mode),
+                    "E_cap_smooth_h": None,
+                    "E_cap_smooth_v": None,
+                    "E_cap_smooth_total": None,
+                    "Pq_h_min": None,
+                    "Pq_h_max": None,
+                    "Pq_h_sum": None,
+                    "Pq_v_min": None,
+                    "Pq_v_max": None,
+                    "Pq_v_sum": None,
+                }
+                if not fast_mode:
+                    energy_stats.update(
+                        {
+                            "E_cap_smooth_h": float(energy_h.detach().item()),
+                            "E_cap_smooth_v": float(energy_v.detach().item()),
+                            "E_cap_smooth_total": float(energy.detach().item()),
+                            "Pq_h_min": _scalar_stat(potential_map_h, "min"),
+                            "Pq_h_max": _scalar_stat(potential_map_h, "max"),
+                            "Pq_h_sum": _scalar_stat(potential_map_h, "sum"),
+                            "Pq_v_min": _scalar_stat(potential_map_v, "min"),
+                            "Pq_v_max": _scalar_stat(potential_map_v, "max"),
+                            "Pq_v_sum": _scalar_stat(potential_map_v, "sum"),
+                        }
+                    )
+                capacity_al_owner.last_al_stats.update(energy_stats)
                 if log_verbose >= 2:
+                    stats = capacity_al_owner.last_al_stats
+                    energy_label = (
+                        "N/A(fast_mode)"
+                        if fast_mode
+                        else "E_h=%.4e E_v=%.4e Pq_h_min=%.4e Pq_v_min=%.4e"
+                        % (
+                            float(stats.get("E_cap_smooth_h", 0.0)),
+                            float(stats.get("E_cap_smooth_v", 0.0)),
+                            float(stats.get("Pq_h_min", 0.0)),
+                            float(stats.get("Pq_v_min", 0.0)),
+                        )
+                    )
                     logger.info(
                         "L-shape capacity AL: iter=%s update=%s reset=%s "
                         "g_h_max=%.4e g_v_max=%.4e g_h_sum=%.4e g_v_sum=%.4e "
                         "g_h_pos_bins=%d/%d g_v_pos_bins=%d/%d "
                         "g_h_pos_ratio=%.4f g_v_pos_ratio=%.4f "
                         "q_h_max=%.4e q_v_max=%.4e "
-                        "lambda_h_max=%.4e lambda_v_max=%.4e E_h=%.4e E_v=%.4e "
-                        "Pq_h_min=%.4e Pq_v_min=%.4e "
-                        "active_memory_bins_h=%d active_memory_bins_v=%d "
-                        "(negative Pq values can occur from the DCT/Poisson gauge)",
+                        "lambda_h_max=%.4e lambda_v_max=%.4e energy=%s "
+                        "active_memory_bins_h=%d active_memory_bins_v=%d",
                         str(placement_iteration_id),
-                        str(capacity_al_owner.last_al_stats.get("updated")),
-                        str(capacity_al_owner.last_al_stats.get("reset_reason")),
-                        float(capacity_al_owner.last_al_stats.get("g_h_max", 0.0)),
-                        float(capacity_al_owner.last_al_stats.get("g_v_max", 0.0)),
-                        float(capacity_al_owner.last_al_stats.get("g_h_sum", 0.0)),
-                        float(capacity_al_owner.last_al_stats.get("g_v_sum", 0.0)),
-                        int(capacity_al_owner.last_al_stats.get("g_h_pos_bins", 0)),
-                        int(capacity_al_owner.last_al_stats.get("g_h_bins", 0)),
-                        int(capacity_al_owner.last_al_stats.get("g_v_pos_bins", 0)),
-                        int(capacity_al_owner.last_al_stats.get("g_v_bins", 0)),
-                        float(capacity_al_owner.last_al_stats.get("g_h_pos_ratio", 0.0)),
-                        float(capacity_al_owner.last_al_stats.get("g_v_pos_ratio", 0.0)),
-                        float(capacity_al_owner.last_al_stats.get("q_h_max", 0.0)),
-                        float(capacity_al_owner.last_al_stats.get("q_v_max", 0.0)),
-                        float(capacity_al_owner.last_al_stats.get("lambda_h_max", 0.0)),
-                        float(capacity_al_owner.last_al_stats.get("lambda_v_max", 0.0)),
-                        float(energy_h.detach().item()),
-                        float(energy_v.detach().item()),
-                        float(capacity_al_owner.last_al_stats.get("Pq_h_min", 0.0)),
-                        float(capacity_al_owner.last_al_stats.get("Pq_v_min", 0.0)),
-                        int(capacity_al_owner.last_al_stats.get("active_memory_bins_h", 0)),
-                        int(capacity_al_owner.last_al_stats.get("active_memory_bins_v", 0)),
+                        str(stats.get("updated")),
+                        str(stats.get("reset_reason")),
+                        float(stats.get("g_h_max", 0.0)),
+                        float(stats.get("g_v_max", 0.0)),
+                        float(stats.get("g_h_sum", 0.0)),
+                        float(stats.get("g_v_sum", 0.0)),
+                        int(stats.get("g_h_pos_bins", 0)),
+                        int(stats.get("g_h_bins", 0)),
+                        int(stats.get("g_v_pos_bins", 0)),
+                        int(stats.get("g_v_bins", 0)),
+                        float(stats.get("g_h_pos_ratio", 0.0)),
+                        float(stats.get("g_v_pos_ratio", 0.0)),
+                        float(stats.get("q_h_max", 0.0)),
+                        float(stats.get("q_v_max", 0.0)),
+                        float(stats.get("lambda_h_max", 0.0)),
+                        float(stats.get("lambda_v_max", 0.0)),
+                        energy_label,
+                        int(stats.get("active_memory_bins_h", 0)),
+                        int(stats.get("active_memory_bins_v", 0)),
                     )
 
             logger.debug(
@@ -1207,6 +1232,8 @@ class SegmentElectricPotentialFunction(Function):
             ctx.field_map_y = field_map_y
             SegmentElectricPotentialFunction.last_rho_map = rho_map.detach()
             SegmentElectricPotentialFunction.last_energy = energy.detach()
+            if capacity_al_owner is not None:
+                capacity_al_owner.energy_valid = not bool(fast_mode)
 
             logger.debug(
                 "Blockage residual-source(planar,track): occ_ratio=%.4f util_mean=%.2f util_max=%.2f "
@@ -1580,7 +1607,8 @@ class LShapeElectricPotential(nn.Module):
         self.padding = padding
         self.deterministic_flag = deterministic_flag
         self.last_demand_supply_ratio = None
-        self.fast_mode = fast_mode
+        self.fast_mode = bool(fast_mode)
+        self.energy_valid = not self.fast_mode
         self.profile_enabled = bool(profile_enabled)
         self.log_verbose = l_shape_log_verbose(log_verbose)
         self.blockage_initial_density = True

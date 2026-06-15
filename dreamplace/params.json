@@ -303,6 +303,10 @@
         "description": "whether use per-routing-bin AL multiplier memory as the hard-GGR L-shape capacity-pressure source",
         "default": 0
     },
+    "l_shape_fast_mode": {
+        "description": "whether L-shape electric potential skips scalar potential-energy computation while preserving current-iteration electric-field gradients; invalid energy telemetry is reported with l_shape_energy_valid=0",
+        "default": 0
+    },
     "l_shape_boundary_source_enable": {
         "description": "whether add a fixed boundary-ring capacity-occupancy source to L-shape electric potential",
         "default": 0

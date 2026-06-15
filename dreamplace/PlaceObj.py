@@ -487,6 +487,8 @@ class PlaceObj(nn.Module):
         self._l_shape_sched_initialized = False
         self._l_shape_sched_start_iter = None
         self._l_shape_sched_base_weight = None
+        self.l_shape_fast_mode = bool(getattr(params, "l_shape_fast_mode", 0))
+        self.l_shape_energy_valid = not self.l_shape_fast_mode
         self.l_shape_last_cost = None
         self.l_shape_last_weighted_cost = None
         self.l_shape_last_weight = None
@@ -2051,6 +2053,8 @@ class PlaceObj(nn.Module):
         self.l_shape_last_cost = None
         self.l_shape_last_weighted_cost = None
         self.l_shape_last_weight = None
+        self.l_shape_fast_mode = bool(getattr(self.params, "l_shape_fast_mode", 0))
+        self.l_shape_energy_valid = not self.l_shape_fast_mode
         self.l_shape_last_target_weight = None
         self.l_shape_last_sched_weight = None
         self.l_shape_last_cap_active = None
@@ -2108,6 +2112,13 @@ class PlaceObj(nn.Module):
                 iteration=current_iteration,
             ):
                 l_shape_cost.backward()
+            density_op = getattr(self.l_shape_routability_op, "density_op", None)
+            self.l_shape_fast_mode = bool(
+                getattr(density_op, "fast_mode", getattr(self.params, "l_shape_fast_mode", 0))
+            )
+            self.l_shape_energy_valid = bool(
+                getattr(density_op, "energy_valid", not self.l_shape_fast_mode)
+            )
             
             # 获取原始 L-shape 梯度范数
             l_shape_grad_raw = pos.grad.data.clone()
@@ -2286,7 +2297,12 @@ class PlaceObj(nn.Module):
                     self.l_shape_routability_weight.data.fill_(current_weight)
                     pos.grad.data.mul_(current_weight)
 
-                    logging.debug(f"L-shape: cost={l_shape_cost.item():.4e}, "
+                    cost_label = (
+                        "N/A(fast_mode)"
+                        if not self.l_shape_energy_valid
+                        else f"{l_shape_cost.item():.4e}"
+                    )
+                    logging.debug(f"L-shape: cost={cost_label}, "
                                  f"grad_norm={l_shape_grad_norm_value:.4e}, "
                                  f"base_grad_norm={base_grad_norm_value:.4e}, "
                                  f"weight={old_weight:.4e}->{new_weight:.4e}")
@@ -2455,8 +2471,12 @@ class PlaceObj(nn.Module):
                 self._apply_gradient_masks_only(pos.grad.data)
                 if debug_hash_op is not None:
                     debug_hash_op.log_debug_hash("place_obj.final_grad", pos.grad.data)
-            self.l_shape_last_cost = float(l_shape_cost.item())
-            self.l_shape_last_weighted_cost = float(l_shape_weighted.item())
+            self.l_shape_last_cost = (
+                float(l_shape_cost.item()) if self.l_shape_energy_valid else None
+            )
+            self.l_shape_last_weighted_cost = (
+                float(l_shape_weighted.item()) if self.l_shape_energy_valid else None
+            )
             self.l_shape_last_weight = current_weight
             self.l_shape_last_target_weight = target_weight_value
             self.l_shape_last_sched_weight = sched_weight_value
@@ -2475,7 +2495,6 @@ class PlaceObj(nn.Module):
                 int(sched_iter_diff) if sched_iter_diff is not None else None
             )
             self.l_shape_last_sched_active = bool(sched_active)
-            density_op = getattr(self.l_shape_routability_op, "density_op", None)
             al_stats = getattr(density_op, "last_al_stats", None)
             if isinstance(al_stats, dict):
                 self.l_shape_capacity_al_last_summary = {
@@ -2746,6 +2765,11 @@ class PlaceObj(nn.Module):
         if not self.use_l_shape_routability or self.l_shape_routability_op is None:
             logging.warning("L-shape routability not enabled")
             return None
+        density_op = getattr(self.l_shape_routability_op, "density_op", None)
+        if bool(getattr(density_op, "fast_mode", False)):
+            raise RuntimeError(
+                "check_l_shape_gradient_direction requires full L-shape energy; disable l_shape_fast_mode"
+            )
         
         logging.info("=" * 60)
         logging.info("L-SHAPE GRADIENT DIRECTION CHECK")
@@ -2955,6 +2979,11 @@ class PlaceObj(nn.Module):
         if not self.use_l_shape_routability or self.l_shape_routability_op is None:
             logging.warning("L-shape routability not enabled, skip gradient check")
             return None
+        density_op = getattr(self.l_shape_routability_op, "density_op", None)
+        if bool(getattr(density_op, "fast_mode", False)):
+            raise RuntimeError(
+                "check_l_shape_gradient_numerical requires full L-shape energy; disable l_shape_fast_mode"
+            )
         
         pos = tpos.detach().clone()
         pos.requires_grad_(True)

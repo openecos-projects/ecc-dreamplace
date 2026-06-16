@@ -153,7 +153,7 @@ To build, go to the root directory.
 
 The build system auto-detects PyTorch installation path, version, and CUDA support
 via `import torch`. You can also override them explicitly with CMake cache entries
-(e.g. in sandboxed / Bazel builds where `import torch` may not work).
+when `import torch` is not available during configuration.
 ```
 mkdir build
 cd build

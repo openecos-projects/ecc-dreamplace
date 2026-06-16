@@ -12,8 +12,6 @@ name = "ecc-dreamplace"
 version = "0.2.0"  # bump this line
 ```
 
-Also update `MODULE.bazel` to match — the CI version consistency check will fail otherwise.
-
 [PEP 440](https://peps.python.org/pep-0440/) formats are supported:
 - `0.1.0`, `0.2.0`, `1.0.0` - stable releases
 - `0.1.0a1` / `0.1.0-alpha.1` - alpha

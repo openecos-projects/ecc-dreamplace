@@ -92,41 +92,41 @@ Relevant configuration knobs include:
 ### Prerequisites
 
 - Linux x86_64
-- Bazel 8+
 - Python 3.11 + [uv](https://docs.astral.sh/uv/)
+- Optional: Nix, for entering the repository development shell before sync
 - System packages:
   `cmake ninja-build build-essential pkg-config libboost-all-dev libcairo2-dev libgflags-dev libgoogle-glog-dev flex libfl-dev bison libeigen3-dev libgtest-dev`
 
 ### Dev Setup
 
 ```bash
-# Setup Python environment
-uv sync --frozen --all-groups --python 3.11
-source .venv/bin/activate
+# If Nix is available, enter the dev shell first.
+nix develop
 
-# Build and install ecc-dreamplace
-mkdir -p build && cd build
-cmake .. \
-  -DCMAKE_INSTALL_PREFIX=your_install_path \
-  -DPYTHON_EXECUTABLE=$(which python)
-make -j`nproc`
-make install
+# Sync the editable development environment.
+uv sync --no-build-isolation-package ecc-dreamplace --verbose
+source .venv/bin/activate
 ```
 
-### Build Wheel
+If Nix is not available, skip `nix develop` and run the `uv sync` command in the
+normal shell after installing the system packages above.
+
+The package uses scikit-build editable rebuilds. Source edits are picked up on
+the next import, and native extensions rebuild automatically when needed.
+
+### Build Package
 
 ```bash
-bazel run //:build_dreamplace_wheel
+uv build
 ```
 
 Output:
 
 ```text
-dist/wheel/repaired/ecc_dreamplace-*.whl
+dist/ecc_dreamplace-*
 ```
 
-The Bazel wheel flow runs CMake compilation, wheel construction, auditwheel
-repair, and a smoke test.
+The uv build runs the package build defined by `pyproject.toml`.
 
 ## Repository Pointers
 

@@ -25,6 +25,7 @@ import dreamplace.BasicPlace as BasicPlace
 import dreamplace.PlaceObj as PlaceObj
 import dreamplace.NesterovAcceleratedGradientOptimizer as NesterovAcceleratedGradientOptimizer
 import dreamplace.EvalMetrics as EvalMetrics
+from dreamplace.ops.irt_egr.egr_padding import apply_egr_padding, restore_egr_padding
 import pdb
 import dreamplace.ops.fence_region.fence_region as fence_region
 import math
@@ -43,6 +44,75 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         @param placedb placement database
         """
         super(NonLinearPlace, self).__init__(params, placedb)
+        self._egr_padding_state = None
+
+    def _apply_egr_padding(self, params, placedb):
+        if not getattr(params, "egr_padding_flag", 0):
+            return
+        if self._egr_padding_state is not None:
+            logging.warning("EGR padding is already active; skip duplicate apply")
+            return
+
+        congestion_map_op = self.op_collections.irt_egr_congestion_map_op
+        if congestion_map_op is None:
+            raise RuntimeError("EGR padding requested but iRT EGR op was not built")
+
+        tt = time.time()
+        with torch.no_grad():
+            try:
+                route_map = congestion_map_op(
+                    self.pos[0], stage="egr3D", resolve_congestion="high")
+            except Exception as exc:
+                raise RuntimeError(
+                    "EGR padding congestion map generation failed") from exc
+
+            self._egr_padding_state = apply_egr_padding(
+                placedb=placedb,
+                pos=self.pos[0],
+                node_size_x=self.data_collections.node_size_x,
+                node_size_y=self.data_collections.node_size_y,
+                pin_offset_x=self.data_collections.pin_offset_x,
+                pin2node_map=self.data_collections.pin2node_map,
+                movable_macro_mask=self.data_collections.movable_macro_mask,
+                route_map=route_map,
+            )
+
+        if self._egr_padding_state is None:
+            logging.info("EGR padding selected no cells")
+            return
+
+        state = self._egr_padding_state
+        logging.info(
+            "EGR padding applied: selected %d/%d cells, threshold %.4g, "
+            "max_congestion %.4g, padding_area %.6g, "
+            "padding_area_ratio_movable %.6g, elapsed %.3fs"
+            % (
+                state.num_selected,
+                placedb.num_movable_nodes,
+                state.threshold,
+                state.max_congestion,
+                state.padding_area,
+                state.padding_area_ratio,
+                time.time() - tt,
+            )
+        )
+
+    def _restore_egr_padding(self):
+        state = self._egr_padding_state
+        if state is None:
+            return
+        with torch.no_grad():
+            restore_egr_padding(
+                state,
+                self.pos[0],
+                self.data_collections.node_size_x,
+                self.data_collections.pin_offset_x,
+            )
+        logging.info(
+            "EGR padding restored: selected %d cells, threshold %.4g"
+            % (state.num_selected, state.threshold)
+        )
+        self._egr_padding_state = None
 
     def __call__(self, params, placedb):
         """
@@ -993,6 +1063,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 iteration += 1
 
         if params.legalize_flag:
+            self._apply_egr_padding(params, placedb)
+
             tt = time.time()
             self.pos[0].data.copy_(
                 self.op_collections.legalize_op(self.pos[0]))
@@ -1006,6 +1078,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             logging.info(cur_metric)
             iteration += 1
 
+            self._restore_egr_padding()
         # after_legalization recover node sizes, pins shifts, and positions of cells
         if params.cell_padding_x >= 0:
             with torch.no_grad():

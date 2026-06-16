@@ -46,6 +46,7 @@ import dreamplace.ops.pin_pos.pin_pos as pin_pos
 import dreamplace.ops.global_swap.global_swap as global_swap
 import dreamplace.ops.k_reorder.k_reorder as k_reorder
 import dreamplace.ops.independent_set_matching.independent_set_matching as independent_set_matching
+import dreamplace.ops.irt_egr.irt_egr as irt_egr
 import dreamplace.ops.steiner_topo.steiner_topo as steiner_topo
 from dreamplace.ops.timing_propagation.timing_propagation import ARCS_INFO, LUTS_INFO
 import pdb
@@ -734,6 +735,11 @@ class BasicPlace(nn.Module):
         self.op_collections.detailed_place_op = self.build_detailed_placement(
             params, placedb, self.data_collections, self.device
         )
+        if (getattr(params, "egr_padding_flag", 0)
+                and getattr(params, "legalize_flag", 0)):
+            self.op_collections.irt_egr_congestion_map_op = (
+                self.build_irt_egr_congestion_map(params, placedb)
+            )
         # draw placement
         self.op_collections.draw_place_op = self.build_draw_placement(
             params, placedb, self.data_collections
@@ -1603,6 +1609,15 @@ class BasicPlace(nn.Module):
                 ),
                 f,
             )
+
+    def build_irt_egr_congestion_map(self, params, placedb):
+        """
+        @brief call iRT EGR for congestion estimation.
+        """
+        return irt_egr.IRT_eGR(
+            params=params,
+            placedb=placedb,
+        )
 
     def load(self, params, placedb, filename):
         """

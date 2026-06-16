@@ -355,6 +355,10 @@
         "description": "compute congestion map after placement complete",
         "default": 0
     },
+    "egr_padding_flag": {
+        "description": "run internal iRT EGR local padding before legalization",
+        "default": 0
+    },
     "macro_halo_x": {
         "description": "horizontal halo around movable macros",
         "default": 1000

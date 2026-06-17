@@ -8,6 +8,8 @@
 import torch
 import logging
 import hashlib
+import os
+from contextlib import contextmanager
 from torch.autograd import Function
 
 logger = logging.getLogger(__name__)
@@ -94,6 +96,286 @@ def _deterministic_gather_1d(values, plan):
         plan["unique"],
         plan["counts"],
     )
+
+
+def _env_flag_enabled(name):
+    value = os.environ.get(name)
+    if value is None:
+        return False
+    return value.strip().lower() not in ("", "0", "false", "no", "off")
+
+
+@contextmanager
+def _temporary_env_flag(name, enabled):
+    old_value = os.environ.get(name)
+    os.environ[name] = "1" if enabled else "0"
+    try:
+        yield
+    finally:
+        if old_value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = old_value
+
+
+class _HardSegmentPositionCompactionFunction(Function):
+    @staticmethod
+    def forward(ctx, seg1_llx, seg1_lly, seg2_llx, seg2_lly, seg1_indices, seg2_indices):
+        ctx.seg1_numel = int(seg1_llx.numel())
+        ctx.seg2_numel = int(seg2_llx.numel())
+        ctx.save_for_backward(seg1_indices, seg2_indices)
+
+        seg1_out_llx = seg1_llx.index_select(0, seg1_indices)
+        seg1_out_lly = seg1_lly.index_select(0, seg1_indices)
+        seg2_out_llx = seg2_llx.index_select(0, seg2_indices)
+        seg2_out_lly = seg2_lly.index_select(0, seg2_indices)
+        return (
+            torch.cat((seg1_out_llx, seg2_out_llx), dim=0),
+            torch.cat((seg1_out_lly, seg2_out_lly), dim=0),
+        )
+
+    @staticmethod
+    def backward(ctx, grad_segment_llx, grad_segment_lly):
+        seg1_indices, seg2_indices = ctx.saved_tensors
+        seg1_count = int(seg1_indices.numel())
+        seg2_count = int(seg2_indices.numel())
+
+        grad_seg1_llx = grad_seg1_lly = grad_seg2_llx = grad_seg2_lly = None
+        if grad_segment_llx is not None:
+            if ctx.needs_input_grad[0]:
+                grad_seg1_llx = grad_segment_llx.new_zeros(ctx.seg1_numel)
+                if seg1_count > 0:
+                    grad_seg1_llx.index_copy_(0, seg1_indices, grad_segment_llx[:seg1_count])
+            if ctx.needs_input_grad[2]:
+                grad_seg2_llx = grad_segment_llx.new_zeros(ctx.seg2_numel)
+                if seg2_count > 0:
+                    grad_seg2_llx.index_copy_(0, seg2_indices, grad_segment_llx[seg1_count:])
+
+        if grad_segment_lly is not None:
+            if ctx.needs_input_grad[1]:
+                grad_seg1_lly = grad_segment_lly.new_zeros(ctx.seg1_numel)
+                if seg1_count > 0:
+                    grad_seg1_lly.index_copy_(0, seg1_indices, grad_segment_lly[:seg1_count])
+            if ctx.needs_input_grad[3]:
+                grad_seg2_lly = grad_segment_lly.new_zeros(ctx.seg2_numel)
+                if seg2_count > 0:
+                    grad_seg2_lly.index_copy_(0, seg2_indices, grad_segment_lly[seg1_count:])
+
+        return grad_seg1_llx, grad_seg1_lly, grad_seg2_llx, grad_seg2_lly, None, None
+
+
+def _compact_hard_segment_positions(seg1_llx, seg1_lly, seg2_llx, seg2_lly, seg1_indices, seg2_indices):
+    return _HardSegmentPositionCompactionFunction.apply(
+        seg1_llx,
+        seg1_lly,
+        seg2_llx,
+        seg2_lly,
+        seg1_indices,
+        seg2_indices,
+    )
+
+
+def _clone_snapshot_tensor(tensor, *, requires_grad=False):
+    cloned = tensor.detach().clone()
+    if requires_grad:
+        cloned.requires_grad_(True)
+    return cloned
+
+
+def _run_hard_segment_snapshot(snapshot, *, reference):
+    with _temporary_env_flag("DREAMPLACE_L_SHAPE_HARD_SEGMENT_COMPACTION_REFERENCE", reference):
+        op = LShapeSegmentOp(
+            wire_width=float(snapshot.get("wire_width", 0.0)),
+            wire_width_h=snapshot.get("wire_width_h", None),
+            wire_width_v=snapshot.get("wire_width_v", None),
+            deterministic_backward=bool(snapshot.get("deterministic_backward", True)),
+        )
+        newx = _clone_snapshot_tensor(snapshot["newx"], requires_grad=True)
+        newy = _clone_snapshot_tensor(snapshot["newy"], requires_grad=True)
+        result = op(
+            newx,
+            newy,
+            _clone_snapshot_tensor(snapshot["flat_from"]).long(),
+            _clone_snapshot_tensor(snapshot["flat_to"]).long(),
+            _clone_snapshot_tensor(snapshot["l_directions"]).long(),
+        )
+    return result, newx, newy
+
+
+def _safe_relative_norm(diff, reference):
+    reference_norm = reference.norm(p=2)
+    denom = reference_norm.clamp_min(torch.finfo(reference.dtype).eps)
+    return float((diff.norm(p=2) / denom).detach().cpu().item())
+
+
+def save_hard_segment_snapshot(
+    path,
+    newx,
+    newy,
+    flat_from,
+    flat_to,
+    l_directions,
+    *,
+    wire_width,
+    wire_width_h=None,
+    wire_width_v=None,
+    deterministic_backward=True,
+):
+    snapshot = {
+        "newx": newx.detach().cpu(),
+        "newy": newy.detach().cpu(),
+        "flat_from": flat_from.detach().cpu().long(),
+        "flat_to": flat_to.detach().cpu().long(),
+        "l_directions": l_directions.detach().cpu().long(),
+        "wire_width": float(wire_width),
+        "wire_width_h": None if wire_width_h is None else float(wire_width_h),
+        "wire_width_v": None if wire_width_v is None else float(wire_width_v),
+        "deterministic_backward": bool(deterministic_backward),
+    }
+    torch.save(snapshot, path)
+
+
+def maybe_save_hard_segment_snapshot(
+    path,
+    snapshot_iter,
+    current_iter,
+    soft_l_assignment,
+    already_saved,
+    newx,
+    newy,
+    flat_from,
+    flat_to,
+    l_directions,
+    *,
+    wire_width,
+    wire_width_h=None,
+    wire_width_v=None,
+    deterministic_backward=True,
+):
+    if not path or already_saved or soft_l_assignment:
+        return False
+    if snapshot_iter:
+        if current_iter is None:
+            return False
+        if int(snapshot_iter) != int(current_iter):
+            return False
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    save_hard_segment_snapshot(
+        path,
+        newx,
+        newy,
+        flat_from,
+        flat_to,
+        l_directions,
+        wire_width=wire_width,
+        wire_width_h=wire_width_h,
+        wire_width_v=wire_width_v,
+        deterministic_backward=deterministic_backward,
+    )
+    return True
+
+
+def replay_hard_segment_snapshot_vjp(path):
+    snapshot = torch.load(path, map_location="cpu")
+    reference, ref_newx, ref_newy = _run_hard_segment_snapshot(snapshot, reference=True)
+    optimized, opt_newx, opt_newy = _run_hard_segment_snapshot(snapshot, reference=False)
+
+    forward_max_abs = 0.0
+    for key in ("segment_llx", "segment_lly", "segment_size_x", "segment_size_y", "segment_weight"):
+        diff = optimized[key].detach() - reference[key].detach()
+        if diff.numel() > 0:
+            forward_max_abs = max(forward_max_abs, float(diff.abs().max().cpu().item()))
+    for key in ("segment_edge_idx", "segment_is_horizontal"):
+        if not torch.equal(optimized[key].detach().cpu(), reference[key].detach().cpu()):
+            raise AssertionError(f"{key} mismatch in hard segment snapshot replay")
+
+    num_segments = int(optimized["num_segments"])
+    upstream_llx = torch.linspace(
+        -0.75,
+        0.85,
+        num_segments,
+        dtype=optimized["segment_llx"].dtype,
+        device=optimized["segment_llx"].device,
+    )
+    upstream_lly = torch.linspace(
+        0.45,
+        -0.65,
+        num_segments,
+        dtype=optimized["segment_lly"].dtype,
+        device=optimized["segment_lly"].device,
+    )
+    opt_cost = (
+        optimized["segment_llx"].mul(upstream_llx).sum()
+        + optimized["segment_lly"].mul(upstream_lly).sum()
+    )
+    ref_cost = (
+        reference["segment_llx"].mul(upstream_llx).sum()
+        + reference["segment_lly"].mul(upstream_lly).sum()
+    )
+    opt_cost.backward()
+    ref_cost.backward()
+
+    grad_newx_diff = opt_newx.grad - ref_newx.grad
+    grad_newy_diff = opt_newy.grad - ref_newy.grad
+    grad_diff = torch.cat((grad_newx_diff, grad_newy_diff), dim=0)
+    ref_grad = torch.cat((ref_newx.grad, ref_newy.grad), dim=0)
+    opt_grad = torch.cat((opt_newx.grad, opt_newy.grad), dim=0)
+    cosine = torch.nn.functional.cosine_similarity(
+        opt_grad.reshape(1, -1),
+        ref_grad.reshape(1, -1),
+        dim=1,
+        eps=torch.finfo(opt_grad.dtype).eps,
+    )
+
+    return {
+        "num_segments": num_segments,
+        "forward_max_abs": forward_max_abs,
+        "grad_newx_max_abs": float(grad_newx_diff.abs().max().cpu().item()),
+        "grad_newy_max_abs": float(grad_newy_diff.abs().max().cpu().item()),
+        "grad_relative_norm": _safe_relative_norm(grad_diff, ref_grad),
+        "grad_cosine_similarity": float(cosine.detach().cpu().item()),
+    }
+
+
+def _compact_hard_segments_reference(
+    seg1_llx,
+    seg1_lly,
+    seg1_size_x,
+    seg1_size_y,
+    seg1_is_h,
+    seg2_llx,
+    seg2_lly,
+    seg2_size_x,
+    seg2_size_y,
+    seg2_is_h,
+    valid_edge_idx,
+    seg1_valid,
+    seg2_valid,
+    final_valid,
+):
+    segment_llx = torch.cat((seg1_llx[seg1_valid], seg2_llx[seg2_valid]), dim=0)
+    segment_lly = torch.cat((seg1_lly[seg1_valid], seg2_lly[seg2_valid]), dim=0)
+    segment_size_x = torch.cat((seg1_size_x[seg1_valid], seg2_size_x[seg2_valid]), dim=0)
+    segment_size_y = torch.cat((seg1_size_y[seg1_valid], seg2_size_y[seg2_valid]), dim=0)
+    segment_edge_idx = torch.cat((valid_edge_idx[seg1_valid], valid_edge_idx[seg2_valid]), dim=0)
+    segment_is_horizontal = torch.cat((seg1_is_h[seg1_valid], seg2_is_h[seg2_valid]), dim=0)
+    segment_weight = torch.cat(
+        (
+            torch.ones_like(seg1_size_x[seg1_valid]),
+            torch.ones_like(seg2_size_x[seg2_valid]),
+        ),
+        dim=0,
+    )
+
+    return {
+        "segment_llx": segment_llx[final_valid],
+        "segment_lly": segment_lly[final_valid],
+        "segment_size_x": segment_size_x[final_valid],
+        "segment_size_y": segment_size_y[final_valid],
+        "segment_edge_idx": segment_edge_idx[final_valid],
+        "segment_is_horizontal": segment_is_horizontal[final_valid],
+        "segment_weight": segment_weight[final_valid],
+    }
 
 
 class LShapeSegmentBuilder:
@@ -547,6 +829,11 @@ class LShapeSegmentOp:
         self.soft_min_weight = float(soft_min_weight)
         self.deterministic_backward = bool(deterministic_backward)
         self.log_verbose = int(log_verbose)
+        self.hard_segment_compaction_reference = _env_flag_enabled(
+            "DREAMPLACE_L_SHAPE_HARD_SEGMENT_COMPACTION_REFERENCE"
+        )
+        if self.hard_segment_compaction_reference:
+            logger.info("Use reference PyTorch hard segment compaction via environment override")
         self.builder = LShapeSegmentBuilder(
             wire_width,
             wire_width_h=wire_width_h,
@@ -811,47 +1098,108 @@ class LShapeSegmentOp:
 
         seg2_valid = is_l_shape & (seg2_size_x > 1e-6) & (seg2_size_y > 1e-6)
         
-        # 合并所有segments
-        all_llx = [seg1_llx[seg1_valid]]
-        all_lly = [seg1_lly[seg1_valid]]
-        all_size_x = [seg1_size_x[seg1_valid]]
-        all_size_y = [seg1_size_y[seg1_valid]]
-        all_edge_idx = [valid_edge_idx[seg1_valid]]
-        all_is_h = [seg1_is_h[seg1_valid]]
-        all_weight = [torch.ones_like(seg1_size_x[seg1_valid])]
-        
-        if seg2_valid.any():
-            all_llx.append(seg2_llx[seg2_valid])
-            all_lly.append(seg2_lly[seg2_valid])
-            all_size_x.append(seg2_size_x[seg2_valid])
-            all_size_y.append(seg2_size_y[seg2_valid])
-            all_edge_idx.append(valid_edge_idx[seg2_valid])
-            all_is_h.append(seg2_is_h[seg2_valid])
-            all_weight.append(torch.ones_like(seg2_size_x[seg2_valid]))
-        
-        segment_llx = torch.cat(all_llx)
-        segment_lly = torch.cat(all_lly)
-        segment_size_x = torch.cat(all_size_x)
-        segment_size_y = torch.cat(all_size_y)
-        segment_edge_idx = torch.cat(all_edge_idx)
-        segment_is_horizontal = torch.cat(all_is_h)
-        segment_weight = torch.cat(all_weight)
-        
-        # 过滤零尺寸segment
         if self.use_directional_widths:
-            valid_seg = (segment_size_x > 1e-6) & (segment_size_y > 1e-6)
+            seg1_final_valid = seg1_valid & (seg1_size_x > 1e-6) & (seg1_size_y > 1e-6)
+            seg2_final_valid = seg2_valid & (seg2_size_x > 1e-6) & (seg2_size_y > 1e-6)
         else:
             half_width = self.wire_width / 2.0
             min_size = max(half_width * 2, 1e-6)
-            valid_seg = (segment_size_x > min_size) | (segment_size_y > min_size)
-        
-        segment_llx = segment_llx[valid_seg]
-        segment_lly = segment_lly[valid_seg]
-        segment_size_x = segment_size_x[valid_seg]
-        segment_size_y = segment_size_y[valid_seg]
-        segment_edge_idx = segment_edge_idx[valid_seg]
-        segment_is_horizontal = segment_is_horizontal[valid_seg]
-        segment_weight = segment_weight[valid_seg]
+            seg1_final_valid = seg1_valid & (
+                (seg1_size_x > min_size) | (seg1_size_y > min_size)
+            )
+            seg2_final_valid = seg2_valid & (
+                (seg2_size_x > min_size) | (seg2_size_y > min_size)
+            )
+
+        if self.hard_segment_compaction_reference:
+            reference_final_valid = torch.cat(
+                (
+                    seg1_final_valid.index_select(0, torch.nonzero(seg1_valid, as_tuple=False).flatten()),
+                    seg2_final_valid.index_select(0, torch.nonzero(seg2_valid, as_tuple=False).flatten()),
+                ),
+                dim=0,
+            )
+            compacted = _compact_hard_segments_reference(
+                seg1_llx,
+                seg1_lly,
+                seg1_size_x,
+                seg1_size_y,
+                seg1_is_h,
+                seg2_llx,
+                seg2_lly,
+                seg2_size_x,
+                seg2_size_y,
+                seg2_is_h,
+                valid_edge_idx,
+                seg1_valid,
+                seg2_valid,
+                reference_final_valid,
+            )
+            segment_llx = compacted["segment_llx"]
+            segment_lly = compacted["segment_lly"]
+            segment_size_x = compacted["segment_size_x"]
+            segment_size_y = compacted["segment_size_y"]
+            segment_edge_idx = compacted["segment_edge_idx"]
+            segment_is_horizontal = compacted["segment_is_horizontal"]
+            segment_weight = compacted["segment_weight"]
+            num_segments = segment_llx.numel()
+            return {
+                'segment_llx': segment_llx,
+                'segment_lly': segment_lly,
+                'segment_size_x': segment_size_x,
+                'segment_size_y': segment_size_y,
+                'segment_edge_idx': segment_edge_idx,
+                'segment_is_horizontal': segment_is_horizontal,
+                'segment_weight': segment_weight,
+                'num_segments': num_segments
+            }
+
+        seg1_indices = torch.nonzero(seg1_final_valid, as_tuple=False).flatten()
+        seg2_indices = torch.nonzero(seg2_final_valid, as_tuple=False).flatten()
+
+        seg1_size_x_forward = seg1_size_x.detach()
+        seg1_size_y_forward = seg1_size_y.detach()
+        seg2_size_x_forward = seg2_size_x.detach()
+        seg2_size_y_forward = seg2_size_y.detach()
+
+        segment_llx, segment_lly = _compact_hard_segment_positions(
+            seg1_llx,
+            seg1_lly,
+            seg2_llx,
+            seg2_lly,
+            seg1_indices,
+            seg2_indices,
+        )
+
+        segment_size_x = torch.cat(
+            (
+                seg1_size_x_forward.index_select(0, seg1_indices),
+                seg2_size_x_forward.index_select(0, seg2_indices),
+            ),
+            dim=0,
+        )
+        segment_size_y = torch.cat(
+            (
+                seg1_size_y_forward.index_select(0, seg1_indices),
+                seg2_size_y_forward.index_select(0, seg2_indices),
+            ),
+            dim=0,
+        )
+        segment_edge_idx = torch.cat(
+            (
+                valid_edge_idx.index_select(0, seg1_indices),
+                valid_edge_idx.index_select(0, seg2_indices),
+            ),
+            dim=0,
+        )
+        segment_is_horizontal = torch.cat(
+            (
+                seg1_is_h.index_select(0, seg1_indices),
+                seg2_is_h.index_select(0, seg2_indices),
+            ),
+            dim=0,
+        )
+        segment_weight = torch.ones_like(segment_size_x)
         
         num_segments = segment_llx.numel()
         

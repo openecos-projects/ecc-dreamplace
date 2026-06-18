@@ -114,6 +114,20 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         )
         self._egr_padding_state = None
 
+    def _run_standard_legalization(self, params, placedb, iteration, all_metrics):
+        tt = time.time()
+        self.pos[0].data.copy_(
+            self.op_collections.legalize_op(self.pos[0]))
+        logging.info("legalization takes %.3f seconds" %
+                     (time.time() - tt))
+        cur_metric = EvalMetrics.EvalMetrics(iteration)
+        all_metrics.append(cur_metric)
+        cur_metric.evaluate(
+            placedb, {"hpwl": self.op_collections.hpwl_op}, self.pos[0])
+
+        logging.info(cur_metric)
+        return iteration + 1
+
     def __call__(self, params, placedb):
         """
         @brief Top API to solve placement.
@@ -1063,22 +1077,14 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 iteration += 1
 
         if params.legalize_flag:
-            self._apply_egr_padding(params, placedb)
+            iteration = self._run_standard_legalization(
+                params, placedb, iteration, all_metrics)
 
-            tt = time.time()
-            self.pos[0].data.copy_(
-                self.op_collections.legalize_op(self.pos[0]))
-            logging.info("legalization takes %.3f seconds" %
-                         (time.time() - tt))
-            cur_metric = EvalMetrics.EvalMetrics(iteration)
-            all_metrics.append(cur_metric)
-            cur_metric.evaluate(
-                placedb, {"hpwl": self.op_collections.hpwl_op}, self.pos[0])
-
-            logging.info(cur_metric)
-            iteration += 1
-
-            self._restore_egr_padding()
+            if getattr(params, "egr_padding_flag", 0):
+                self._apply_egr_padding(params, placedb)
+                iteration = self._run_standard_legalization(
+                    params, placedb, iteration, all_metrics)
+                self._restore_egr_padding()
         # after_legalization recover node sizes, pins shifts, and positions of cells
         if params.cell_padding_x >= 0:
             with torch.no_grad():

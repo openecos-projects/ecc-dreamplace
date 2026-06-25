@@ -57,7 +57,7 @@ def _run_op(wire_width=0.2, wire_width_h=None, wire_width_v=None, deterministic_
     return result, newx, newy
 
 
-def _run_reference_hard_compaction(wire_width=0.2, wire_width_h=None, wire_width_v=None):
+def _run_reference_segment_compaction(wire_width=0.2, wire_width_h=None, wire_width_v=None):
     newx, newy, flat_from, flat_to, l_directions = _make_inputs()
     op = LShapeSegmentOp(
         wire_width=wire_width,
@@ -157,7 +157,7 @@ def _run_reference_hard_compaction(wire_width=0.2, wire_width_h=None, wire_width
     return result, newx, newy
 
 
-class TestLShapeHardSegmentCompaction(unittest.TestCase):
+class TestLShapeSegmentCompaction(unittest.TestCase):
     def assert_forward_matches_expected(self, result, expected):
         for key, value in expected.items():
             actual = result[key]
@@ -172,7 +172,7 @@ class TestLShapeHardSegmentCompaction(unittest.TestCase):
             else:
                 self.assertEqual(actual, value, msg=key)
 
-    def test_hard_forward_preserves_segment_order_and_masks(self):
+    def test_forward_preserves_segment_order_and_masks(self):
         result, _, _ = _run_op(wire_width=0.2)
 
         expected = {
@@ -224,11 +224,11 @@ class TestLShapeHardSegmentCompaction(unittest.TestCase):
         }
         self.assert_forward_matches_expected(result, expected)
 
-    def test_size_and_weight_are_forward_only_in_hard_active_path(self):
+    def test_size_and_weight_are_forward_only_in_segment_active_path(self):
         result, _, _ = _run_op(wire_width=0.2)
 
-        self.assertIn("HardSegmentPositionCompaction", type(result["segment_llx"].grad_fn).__name__)
-        self.assertIn("HardSegmentPositionCompaction", type(result["segment_lly"].grad_fn).__name__)
+        self.assertIn("SegmentPositionCompaction", type(result["segment_llx"].grad_fn).__name__)
+        self.assertIn("SegmentPositionCompaction", type(result["segment_lly"].grad_fn).__name__)
         self.assertFalse(result["segment_size_x"].requires_grad)
         self.assertFalse(result["segment_size_y"].requires_grad)
         self.assertFalse(result["segment_weight"].requires_grad)
@@ -358,7 +358,7 @@ class TestLShapeHardSegmentCompaction(unittest.TestCase):
             {"wire_width": 0.0, "wire_width_h": 0.4, "wire_width_v": 0.6},
         ):
             optimized, opt_newx, opt_newy = _run_op(**kwargs)
-            reference, ref_newx, ref_newy = _run_reference_hard_compaction(**kwargs)
+            reference, ref_newx, ref_newy = _run_reference_segment_compaction(**kwargs)
 
             self.assertEqual(optimized["num_segments"], reference["num_segments"])
             for key in ("segment_llx", "segment_lly", "segment_size_x", "segment_size_y", "segment_weight"):
@@ -386,11 +386,11 @@ class TestLShapeHardSegmentCompaction(unittest.TestCase):
             self.assertTrue(torch.allclose(opt_newy.grad, ref_newy.grad, atol=1e-6, rtol=0), msg=str(kwargs))
 
     def test_internal_env_reference_route_matches_optimized_forward_and_vjp(self):
-        with mock.patch.dict(os.environ, {"DREAMPLACE_L_SHAPE_HARD_SEGMENT_COMPACTION_REFERENCE": "1"}):
+        with mock.patch.dict(os.environ, {"DREAMPLACE_L_SHAPE_SEGMENT_COMPACTION_REFERENCE": "1"}):
             reference_env, ref_newx, ref_newy = _run_op(wire_width=0.2)
         optimized, opt_newx, opt_newy = _run_op(wire_width=0.2)
 
-        self.assertNotIn("HardSegmentPositionCompaction", type(reference_env["segment_llx"].grad_fn).__name__)
+        self.assertNotIn("SegmentPositionCompaction", type(reference_env["segment_llx"].grad_fn).__name__)
         self.assertTrue(reference_env["segment_size_x"].requires_grad)
         self.assertFalse(optimized["segment_size_x"].requires_grad)
 
@@ -416,7 +416,7 @@ class TestLShapeHardSegmentCompaction(unittest.TestCase):
         self.assertTrue(torch.allclose(opt_newy.grad, ref_newy.grad, atol=1e-6, rtol=0))
 
     def test_non_deterministic_setting_matches_reference_forward_and_vjp(self):
-        with mock.patch.dict(os.environ, {"DREAMPLACE_L_SHAPE_HARD_SEGMENT_COMPACTION_REFERENCE": "1"}):
+        with mock.patch.dict(os.environ, {"DREAMPLACE_L_SHAPE_SEGMENT_COMPACTION_REFERENCE": "1"}):
             reference_env, ref_newx, ref_newy = _run_op(
                 wire_width=0.2,
                 deterministic_backward=False,
@@ -453,7 +453,7 @@ class TestLShapeHardSegmentCompaction(unittest.TestCase):
         newx, newy, flat_from, flat_to, l_directions = _make_inputs()
         with tempfile.TemporaryDirectory() as tmpdir:
             snapshot_path = os.path.join(tmpdir, "snapshot.pt")
-            MODULE.save_hard_segment_snapshot(
+            MODULE.save_segment_snapshot(
                 snapshot_path,
                 newx,
                 newy,
@@ -466,7 +466,7 @@ class TestLShapeHardSegmentCompaction(unittest.TestCase):
                 deterministic_backward=True,
             )
 
-            stats = MODULE.replay_hard_segment_snapshot_vjp(snapshot_path)
+            stats = MODULE.replay_segment_snapshot_vjp(snapshot_path)
 
         self.assertLessEqual(stats["forward_max_abs"], 1e-7)
         self.assertLessEqual(stats["grad_newx_max_abs"], 1e-6)
@@ -481,7 +481,7 @@ class TestLShapeHardSegmentCompaction(unittest.TestCase):
         newx, newy, flat_from, flat_to, l_directions = _make_inputs()
         with tempfile.TemporaryDirectory() as tmpdir:
             snapshot_path = os.path.join(tmpdir, "realish_snapshot.pt")
-            saved = MODULE.maybe_save_hard_segment_snapshot(
+            saved = MODULE.maybe_save_segment_snapshot(
                 snapshot_path,
                 None,
                 330,
@@ -500,7 +500,7 @@ class TestLShapeHardSegmentCompaction(unittest.TestCase):
 
             self.assertTrue(saved)
             self.assertTrue(os.path.exists(snapshot_path))
-            stats = MODULE.replay_hard_segment_snapshot_vjp(snapshot_path)
+            stats = MODULE.replay_segment_snapshot_vjp(snapshot_path)
 
         self.assertEqual(stats["num_segments"], 5)
         self.assertLessEqual(stats["grad_relative_norm"], 1e-6)
@@ -522,6 +522,64 @@ class TestLShapeHardSegmentCompaction(unittest.TestCase):
 
         self.assertTrue(torch.equal(first_x, second_x))
         self.assertTrue(torch.equal(first_y, second_y))
+
+    def test_position_compaction_helper_vjp_cpu_and_cuda(self):
+        devices = ["cpu"]
+        if torch.cuda.is_available():
+            devices.append("cuda")
+
+        for device in devices:
+            with self.subTest(device=device):
+                seg1_llx = torch.tensor([0.0, 1.0, 2.0, 3.0], device=device, requires_grad=True)
+                seg1_lly = torch.tensor([4.0, 5.0, 6.0, 7.0], device=device, requires_grad=True)
+                seg2_llx = torch.tensor([8.0, 9.0, 10.0], device=device, requires_grad=True)
+                seg2_lly = torch.tensor([11.0, 12.0, 13.0], device=device, requires_grad=True)
+                seg1_indices = torch.tensor([2, 0, 3], device=device, dtype=torch.long)
+                seg2_indices = torch.tensor([1, 2], device=device, dtype=torch.long)
+
+                segment_llx, segment_lly = MODULE._compact_segment_positions(
+                    seg1_llx,
+                    seg1_lly,
+                    seg2_llx,
+                    seg2_lly,
+                    seg1_indices,
+                    seg2_indices,
+                )
+
+                expected_llx = torch.tensor([2.0, 0.0, 3.0, 9.0, 10.0], device=device)
+                expected_lly = torch.tensor([6.0, 4.0, 7.0, 12.0, 13.0], device=device)
+                self.assertTrue(torch.equal(segment_llx.detach(), expected_llx))
+                self.assertTrue(torch.equal(segment_lly.detach(), expected_lly))
+
+                upstream_llx = torch.tensor([0.5, -1.0, 2.0, 3.0, -0.25], device=device)
+                upstream_lly = torch.tensor([-0.75, 1.25, -1.5, 0.5, 2.5], device=device)
+                cost = segment_llx.mul(upstream_llx).sum() + segment_lly.mul(upstream_lly).sum()
+                cost.backward()
+
+                self.assertTrue(
+                    torch.equal(
+                        seg1_llx.grad,
+                        torch.tensor([-1.0, 0.0, 0.5, 2.0], device=device),
+                    )
+                )
+                self.assertTrue(
+                    torch.equal(
+                        seg1_lly.grad,
+                        torch.tensor([1.25, 0.0, -0.75, -1.5], device=device),
+                    )
+                )
+                self.assertTrue(
+                    torch.equal(
+                        seg2_llx.grad,
+                        torch.tensor([0.0, 3.0, -0.25], device=device),
+                    )
+                )
+                self.assertTrue(
+                    torch.equal(
+                        seg2_lly.grad,
+                        torch.tensor([0.0, 0.5, 2.5], device=device),
+                    )
+                )
 
 
 if __name__ == "__main__":

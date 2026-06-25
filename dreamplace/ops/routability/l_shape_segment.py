@@ -9,10 +9,40 @@ import torch
 import logging
 import hashlib
 import os
+import glob
+import importlib.util
+import sys
 from contextlib import contextmanager
 from torch.autograd import Function
 
 logger = logging.getLogger(__name__)
+
+def _load_local_extension(module_name):
+    module = sys.modules.get(module_name)
+    if module is not None:
+        return module
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+    matches = glob.glob(os.path.join(module_dir, f"{module_name}*.so"))
+    if not matches:
+        return None
+    spec = importlib.util.spec_from_file_location(module_name, matches[0])
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except ImportError:
+        sys.modules.pop(module_name, None)
+        return None
+    sys.modules[f"dreamplace.ops.routability.{module_name}"] = module
+    return module
+
+
+segment_compaction_cpp = _load_local_extension("segment_compaction_cpp")
+segment_compaction_cuda = _load_local_extension("segment_compaction_cuda")
+_segment_compaction_logged_forward_backends = set()
+_segment_compaction_logged_backward_backends = set()
 
 # L方向常量 (与steiner_topo.py保持一致)
 H_FIRST = 0       # 先水平后垂直, 拐点在 (x2, y1)
@@ -105,6 +135,10 @@ def _env_flag_enabled(name):
     return value.strip().lower() not in ("", "0", "false", "no", "off")
 
 
+def _env_any_flag_enabled(*names):
+    return any(_env_flag_enabled(name) for name in names)
+
+
 @contextmanager
 def _temporary_env_flag(name, enabled):
     old_value = os.environ.get(name)
@@ -118,12 +152,49 @@ def _temporary_env_flag(name, enabled):
             os.environ[name] = old_value
 
 
-class _HardSegmentPositionCompactionFunction(Function):
+def _segment_compaction_extension_for_device(device):
+    if device.type == "cuda" and segment_compaction_cuda is not None:
+        return segment_compaction_cuda
+    if device.type == "cpu" and segment_compaction_cpp is not None:
+        return segment_compaction_cpp
+    return None
+
+
+def _segment_compaction_backend_name(extension, device):
+    if extension is segment_compaction_cuda:
+        return "cuda"
+    if extension is segment_compaction_cpp:
+        return "cpp"
+    return f"python_fallback_{device.type}"
+
+
+class _SegmentPositionCompactionFunction(Function):
     @staticmethod
     def forward(ctx, seg1_llx, seg1_lly, seg2_llx, seg2_lly, seg1_indices, seg2_indices):
         ctx.seg1_numel = int(seg1_llx.numel())
         ctx.seg2_numel = int(seg2_llx.numel())
         ctx.save_for_backward(seg1_indices, seg2_indices)
+        ctx.extension = _segment_compaction_extension_for_device(seg1_llx.device)
+        ctx.backend_name = _segment_compaction_backend_name(ctx.extension, seg1_llx.device)
+
+        if ctx.extension is not None:
+            if ctx.backend_name not in _segment_compaction_logged_forward_backends:
+                _segment_compaction_logged_forward_backends.add(ctx.backend_name)
+                logger.info(
+                    "LShapeSegmentCompaction forward backend=%s device=%s seg1_numel=%d seg2_numel=%d",
+                    ctx.backend_name,
+                    seg1_llx.device,
+                    ctx.seg1_numel,
+                    ctx.seg2_numel,
+                )
+            return tuple(ctx.extension.forward(
+                seg1_llx.contiguous(),
+                seg1_lly.contiguous(),
+                seg2_llx.contiguous(),
+                seg2_lly.contiguous(),
+                seg1_indices.contiguous(),
+                seg2_indices.contiguous(),
+            ))
 
         seg1_out_llx = seg1_llx.index_select(0, seg1_indices)
         seg1_out_lly = seg1_lly.index_select(0, seg1_indices)
@@ -139,6 +210,36 @@ class _HardSegmentPositionCompactionFunction(Function):
         seg1_indices, seg2_indices = ctx.saved_tensors
         seg1_count = int(seg1_indices.numel())
         seg2_count = int(seg2_indices.numel())
+
+        if grad_segment_llx is not None and grad_segment_lly is not None and ctx.extension is not None:
+            if ctx.backend_name not in _segment_compaction_logged_backward_backends:
+                _segment_compaction_logged_backward_backends.add(ctx.backend_name)
+                logger.info(
+                    "LShapeSegmentCompaction backward backend=%s device=%s seg1_numel=%d seg2_numel=%d",
+                    ctx.backend_name,
+                    grad_segment_llx.device,
+                    ctx.seg1_numel,
+                    ctx.seg2_numel,
+                )
+            grad_segment_llx = grad_segment_llx.contiguous()
+            grad_segment_lly = grad_segment_lly.contiguous()
+            grad_seg1_llx, grad_seg1_lly, grad_seg2_llx, grad_seg2_lly = ctx.extension.backward(
+                grad_segment_llx,
+                grad_segment_lly,
+                seg1_indices.contiguous(),
+                seg2_indices.contiguous(),
+                ctx.seg1_numel,
+                ctx.seg2_numel,
+            )
+            if not ctx.needs_input_grad[0]:
+                grad_seg1_llx = None
+            if not ctx.needs_input_grad[1]:
+                grad_seg1_lly = None
+            if not ctx.needs_input_grad[2]:
+                grad_seg2_llx = None
+            if not ctx.needs_input_grad[3]:
+                grad_seg2_lly = None
+            return grad_seg1_llx, grad_seg1_lly, grad_seg2_llx, grad_seg2_lly, None, None
 
         grad_seg1_llx = grad_seg1_lly = grad_seg2_llx = grad_seg2_lly = None
         if grad_segment_llx is not None:
@@ -164,8 +265,8 @@ class _HardSegmentPositionCompactionFunction(Function):
         return grad_seg1_llx, grad_seg1_lly, grad_seg2_llx, grad_seg2_lly, None, None
 
 
-def _compact_hard_segment_positions(seg1_llx, seg1_lly, seg2_llx, seg2_lly, seg1_indices, seg2_indices):
-    return _HardSegmentPositionCompactionFunction.apply(
+def _compact_segment_positions(seg1_llx, seg1_lly, seg2_llx, seg2_lly, seg1_indices, seg2_indices):
+    return _SegmentPositionCompactionFunction.apply(
         seg1_llx,
         seg1_lly,
         seg2_llx,
@@ -175,6 +276,10 @@ def _compact_hard_segment_positions(seg1_llx, seg1_lly, seg2_llx, seg2_lly, seg1
     )
 
 
+def _compact_hard_segment_positions(seg1_llx, seg1_lly, seg2_llx, seg2_lly, seg1_indices, seg2_indices):
+    return _compact_segment_positions(seg1_llx, seg1_lly, seg2_llx, seg2_lly, seg1_indices, seg2_indices)
+
+
 def _clone_snapshot_tensor(tensor, *, requires_grad=False):
     cloned = tensor.detach().clone()
     if requires_grad:
@@ -182,8 +287,8 @@ def _clone_snapshot_tensor(tensor, *, requires_grad=False):
     return cloned
 
 
-def _run_hard_segment_snapshot(snapshot, *, reference):
-    with _temporary_env_flag("DREAMPLACE_L_SHAPE_HARD_SEGMENT_COMPACTION_REFERENCE", reference):
+def _run_segment_snapshot(snapshot, *, reference):
+    with _temporary_env_flag("DREAMPLACE_L_SHAPE_SEGMENT_COMPACTION_REFERENCE", reference):
         op = LShapeSegmentOp(
             wire_width=float(snapshot.get("wire_width", 0.0)),
             wire_width_h=snapshot.get("wire_width_h", None),
@@ -202,13 +307,17 @@ def _run_hard_segment_snapshot(snapshot, *, reference):
     return result, newx, newy
 
 
+def _run_hard_segment_snapshot(snapshot, *, reference):
+    return _run_segment_snapshot(snapshot, reference=reference)
+
+
 def _safe_relative_norm(diff, reference):
     reference_norm = reference.norm(p=2)
     denom = reference_norm.clamp_min(torch.finfo(reference.dtype).eps)
     return float((diff.norm(p=2) / denom).detach().cpu().item())
 
 
-def save_hard_segment_snapshot(
+def save_segment_snapshot(
     path,
     newx,
     newy,
@@ -235,7 +344,11 @@ def save_hard_segment_snapshot(
     torch.save(snapshot, path)
 
 
-def maybe_save_hard_segment_snapshot(
+def save_hard_segment_snapshot(*args, **kwargs):
+    return save_segment_snapshot(*args, **kwargs)
+
+
+def maybe_save_segment_snapshot(
     path,
     snapshot_iter,
     current_iter,
@@ -260,7 +373,7 @@ def maybe_save_hard_segment_snapshot(
         if int(snapshot_iter) != int(current_iter):
             return False
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    save_hard_segment_snapshot(
+    save_segment_snapshot(
         path,
         newx,
         newy,
@@ -275,10 +388,14 @@ def maybe_save_hard_segment_snapshot(
     return True
 
 
-def replay_hard_segment_snapshot_vjp(path):
+def maybe_save_hard_segment_snapshot(*args, **kwargs):
+    return maybe_save_segment_snapshot(*args, **kwargs)
+
+
+def replay_segment_snapshot_vjp(path):
     snapshot = torch.load(path, map_location="cpu")
-    reference, ref_newx, ref_newy = _run_hard_segment_snapshot(snapshot, reference=True)
-    optimized, opt_newx, opt_newy = _run_hard_segment_snapshot(snapshot, reference=False)
+    reference, ref_newx, ref_newy = _run_segment_snapshot(snapshot, reference=True)
+    optimized, opt_newx, opt_newy = _run_segment_snapshot(snapshot, reference=False)
 
     forward_max_abs = 0.0
     for key in ("segment_llx", "segment_lly", "segment_size_x", "segment_size_y", "segment_weight"):
@@ -287,7 +404,7 @@ def replay_hard_segment_snapshot_vjp(path):
             forward_max_abs = max(forward_max_abs, float(diff.abs().max().cpu().item()))
     for key in ("segment_edge_idx", "segment_is_horizontal"):
         if not torch.equal(optimized[key].detach().cpu(), reference[key].detach().cpu()):
-            raise AssertionError(f"{key} mismatch in hard segment snapshot replay")
+            raise AssertionError(f"{key} mismatch in segment snapshot replay")
 
     num_segments = int(optimized["num_segments"])
     upstream_llx = torch.linspace(
@@ -337,7 +454,11 @@ def replay_hard_segment_snapshot_vjp(path):
     }
 
 
-def _compact_hard_segments_reference(
+def replay_hard_segment_snapshot_vjp(path):
+    return replay_segment_snapshot_vjp(path)
+
+
+def _compact_segments_reference(
     seg1_llx,
     seg1_lly,
     seg1_size_x,
@@ -376,6 +497,10 @@ def _compact_hard_segments_reference(
         "segment_is_horizontal": segment_is_horizontal[final_valid],
         "segment_weight": segment_weight[final_valid],
     }
+
+
+def _compact_hard_segments_reference(*args, **kwargs):
+    return _compact_segments_reference(*args, **kwargs)
 
 
 class LShapeSegmentBuilder:
@@ -829,11 +954,12 @@ class LShapeSegmentOp:
         self.soft_min_weight = float(soft_min_weight)
         self.deterministic_backward = bool(deterministic_backward)
         self.log_verbose = int(log_verbose)
-        self.hard_segment_compaction_reference = _env_flag_enabled(
-            "DREAMPLACE_L_SHAPE_HARD_SEGMENT_COMPACTION_REFERENCE"
+        self.segment_compaction_reference = _env_any_flag_enabled(
+            "DREAMPLACE_L_SHAPE_SEGMENT_COMPACTION_REFERENCE",
+            "DREAMPLACE_L_SHAPE_HARD_SEGMENT_COMPACTION_REFERENCE",
         )
-        if self.hard_segment_compaction_reference:
-            logger.info("Use reference PyTorch hard segment compaction via environment override")
+        if self.segment_compaction_reference:
+            logger.info("Use reference PyTorch segment compaction via environment override")
         self.builder = LShapeSegmentBuilder(
             wire_width,
             wire_width_h=wire_width_h,
@@ -994,9 +1120,9 @@ class LShapeSegmentOp:
             plan = _build_gather_plan(indices)
         return _deterministic_gather_1d(values, plan)
 
-    def _compute_segments_hard(self, newx, newy, topo, l_directions):
+    def _compute_segments_discrete(self, newx, newy, topo, l_directions):
         """
-        使用 hard L-direction 计算 segment
+        使用离散 L-direction 计算 segment
         """
         device = newx.device
         dtype = newx.dtype
@@ -1111,7 +1237,7 @@ class LShapeSegmentOp:
                 (seg2_size_x > min_size) | (seg2_size_y > min_size)
             )
 
-        if self.hard_segment_compaction_reference:
+        if self.segment_compaction_reference:
             reference_final_valid = torch.cat(
                 (
                     seg1_final_valid.index_select(0, torch.nonzero(seg1_valid, as_tuple=False).flatten()),
@@ -1119,7 +1245,7 @@ class LShapeSegmentOp:
                 ),
                 dim=0,
             )
-            compacted = _compact_hard_segments_reference(
+            compacted = _compact_segments_reference(
                 seg1_llx,
                 seg1_lly,
                 seg1_size_x,
@@ -1162,7 +1288,7 @@ class LShapeSegmentOp:
         seg2_size_x_forward = seg2_size_x.detach()
         seg2_size_y_forward = seg2_size_y.detach()
 
-        segment_llx, segment_lly = _compact_hard_segment_positions(
+        segment_llx, segment_lly = _compact_segment_positions(
             seg1_llx,
             seg1_lly,
             seg2_llx,
@@ -1392,8 +1518,8 @@ class LShapeSegmentOp:
 
         # 快速计算segment坐标
         if soft_l_weights is None:
-            result = self._compute_segments_hard(newx, newy, self._cached_topology, l_directions)
-            mode_name = "hard"
+            result = self._compute_segments_discrete(newx, newy, self._cached_topology, l_directions)
+            mode_name = "discrete"
         else:
             result = self._compute_segments_soft(newx, newy, self._cached_topology, soft_l_weights)
             mode_name = "soft"

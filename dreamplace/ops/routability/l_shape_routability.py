@@ -20,7 +20,7 @@ from dreamplace.ops.routability.l_shape_segment import (
     build_l_shape_segments_vectorized,
     _build_gather_plan,
     _deterministic_gather_1d,
-    maybe_save_hard_segment_snapshot,
+    maybe_save_segment_snapshot,
     H_FIRST, V_FIRST, STRAIGHT, FAKE_STRAIGHT, UNKNOWN
 )
 from dreamplace.ops.routability.segment_density import (
@@ -132,14 +132,20 @@ class LShapeRoutabilityOp(nn.Module):
         self.placedb = placedb
         self.params = params
         segment_module_path, segment_module_digest = _module_file_digest(l_shape_segment_module)
-        segment_reference_env = "DREAMPLACE_L_SHAPE_HARD_SEGMENT_COMPACTION_REFERENCE"
-        segment_reference_enabled = l_shape_segment_module._env_flag_enabled(segment_reference_env)
+        segment_reference_env = "DREAMPLACE_L_SHAPE_SEGMENT_COMPACTION_REFERENCE"
+        legacy_segment_reference_env = "DREAMPLACE_L_SHAPE_HARD_SEGMENT_COMPACTION_REFERENCE"
+        segment_reference_enabled = l_shape_segment_module._env_any_flag_enabled(
+            segment_reference_env,
+            legacy_segment_reference_env,
+        )
         logger.info(
             "LShapeSegmentProvenance module_path=%s blake2b16=%s "
-            "hard_compaction_reference_env=%s hard_compaction_reference_enabled=%s",
+            "segment_compaction_reference_env=%s legacy_segment_compaction_reference_env=%s "
+            "segment_compaction_reference_enabled=%s",
             segment_module_path,
             segment_module_digest,
             segment_reference_env,
+            legacy_segment_reference_env,
             segment_reference_enabled,
         )
         self.density_mode = density_mode
@@ -197,18 +203,20 @@ class LShapeRoutabilityOp(nn.Module):
         self.debug_hash_end_iter = int(getattr(params, "l_shape_debug_hash_end_iter", -1))
         self.debug_hash_sample = max(int(getattr(params, "l_shape_debug_hash_sample", 4096)), 0)
         self._debug_hash_iteration = None
-        self.hard_segment_snapshot_path = os.environ.get(
-            "DREAMPLACE_L_SHAPE_HARD_SEGMENT_SNAPSHOT_PATH"
+        self.segment_snapshot_path = os.environ.get(
+            "DREAMPLACE_L_SHAPE_SEGMENT_SNAPSHOT_PATH",
+            os.environ.get("DREAMPLACE_L_SHAPE_HARD_SEGMENT_SNAPSHOT_PATH"),
         )
-        self.hard_segment_snapshot_iter = os.environ.get(
-            "DREAMPLACE_L_SHAPE_HARD_SEGMENT_SNAPSHOT_ITER"
+        self.segment_snapshot_iter = os.environ.get(
+            "DREAMPLACE_L_SHAPE_SEGMENT_SNAPSHOT_ITER",
+            os.environ.get("DREAMPLACE_L_SHAPE_HARD_SEGMENT_SNAPSHOT_ITER"),
         )
-        self._hard_segment_snapshot_saved = False
-        if self.hard_segment_snapshot_path:
+        self._segment_snapshot_saved = False
+        if self.segment_snapshot_path:
             logger.info(
-                "LShapeHardSegmentSnapshot path=%s iteration=%s",
-                self.hard_segment_snapshot_path,
-                self.hard_segment_snapshot_iter or "<first>",
+                "LShapeSegmentSnapshot path=%s iteration=%s",
+                self.segment_snapshot_path,
+                self.segment_snapshot_iter or "<first>",
             )
         self.per_net_topology_use_cpp = True
         cache_flag = getattr(params, "l_shape_edge_net_ids_cache_flag", 1)
@@ -474,25 +482,25 @@ class LShapeRoutabilityOp(nn.Module):
     def log_debug_hash(self, name, tensor, **fields):
         self._log_debug_hash(name, tensor, **fields)
 
-    def _maybe_save_hard_segment_snapshot(
+    def _maybe_save_segment_snapshot(
         self, newx, newy, flat_pin_from, flat_pin_to, l_directions
     ):
-        if not self.hard_segment_snapshot_path or self._hard_segment_snapshot_saved:
+        if not self.segment_snapshot_path or self._segment_snapshot_saved:
             return
         if self.soft_l_assignment:
             return
-        if self.hard_segment_snapshot_iter:
+        if self.segment_snapshot_iter:
             if self._debug_hash_iteration is None:
                 return
-            if int(self.hard_segment_snapshot_iter) != int(self._debug_hash_iteration):
+            if int(self.segment_snapshot_iter) != int(self._debug_hash_iteration):
                 return
         try:
-            saved = maybe_save_hard_segment_snapshot(
-                self.hard_segment_snapshot_path,
-                self.hard_segment_snapshot_iter,
+            saved = maybe_save_segment_snapshot(
+                self.segment_snapshot_path,
+                self.segment_snapshot_iter,
                 self._debug_hash_iteration,
                 self.soft_l_assignment,
-                self._hard_segment_snapshot_saved,
+                self._segment_snapshot_saved,
                 newx,
                 newy,
                 flat_pin_from,
@@ -504,17 +512,17 @@ class LShapeRoutabilityOp(nn.Module):
                 deterministic_backward=self.deterministic_flag,
             )
             if saved:
-                self._hard_segment_snapshot_saved = True
+                self._segment_snapshot_saved = True
                 logger.info(
-                    "Saved L-shape hard segment snapshot path=%s iteration=%s",
-                    self.hard_segment_snapshot_path,
+                    "Saved L-shape segment snapshot path=%s iteration=%s",
+                    self.segment_snapshot_path,
                     self._debug_hash_iteration,
                 )
         except Exception as exc:
-            self._hard_segment_snapshot_saved = True
+            self._segment_snapshot_saved = True
             logger.warning(
-                "Failed to save L-shape hard segment snapshot path=%s: %s",
-                self.hard_segment_snapshot_path,
+                "Failed to save L-shape segment snapshot path=%s: %s",
+                self.segment_snapshot_path,
                 exc,
             )
 
@@ -1924,7 +1932,7 @@ class LShapeRoutabilityOp(nn.Module):
         self._log_debug_hash("forward.flat_pin_from", flat_pin_from)
         self._log_debug_hash("forward.flat_pin_to", flat_pin_to)
         self._log_debug_hash("forward.l_directions", l_directions)
-        self._maybe_save_hard_segment_snapshot(
+        self._maybe_save_segment_snapshot(
             newx,
             newy,
             flat_pin_from,

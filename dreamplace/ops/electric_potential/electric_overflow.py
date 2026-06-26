@@ -5,6 +5,7 @@
 #
 
 import math
+import logging
 import numpy as np
 import torch
 from torch import nn
@@ -21,6 +22,8 @@ import matplotlib
 # matplotlib.use('Agg')
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.pyplot as plt
+
+logger = logging.getLogger(__name__)
 
 
 class ElectricDensityMapFunction(Function):
@@ -134,7 +137,9 @@ class ElectricOverflow(nn.Module):
         padding,
         deterministic_flag,  # control whether to use deterministic routine
         sorted_node_map,
-        movable_macro_mask=None):
+        movable_macro_mask=None,
+        num_terminal_NIs=0,
+        iopin_density_weight=0.0):
         super(ElectricOverflow, self).__init__()
         self.node_size_x = node_size_x
         self.node_size_y = node_size_y
@@ -154,6 +159,8 @@ class ElectricOverflow(nn.Module):
         self.padding = padding
         self.sorted_node_map = sorted_node_map
         self.movable_macro_mask = movable_macro_mask
+        self.num_terminal_NIs = int(num_terminal_NIs)
+        self.iopin_density_weight = float(iopin_density_weight)
 
         self.deterministic_flag = deterministic_flag
 
@@ -226,17 +233,16 @@ class ElectricOverflow(nn.Module):
         # initial density_map due to fixed cells
         self.initial_density_map = None
 
-    def compute_initial_density_map(self, pos):
-        if self.num_terminals == 0:
+    def _fixed_density_map(self, pos, node_size_x, node_size_y, num_movable_nodes,
+                           num_terminals):
+        if num_terminals == 0:
             num_fixed_impacted_bins_x = 0
             num_fixed_impacted_bins_y = 0
         else:
-            max_size_x = self.node_size_x[self.num_movable_nodes:self.
-                                          num_movable_nodes +
-                                          self.num_terminals].max()
-            max_size_y = self.node_size_y[self.num_movable_nodes:self.
-                                          num_movable_nodes +
-                                          self.num_terminals].max()
+            fixed_beg = num_movable_nodes
+            fixed_end = num_movable_nodes + num_terminals
+            max_size_x = node_size_x[fixed_beg:fixed_end].max()
+            max_size_y = node_size_y[fixed_beg:fixed_end].max()
             num_fixed_impacted_bins_x = ((max_size_x + self.bin_size_x) /
                                          self.bin_size_x).ceil().clamp(
                                              max=self.num_bins_x)
@@ -247,15 +253,46 @@ class ElectricOverflow(nn.Module):
             func = electric_potential_cuda.fixed_density_map
         else:
             func = electric_potential_cpp.fixed_density_map
-        self.initial_density_map = func(
-            pos, self.node_size_x, self.node_size_y, self.bin_center_x,
+        return func(
+            pos, node_size_x, node_size_y, self.bin_center_x,
             self.bin_center_y, self.xl, self.yl, self.xh, self.yh,
-            self.bin_size_x, self.bin_size_y, self.num_movable_nodes,
-            self.num_terminals, self.num_bins_x, self.num_bins_y,
+            self.bin_size_x, self.bin_size_y, num_movable_nodes,
+            num_terminals, self.num_bins_x, self.num_bins_y,
             num_fixed_impacted_bins_x, num_fixed_impacted_bins_y,
             self.deterministic_flag)
+
+    def compute_iopin_density_map(self, pos):
+        num_nodes = pos.numel() // 2
+        iopin_start = self.num_movable_nodes + self.num_terminals
+        iopin_end = iopin_start + self.num_terminal_NIs
+        packed_pos = torch.cat([
+            pos[iopin_start:iopin_end],
+            pos[num_nodes + iopin_start:num_nodes + iopin_end],
+        ]).contiguous()
+        packed_node_size_x = self.node_size_x[iopin_start:iopin_end].contiguous()
+        packed_node_size_y = self.node_size_y[iopin_start:iopin_end].contiguous()
+        return self._fixed_density_map(
+            packed_pos,
+            packed_node_size_x,
+            packed_node_size_y,
+            num_movable_nodes=0,
+            num_terminals=self.num_terminal_NIs)
+
+    def compute_initial_density_map(self, pos):
+        self.initial_density_map = self._fixed_density_map(
+            pos, self.node_size_x, self.node_size_y, self.num_movable_nodes,
+            self.num_terminals)
         # scale density of fixed macros
         self.initial_density_map.mul_(self.target_density)
+        if self.iopin_density_weight > 0 and self.num_terminal_NIs > 0:
+            logger.info(
+                "I/O pin density increment enabled: weight=%s, num_terminal_NIs=%d",
+                self.iopin_density_weight,
+                self.num_terminal_NIs,
+            )
+            self.initial_density_map.add_(
+                self.compute_iopin_density_map(pos),
+                alpha=self.iopin_density_weight)
 
     def forward(self, pos):
         if self.initial_density_map is None:

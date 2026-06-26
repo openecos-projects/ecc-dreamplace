@@ -61,6 +61,13 @@ from dreamplace.ops.routability.plot_map import plot_node_grad_directions
 from dreamplace.ops.routability.profile_timing import l_shape_log_verbose, profile_scope
 
 
+def _effective_iopin_density_weight(params, placedb, region_id=None,
+                                    fence_regions=None):
+    if len(placedb.regions) > 0 or region_id is not None or fence_regions is not None:
+        return 0.0
+    return float(getattr(params, "iopin_density_weight", 0.0))
+
+
 class PreconditionOp:
     """Preconditioning engine is critical for convergence.
     Need to be carefully designed.
@@ -3435,6 +3442,8 @@ class PlaceObj(nn.Module):
             deterministic_flag=params.deterministic_flag,
             sorted_node_map=data_collections.sorted_node_map,
             movable_macro_mask=data_collections.movable_macro_mask,
+            num_terminal_NIs=placedb.num_terminal_NIs,
+            iopin_density_weight=_effective_iopin_density_weight(params, placedb),
         )
 
     def build_density_potential(
@@ -3688,6 +3697,9 @@ class PlaceObj(nn.Module):
             deterministic_flag=params.deterministic_flag,
             sorted_node_map=data_collections.sorted_node_map,
             movable_macro_mask=data_collections.movable_macro_mask,
+            num_terminal_NIs=placedb.num_terminal_NIs,
+            iopin_density_weight=_effective_iopin_density_weight(
+                params, placedb, region_id=region_id, fence_regions=fence_regions),
             fast_mode=params.RePlAce_skip_energy_flag,
             region_id=region_id,
             fence_regions=fence_regions,

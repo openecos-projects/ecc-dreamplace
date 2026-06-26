@@ -187,6 +187,10 @@
         "description": "whether enable routability optimization",
         "default": 0
     },
+    "iopin_density_weight": {
+        "description": "extra I/O pin density weight added to the electric initial density map; 0 disables Xplace-style I/O pin density increment, 3 matches Xplace's extra 3*Diopin term",
+        "default": 0.0
+    },
     "ieda_m2_pg_rail_blockage_flag": {
         "description": "whether convert iEDA VDD/VSS special-net shapes on the second routing layer into synthetic placement blockages",
         "default": 1

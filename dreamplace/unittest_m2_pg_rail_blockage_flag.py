@@ -108,6 +108,17 @@ class M2PgRailBlockageFlagTest(unittest.TestCase):
             ("dm-inst-ptr", 7, 11, 1, 0, True),
         )
 
+    def test_iopin_density_weight_does_not_affect_m2_pg_rail_flag(self):
+        self._run_setup_rawdb(
+            self._make_params(ieda_m2_pg_rail_blockage_flag=0, iopin_density_weight=3.0)
+        )
+
+        self.assertEqual(len(FakeIEDAIO.calls), 1)
+        self.assertEqual(
+            FakeIEDAIO.calls[0],
+            ("dm-inst-ptr", 7, 11, 1, 0, False),
+        )
+
     def test_flag_resolver_accepts_numeric_and_text_boolean_values(self):
         cases = [
             (0, False),

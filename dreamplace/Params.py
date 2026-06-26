@@ -153,6 +153,21 @@ class Params:
             if not hasattr(self, key):
                 setattr(self, key, value)
 
+    def normalize_iopin_density_weight(self):
+        value = getattr(self, "iopin_density_weight", 0.0)
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            raise ValueError("iopin_density_weight must be numeric")
+        if not math.isfinite(value):
+            raise ValueError("iopin_density_weight must be finite")
+        if value < 0:
+            raise ValueError("iopin_density_weight must be non-negative")
+        self.iopin_density_weight = value
+
+    def normalize_params(self):
+        self.normalize_iopin_density_weight()
+
     def fromJson(self, data):
         """
         @brief load from json
@@ -160,6 +175,7 @@ class Params:
         for key, value in data.items():
             self.__dict__[key] = value
         self.apply_l_shape_routability_preset()
+        self.normalize_params()
 
     def dump(self, filename):
         """
@@ -226,6 +242,7 @@ class Params:
         ):
             self.__dict__[key] = value
         self.apply_l_shape_routability_preset()
+        self.normalize_params()
 
     def update(self, params):
         """

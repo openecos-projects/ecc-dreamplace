@@ -29,5 +29,4 @@ jobs:
         with:
           name: ecc-dreamplace-wheel
           path: dist/wheel/repaired/ecc_dreamplace-*.whl
-          retention-days: 7
           if-no-files-found: error

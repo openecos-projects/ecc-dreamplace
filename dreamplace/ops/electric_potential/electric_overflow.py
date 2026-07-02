@@ -139,7 +139,9 @@ class ElectricOverflow(nn.Module):
         sorted_node_map,
         movable_macro_mask=None,
         num_terminal_NIs=0,
-        iopin_density_weight=0.0):
+        iopin_density_weight=0.0,
+        m2_pg_rail_density_boxes=None,
+        m2_pg_rail_density_weight=1.0):
         super(ElectricOverflow, self).__init__()
         self.node_size_x = node_size_x
         self.node_size_y = node_size_y
@@ -161,10 +163,47 @@ class ElectricOverflow(nn.Module):
         self.movable_macro_mask = movable_macro_mask
         self.num_terminal_NIs = int(num_terminal_NIs)
         self.iopin_density_weight = float(iopin_density_weight)
+        self.m2_pg_rail_density_boxes = self._normalize_m2_pg_rail_density_boxes(
+            m2_pg_rail_density_boxes)
+        self.m2_pg_rail_density_weight = self._normalize_m2_pg_rail_density_weight(
+            m2_pg_rail_density_weight)
 
         self.deterministic_flag = deterministic_flag
 
         self.reset()
+
+    def _normalize_m2_pg_rail_density_boxes(self, boxes):
+        if boxes is None:
+            return None
+        boxes = torch.as_tensor(
+            boxes,
+            dtype=self.node_size_x.dtype,
+            device=self.node_size_x.device,
+        )
+        if boxes.numel() == 0:
+            return boxes.reshape(0, 4).contiguous()
+        if boxes.dim() != 2 or boxes.size(1) != 4:
+            raise ValueError(
+                "m2_pg_rail_density_boxes must have shape [N, 4], got %s"
+                % (tuple(boxes.size()),)
+            )
+        if torch.any(boxes[:, 2] <= boxes[:, 0]) or torch.any(boxes[:, 3] <= boxes[:, 1]):
+            raise ValueError(
+                "m2_pg_rail_density_boxes must contain positive-width and "
+                "positive-height [xl, yl, xh, yh] rectangles"
+            )
+        return boxes.contiguous()
+
+    def _normalize_m2_pg_rail_density_weight(self, weight):
+        try:
+            weight = float(weight)
+        except (TypeError, ValueError):
+            raise ValueError("m2_pg_rail_density_weight must be numeric")
+        if not math.isfinite(weight):
+            raise ValueError("m2_pg_rail_density_weight must be finite")
+        if weight < 0:
+            raise ValueError("m2_pg_rail_density_weight must be non-negative")
+        return weight
 
     def reset(self):
         sqrt2 = math.sqrt(2)
@@ -232,6 +271,9 @@ class ElectricOverflow(nn.Module):
                                             device=self.node_size_x.device)
         # initial density_map due to fixed cells
         self.initial_density_map = None
+        self.m2_pg_rail_fixed_without_rail_raw_map = None
+        self.m2_pg_rail_combined_raw_map = None
+        self.m2_pg_rail_raw_delta_map = None
 
     def _fixed_density_map(self, pos, node_size_x, node_size_y, num_movable_nodes,
                            num_terminals):
@@ -278,10 +320,102 @@ class ElectricOverflow(nn.Module):
             num_movable_nodes=0,
             num_terminals=self.num_terminal_NIs)
 
+    def _pack_combined_fixed_density_terms(self, pos):
+        rail_boxes = self.m2_pg_rail_density_boxes
+        if rail_boxes is None or rail_boxes.numel() == 0:
+            return (
+                pos,
+                self.node_size_x,
+                self.node_size_y,
+                self.num_movable_nodes,
+                self.num_terminals,
+            )
+
+        num_nodes = pos.numel() // 2
+        fixed_beg = self.num_movable_nodes
+        fixed_end = self.num_movable_nodes + self.num_terminals
+        packed_pos = torch.cat(
+            [
+                pos[fixed_beg:fixed_end],
+                rail_boxes[:, 0],
+                pos[num_nodes + fixed_beg:num_nodes + fixed_end],
+                rail_boxes[:, 1],
+            ]
+        ).contiguous()
+        packed_node_size_x = torch.cat(
+            [
+                self.node_size_x[fixed_beg:fixed_end],
+                rail_boxes[:, 2] - rail_boxes[:, 0],
+            ]
+        ).contiguous()
+        packed_node_size_y = torch.cat(
+            [
+                self.node_size_y[fixed_beg:fixed_end],
+                rail_boxes[:, 3] - rail_boxes[:, 1],
+            ]
+        ).contiguous()
+        return (
+            packed_pos,
+            packed_node_size_x,
+            packed_node_size_y,
+            0,
+            self.num_terminals + rail_boxes.size(0),
+        )
+
     def compute_initial_density_map(self, pos):
-        self.initial_density_map = self._fixed_density_map(
+        fixed_without_rail_raw_map = self._fixed_density_map(
             pos, self.node_size_x, self.node_size_y, self.num_movable_nodes,
             self.num_terminals)
+        self.m2_pg_rail_fixed_without_rail_raw_map = fixed_without_rail_raw_map.clone()
+        if (
+            self.m2_pg_rail_density_boxes is not None
+            and self.m2_pg_rail_density_boxes.numel() > 0
+            and self.m2_pg_rail_density_weight > 0
+        ):
+            (
+                packed_pos,
+                packed_node_size_x,
+                packed_node_size_y,
+                packed_num_movable_nodes,
+                packed_num_terminals,
+            ) = self._pack_combined_fixed_density_terms(pos)
+            combined_raw_map = self._fixed_density_map(
+                packed_pos,
+                packed_node_size_x,
+                packed_node_size_y,
+                packed_num_movable_nodes,
+                packed_num_terminals,
+            )
+        else:
+            combined_raw_map = fixed_without_rail_raw_map
+        self.m2_pg_rail_combined_raw_map = combined_raw_map.clone()
+        self.m2_pg_rail_raw_delta_map = (
+            combined_raw_map - fixed_without_rail_raw_map
+        ).clone()
+        if (
+            self.m2_pg_rail_density_boxes is not None
+            and self.m2_pg_rail_density_boxes.numel() > 0
+            and self.m2_pg_rail_density_weight > 0
+        ):
+            logger.info(
+                "M2 PG rail soft density map: boxes=%d, weight=%g, combined_raw_sum=%g, "
+                "combined_raw_max=%g, raw_delta_sum=%g, raw_delta_max=%g",
+                int(self.m2_pg_rail_density_boxes.size(0)),
+                self.m2_pg_rail_density_weight,
+                float(self.m2_pg_rail_combined_raw_map.sum().item()),
+                float(self.m2_pg_rail_combined_raw_map.max().item()),
+                float(self.m2_pg_rail_raw_delta_map.sum().item()),
+                float(self.m2_pg_rail_raw_delta_map.max().item()),
+            )
+        if self.m2_pg_rail_density_weight == 1.0:
+            self.initial_density_map = combined_raw_map.clone()
+        elif self.m2_pg_rail_density_weight > 0:
+            self.initial_density_map = fixed_without_rail_raw_map.add(
+                self.m2_pg_rail_raw_delta_map,
+                alpha=self.m2_pg_rail_density_weight,
+            )
+        else:
+            self.initial_density_map = fixed_without_rail_raw_map.clone()
         # scale density of fixed macros
         self.initial_density_map.mul_(self.target_density)
         if self.iopin_density_weight > 0 and self.num_terminal_NIs > 0:

@@ -49,6 +49,7 @@ class MacroPlaceDB(object):
         self.num_terminal_NIs = 0
         self.num_place_blockages = 0  # synthetic placement blockages appended to fixed terminals
         self.num_fixed_macro_excluded_place_blockages = 0
+        self.m2_pg_rail_density_boxes = np.zeros((0, 4), dtype=np.float32)
         self.node_name2id_map = {}  # node name to id map, cell name
         self.node_names = None  # 1D array, cell name
         self.node_x = None  # 1D array, cell position x
@@ -288,10 +289,20 @@ class MacroPlaceDB(object):
             # may have performance issue
             self.regions[i] -= box_shift_factor
             self.regions[i] *= scale_factor
+        if self.m2_pg_rail_density_boxes is not None and self.m2_pg_rail_density_boxes.size:
+            rail_boxes = self.m2_pg_rail_density_boxes
+            rail_xl = rail_boxes[:, 0].copy()
+            rail_yl = rail_boxes[:, 1].copy()
+            rail_w = (rail_boxes[:, 2] - rail_boxes[:, 0]).copy()
+            rail_h = (rail_boxes[:, 3] - rail_boxes[:, 1]).copy()
+            rail_boxes[:, 0] = (rail_xl - shift_factor[0]) * scale_factor
+            rail_boxes[:, 1] = (rail_yl - shift_factor[1]) * scale_factor
+            rail_boxes[:, 2] = rail_boxes[:, 0] + rail_w * scale_factor
+            rail_boxes[:, 3] = rail_boxes[:, 1] + rail_h * scale_factor
 
     @staticmethod
     def _resolve_ieda_m2_pg_rail_blockage_flag(params):
-        value = getattr(params, "ieda_m2_pg_rail_blockage_flag", 1)
+        value = getattr(params, "ieda_m2_pg_rail_blockage_flag", 0)
         if isinstance(value, bool):
             return value
         if isinstance(value, str):
@@ -312,6 +323,19 @@ class MacroPlaceDB(object):
             "(0/1, true/false, yes/no, on/off)"
         )
 
+    @staticmethod
+    def _resolve_m2_pg_rail_density_weight(params):
+        value = getattr(params, "m2_pg_rail_density_weight", 1.0)
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            raise ValueError("m2_pg_rail_density_weight must be numeric")
+        if not np.isfinite(value):
+            raise ValueError("m2_pg_rail_density_weight must be finite")
+        if value < 0:
+            raise ValueError("m2_pg_rail_density_weight must be non-negative")
+        return value
+
     def _validate_place_blockage_bookkeeping(self):
         blockage_count = int(getattr(self, "num_place_blockages", 0))
         terminal_count = int(getattr(self, "num_terminals", 0))
@@ -322,15 +346,58 @@ class MacroPlaceDB(object):
                 % (blockage_count, terminal_count)
             )
 
+    def _import_m2_pg_rail_density_boxes(self, pydb, include_m2_pg_rail_density):
+        dtype = getattr(self, "dtype", None) or np.float32
+        if not hasattr(pydb, "m2_pg_rail_density_boxes"):
+            if include_m2_pg_rail_density:
+                raise RuntimeError(
+                    "M2 PG rail soft density is enabled, but pydb has no "
+                    "m2_pg_rail_density_boxes field. Rebuild iEDA pybind to avoid "
+                    "using stale hard-node M2 PG rail behavior."
+                )
+            logging.warning(
+                "pydb has no m2_pg_rail_density_boxes field; treating M2 PG rail "
+                "soft density as empty because soft density collection is disabled"
+            )
+            return np.zeros((0, 4), dtype=dtype)
+
+        boxes = np.array(pydb.m2_pg_rail_density_boxes, dtype=dtype)
+        if boxes.size == 0:
+            return boxes.reshape(0, 4)
+        if boxes.ndim != 2 or boxes.shape[1] != 4:
+            raise ValueError(
+                "m2_pg_rail_density_boxes must have shape [N, 4], got %s"
+                % (boxes.shape,)
+            )
+        if np.any(boxes[:, 2] <= boxes[:, 0]) or np.any(boxes[:, 3] <= boxes[:, 1]):
+            raise ValueError(
+                "m2_pg_rail_density_boxes must contain positive-width and "
+                "positive-height [xl, yl, xh, yh] rectangles"
+            )
+        return boxes
+
     @staticmethod
-    def _log_ieda_m2_pg_rail_blockage_effect(include_m2_pg_rail_blockage, pydb):
+    def _log_ieda_m2_pg_rail_blockage_effect(
+        include_m2_pg_rail_blockage,
+        include_m2_pg_rail_density,
+        pydb,
+    ):
         if include_m2_pg_rail_blockage:
             logging.info(
                 "PyPlaceDB M2 PG rail blockage rectangles added before union: %d",
                 int(getattr(pydb, "m2_pg_rail_blockage_rects", 0)),
             )
         else:
-            logging.info("PyPlaceDB M2 PG rail blockage conversion skipped")
+            rail_boxes = getattr(pydb, "m2_pg_rail_density_boxes", [])
+            logging.info("PyPlaceDB M2 PG rail hard blockage conversion skipped")
+            logging.info(
+                "PyPlaceDB M2 PG rail density boxes exported: %d",
+                len(rail_boxes),
+            )
+            if include_m2_pg_rail_density:
+                logging.info("PyPlaceDB M2 PG rail soft density collection enabled")
+            else:
+                logging.info("PyPlaceDB M2 PG rail soft density collection skipped")
 
     def setup_rawdb(self, params):
         self.dtype = datatypes[params.dtype]
@@ -340,9 +407,18 @@ class MacroPlaceDB(object):
             include_m2_pg_rail_blockage = (
                 self._resolve_ieda_m2_pg_rail_blockage_flag(params)
             )
+            m2_pg_rail_density_weight = self._resolve_m2_pg_rail_density_weight(params)
+            include_m2_pg_rail_density = (
+                m2_pg_rail_density_weight > 0 and not include_m2_pg_rail_blockage
+            )
             logging.info(
                 "ieda_m2_pg_rail_blockage_flag resolved to %d",
                 int(include_m2_pg_rail_blockage),
+            )
+            logging.info(
+                "m2_pg_rail_density_weight resolved to %g; soft density collection %s",
+                m2_pg_rail_density_weight,
+                "enabled" if include_m2_pg_rail_density else "disabled",
             )
             self.pydb = ieda_dm.pydb(
                 self.get_dmInst_ptr,
@@ -351,9 +427,11 @@ class MacroPlaceDB(object):
                 params.routability_opt_flag,
                 params.with_sta,
                 include_m2_pg_rail_blockage,
+                include_m2_pg_rail_density,
             )
             self._log_ieda_m2_pg_rail_blockage_effect(
                 include_m2_pg_rail_blockage,
+                include_m2_pg_rail_density,
                 self.pydb,
             )
 
@@ -1065,6 +1143,15 @@ class MacroPlaceDB(object):
         self.num_terminal_NIs = pydb.num_terminal_NIs
         self.num_place_blockages = int(getattr(pydb, "num_place_blockages", 0))
         self._validate_place_blockage_bookkeeping()
+        include_m2_pg_rail_blockage = self._resolve_ieda_m2_pg_rail_blockage_flag(params)
+        include_m2_pg_rail_density = (
+            self._resolve_m2_pg_rail_density_weight(params) > 0
+            and not include_m2_pg_rail_blockage
+        )
+        self.m2_pg_rail_density_boxes = self._import_m2_pg_rail_density_boxes(
+            pydb,
+            include_m2_pg_rail_density=include_m2_pg_rail_density,
+        )
         self.node_name2id_map = pydb.node_name2id_map
         self.node_names = np.array(pydb.node_names, dtype=np.string_)
         # If the placer directly takes a global placement solution,

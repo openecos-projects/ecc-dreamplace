@@ -189,11 +189,15 @@
     },
     "iopin_density_weight": {
         "description": "extra I/O pin density weight added to the electric initial density map; 0 disables Xplace-style I/O pin density increment, 3 matches Xplace's extra 3*Diopin term",
-        "default": 0.0
+        "default": 3.0
     },
     "ieda_m2_pg_rail_blockage_flag": {
         "description": "whether convert iEDA VDD/VSS special-net shapes on the second routing layer into synthetic placement blockages",
-        "default": 1
+        "default": 0
+    },
+    "m2_pg_rail_density_weight": {
+        "description": "M2 PG rail soft density weight added to the electric initial density map when ieda_m2_pg_rail_blockage_flag is disabled; 0 disables the soft density path, 1 matches the old hard-node rail density contribution",
+        "default": 1.0
     },
     "route_num_bins_x": {
         "description": "number of routing grids/tiles",
@@ -377,7 +381,7 @@
     },
     "l_shape_overflow_threshold": {
         "description": "placement overflow threshold below which disabled L-shape diff/routability force is allowed to start or re-enable",
-        "default": 0.2
+        "default": 0.3
     },
     "l_shape_filler_reverse_force": {
         "description": "strength of filler reverse force: push fillers TOWARD congested areas using the L-shape Poisson field, so fillers occupy congested bins and density gradient locks real cells away; 0 disables",

@@ -301,6 +301,8 @@ class ElectricPotential(ElectricOverflow):
         movable_macro_mask=None,
         num_terminal_NIs=0,
         iopin_density_weight=0.0,
+        m2_pg_rail_density_boxes=None,
+        m2_pg_rail_density_weight=1.0,
         fast_mode=False,
         region_id=None,
         fence_regions=None, # [n_subregion, 4] as dummy macros added to initial density. (xl,yl,xh,yh) rectangles
@@ -384,7 +386,9 @@ class ElectricPotential(ElectricOverflow):
                              sorted_node_map=sorted_node_map,
                              movable_macro_mask=movable_macro_mask,
                              num_terminal_NIs=num_terminal_NIs,
-                             iopin_density_weight=iopin_density_weight)
+                             iopin_density_weight=iopin_density_weight,
+                             m2_pg_rail_density_boxes=m2_pg_rail_density_boxes,
+                             m2_pg_rail_density_weight=m2_pg_rail_density_weight)
         self.fast_mode = fast_mode
         self.fence_regions = fence_regions
         self.node2fence_region_map = node2fence_region_map

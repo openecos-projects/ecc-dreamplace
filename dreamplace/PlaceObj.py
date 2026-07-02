@@ -65,7 +65,58 @@ def _effective_iopin_density_weight(params, placedb, region_id=None,
                                     fence_regions=None):
     if len(placedb.regions) > 0 or region_id is not None or fence_regions is not None:
         return 0.0
-    return float(getattr(params, "iopin_density_weight", 0.0))
+    return float(getattr(params, "iopin_density_weight", 3.0))
+
+
+def _bool_like(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def _effective_m2_pg_rail_density_weight(params, placedb, region_id=None,
+                                         fence_regions=None):
+    if len(placedb.regions) > 0 or region_id is not None or fence_regions is not None:
+        return 0.0
+    if _bool_like(getattr(params, "ieda_m2_pg_rail_blockage_flag", 0)):
+        return 0.0
+    return float(getattr(params, "m2_pg_rail_density_weight", 1.0))
+
+
+def _effective_m2_pg_rail_density_boxes(
+    params,
+    placedb,
+    data_collections,
+    region_id=None,
+    fence_regions=None,
+):
+    boxes = getattr(
+        data_collections,
+        "m2_pg_rail_density_boxes",
+        getattr(placedb, "m2_pg_rail_density_boxes", None),
+    )
+    if boxes is None:
+        return None
+
+    if _effective_m2_pg_rail_density_weight(
+        params, placedb, region_id=region_id, fence_regions=fence_regions
+    ) <= 0:
+        has_boxes = boxes.numel() > 0 if isinstance(boxes, torch.Tensor) else len(boxes) > 0
+        if has_boxes:
+            reason = (
+                "fence-region electric field"
+                if len(placedb.regions) > 0 or region_id is not None or fence_regions is not None
+                else "disabled soft-density weight or enabled hard blockage flag"
+            )
+            logging.info(
+                "M2 PG rail soft density skipped for %s",
+                reason,
+            )
+        return None
+
+    return boxes
 
 
 class PreconditionOp:
@@ -3444,6 +3495,15 @@ class PlaceObj(nn.Module):
             movable_macro_mask=data_collections.movable_macro_mask,
             num_terminal_NIs=placedb.num_terminal_NIs,
             iopin_density_weight=_effective_iopin_density_weight(params, placedb),
+            m2_pg_rail_density_boxes=_effective_m2_pg_rail_density_boxes(
+                params,
+                placedb,
+                data_collections,
+            ),
+            m2_pg_rail_density_weight=_effective_m2_pg_rail_density_weight(
+                params,
+                placedb,
+            ),
         )
 
     def build_density_potential(
@@ -3700,6 +3760,19 @@ class PlaceObj(nn.Module):
             num_terminal_NIs=placedb.num_terminal_NIs,
             iopin_density_weight=_effective_iopin_density_weight(
                 params, placedb, region_id=region_id, fence_regions=fence_regions),
+            m2_pg_rail_density_boxes=_effective_m2_pg_rail_density_boxes(
+                params,
+                placedb,
+                data_collections,
+                region_id=region_id,
+                fence_regions=fence_regions,
+            ),
+            m2_pg_rail_density_weight=_effective_m2_pg_rail_density_weight(
+                params,
+                placedb,
+                region_id=region_id,
+                fence_regions=fence_regions,
+            ),
             fast_mode=params.RePlAce_skip_energy_flag,
             region_id=region_id,
             fence_regions=fence_regions,

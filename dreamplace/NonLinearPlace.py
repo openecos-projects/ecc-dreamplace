@@ -52,7 +52,7 @@ from dreamplace.ops.routability.leiden_clustering import (
     build_active_leiden_clusters,
     plot_modularity_clusters,
 )
-from dreamplace.ops.routability import xplace_inflation_controller
+from dreamplace.ops.routability import enhanced_inflation_controller
 
 
 def _snapshot_l_shape_forward_source():
@@ -1536,16 +1536,16 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 ).to(self.data_collections.pos[0].device)
                 model.compile()
                 if params.routability_opt_flag:
-                    inflation_state = xplace_inflation_controller.ensure_inflation_state(
+                    inflation_state = enhanced_inflation_controller.ensure_inflation_state(
                         params,
                         placedb,
                         self.data_collections,
                         stage_idx=cur_stage,
                     )
                     model.inflation_state = inflation_state
-                    if getattr(params, "xplace_style_inflation_flag", False):
+                    if getattr(params, "enhanced_inflation_flag", False):
                         logging.info(
-                            "Initialized Xplace-style inflation controller for stage %d; "
+                            "Initialized enhanced inflation controller for stage %d; "
                             "inflation rounds will restore best_pos before the route-driven "
                             "outer-loop area adjust.",
                             cur_stage,
@@ -3676,7 +3676,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     )
                     adjust_pin_area_flag = params.adjust_pin_area_flag
                     num_area_adjust = 0
-                    max_area_adjust_rounds = xplace_inflation_controller.get_inflation_round_limit(params)
+                    max_area_adjust_rounds = enhanced_inflation_controller.get_inflation_round_limit(params)
                     if getattr(model, "inflation_state", None) is not None:
                         model.inflation_state.num_area_adjust = 0
 
@@ -3792,21 +3792,21 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
                         # for routability optimization
                         if params.routability_opt_flag:
-                            trigger_xplace_inflation = xplace_inflation_controller.should_trigger_xplace_inflation(
+                            trigger_enhanced_inflation = enhanced_inflation_controller.should_trigger_enhanced_inflation(
                                 params,
                                 num_area_adjust=num_area_adjust,
                                 overflow=Llambda_metrics[-1][-1].overflow,
                             )
                             trigger_legacy_inflation = (
-                                not trigger_xplace_inflation
+                                not trigger_enhanced_inflation
                                 and num_area_adjust < max_area_adjust_rounds
                                 and Llambda_metrics[-1][-1].overflow < params.node_area_adjust_overflow
                             )
-                            if trigger_xplace_inflation or trigger_legacy_inflation:
-                                use_xplace_outer_loop = bool(trigger_xplace_inflation)
+                            if trigger_enhanced_inflation or trigger_legacy_inflation:
+                                use_enhanced_inflation = bool(trigger_enhanced_inflation)
                                 round_flags = (
-                                    xplace_inflation_controller.get_area_adjust_flags(params)
-                                    if use_xplace_outer_loop
+                                    enhanced_inflation_controller.get_area_adjust_flags(params)
+                                    if use_enhanced_inflation
                                     else {
                                         "adjust_area_flag": adjust_area_flag,
                                         "adjust_route_area_flag": adjust_route_area_flag,
@@ -3826,21 +3826,21 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     )
                                 )
                                 pos = model.data_collections.pos[0]
-                                if use_xplace_outer_loop and best_pos[0] is not None:
+                                if use_enhanced_inflation and best_pos[0] is not None:
                                     pos.data.copy_(best_pos[0].data)
                                     content = (
-                                        "xplace-style inflation round %d: restore best_pos snapshot before gpugr/area-adjust | "
+                                        "enhanced inflation round %d: restore best_pos snapshot before gpugr/area-adjust | "
                                         % num_area_adjust
                                     ) + content
                                     logging.info(
-                                        "Xplace-style inflation round %d uses best_pos snapshot with best overflow %.6f at iter %d",
+                                        "enhanced inflation round %d uses best_pos snapshot with best overflow %.6f at iter %d",
                                         num_area_adjust,
                                         float(best_metric[0].overflow[-1]) if best_metric[0] is not None else float("nan"),
                                         int(best_metric[0].iteration) if best_metric[0] is not None else -1,
                                     )
-                                elif use_xplace_outer_loop:
+                                elif use_enhanced_inflation:
                                     logging.info(
-                                        "Xplace-style inflation round %d cannot find an earlier best_pos snapshot; use current position as trigger input",
+                                        "enhanced inflation round %d cannot find an earlier best_pos snapshot; use current position as trigger input",
                                         num_area_adjust,
                                     )
                                 route_map_source = "none"
@@ -3858,11 +3858,11 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     )
                                 current_inflation_round = None
                                 if getattr(model, "inflation_state", None) is not None:
-                                    xplace_inflation_controller.maybe_capture_model_density_state(
+                                    enhanced_inflation_controller.maybe_capture_model_density_state(
                                         model.inflation_state,
                                         model,
                                     )
-                                    current_inflation_round = xplace_inflation_controller.begin_inflation_round(
+                                    current_inflation_round = enhanced_inflation_controller.begin_inflation_round(
                                         model.inflation_state,
                                         self.data_collections,
                                         placedb,
@@ -3876,8 +3876,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                         adjust_route_area_flag=round_adjust_route_area_flag,
                                         adjust_pin_area_flag=round_adjust_pin_area_flag,
                                         notes=(
-                                            "xplace_outer_loop_best_pos"
-                                            if use_xplace_outer_loop
+                                            "enhanced_inflation_best_pos"
+                                            if use_enhanced_inflation
                                             else "legacy_area_adjust"
                                         ),
                                     )
@@ -3902,6 +3902,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 modularity_maps = None
                                 gpugr_metrics = {}
                                 low_util_context = None
+                                fixed_target_area = None
                                 if round_adjust_route_area_flag:
                                     if getattr(params, "adjust_gpugr_area_flag", False):
                                         _sync_gpugr_route_grid_to_autodmp(
@@ -3963,7 +3964,13 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                             figname, pin_utilization_map.data.cpu().numpy().T, origin="lower"
                                         )
                                 if getattr(model, "inflation_state", None) is not None:
-                                    low_util_context = xplace_inflation_controller.prepare_low_util_inflation(
+                                    if use_enhanced_inflation:
+                                        fixed_target_area = getattr(
+                                            model.inflation_state,
+                                            "target_area",
+                                            None,
+                                        )
+                                    low_util_context = enhanced_inflation_controller.prepare_low_util_inflation(
                                         params,
                                         model.inflation_state,
                                         placedb,
@@ -3981,14 +3988,15 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     pin_utilization_map,
                                     modularity_maps=modularity_maps,
                                     inflation_round=int(num_area_adjust),
+                                    fixed_target_area=fixed_target_area,
                                 )
-                                xplace_inflation_controller.restore_low_util_inflation(
+                                enhanced_inflation_controller.restore_low_util_inflation(
                                     model.op_collections.adjust_node_area_op,
                                     low_util_context,
                                 )
                                 low_util_metrics = {}
                                 if adjust_area_flag:
-                                    low_util_metrics = xplace_inflation_controller.apply_low_util_target_density(
+                                    low_util_metrics = enhanced_inflation_controller.apply_low_util_target_density(
                                         params,
                                         getattr(model, "inflation_state", None),
                                         self.data_collections,
@@ -4000,9 +4008,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 if (
                                     adjust_area_flag
                                     and current_inflation_round is not None
-                                    and use_xplace_outer_loop
+                                    and use_enhanced_inflation
                                 ):
-                                    min_area_inc_result = xplace_inflation_controller.enforce_min_area_increment(
+                                    min_area_inc_result = enhanced_inflation_controller.enforce_min_area_increment(
                                         params,
                                         model.inflation_state,
                                         self.data_collections,
@@ -4014,10 +4022,10 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     )
                                     if movable_area_increment_ratio is not None:
                                         min_area_inc_metrics = {
-                                            "xplace_movable_area_increment_ratio": float(
+                                            "enhanced_movable_area_increment_ratio": float(
                                                 movable_area_increment_ratio
                                             ),
-                                            "xplace_min_area_increment_threshold": float(
+                                            "enhanced_min_area_increment_threshold": float(
                                                 min_area_inc_result[
                                                     "min_area_increment_threshold"
                                                 ]
@@ -4036,7 +4044,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 logging.info(content)
                                 if current_inflation_round is not None:
                                     round_status = "applied" if adjust_area_flag else "stopped"
-                                    xplace_inflation_controller.finish_inflation_round(
+                                    enhanced_inflation_controller.finish_inflation_round(
                                         model.inflation_state,
                                         self.data_collections,
                                         placedb,
@@ -4056,16 +4064,16 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     )
                                     selected_metric_name = getattr(
                                         params,
-                                        "xplace_inflation_select_metric",
+                                        "enhanced_inflation_select_metric",
                                         "est_shorts",
                                     )
-                                    round_metric_value = xplace_inflation_controller.get_round_metric(
+                                    round_metric_value = enhanced_inflation_controller.get_round_metric(
                                         model.inflation_state.round_records[-1],
                                         selected_metric_name,
                                     )
                                     if round_metric_value is not None:
                                         logging.info(
-                                            "Recorded Xplace-style inflation round %d: %s=%.4f trigger_overflow=%.6f",
+                                            "Recorded enhanced inflation round %d: %s=%.4f trigger_overflow=%.6f",
                                             num_area_adjust,
                                             selected_metric_name,
                                             round_metric_value,
@@ -4215,17 +4223,17 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             if params.routability_opt_flag:
                 selected_inflation_round = None
                 replay_best_inflation_round = bool(
-                    getattr(params, "xplace_inflation_replay_best_round_flag", False)
+                    getattr(params, "enhanced_inflation_replay_best_round_flag", False)
                 )
                 if (
                     replay_best_inflation_round
-                    and xplace_inflation_controller.is_xplace_outer_loop_enabled(params)
+                    and enhanced_inflation_controller.is_enhanced_inflation_enabled(params)
                 ):
-                    selected_inflation_round = xplace_inflation_controller.select_best_gr_solution(
+                    selected_inflation_round = enhanced_inflation_controller.select_best_gr_solution(
                         getattr(self.data_collections, "inflation_state", None),
                         metric_name=getattr(
                             params,
-                            "xplace_inflation_select_metric",
+                            "enhanced_inflation_select_metric",
                             "est_shorts",
                         ),
                     )
@@ -4256,10 +4264,10 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         self.data_collections.original_pin_offset_x)
                     self.data_collections.pin_offset_y.copy_(
                         self.data_collections.original_pin_offset_y)
-                    xplace_inflation_controller.rollback_inflation_state(
+                    enhanced_inflation_controller.rollback_inflation_state(
                         self.data_collections
                     )
-                    xplace_inflation_controller.restore_model_density_state(
+                    enhanced_inflation_controller.restore_model_density_state(
                         getattr(self.data_collections, "inflation_state", None),
                         model,
                     )
@@ -4273,15 +4281,15 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         )
                     selected_metric_name = getattr(
                         params,
-                        "xplace_inflation_select_metric",
+                        "enhanced_inflation_select_metric",
                         "est_shorts",
                     )
-                    selected_metric_value = xplace_inflation_controller.get_round_metric(
+                    selected_metric_value = enhanced_inflation_controller.get_round_metric(
                         selected_inflation_round,
                         selected_metric_name,
                     )
                     logging.info(
-                        "Replay Xplace-style best inflation round %d after rollback using %s=%.4f (trigger_overflow=%.6f, stage=%d, iter=%d)",
+                        "Replay enhanced best inflation round %d after rollback using %s=%.4f (trigger_overflow=%.6f, stage=%d, iter=%d)",
                         selected_inflation_round.round_idx,
                         selected_metric_name,
                         float(selected_metric_value)
@@ -4293,14 +4301,14 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     )
                 elif (
                     not replay_best_inflation_round
-                    and xplace_inflation_controller.is_xplace_outer_loop_enabled(params)
+                    and enhanced_inflation_controller.is_enhanced_inflation_enabled(params)
                 ):
                     logging.info(
-                        "Skip Xplace-style best-round replay after rollback because xplace_inflation_replay_best_round_flag is disabled"
+                        "Skip enhanced best-round replay after rollback because enhanced_inflation_replay_best_round_flag is disabled"
                     )
-                elif replay_best_inflation_round and xplace_inflation_controller.is_xplace_outer_loop_enabled(params):
+                elif replay_best_inflation_round and enhanced_inflation_controller.is_enhanced_inflation_enabled(params):
                     logging.info(
-                        "Skip Xplace-style best-round replay after rollback because no eligible inflation round was recorded"
+                        "Skip enhanced best-round replay after rollback because no eligible inflation round was recorded"
                     )
 
         else:

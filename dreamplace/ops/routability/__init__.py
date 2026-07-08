@@ -38,7 +38,7 @@ from .l_shape_routability import (
     plot_segment_density_map
 )
 
-from .xplace_inflation_controller import (
+from .enhanced_inflation_controller import (
     InflationGeometrySnapshot,
     InflationRoundRecord,
     InflationState,
@@ -48,11 +48,11 @@ from .xplace_inflation_controller import (
     ensure_inflation_state,
     finish_inflation_round,
     get_inflation_round_limit,
-    is_xplace_outer_loop_enabled,
+    is_enhanced_inflation_enabled,
     rollback_inflation_state,
-    run_xplace_style_inflation_round,
+    run_enhanced_inflation_round,
     select_best_gr_solution,
-    should_trigger_xplace_inflation,
+    should_trigger_enhanced_inflation,
 )
 
 __all__ = [
@@ -88,7 +88,7 @@ __all__ = [
     'plot_l_shape_segments',
     'plot_segment_density_map',
 
-    # Xplace-style inflation controller
+    # enhanced inflation controller
     'InflationGeometrySnapshot',
     'InflationRoundRecord',
     'InflationState',
@@ -98,9 +98,9 @@ __all__ = [
     'ensure_inflation_state',
     'finish_inflation_round',
     'get_inflation_round_limit',
-    'is_xplace_outer_loop_enabled',
+    'is_enhanced_inflation_enabled',
     'rollback_inflation_state',
-    'run_xplace_style_inflation_round',
+    'run_enhanced_inflation_round',
     'select_best_gr_solution',
-    'should_trigger_xplace_inflation',
+    'should_trigger_enhanced_inflation',
 ]

@@ -515,7 +515,7 @@ class PlaceObj(nn.Module):
         self.l_shape_filler_reverse_force = float(
             getattr(params, "l_shape_filler_reverse_force", 0.0)
         )
-        # Filler pseudo wire force: pull random fillers to most congested point (Xplace-style)
+        # Filler pseudo wire force: pull random fillers to most congested point.
         self.l_shape_filler_pseudo_wire_ratio = float(
             getattr(params, "l_shape_filler_pseudo_wire_ratio", 0.0)
         )
@@ -671,7 +671,7 @@ class PlaceObj(nn.Module):
         self.l_shape_last_sched_active = bool(self._l_shape_sched_active)
         if self._l_shape_sched_active and l_shape_log_verbose(self.params) >= 1:
             logging.info(
-                "Start Xplace-style L-shape weight schedule at iteration %s "
+                "Start L-shape weight schedule at iteration %s "
                 "(route_iter_budget=%d, smooth_r=%.3f, half_iter=%d)",
                 str(iteration),
                 self.l_shape_num_route_iter,
@@ -2307,7 +2307,7 @@ class PlaceObj(nn.Module):
                             sched_active = False
                             if l_shape_log_verbose(self.params) >= 1:
                                 logging.info(
-                                    "End Xplace-style L-shape weight schedule at iter %d "
+                                    "End L-shape weight schedule at iter %d "
                                     "(dt=%d, sigma=%.4e, weight=%.4e)",
                                     int(current_iteration),
                                     int(sched_iter_diff),
@@ -2436,7 +2436,7 @@ class PlaceObj(nn.Module):
                             f"num_fillers={num_nodes - num_physical}"
                         )
 
-            # Filler pseudo wire force: Xplace-style, pull random fillers to most congested point
+            # Filler pseudo wire force: pull random fillers to most congested point.
             if self.l_shape_filler_pseudo_wire_ratio > 0:
                 from dreamplace.ops.routability.l_shape_electric_potential import SegmentElectricPotentialFunction
                 import torchvision
@@ -2475,7 +2475,7 @@ class PlaceObj(nn.Module):
                     filler_pos_y = pos[filler_idx_y].clone().requires_grad_(True)
                     filler_pos = torch.stack([filler_pos_x, filler_pos_y], dim=1)  # [N, 2]
 
-                    # 6. Create virtual pin positions with noise (Xplace-style)
+                    # 6. Create virtual pin positions with noise.
                     # Each filler has slightly different target to avoid clustering
                     target_pos = torch.tensor([[target_x, target_y]], device=pos.device, dtype=pos.dtype)
                     target_pos = target_pos.repeat(num_selected, 1)  # [N, 2]
@@ -4202,6 +4202,7 @@ class PlaceObj(nn.Module):
             pin_utilization_map,
             modularity_maps=None,
             inflation_round=0,
+            fixed_target_area=None,
         ):
             return adjust_node_area_op(
                 pos,
@@ -4214,9 +4215,10 @@ class PlaceObj(nn.Module):
                 pin_utilization_map,
                 modularity_maps=modularity_maps,
                 inflation_round=inflation_round,
+                fixed_target_area=fixed_target_area,
             )
 
-        build_adjust_node_area_op._xplace_adjust_node_area_impl = adjust_node_area_op
+        build_adjust_node_area_op._enhanced_adjust_node_area_impl = adjust_node_area_op
         return build_adjust_node_area_op
 
     def build_fence_region_density_op(self, fence_region_list, node2fence_region_map):

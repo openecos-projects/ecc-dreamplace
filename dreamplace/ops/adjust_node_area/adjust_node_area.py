@@ -443,7 +443,8 @@ class AdjustNodeArea(nn.Module):
 
     def forward(self, pos, node_size_x, node_size_y, pin_offset_x,
                 pin_offset_y, target_density, route_utilization_map,
-                pin_utilization_map, modularity_maps=None, inflation_round=0):
+                pin_utilization_map, modularity_maps=None, inflation_round=0,
+                fixed_target_area=None):
 
         with torch.no_grad():
             adjust_area_flag = True
@@ -470,6 +471,21 @@ class AdjustNodeArea(nn.Module):
                 node_size_y_filler = node_size_y[:0]
             old_filler_area_sum = (node_size_x_filler *
                                    node_size_y_filler).sum()
+            fixed_target_area_tensor = None
+            if fixed_target_area is not None:
+                if isinstance(fixed_target_area, torch.Tensor):
+                    fixed_target_area_value = float(
+                        fixed_target_area.detach().cpu().reshape(-1)[0].item()
+                    )
+                else:
+                    fixed_target_area_value = float(fixed_target_area)
+                fixed_target_area_value = max(
+                    0.0,
+                    min(fixed_target_area_value, float(self.total_place_area)),
+                )
+                fixed_target_area_tensor = old_movable_area_sum.new_tensor(
+                    fixed_target_area_value
+                )
 
             # compute routability optimized area
             if adjust_route_area_flag:
@@ -570,9 +586,29 @@ class AdjustNodeArea(nn.Module):
             # check whether the total area is larger than the max area requirement
             # If yes, scale the extra area to meet the requirement
             # We assume the total base area is no greater than the max area requirement
-            scale_factor = (min(0.1 * self.total_whitespace_area,
-                                self.total_place_area - old_movable_area_sum) /
-                            area_increment_sum).item()
+            if fixed_target_area_tensor is not None:
+                area_budget = torch.minimum(
+                    old_movable_area_sum.new_tensor(0.1 * self.total_whitespace_area),
+                    F.relu(fixed_target_area_tensor - old_movable_area_sum),
+                )
+                logger.info(
+                    "fixed target area budget %.3E: old movable %.3E, old filler %.3E"
+                    % (
+                        fixed_target_area_tensor,
+                        old_movable_area_sum,
+                        old_filler_area_sum,
+                    )
+                )
+            else:
+                area_budget = torch.minimum(
+                    old_movable_area_sum.new_tensor(0.1 * self.total_whitespace_area),
+                    old_movable_area_sum.new_tensor(self.total_place_area)
+                    - old_movable_area_sum,
+                )
+            if area_increment_sum.data.item() <= 0:
+                scale_factor = 0
+            else:
+                scale_factor = (area_budget / area_increment_sum).item()
 
             # set the new_movable_area as base_area + scaled area increment
             if scale_factor <= 0:
@@ -658,10 +694,33 @@ class AdjustNodeArea(nn.Module):
             pos.data[num_nodes:num_nodes +
                      self.num_movable_nodes] -= node_size_y_movable * 0.5
 
-            # finally scale the filler instance areas to let the total area be self.total_place_area
+            # finally scale the filler instance areas to match the active area budget
             # all the filler nodes share the same deflation ratio, filler_nodes_ratio is a scalar
             # we keep the centers the same
-            if (
+            if fixed_target_area_tensor is not None:
+                desired_filler_area_sum = F.relu(
+                    fixed_target_area_tensor - new_movable_area_sum
+                )
+                if self.num_filler_nodes > 0 and old_filler_area_sum > 0:
+                    new_filler_area_sum = desired_filler_area_sum
+                    filler_nodes_ratio = new_filler_area_sum / old_filler_area_sum
+                    logger.info("inflation ratio for filler nodes: %g" %
+                                (filler_nodes_ratio))
+                    filler_nodes_ratio.sqrt_()
+                    # convert positions to centers
+                    pos.data[num_nodes - self.num_filler_nodes:
+                             num_nodes] += node_size_x_filler * 0.5
+                    pos.data[-self.num_filler_nodes:] += node_size_y_filler * 0.5
+                    # scale size
+                    node_size_x_filler *= filler_nodes_ratio
+                    node_size_y_filler *= filler_nodes_ratio
+                    # convert back to lower left corners
+                    pos.data[num_nodes - self.num_filler_nodes:
+                             num_nodes] -= node_size_x_filler * 0.5
+                    pos.data[-self.num_filler_nodes:] -= node_size_y_filler * 0.5
+                else:
+                    new_filler_area_sum = old_filler_area_sum
+            elif (
                 self.num_filler_nodes > 0
                 and old_filler_area_sum > 0
                 and new_movable_area_sum + old_filler_area_sum > self.total_place_area
@@ -696,9 +755,17 @@ class AdjustNodeArea(nn.Module):
                 % (new_movable_area_sum, new_filler_area_sum,
                    new_movable_area_sum + new_filler_area_sum,
                    self.total_place_area))
-            target_density.data.copy_(
-                (new_movable_area_sum + new_filler_area_sum) /
-                self.total_place_area)
+            if fixed_target_area_tensor is not None:
+                target_density.data.copy_(
+                    (fixed_target_area_tensor / self.total_place_area).to(
+                        device=target_density.device,
+                        dtype=target_density.dtype,
+                    )
+                )
+            else:
+                target_density.data.copy_(
+                    (new_movable_area_sum + new_filler_area_sum) /
+                    self.total_place_area)
             logger.info("new target_density %g" % (target_density))
 
             if pos.is_cuda:

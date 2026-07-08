@@ -188,7 +188,7 @@
         "default": 0
     },
     "iopin_density_weight": {
-        "description": "extra I/O pin density weight added to the electric initial density map; 0 disables Xplace-style I/O pin density increment, 3 matches Xplace's extra 3*Diopin term",
+        "description": "extra I/O pin density weight added to the electric initial density map; 0 disables the extra I/O pin density increment, 3 matches Xplace's extra 3*Diopin term",
         "default": 3.0
     },
     "ieda_m2_pg_rail_blockage_flag": {
@@ -215,48 +215,20 @@
         "description": "maximum times to adjust node area",
         "default": 3
     },
-    "xplace_style_inflation_flag": {
-        "description": "whether enable the Xplace-style outer-loop inflation controller skeleton",
+    "enhanced_inflation_flag": {
+        "description": "whether enable the enhanced outer-loop inflation controller skeleton",
         "default": 0
     },
-    "xplace_inflation_max_rounds": {
-        "description": "maximum number of Xplace-style inflation rounds",
-        "default": 5
-    },
-    "xplace_inflation_min_area_inc": {
-        "description": "minimum relative area increment ratio to keep an Xplace-style inflation round",
+    "enhanced_inflation_min_area_inc": {
+        "description": "minimum relative area increment ratio to keep an enhanced inflation round",
         "default": 0.01
     },
-    "xplace_inflation_use_target_area": {
-        "description": "whether track an explicit target area budget in the Xplace-style inflation controller",
-        "default": 1
-    },
-    "xplace_inflation_dynamic_target_density_flag": {
-        "description": "whether allow the Xplace-style inflation controller to lower target density between rounds",
-        "default": 1
-    },
-    "xplace_inflation_low_util_filler_ratio": {
-        "description": "low-utilization filler ratio threshold used by the Xplace-style inflation controller",
-        "default": 1.10
-    },
-    "xplace_inflation_low_util_overflow_ratio": {
-        "description": "overflow threshold used to trigger low-utilization filler handling in the Xplace-style inflation controller",
-        "default": 0.04
-    },
-    "xplace_inflation_target_density_decay": {
-        "description": "per-round target density decay used by the Xplace-style inflation controller",
-        "default": 0.85
-    },
-    "xplace_inflation_target_density_floor": {
-        "description": "minimum target density allowed by the Xplace-style inflation controller",
-        "default": 0.4762
-    },
-    "xplace_inflation_replay_best_round_flag": {
-        "description": "whether replay the best recorded Xplace-style inflation round after rolling back inflated geometry",
+    "enhanced_inflation_replay_best_round_flag": {
+        "description": "whether replay the best recorded enhanced inflation round after rolling back inflated geometry",
         "default": 0
     },
-    "xplace_inflation_select_metric": {
-        "description": "metric name used to select the best Xplace-style inflation round",
+    "enhanced_inflation_select_metric": {
+        "description": "metric name used to select the best enhanced inflation round",
         "default": "est_shorts"
     },
     "gpugr_first_inflation_exit": {
@@ -388,7 +360,7 @@
         "default": 0.0
     },
     "l_shape_filler_pseudo_wire_ratio": {
-        "description": "ratio of fillers to pull toward the most congested point using pseudo wire force (Xplace-style); 0.05 means 5% of fillers are selected randomly and attracted to the max congestion bin",
+        "description": "ratio of fillers to pull toward the most congested point using pseudo wire force; 0.05 means 5% of fillers are selected randomly and attracted to the max congestion bin",
         "default": 0.0
     },
     "l_shape_keep_during_inflation": {
@@ -396,23 +368,23 @@
         "default": false
     },
     "l_shape_weight_momentum": {
-        "description": "EMA momentum used by the legacy per-iteration L-shape weight update when the Xplace-style scheduler is disabled",
+        "description": "EMA momentum used by the legacy per-iteration L-shape weight update when the stage-wise scheduler is disabled",
         "default": 0.1
     },
     "l_shape_use_xplace_weight_schedule": {
-        "description": "whether drive l_shape_routability_weight with a stage-wise Xplace-style schedule instead of per-iteration instant gradient matching",
+        "description": "whether drive l_shape_routability_weight with a stage-wise schedule instead of per-iteration instant gradient matching",
         "default": 0
     },
     "l_shape_num_route_iter": {
-        "description": "route-opt window length for the Xplace-style L-shape weight schedule",
+        "description": "route-opt window length for the L-shape weight schedule",
         "default": 200
     },
     "l_shape_weight_schedule_r": {
-        "description": "logistic steepness used by the Xplace-style L-shape weight schedule",
+        "description": "logistic steepness used by the L-shape weight schedule",
         "default": 0.2
     },
     "l_shape_weight_schedule_half_iter": {
-        "description": "warmup/cooldown shoulder width for the Xplace-style L-shape weight schedule",
+        "description": "warmup/cooldown shoulder width for the L-shape weight schedule",
         "default": 30
     },
     "l_shape_weight_min": {

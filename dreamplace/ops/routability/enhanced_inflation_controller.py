@@ -82,16 +82,14 @@ class InflationState:
     original_quad_penalty_coeff: Optional[torch.Tensor] = None
 
 
-def is_xplace_outer_loop_enabled(params) -> bool:
+def is_enhanced_inflation_enabled(params) -> bool:
     return bool(
         getattr(params, "routability_opt_flag", False)
-        and getattr(params, "xplace_style_inflation_flag", False)
+        and getattr(params, "enhanced_inflation_flag", False)
     )
 
 
 def get_inflation_round_limit(params) -> int:
-    if is_xplace_outer_loop_enabled(params):
-        return int(getattr(params, "xplace_inflation_max_rounds", getattr(params, "max_num_area_adjust", 0)))
     return int(getattr(params, "max_num_area_adjust", 0))
 
 
@@ -187,14 +185,14 @@ def restore_model_density_state(state: Optional[InflationState], model) -> None:
 def create_inflation_state(params, placedb, data_collections) -> InflationState:
     enabled = bool(getattr(params, "routability_opt_flag", False))
     controller_mode = (
-        "xplace_outer_loop"
-        if bool(getattr(params, "xplace_style_inflation_flag", False))
+        "enhanced_inflation"
+        if bool(getattr(params, "enhanced_inflation_flag", False))
         else "legacy_area_adjust"
     )
     baseline = capture_inflation_snapshot(data_collections, placedb) if enabled else None
     target_area = (
         baseline.movable_area + baseline.filler_area
-        if baseline and bool(getattr(params, "xplace_inflation_use_target_area", 1))
+        if baseline and controller_mode == "enhanced_inflation"
         else None
     )
     return InflationState(
@@ -345,7 +343,7 @@ def enforce_min_area_increment(
     placedb,
     pos: torch.Tensor,
 ) -> Dict[str, Any]:
-    min_area_inc = _to_float(getattr(params, "xplace_inflation_min_area_inc", 0.01), 0.01)
+    min_area_inc = _to_float(getattr(params, "enhanced_inflation_min_area_inc", 0.01), 0.01)
     if min_area_inc <= 0:
         return {
             "triggered": False,
@@ -384,7 +382,7 @@ def enforce_min_area_increment(
     early_stop_note = "rejected_by_min_area_inc=%.6f<%.6f" % (movable_area_increment_ratio, min_area_inc)
     record.notes = f"{record.notes} | {early_stop_note}" if record.notes else early_stop_note
     logging.warning(
-        "Too small relative area increment (%.4f < %.4f). Early terminate Xplace-style cell inflation round %d.",
+        "Too small relative area increment (%.4f < %.4f). Early terminate enhanced cell inflation round %d.",
         movable_area_increment_ratio,
         min_area_inc,
         record.round_idx,
@@ -474,12 +472,7 @@ def _detect_low_utilization(
     total_nets = max(int(getattr(placedb, "num_nets", 0)), 1)
     filler_ratio = snapshot.filler_area / max(snapshot.movable_area, 1e-12)
     overflow_ratio = overflow_nets / total_nets
-    triggered = bool(
-        getattr(params, "xplace_inflation_dynamic_target_density_flag", 1)
-        and snapshot.filler_area > 0
-        and filler_ratio > _to_float(getattr(params, "xplace_inflation_low_util_filler_ratio", 1.10), 1.10)
-        and overflow_ratio > _to_float(getattr(params, "xplace_inflation_low_util_overflow_ratio", 0.04), 0.04)
-    )
+    triggered = False
     return {
         "triggered": triggered,
         "snapshot": snapshot,
@@ -493,7 +486,7 @@ def _detect_low_utilization(
 
 
 def get_adjust_node_area_impl(adjust_node_area_op):
-    return getattr(adjust_node_area_op, "_xplace_adjust_node_area_impl", None)
+    return getattr(adjust_node_area_op, "_enhanced_adjust_node_area_impl", None)
 
 
 def prepare_low_util_inflation(
@@ -542,67 +535,6 @@ def restore_low_util_inflation(adjust_node_area_op, context: Optional[Dict[str, 
     adjust_node_area_impl.total_whitespace_area = context["original_total_whitespace_area"]
 
 
-def _apply_filler_target_area(
-    data_collections,
-    placedb,
-    pos: torch.Tensor,
-    desired_filler_area: float,
-) -> Dict[str, float]:
-    if placedb.num_filler_nodes <= 0:
-        return {
-            "remaining_fillers": 0.0,
-            "filler_area_after": 0.0,
-        }
-
-    filler_lhs = placedb.num_nodes - placedb.num_filler_nodes
-    filler_rhs = placedb.num_nodes
-    num_nodes = int(pos.numel() / 2)
-
-    filler_size_x = data_collections.node_size_x[filler_lhs:filler_rhs]
-    filler_size_y = data_collections.node_size_y[filler_lhs:filler_rhs]
-    filler_center_x = pos.data[filler_lhs:filler_rhs] + filler_size_x * 0.5
-    filler_center_y = pos.data[num_nodes + filler_lhs : num_nodes + filler_rhs] + filler_size_y * 0.5
-
-    original_filler_size_x = data_collections.original_node_size_x[filler_lhs:filler_rhs]
-    original_filler_size_y = data_collections.original_node_size_y[filler_lhs:filler_rhs]
-    original_filler_area = original_filler_size_x * original_filler_size_y
-    total_original_filler_area = _to_float(original_filler_area.sum())
-    clamped_filler_area = max(0.0, min(desired_filler_area, total_original_filler_area))
-
-    filler_size_x.zero_()
-    filler_size_y.zero_()
-
-    remaining_fillers = 0
-    if clamped_filler_area > 0 and total_original_filler_area > 0:
-        cumulative_filler_area = torch.cumsum(original_filler_area, dim=0)
-        threshold = torch.tensor(
-            clamped_filler_area,
-            device=cumulative_filler_area.device,
-            dtype=cumulative_filler_area.dtype,
-        )
-        remaining_fillers = int(
-            torch.searchsorted(cumulative_filler_area, threshold, right=False).item()
-        ) + 1
-        remaining_fillers = min(remaining_fillers, placedb.num_filler_nodes)
-        filler_size_x[:remaining_fillers].copy_(original_filler_size_x[:remaining_fillers])
-        filler_size_y[:remaining_fillers].copy_(original_filler_size_y[:remaining_fillers])
-        kept_area = _to_float((filler_size_x[:remaining_fillers] * filler_size_y[:remaining_fillers]).sum())
-        if kept_area > clamped_filler_area + 1e-12:
-            filler_scale = (clamped_filler_area / kept_area) ** 0.5
-            filler_size_x[:remaining_fillers].mul_(filler_scale)
-            filler_size_y[:remaining_fillers].mul_(filler_scale)
-
-    pos.data[filler_lhs:filler_rhs].copy_(filler_center_x - filler_size_x * 0.5)
-    pos.data[num_nodes + filler_lhs : num_nodes + filler_rhs].copy_(
-        filler_center_y - filler_size_y * 0.5
-    )
-
-    return {
-        "remaining_fillers": float(remaining_fillers),
-        "filler_area_after": _to_float((filler_size_x * filler_size_y).sum()),
-    }
-
-
 def apply_low_util_target_density(
     params,
     state: Optional[InflationState],
@@ -611,71 +543,7 @@ def apply_low_util_target_density(
     pos: torch.Tensor,
     context: Optional[Dict[str, Any]],
 ) -> Dict[str, float]:
-    if not context or not context.get("triggered"):
-        return {}
-
-    snapshot = capture_inflation_snapshot(data_collections, placedb)
-    placeable_area = (
-        state.baseline.total_place_area
-        if state is not None and state.baseline is not None
-        else snapshot.total_place_area
-    )
-    current_target_density = _to_float(getattr(data_collections, "target_density", None), snapshot.target_density)
-    target_density_before = float(context.get("target_density_before", current_target_density))
-    target_density_floor = _to_float(
-        getattr(params, "xplace_inflation_target_density_floor", 0.4762), 0.4762
-    )
-    target_density_decay = _to_float(
-        getattr(params, "xplace_inflation_target_density_decay", 0.85), 0.85
-    )
-    reduced_target_density = max(target_density_floor, target_density_decay * target_density_before)
-    if reduced_target_density >= current_target_density - 1e-12:
-        return {}
-
-    desired_total_area = min(reduced_target_density * placeable_area, placeable_area)
-    if state is not None and state.target_area is not None:
-        desired_total_area = min(desired_total_area, float(state.target_area))
-    desired_total_area = max(desired_total_area, snapshot.movable_area)
-    desired_filler_area = min(
-        max(desired_total_area - snapshot.movable_area, 0.0),
-        snapshot.filler_area,
-    )
-
-    filler_result = _apply_filler_target_area(
-        data_collections,
-        placedb,
-        pos,
-        desired_filler_area=desired_filler_area,
-    )
-    actual_total_area = snapshot.movable_area + filler_result["filler_area_after"]
-    actual_target_density = actual_total_area / max(placeable_area, 1e-12)
-    with torch.no_grad():
-        data_collections.target_density.fill_(actual_target_density)
-
-    if state is not None:
-        state.target_area = actual_total_area
-        state.current_snapshot = capture_inflation_snapshot(data_collections, placedb)
-
-    logging.info(
-        "Low-utilization target-density adjustment: filler/movable=%.3f overflow_net_ratio=%.3f target_density %.6f -> %.6f target_area=%.3E filler_area=%.3E remaining_fillers=%d",
-        context["filler_ratio"],
-        context["overflow_ratio"],
-        target_density_before,
-        actual_target_density,
-        actual_total_area,
-        filler_result["filler_area_after"],
-        int(filler_result["remaining_fillers"]),
-    )
-    return {
-        "low_util_applied": 1.0,
-        "low_util_filler_ratio": float(context["filler_ratio"]),
-        "low_util_overflow_net_ratio": float(context["overflow_ratio"]),
-        "low_util_target_density_before": float(target_density_before),
-        "low_util_target_density_after": float(actual_target_density),
-        "low_util_target_area": float(actual_total_area),
-        "low_util_filler_area_after": float(filler_result["filler_area_after"]),
-        "low_util_remaining_fillers": float(filler_result["remaining_fillers"]),
-    }
+    return {}
 
 
 def rollback_inflation_state(data_collections) -> None:
@@ -692,9 +560,9 @@ def rollback_inflation_state(data_collections) -> None:
                 state.target_area = state.baseline.movable_area + state.baseline.filler_area
 
 
-def should_trigger_xplace_inflation(params, num_area_adjust: int, overflow: Any) -> bool:
+def should_trigger_enhanced_inflation(params, num_area_adjust: int, overflow: Any) -> bool:
     return bool(
-        is_xplace_outer_loop_enabled(params)
+        is_enhanced_inflation_enabled(params)
         and int(num_area_adjust) < get_inflation_round_limit(params)
         and _to_float(overflow) < _to_float(getattr(params, "node_area_adjust_overflow", 0.15), default=0.15)
     )
@@ -712,9 +580,9 @@ def get_area_adjust_flags(params) -> Dict[str, bool]:
     }
 
 
-def run_xplace_style_inflation_round(*args, **kwargs) -> Dict[str, Any]:
+def run_enhanced_inflation_round(*args, **kwargs) -> Dict[str, Any]:
     logging.info(
-        "Direct helper entry for Xplace-style inflation is not used; the active execution path "
+        "Direct helper entry for enhanced inflation is not used; the active execution path "
         "is coordinated inside NonLinearPlace."
     )
     return {

@@ -29,6 +29,41 @@ datatypes = {
 }
 
 
+def _is_enabled_param(value):
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "0", "false", "no", "off")
+    return bool(value)
+
+
+def _pow2_floor(value):
+    return int(math.pow(2, math.floor(math.log2(value))))
+
+
+def _compute_enhanced_auto_adjust_bins(
+    preset_num_bins_x,
+    preset_num_bins_y,
+    layout_height,
+    row_height,
+):
+    preset_num_bins_x = int(preset_num_bins_x)
+    preset_num_bins_y = int(preset_num_bins_y)
+    if preset_num_bins_x <= 0 or preset_num_bins_y <= 0:
+        raise ValueError("preset bin counts must be positive")
+    if layout_height <= 0 or row_height <= 0:
+        return preset_num_bins_x, preset_num_bins_y
+
+    num_rows = int(math.floor(float(layout_height) / float(row_height)))
+    if num_rows <= 0 or preset_num_bins_y <= num_rows:
+        return preset_num_bins_x, preset_num_bins_y
+
+    new_num_bins_y = _pow2_floor(num_rows)
+    new_num_bins_x = max(
+        1,
+        int(round(float(preset_num_bins_x) / float(preset_num_bins_y) * new_num_bins_y)),
+    )
+    return new_num_bins_x, new_num_bins_y
+
+
 class MacroPlaceDB(object):
     """
     @brief placement database
@@ -1553,7 +1588,23 @@ row height = %g, site width = %g
         # set number of bins
         # derive bin dimensions by keeping the aspect ratio
         aspect_ratio = (self.yh - self.yl) / (self.xh - self.xl)
-        if params.auto_adjust_bins:
+        if _is_enabled_param(getattr(params, "enhanced_auto_adjust_bins", 0)):
+            preset_num_bins_x = int(params.num_bins_x)
+            preset_num_bins_y = int(params.num_bins_y)
+            num_bins_x, num_bins_y = _compute_enhanced_auto_adjust_bins(
+                preset_num_bins_x,
+                preset_num_bins_y,
+                self.yh - self.yl,
+                self.row_height,
+            )
+            if (num_bins_x, num_bins_y) != (preset_num_bins_x, preset_num_bins_y):
+                logging.warning(
+                    "enhanced_auto_adjust_bins caps preset num_bins %dx%d to %dx%d by row count"
+                    % (preset_num_bins_x, preset_num_bins_y, num_bins_x, num_bins_y)
+                )
+            params.num_bins_x = num_bins_x
+            params.num_bins_y = num_bins_y
+        elif _is_enabled_param(getattr(params, "auto_adjust_bins", 0)):
             num_bins = math.pow(2, math.floor(math.log2(math.sqrt(self.num_physical_nodes))))
             num_bins_x = math.floor(num_bins)
             num_bins_y = math.floor(num_bins)

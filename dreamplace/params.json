@@ -99,6 +99,10 @@
         "description": "noise to initial positions for global placement",
         "default": 0.025
     },
+    "enhanced_auto_adjust_bins": {
+        "description": "enable enhanced automatic placement bin adjustment; when enabled, it overrides auto_adjust_bins, keeps the configured bin preset unless num_bins_y exceeds the placement row count, and then caps num_bins_y to the largest power of two not exceeding the row count while preserving the configured num_bins_x/num_bins_y ratio",
+        "default": 0
+    },
     "enable_fillers": {
         "description": "enable filler cells",
         "default": 1

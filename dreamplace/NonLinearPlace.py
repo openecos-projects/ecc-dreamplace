@@ -4251,6 +4251,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         self.data_collections.original_node_size_x)
                     self.data_collections.node_size_y.copy_(
                         self.data_collections.original_node_size_y)
+                    enhanced_inflation_controller.sync_node_areas(
+                        self.data_collections
+                    )
                     # use fixed centers as the anchor
                     self.pos[0][: placedb.num_movable_nodes].sub_(
                         self.data_collections.node_size_x[:

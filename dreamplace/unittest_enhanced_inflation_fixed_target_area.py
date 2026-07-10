@@ -8,9 +8,13 @@ import torch
 AUTODMP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if AUTODMP_ROOT not in sys.path:
     sys.path.insert(0, AUTODMP_ROOT)
+AIEDA_ROOT = os.path.abspath(os.path.join(AUTODMP_ROOT, "..", ".."))
+if AIEDA_ROOT not in sys.path:
+    sys.path.insert(0, AIEDA_ROOT)
 
 from dreamplace.ops.adjust_node_area import adjust_node_area  # noqa: E402
 from dreamplace.ops.routability import enhanced_inflation_controller  # noqa: E402
+from dreamplace import PlaceObj  # noqa: E402
 
 
 class _FixedRouteArea(torch.nn.Module):
@@ -26,19 +30,39 @@ class _Params:
     routability_opt_flag = True
     enhanced_inflation_flag = True
     enhanced_inflation_use_target_area = 0
+    modularity_inflation_flag = False
+    max_route_opt_adjust_rate = 10.0
+    route_opt_adjust_exponent = 1.0
+    max_pin_opt_adjust_rate = 10.0
+    area_adjust_stop_ratio = 0.001
+    route_area_adjust_stop_ratio = 0.001
+    pin_area_adjust_stop_ratio = 0.001
 
 
 class _PlaceDB:
     num_movable_nodes = 2
     num_filler_nodes = 2
     num_nodes = 4
+    routing_grid_xl = 0.0
+    routing_grid_yl = 0.0
+    routing_grid_xh = 100.0
+    routing_grid_yh = 100.0
+    num_routing_grids_x = 1
+    num_routing_grids_y = 1
 
 
 class _DataCollections:
     def __init__(self):
         self.node_size_x = torch.tensor([5.0, 5.0, 5.0, 5.0])
         self.node_size_y = torch.tensor([6.0, 6.0, 4.0, 4.0])
+        self.node_areas = self.node_size_x * self.node_size_y
         self.target_density = torch.tensor(0.5)
+        self.flat_node2pin_map = torch.empty(0, dtype=torch.int64)
+        self.flat_node2pin_start_map = torch.zeros(3, dtype=torch.int64)
+        self.pin_weights = None
+        self.pin_offset_x = torch.empty(0)
+        self.pin_offset_y = torch.empty(0)
+        self.unit_pin_capacity = 1.0
 
 
 class EnhancedInflationFixedTargetAreaTest(unittest.TestCase):
@@ -151,6 +175,81 @@ class EnhancedInflationFixedTargetAreaTest(unittest.TestCase):
 
         self.assertEqual(state.controller_mode, "enhanced_inflation")
         self.assertAlmostEqual(state.target_area, 100.0, places=6)
+
+    def test_build_adjust_node_area_syncs_node_areas_after_inflation(self):
+        data_collections = _DataCollections()
+        placedb = _PlaceDB()
+        params = _Params()
+        place_obj = PlaceObj.PlaceObj.__new__(PlaceObj.PlaceObj)
+        adjust_op = PlaceObj.PlaceObj.build_adjust_node_area(
+            place_obj,
+            params,
+            placedb,
+            data_collections,
+        )
+        adjust_op._enhanced_adjust_node_area_impl.compute_node_area_route = _FixedRouteArea(
+            torch.tensor([40.0, 30.0])
+        )
+        pos = torch.tensor([0.0, 10.0, 20.0, 30.0, 0.0, 10.0, 20.0, 30.0])
+        original_update = adjust_node_area.update_pin_offset_cpp.forward
+        adjust_node_area.update_pin_offset_cpp.forward = lambda *args: None
+        try:
+            result = adjust_op(
+                pos,
+                torch.ones(1, 1),
+                None,
+                fixed_target_area=100.0,
+            )
+        finally:
+            adjust_node_area.update_pin_offset_cpp.forward = original_update
+
+        self.assertEqual(result, (True, True, False))
+        torch.testing.assert_close(
+            data_collections.node_areas,
+            data_collections.node_size_x * data_collections.node_size_y,
+        )
+
+    def test_restore_current_round_geometry_syncs_node_areas(self):
+        data_collections = _DataCollections()
+        placedb = _PlaceDB()
+        state = enhanced_inflation_controller.create_inflation_state(
+            _Params(),
+            placedb,
+            data_collections,
+        )
+        pos = torch.tensor([0.0, 10.0, 20.0, 30.0, 0.0, 10.0, 20.0, 30.0])
+        enhanced_inflation_controller.begin_inflation_round(
+            state,
+            data_collections,
+            placedb,
+            pos=pos,
+            round_idx=0,
+            stage_idx=0,
+            iteration=10,
+            overflow=torch.tensor(0.1),
+            route_map_source="gpugr",
+            adjust_area_flag=True,
+            adjust_route_area_flag=True,
+            adjust_pin_area_flag=False,
+        )
+        data_collections.node_size_x.mul_(2.0)
+        data_collections.node_size_y.mul_(3.0)
+        data_collections.node_areas.copy_(
+            data_collections.node_size_x * data_collections.node_size_y
+        )
+
+        self.assertTrue(
+            enhanced_inflation_controller.restore_current_round_geometry(
+                state,
+                data_collections,
+                placedb,
+                pos,
+            )
+        )
+        torch.testing.assert_close(
+            data_collections.node_areas,
+            data_collections.node_size_x * data_collections.node_size_y,
+        )
 
 
 if __name__ == "__main__":

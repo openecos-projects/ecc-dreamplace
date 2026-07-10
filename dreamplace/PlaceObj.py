@@ -59,6 +59,7 @@ from dreamplace.BasicPlace import PlaceDataCollection
 from tools.iEDA.module.sta import IEDASta
 from dreamplace.ops.routability.plot_map import plot_node_grad_directions
 from dreamplace.ops.routability.profile_timing import l_shape_log_verbose, profile_scope
+from dreamplace.ops.routability import enhanced_inflation_controller
 
 
 def _effective_iopin_density_weight(params, placedb, region_id=None,
@@ -4204,7 +4205,7 @@ class PlaceObj(nn.Module):
             inflation_round=0,
             fixed_target_area=None,
         ):
-            return adjust_node_area_op(
+            result = adjust_node_area_op(
                 pos,
                 data_collections.node_size_x,
                 data_collections.node_size_y,
@@ -4217,6 +4218,9 @@ class PlaceObj(nn.Module):
                 inflation_round=inflation_round,
                 fixed_target_area=fixed_target_area,
             )
+            if result[0]:
+                enhanced_inflation_controller.sync_node_areas(data_collections)
+            return result
 
         build_adjust_node_area_op._enhanced_adjust_node_area_impl = adjust_node_area_op
         return build_adjust_node_area_op

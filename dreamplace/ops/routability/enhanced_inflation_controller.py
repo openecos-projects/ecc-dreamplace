@@ -126,6 +126,26 @@ def capture_inflation_snapshot(data_collections, placedb) -> InflationGeometrySn
         )
 
 
+def sync_node_areas(data_collections) -> bool:
+    node_size_x = getattr(data_collections, "node_size_x", None)
+    node_size_y = getattr(data_collections, "node_size_y", None)
+    if node_size_x is None or node_size_y is None:
+        return False
+    with torch.no_grad():
+        updated_node_areas = node_size_x * node_size_y
+        node_areas = getattr(data_collections, "node_areas", None)
+        if (
+            not isinstance(node_areas, torch.Tensor)
+            or node_areas.shape != updated_node_areas.shape
+        ):
+            data_collections.node_areas = updated_node_areas.detach().clone()
+        else:
+            node_areas.copy_(
+                updated_node_areas.to(device=node_areas.device, dtype=node_areas.dtype)
+            )
+    return True
+
+
 def capture_inflation_geometry_backup(
     state: Optional[InflationState],
     data_collections,
@@ -329,6 +349,7 @@ def restore_current_round_geometry(
         target_density = backup.get("target_density")
         if isinstance(target_density, torch.Tensor):
             data_collections.target_density.copy_(target_density)
+        sync_node_areas(data_collections)
 
     if state is not None:
         state.target_area = backup.get("target_area")

@@ -147,7 +147,6 @@ class Params:
             "l_shape_grad_target_ratio_max": 0.1,
             "l_shape_overflow_threshold": 0.3,
             "l_shape_keep_during_inflation": 1,
-            "l_shape_use_xplace_weight_schedule": 0,
         }
         for key, value in defaults.items():
             if not hasattr(self, key):
@@ -177,7 +176,24 @@ class Params:
             raise ValueError("m2_pg_rail_density_weight must be non-negative")
         self.m2_pg_rail_density_weight = value
 
+    def normalize_removed_l_shape_weight_schedule(self):
+        legacy_keys = (
+            "l_shape_use_xplace_weight_schedule",
+            "l_shape_num_route_iter",
+            "l_shape_weight_schedule_r",
+            "l_shape_weight_schedule_half_iter",
+        )
+        legacy_enable = getattr(self, legacy_keys[0], 0)
+        if self._is_enabled(legacy_enable):
+            raise ValueError(
+                "l_shape_use_xplace_weight_schedule has been removed; "
+                "the adaptive target-ratio controller is always used"
+            )
+        for key in legacy_keys:
+            self.__dict__.pop(key, None)
+
     def normalize_params(self):
+        self.normalize_removed_l_shape_weight_schedule()
         self.normalize_iopin_density_weight()
         self.normalize_m2_pg_rail_density_weight()
 

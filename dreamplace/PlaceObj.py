@@ -525,18 +525,6 @@ class PlaceObj(nn.Module):
         )
         # 权重调整的平滑因子 (0~1, 越小越平滑)
         self.l_shape_weight_momentum = getattr(params, 'l_shape_weight_momentum', 0.1)
-        self.l_shape_use_xplace_weight_schedule = bool(
-            getattr(params, "l_shape_use_xplace_weight_schedule", 0)
-        )
-        self.l_shape_num_route_iter = int(
-            getattr(params, "l_shape_num_route_iter", 200)
-        )
-        self.l_shape_weight_schedule_r = float(
-            getattr(params, "l_shape_weight_schedule_r", 0.2)
-        )
-        self.l_shape_weight_schedule_half_iter = int(
-            getattr(params, "l_shape_weight_schedule_half_iter", 30)
-        )
         self.l_shape_weight_min = float(
             getattr(params, "l_shape_weight_min", 1e-12)
         )
@@ -545,26 +533,18 @@ class PlaceObj(nn.Module):
         )
         self._l_shape_weight_initialized = False
         self._l_shape_outer_iteration = None
-        self._l_shape_sched_active = False
-        self._l_shape_sched_initialized = False
-        self._l_shape_sched_start_iter = None
-        self._l_shape_sched_base_weight = None
         self.l_shape_fast_mode = bool(getattr(params, "l_shape_fast_mode", 0))
         self.l_shape_energy_valid = not self.l_shape_fast_mode
         self.l_shape_last_cost = None
         self.l_shape_last_weighted_cost = None
         self.l_shape_last_weight = None
         self.l_shape_last_target_weight = None
-        self.l_shape_last_sched_weight = None
+        self.l_shape_last_weight_candidate = None
         self.l_shape_last_cap_active = None
         self.l_shape_last_base_grad_norm = None
         self.l_shape_last_grad_raw_norm = None
         self.l_shape_last_grad_norm = None
         self.l_shape_last_grad_ratio = None
-        self.l_shape_last_sched_base_weight = None
-        self.l_shape_last_sched_sigma = None
-        self.l_shape_last_sched_iter_diff = None
-        self.l_shape_last_sched_active = None
         self.l_shape_capacity_al_last_summary = {}
         self.l_shape_macro_exclusion_last_summary = {}
         self.soft_l_last_summary = {}
@@ -575,22 +555,14 @@ class PlaceObj(nn.Module):
     def reset_l_shape_weight_state(self):
         self.l_shape_routability_weight.data.fill_(self.l_shape_routability_weight_init)
         self._l_shape_weight_initialized = False
-        self._l_shape_sched_active = False
-        self._l_shape_sched_initialized = False
-        self._l_shape_sched_start_iter = None
-        self._l_shape_sched_base_weight = None
         self.l_shape_last_weight = None
         self.l_shape_last_target_weight = None
-        self.l_shape_last_sched_weight = None
+        self.l_shape_last_weight_candidate = None
         self.l_shape_last_cap_active = None
         self.l_shape_last_base_grad_norm = None
         self.l_shape_last_grad_raw_norm = None
         self.l_shape_last_grad_norm = None
         self.l_shape_last_grad_ratio = None
-        self.l_shape_last_sched_base_weight = None
-        self.l_shape_last_sched_sigma = None
-        self.l_shape_last_sched_iter_diff = None
-        self.l_shape_last_sched_active = None
         self.l_shape_capacity_al_last_summary = {}
         self.l_shape_macro_exclusion_last_summary = {}
 
@@ -618,37 +590,6 @@ class PlaceObj(nn.Module):
         ):
             self.l_shape_routability_op.set_debug_iteration(self._l_shape_outer_iteration)
 
-    def _get_l_shape_density_weight_scalar(self):
-        density_weight = getattr(self, "density_weight", None)
-        if density_weight is None:
-            return 1.0
-        if isinstance(density_weight, torch.Tensor):
-            if density_weight.numel() == 0:
-                return 1.0
-            density_weight = density_weight.detach()
-            if density_weight.numel() == 1:
-                return float(density_weight.item())
-            return float(density_weight.mean().item())
-        try:
-            return float(density_weight)
-        except (TypeError, ValueError):
-            return 1.0
-
-    def _l_shape_param_smooth_func(self, iteration_diff):
-        route_iter_budget = max(int(self.l_shape_num_route_iter), 1)
-        half_iter = max(int(self.l_shape_weight_schedule_half_iter), 1)
-        if route_iter_budget <= 1:
-            return 1.0
-        half_iter = min(half_iter, route_iter_budget - 1)
-        smooth_r = max(float(self.l_shape_weight_schedule_r), 1e-6)
-
-        def logistic(x, k, x0):
-            return 1.0 / (1.0 + math.exp(-k * (x - x0)))
-
-        lhs = 1.0 - logistic(iteration_diff, smooth_r, route_iter_budget - half_iter)
-        rhs = logistic(iteration_diff, smooth_r, half_iter)
-        return max(lhs + rhs - 1.0, 0.0)
-
     @staticmethod
     def _compute_l_shape_target_weight(
         base_grad_norm_value, l_shape_grad_norm_value, target_ratio
@@ -661,27 +602,11 @@ class PlaceObj(nn.Module):
             / (float(l_shape_grad_norm_value) + 1e-12)
         )
 
-    def start_l_shape_weight_schedule(self, iteration):
+    def start_l_shape_weight_controller(self, iteration):
         self.set_l_shape_outer_iteration(iteration)
         self._l_shape_weight_initialized = False
-        self._l_shape_sched_active = bool(self.l_shape_use_xplace_weight_schedule)
-        self._l_shape_sched_initialized = False
-        self._l_shape_sched_start_iter = int(iteration) if iteration is not None else None
-        self._l_shape_sched_base_weight = None
         self.l_shape_routability_weight.data.fill_(self.l_shape_routability_weight_init)
-        self.l_shape_last_sched_base_weight = None
-        self.l_shape_last_sched_sigma = None
-        self.l_shape_last_sched_iter_diff = None
-        self.l_shape_last_sched_active = bool(self._l_shape_sched_active)
-        if self._l_shape_sched_active and l_shape_log_verbose(self.params) >= 1:
-            logging.info(
-                "Start L-shape weight schedule at iteration %s "
-                "(route_iter_budget=%d, smooth_r=%.3f, half_iter=%d)",
-                str(iteration),
-                self.l_shape_num_route_iter,
-                self.l_shape_weight_schedule_r,
-                self.l_shape_weight_schedule_half_iter,
-            )
+        self.l_shape_last_weight_candidate = None
 
     def init_l_shape_routability(
         self,
@@ -2118,16 +2043,12 @@ class PlaceObj(nn.Module):
         self.l_shape_fast_mode = bool(getattr(self.params, "l_shape_fast_mode", 0))
         self.l_shape_energy_valid = not self.l_shape_fast_mode
         self.l_shape_last_target_weight = None
-        self.l_shape_last_sched_weight = None
+        self.l_shape_last_weight_candidate = None
         self.l_shape_last_cap_active = None
         self.l_shape_last_base_grad_norm = None
         self.l_shape_last_grad_raw_norm = None
         self.l_shape_last_grad_norm = None
         self.l_shape_last_grad_ratio = None
-        self.l_shape_last_sched_base_weight = None
-        self.l_shape_last_sched_sigma = None
-        self.l_shape_last_sched_iter_diff = None
-        self.l_shape_last_sched_active = None
         self.l_shape_capacity_al_last_summary = {}
         self.soft_l_last_summary = {}
         
@@ -2223,153 +2144,55 @@ class PlaceObj(nn.Module):
                     norm="%.9e" % l_shape_grad_norm_value,
                 )
             target_weight_value = None
-            sched_weight_value = None
+            weight_candidate_value = None
             cap_active = False
             pos.grad.data.copy_(l_shape_grad)
 
             current_weight = float(self.l_shape_routability_weight.item())
-            density_weight_scalar = self._get_l_shape_density_weight_scalar()
-            sched_base_weight = None
-            sched_sigma = None
-            sched_iter_diff = None
-            sched_active = False
 
-            if self.l_shape_use_xplace_weight_schedule:
-                with profile_scope(
-                    self.params,
-                    "place_obj.l_shape_weight_schedule",
-                    tensor=pos.grad,
-                    logger=logging,
-                    iteration=current_iteration,
-                ):
-                    if (
-                        self._l_shape_sched_active
-                        and not self._l_shape_sched_initialized
-                        and current_iteration is not None
-                        and l_shape_grad_norm_value > 1e-10
-                        and base_grad_norm_value > 1e-10
-                    ):
-                        target_weight = self._compute_l_shape_target_weight(
-                            base_grad_norm_value,
-                            l_shape_grad_norm_value,
-                            self.l_shape_grad_target_ratio,
+            # 自适应调整权重
+            # 目标: l_shape_grad_norm * weight ≈ target_ratio * base_grad_norm
+            if l_shape_grad_norm_value > 1e-10 and base_grad_norm_value > 1e-10:
+                target_weight = self._compute_l_shape_target_weight(
+                    base_grad_norm_value,
+                    l_shape_grad_norm_value,
+                    self.l_shape_grad_target_ratio,
+                )
+                target_weight_value = float(target_weight)
+                old_weight = current_weight
+
+                if not self._l_shape_weight_initialized:
+                    new_weight = target_weight
+                    self._l_shape_weight_initialized = True
+                    if l_shape_log_verbose(self.params) >= 1:
+                        logging.info(
+                            f"L-shape weight auto-initialized: {new_weight:.4e} "
+                            f"(base_grad={base_grad_norm_value:.4e}, l_shape_grad={l_shape_grad_norm_value:.4e})"
                         )
-                        base_weight = target_weight / max(density_weight_scalar, 1e-12)
-                        base_weight = max(
-                            self.l_shape_weight_min,
-                            min(self.l_shape_weight_max, base_weight),
-                        )
-                        self._l_shape_sched_base_weight = float(base_weight)
-                        self._l_shape_sched_initialized = True
-                        self._l_shape_weight_initialized = True
-                        if l_shape_log_verbose(self.params) >= 1:
-                            logging.info(
-                                "L-shape weight schedule calibrated at iter %d: "
-                                "target_weight=%.4e base_weight=%.4e density_weight=%.4e "
-                                "(base_grad=%.4e, l_shape_grad=%.4e, target_ratio=%.4f)",
-                                int(current_iteration),
-                                float(target_weight),
-                                float(base_weight),
-                                float(density_weight_scalar),
-                                base_grad_norm_value,
-                                l_shape_grad_norm_value,
-                                float(self.l_shape_grad_target_ratio),
-                            )
-
-                    if self._l_shape_sched_active and self._l_shape_sched_initialized:
-                        sched_active = True
-                        sched_base_weight = float(self._l_shape_sched_base_weight)
-                        sched_iter_diff = max(
-                            0,
-                            int(current_iteration) - int(self._l_shape_sched_start_iter),
-                        ) if (
-                            current_iteration is not None
-                            and self._l_shape_sched_start_iter is not None
-                        ) else 0
-                        sched_sigma = self._l_shape_param_smooth_func(sched_iter_diff)
-                        sched_weight_value = float(
-                            density_weight_scalar * sched_base_weight
-                        ) * float(sched_sigma)
-                        target_weight_value = self._compute_l_shape_target_weight(
-                            base_grad_norm_value,
-                            l_shape_grad_norm_value,
-                            self.l_shape_grad_target_ratio,
-                        )
-                        new_weight = sched_weight_value
-                        if target_weight_value is not None and new_weight > target_weight_value:
-                            new_weight = target_weight_value
-                            cap_active = True
-                        new_weight = max(
-                            self.l_shape_weight_min,
-                            min(self.l_shape_weight_max, new_weight),
-                        )
-                        current_weight = float(new_weight)
-                        self.l_shape_routability_weight.data.fill_(current_weight)
-                        pos.grad.data.mul_(current_weight)
-                        if sched_iter_diff > int(self.l_shape_num_route_iter):
-                            self._l_shape_sched_active = False
-                            sched_active = False
-                            if l_shape_log_verbose(self.params) >= 1:
-                                logging.info(
-                                    "End L-shape weight schedule at iter %d "
-                                    "(dt=%d, sigma=%.4e, weight=%.4e)",
-                                    int(current_iteration),
-                                    int(sched_iter_diff),
-                                    float(sched_sigma),
-                                    float(current_weight),
-                                )
-                    else:
-                        # Keep l-shape contribution disabled until the first valid
-                        # schedule calibration instead of applying a placeholder weight.
-                        pos.grad.zero_()
-                        self.l_shape_routability_weight.data.zero_()
-                        current_weight = 0.0
-                        sched_active = bool(self._l_shape_sched_active)
-                        sched_base_weight = self._l_shape_sched_base_weight
-            else:
-                # 自适应调整权重
-                # 目标: l_shape_grad_norm * weight ≈ target_ratio * base_grad_norm
-                if l_shape_grad_norm_value > 1e-10 and base_grad_norm_value > 1e-10:
-                    target_weight = self._compute_l_shape_target_weight(
-                        base_grad_norm_value,
-                        l_shape_grad_norm_value,
-                        self.l_shape_grad_target_ratio,
-                    )
-                    target_weight_value = float(target_weight)
-                    old_weight = current_weight
-
-                    if not self._l_shape_weight_initialized:
-                        new_weight = target_weight
-                        self._l_shape_weight_initialized = True
-                        if l_shape_log_verbose(self.params) >= 1:
-                            logging.info(
-                                f"L-shape weight auto-initialized: {new_weight:.4e} "
-                                f"(base_grad={base_grad_norm_value:.4e}, l_shape_grad={l_shape_grad_norm_value:.4e})"
-                            )
-                    else:
-                        new_weight = (1 - self.l_shape_weight_momentum) * old_weight + \
-                                     self.l_shape_weight_momentum * target_weight
-
-                    sched_weight_value = float(new_weight)
-                    if new_weight > target_weight:
-                        new_weight = target_weight
-                        cap_active = True
-                    new_weight = max(self.l_shape_weight_min, min(self.l_shape_weight_max, new_weight))
-                    current_weight = float(new_weight)
-                    self.l_shape_routability_weight.data.fill_(current_weight)
-                    pos.grad.data.mul_(current_weight)
-
-                    cost_label = (
-                        "N/A(fast_mode)"
-                        if not self.l_shape_energy_valid
-                        else f"{l_shape_cost.item():.4e}"
-                    )
-                    logging.debug(f"L-shape: cost={cost_label}, "
-                                 f"grad_norm={l_shape_grad_norm_value:.4e}, "
-                                 f"base_grad_norm={base_grad_norm_value:.4e}, "
-                                 f"weight={old_weight:.4e}->{new_weight:.4e}")
                 else:
-                    pos.grad.data.mul_(current_weight)
+                    new_weight = (1 - self.l_shape_weight_momentum) * old_weight + \
+                                 self.l_shape_weight_momentum * target_weight
+
+                weight_candidate_value = float(new_weight)
+                if new_weight > target_weight:
+                    new_weight = target_weight
+                    cap_active = True
+                new_weight = max(self.l_shape_weight_min, min(self.l_shape_weight_max, new_weight))
+                current_weight = float(new_weight)
+                self.l_shape_routability_weight.data.fill_(current_weight)
+                pos.grad.data.mul_(current_weight)
+
+                cost_label = (
+                    "N/A(fast_mode)"
+                    if not self.l_shape_energy_valid
+                    else f"{l_shape_cost.item():.4e}"
+                )
+                logging.debug(f"L-shape: cost={cost_label}, "
+                             f"grad_norm={l_shape_grad_norm_value:.4e}, "
+                             f"base_grad_norm={base_grad_norm_value:.4e}, "
+                             f"weight={old_weight:.4e}->{new_weight:.4e}")
+            else:
+                pos.grad.data.mul_(current_weight)
 
             l_shape_weighted = l_shape_cost * self.l_shape_routability_weight.item()
             current_weight = float(self.l_shape_routability_weight.item())
@@ -2541,22 +2364,12 @@ class PlaceObj(nn.Module):
             )
             self.l_shape_last_weight = current_weight
             self.l_shape_last_target_weight = target_weight_value
-            self.l_shape_last_sched_weight = sched_weight_value
+            self.l_shape_last_weight_candidate = weight_candidate_value
             self.l_shape_last_cap_active = bool(cap_active)
             self.l_shape_last_base_grad_norm = base_grad_norm_value
             self.l_shape_last_grad_raw_norm = l_shape_grad_raw_norm_value
             self.l_shape_last_grad_norm = l_shape_grad_norm_value
             self.l_shape_last_grad_ratio = grad_ratio_value
-            self.l_shape_last_sched_base_weight = (
-                float(sched_base_weight) if sched_base_weight is not None else None
-            )
-            self.l_shape_last_sched_sigma = (
-                float(sched_sigma) if sched_sigma is not None else None
-            )
-            self.l_shape_last_sched_iter_diff = (
-                int(sched_iter_diff) if sched_iter_diff is not None else None
-            )
-            self.l_shape_last_sched_active = bool(sched_active)
             al_stats = getattr(density_op, "last_al_stats", None)
             if isinstance(al_stats, dict):
                 self.l_shape_capacity_al_last_summary = {

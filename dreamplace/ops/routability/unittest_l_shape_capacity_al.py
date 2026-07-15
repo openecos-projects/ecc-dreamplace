@@ -1106,7 +1106,6 @@ class LShapeCapacityALTest(unittest.TestCase):
             l_shape_use_ggr_topology=1,
             l_direction_use_gpugr=1,
             soft_l_assignment=0,
-            l_shape_use_xplace_weight_schedule=0,
         )
         validate_ggr_l_shape_topology_params(types.SimpleNamespace(**base))
 
@@ -1114,12 +1113,21 @@ class LShapeCapacityALTest(unittest.TestCase):
             ("l_shape_use_ggr_topology", 0),
             ("l_direction_use_gpugr", 0),
             ("soft_l_assignment", 1),
-            ("l_shape_use_xplace_weight_schedule", 1),
         ):
             bad = dict(base)
             bad[key] = value
             with self.assertRaises(RuntimeError, msg=key):
                 validate_ggr_l_shape_topology_params(types.SimpleNamespace(**bad))
+
+    def test_eval_metrics_reports_adaptive_weight_candidate(self):
+        metric = EvalMetrics()
+        metric.l_shape_log_verbose = 2
+        metric.l_shape_weight_candidate = 0.25
+
+        text = str(metric)
+
+        self.assertIn("LWCandidate 2.500000E-01", text)
+        self.assertNotIn("LWSched", text)
 
     def test_lambda_maps_are_detached_and_iteration_gated(self):
         op = _make_op(enable=True)

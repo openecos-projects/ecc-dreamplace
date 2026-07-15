@@ -78,16 +78,12 @@ class EvalMetrics(object):
         self.l_shape_weighted_cost = None
         self.l_shape_weight = None
         self.l_shape_target_weight = None
-        self.l_shape_sched_weight = None
+        self.l_shape_weight_candidate = None
         self.l_shape_cap_active = None
         self.l_shape_base_grad_norm = None
         self.l_shape_grad_raw_norm = None
         self.l_shape_grad_norm = None
         self.l_shape_grad_ratio = None
-        self.l_shape_sched_base_weight = None
-        self.l_shape_sched_sigma = None
-        self.l_shape_sched_iter_diff = None
-        self.l_shape_sched_active = None
         self.l_shape_target_ratio = None
         self.l_shape_overflow = None
         self.l_shape_overflow_ratio = None
@@ -237,8 +233,8 @@ class EvalMetrics(object):
         if _as_log_verbose(self.l_shape_log_verbose) >= 2:
             if self.l_shape_weight is not None:
                 content += ", LWeight %.6E" % (self.l_shape_weight)
-            if self.l_shape_sched_weight is not None:
-                content += ", LWSched %.6E" % (self.l_shape_sched_weight)
+            if self.l_shape_weight_candidate is not None:
+                content += ", LWCandidate %.6E" % (self.l_shape_weight_candidate)
             if self.l_shape_target_weight is not None:
                 content += ", LWCap %.6E" % (self.l_shape_target_weight)
             if self.l_shape_cap_active is not None:
@@ -251,14 +247,6 @@ class EvalMetrics(object):
                 content += ", LGradRaw %.6E" % (self.l_shape_grad_raw_norm)
             if self.l_shape_grad_ratio is not None:
                 content += ", LGradRatio %.4f" % (self.l_shape_grad_ratio)
-            if self.l_shape_sched_base_weight is not None:
-                content += ", LSBase %.6E" % (self.l_shape_sched_base_weight)
-            if self.l_shape_sched_sigma is not None:
-                content += ", LSSigma %.6E" % (self.l_shape_sched_sigma)
-            if self.l_shape_sched_iter_diff is not None:
-                content += ", LSdt %d" % (self.l_shape_sched_iter_diff)
-            if self.l_shape_sched_active is not None:
-                content += ", LSAct %d" % (1 if self.l_shape_sched_active else 0)
             if self.l_shape_target_ratio is not None:
                 content += ", LTargetRatio %.4f" % (self.l_shape_target_ratio)
             if self.l_shape_overflow is not None:

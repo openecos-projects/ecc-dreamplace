@@ -1736,16 +1736,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         "l_shape_weighted_cost": "l_shape_last_weighted_cost",
                         "l_shape_weight": "l_shape_last_weight",
                         "l_shape_target_weight": "l_shape_last_target_weight",
-                        "l_shape_sched_weight": "l_shape_last_sched_weight",
+                        "l_shape_weight_candidate": "l_shape_last_weight_candidate",
                         "l_shape_cap_active": "l_shape_last_cap_active",
                         "l_shape_base_grad_norm": "l_shape_last_base_grad_norm",
                         "l_shape_grad_raw_norm": "l_shape_last_grad_raw_norm",
                         "l_shape_grad_norm": "l_shape_last_grad_norm",
                         "l_shape_grad_ratio": "l_shape_last_grad_ratio",
-                        "l_shape_sched_base_weight": "l_shape_last_sched_base_weight",
-                        "l_shape_sched_sigma": "l_shape_last_sched_sigma",
-                        "l_shape_sched_iter_diff": "l_shape_last_sched_iter_diff",
-                        "l_shape_sched_active": "l_shape_last_sched_active",
                     }
                     for metric_field, model_field in field_map.items():
                         value = getattr(model, model_field, None)
@@ -2510,8 +2506,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     topo_cache=l_shape_inputs.get("same_net_topo_cache"),
                                     topo_stats=l_shape_inputs.get("same_net_topo_stats"),
                                 )
-                            if hasattr(model, "start_l_shape_weight_schedule"):
-                                model.start_l_shape_weight_schedule(iteration)
+                            if hasattr(model, "start_l_shape_weight_controller"):
+                                model.start_l_shape_weight_controller(iteration)
                             # 初始化基于L-shape overflow的外环状态
                             model._l_shape_overflow_ema = None
                             model._l_shape_overflow_last = None
@@ -4357,6 +4353,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 "l_shape_weighted_cost",
                 "l_shape_weight",
                 "l_shape_target_weight",
+                "l_shape_weight_candidate",
                 "l_shape_base_grad_norm",
                 "l_shape_grad_raw_norm",
                 "l_shape_grad_norm",

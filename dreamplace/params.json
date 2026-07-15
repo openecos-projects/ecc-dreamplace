@@ -372,31 +372,15 @@
         "default": false
     },
     "l_shape_weight_momentum": {
-        "description": "EMA momentum used by the legacy per-iteration L-shape weight update when the stage-wise scheduler is disabled",
+        "description": "EMA momentum used by the adaptive per-iteration L-shape weight controller",
         "default": 0.1
     },
-    "l_shape_use_xplace_weight_schedule": {
-        "description": "whether drive l_shape_routability_weight with a stage-wise schedule instead of per-iteration instant gradient matching",
-        "default": 0
-    },
-    "l_shape_num_route_iter": {
-        "description": "route-opt window length for the L-shape weight schedule",
-        "default": 200
-    },
-    "l_shape_weight_schedule_r": {
-        "description": "logistic steepness used by the L-shape weight schedule",
-        "default": 0.2
-    },
-    "l_shape_weight_schedule_half_iter": {
-        "description": "warmup/cooldown shoulder width for the L-shape weight schedule",
-        "default": 30
-    },
     "l_shape_weight_min": {
-        "description": "minimum allowed l_shape_routability_weight after scheduling or legacy update",
+        "description": "minimum allowed l_shape_routability_weight after adaptive update",
         "default": 1e-12
     },
     "l_shape_weight_max": {
-        "description": "maximum allowed l_shape_routability_weight after scheduling or legacy update",
+        "description": "maximum allowed l_shape_routability_weight after adaptive update",
         "default": 1.0
     },
     "l_shape_log_verbose": {

@@ -49,12 +49,6 @@ def validate_ggr_l_shape_topology_params(params):
         raise RuntimeError(
             "l_shape_use_ggr_topology is incompatible with soft_l_assignment=1"
         )
-    if capacity_al_enable and bool(
-        getattr(params, "l_shape_use_xplace_weight_schedule", True)
-    ):
-        raise RuntimeError(
-            "l_shape_capacity_al_enable requires l_shape_use_xplace_weight_schedule=0"
-        )
 
 
 def _as_int32_tensor(pack, name, device):

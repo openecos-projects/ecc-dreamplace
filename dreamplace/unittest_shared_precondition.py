@@ -40,7 +40,9 @@ _install_ieda_stubs()
 from dreamplace.PlaceObj import PlaceObj, PreconditionOp  # noqa: E402
 
 
-def _make_precondition_op(regions=()):
+def _make_precondition_op(regions=(), pin_counts=None):
+    if pin_counts is None:
+        pin_counts = torch.zeros(4)
     placedb = types.SimpleNamespace(
         num_nodes=4,
         num_movable_nodes=2,
@@ -51,6 +53,7 @@ def _make_precondition_op(regions=()):
     )
     data_collections = types.SimpleNamespace(
         node_areas=torch.tensor([2.0, 4.0, 8.0, 16.0]),
+        num_pins_in_nodes=pin_counts,
         pos=[torch.zeros(8)],
         node2fence_region_map=torch.tensor([0, 1, 0, 0], dtype=torch.long),
     )
@@ -59,6 +62,29 @@ def _make_precondition_op(regions=()):
 
 
 class SharedPreconditionTest(unittest.TestCase):
+    def test_single_density_denominator_includes_raw_pin_count(self):
+        op = _make_precondition_op(pin_counts=torch.tensor([3.0, 1.0, 0.0, 0.0]))
+
+        precond = op._build_precondition(torch.tensor([2.0]))
+
+        torch.testing.assert_close(
+            precond,
+            torch.tensor([7.0, 9.0, 16.0, 32.0]),
+        )
+
+    def test_multi_fence_denominator_includes_raw_pin_count(self):
+        op = _make_precondition_op(
+            regions=(object(), object()),
+            pin_counts=torch.tensor([3.0, 1.0, 0.0, 0.0]),
+        )
+
+        precond = op._build_precondition(torch.tensor([0.5, 1.5, 2.0]))
+
+        torch.testing.assert_close(
+            precond,
+            torch.tensor([5.0, 5.0, 8.0, 32.0]),
+        )
+
     def test_apply_components_uses_one_state_step_and_one_denominator(self):
         op = _make_precondition_op()
         density_weight = torch.tensor([2.0])

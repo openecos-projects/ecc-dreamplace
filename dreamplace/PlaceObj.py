@@ -187,9 +187,11 @@ class PreconditionOp:
         return outputs
 
     def _build_precondition(self, density_weight):
-        # The original pin-weight precondition term is disabled in this branch.
+        pin_count = self.data_collections.num_pins_in_nodes
         if density_weight.size(0) == 1:
-            precond = self.alpha * density_weight * self.data_collections.node_areas
+            density_precond = (
+                self.alpha * density_weight * self.data_collections.node_areas
+            )
         else:
             # only precondition the non fence region
             node_areas = self.data_collections.node_areas.clone()
@@ -210,8 +212,9 @@ class PreconditionOp:
                 - self.placedb.num_filler_nodes
                 + filler_end
             ] *= density_weight[-1]
-            precond = self.alpha * node_areas
+            density_precond = self.alpha * node_areas
 
+        precond = pin_count + density_precond
         return precond.clamp(min=1.0)
 
     def _apply_precondition_to_grad(

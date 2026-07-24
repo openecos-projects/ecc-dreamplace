@@ -136,8 +136,13 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/dreamplace/configure.py.in ${CMAKE_CU
 
 add_subdirectory(thirdparty)
 add_subdirectory(dreamplace)
-add_subdirectory(unittest)
+# unittest/ and test/ are disabled: their install rules copy upstream test
+# scripts into the wheel platlib as top-level `unittest`/`test` namespace
+# packages, which shadow the Python stdlib modules of the same names under
+# scikit-build-core's editable install finder (breaks pytest and any
+# `import unittest` in the environment).
+#add_subdirectory(unittest)
 add_subdirectory(benchmarks)
-add_subdirectory(test)
+#add_subdirectory(test)
 
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/dreamplace/configure.py DESTINATION dreamplace)

@@ -1396,7 +1396,7 @@ row height = %g, site width = %g
                 - np.maximum(self.node_y[self.num_movable_nodes:self.num_physical_nodes - self.num_terminal_NIs], self.yl),
                 0.0)
         ))
-        self.total_space_area = self.area - self.total_fixed_node_area
+        # self.total_space_area = self.area - self.total_fixed_node_area
         content += "total_movable_node_area = %g, total_fixed_node_area = %g, total_space_area = %g\n" % (
             self.total_movable_node_area, self.total_fixed_node_area, self.total_space_area)
 

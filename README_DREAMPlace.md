@@ -61,16 +61,16 @@ DREAMPlace runs on both CPU and GPU. If it is installed on a machine without GPU
     - Need to install
 
 - [Limbo](https://github.com/limbo018/Limbo)
-    - Integrated as a git submodule
+    - Bundled as a source snapshot
 
 - [Flute](https://doi.org/10.1109/TCAD.2007.907068)
-    - Integrated as a submodule
+    - Bundled as source
 
 - [CUB](https://github.com/NVlabs/cub)
-    - Integrated as a git submodule
+    - Bundled as a source snapshot
 
 - [munkres-cpp](https://github.com/saebyn/munkres-cpp)
-    - Integrated as a git submodule
+    - Bundled as a source snapshot
 
 - [CUDA 9.1 or later](https://developer.nvidia.com/cuda-toolkit) (Optional)
     - If installed and found, GPU acceleration will be enabled. 
@@ -88,16 +88,8 @@ DREAMPlace runs on both CPU and GPU. If it is installed on a machine without GPU
 - [NTUPlace3](http://eda.ee.ntu.edu.tw/research.htm) (Optional)
     - If the binary is provided, it can be used to perform detailed placement.
 
-To pull git submodules in the root directory
-```
-git submodule init
-git submodule update
-```
-
-Or alternatively, pull all the submodules when cloning the repository. 
-```
-git clone --recursive https://github.com/limbo018/DREAMPlace.git
-```
+Required third-party source is vendored under `thirdparty/`; no submodule
+initialization is required.
 
 # How to Install Python Dependency 
 
@@ -164,7 +156,7 @@ make
 make install
 ```
 
-Third party submodules are automatically built except for [Boost](https://www.boost.org).
+Bundled third-party sources are automatically built except for [Boost](https://www.boost.org).
 
 To clean, go to the root directory.
 ```

@@ -1,5 +1,4 @@
 {
-  inputs.self.submodules = true;
   # pinning nixpkgs for old cmake and gcc
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/f4b140d5b253f5e2a1ff4e5506edbf8267724bde";
   outputs = inputs@{

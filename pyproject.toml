@@ -29,7 +29,7 @@ dependencies = [
 [tool.scikit-build]
 cmake.define.PYTHON_EXECUTABLE = "python3"
 cmake.define.CMAKE_CXX_ABI = 1
-sdist.include = ["thirdparty/pybind11/include/pybind11"]
+sdist.include = ["thirdparty/**"]
 build.verbose = true
 editable.rebuild = true
 build-dir = "build"

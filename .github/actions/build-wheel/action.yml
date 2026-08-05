@@ -32,7 +32,10 @@ runs:
     - name: Build repaired wheel
       shell: bash
       run: |
-        uv build --verbose
+        # --no-build-isolation: the C++ ops must compile against the locked
+        # torch (build-system requires would otherwise resolve the latest
+        # torch, whose C++ ABI may not match the runtime torch used by ecc).
+        uv build --verbose --no-build-isolation
 
         # Torch and CUDA libs excluded from auditwheel repair -- DreamPlace is built with
         # TORCH_ENABLE_CUDA=0 and torch is a runtime dependency (not bundled). Without these

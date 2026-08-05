@@ -114,6 +114,10 @@ PYTHONPATH="$smoke_dir/site" "$PYTHON3" -c "
 from dreamplace.Params import Params
 from dreamplace.Placer import PlacementEngine
 
+# NonLinearPlace pulls in the compiled op extensions (draw_place, place_io,
+# global_swap, ...), exercising the bundled shared libraries.
+import dreamplace.NonLinearPlace
+
 print('ecc-dreamplace smoke test passed: core imports verified')
 "
 

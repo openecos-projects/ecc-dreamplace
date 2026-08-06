@@ -14,6 +14,7 @@
       boost,
       bison,
       flex,
+      bzip2,
     }: python3Packages.buildPythonPackage rec {
       name = "dreamplace";
       format = "pyproject";
@@ -51,7 +52,7 @@
         wheel
       ];
 
-      buildInputs = [ zlib boost flex ];
+      buildInputs = [ zlib boost flex bzip2 ];
       nativeBuildInputs = [ bison flex cmake ninja ];
 
       dontUseCmakeConfigure = true;

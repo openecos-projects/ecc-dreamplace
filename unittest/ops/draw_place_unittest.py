@@ -60,7 +60,7 @@ class DrawPlaceOpTest(unittest.TestCase):
                     bin_size_x, bin_size_y, 
                     num_movable_nodes, 
                     num_filler_nodes, 
-                    "test.gds" # png, jpg, eps, pdf, gds 
+                    "test.png"  # png, pdf, svg
                     )
         print(custom)
 

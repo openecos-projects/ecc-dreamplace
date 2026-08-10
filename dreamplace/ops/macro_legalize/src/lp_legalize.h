@@ -14,7 +14,7 @@
 #include <lemon/list_graph.h>
 #include <lemon/smart_graph.h>
 #include <lemon/connectivity.h>
-#include "place_io/src/Util.h"
+#include "utility/src/Util.h"
 
 DREAMPLACE_BEGIN_NAMESPACE
 

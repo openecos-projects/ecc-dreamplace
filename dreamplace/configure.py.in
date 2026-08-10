@@ -12,10 +12,6 @@ compile_configurations = {
         "CMAKE_CXX_ABI" : "${CMAKE_CXX_ABI}", 
         "CMAKE_CXX_STANDARD" : "${CMAKE_CXX_STANDARD}", 
         "PYTHON" : "${PYTHON}", 
-        "Boost_DIR" : "${Boost_DIR}", 
-        "Boost_INCLUDE_DIRS" : "${Boost_INCLUDE_DIRS}", 
-        "ZLIB_INCLUDE_DIRS" : "${ZLIB_INCLUDE_DIRS}", 
-        "ZLIB_LIBRARIES" : "${ZLIB_LIBRARIES}", 
         "CUDA_FOUND" : "${CUDA_FOUND}", 
         "CUDA_TOOLKIT_ROOT_DIR" : "${CUDA_TOOLKIT_ROOT_DIR}", 
         "CMAKE_CUDA_FLAGS" : "${CMAKE_CUDA_FLAGS}", 
@@ -23,4 +19,3 @@ compile_configurations = {
         "CAIRO_INCLUDE_DIRS" : "${CAIRO_INCLUDE_DIRS}", 
         "CAIRO_LIBRARIES" : "${CAIRO_LIBRARIES}", 
         }
-

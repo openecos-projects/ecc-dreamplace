@@ -80,7 +80,7 @@ Relevant configuration knobs include:
 | Parameter | Purpose |
 | --- | --- |
 | `routability_opt_flag` | Enable routability-driven global placement. |
-| `adjust_nctugr_area_flag` | Use the integrated EGR/NCTUgr-style route map for route-area adjustment. |
+| `adjust_nctugr_area_flag` | Use the ECC/iRT EGR route map for route-area adjustment. The legacy parameter name is retained for configuration compatibility. |
 | `adjust_rudy_area_flag` | Use RUDY-style route utilization for route-area adjustment. |
 | `route_num_bins_x`, `route_num_bins_y` | Routing-utilization grid resolution. |
 | `max_route_opt_adjust_rate` | Maximum route-driven area inflation rate. |
@@ -95,7 +95,7 @@ Relevant configuration knobs include:
 - Python 3.11 + [uv](https://docs.astral.sh/uv/)
 - Optional: Nix, for entering the repository development shell before sync
 - System packages:
-  `cmake ninja-build build-essential pkg-config libboost-all-dev libcairo2-dev libgflags-dev libgoogle-glog-dev flex libfl-dev bison libeigen3-dev libgtest-dev`
+  `cmake ninja-build build-essential pkg-config libcairo2-dev libgflags-dev libgoogle-glog-dev flex libfl-dev bison libeigen3-dev libgtest-dev`
 
 ### Dev Setup
 

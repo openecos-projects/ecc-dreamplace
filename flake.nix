@@ -10,10 +10,10 @@
       python3Packages,
       cmake,
       ninja,
-      zlib,
-      boost,
+      cairo,
       bison,
       flex,
+      pkg-config,
     }: python3Packages.buildPythonPackage rec {
       name = "dreamplace";
       format = "pyproject";
@@ -51,8 +51,8 @@
         wheel
       ];
 
-      buildInputs = [ zlib boost flex ];
-      nativeBuildInputs = [ bison flex cmake ninja ];
+      buildInputs = [ cairo flex ];
+      nativeBuildInputs = [ bison flex cmake ninja pkg-config ];
 
       dontUseCmakeConfigure = true;
       dontCheckRuntimeDeps = true;

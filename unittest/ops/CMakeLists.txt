@@ -1,4 +1,3 @@
-add_subdirectory(place_io_unittest)
 add_subdirectory(macro_legalize_unittest)
 add_subdirectory(greedy_legalize_unittest)
 add_subdirectory(abacus_legalize_unittest)

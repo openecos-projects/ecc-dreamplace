@@ -459,7 +459,6 @@ class PlaceOpCollection(object):
         self.draw_place_op = None
         self.route_utilization_map_op = None
         self.pin_utilization_map_op = None
-        self.nctugr_congestion_map_op = None
         self.irt_egr_congestion_map_op = None
         self.adjust_node_area_op = None
         self.macro_overlap_op = None

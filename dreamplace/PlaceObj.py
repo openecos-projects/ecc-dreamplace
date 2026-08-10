@@ -44,7 +44,6 @@ import dreamplace.ops.electric_potential.electric_potential as electric_potentia
 import dreamplace.ops.density_potential.density_potential as density_potential
 import dreamplace.ops.rudy.rudy as rudy
 import dreamplace.ops.pin_utilization.pin_utilization as pin_utilization
-import dreamplace.ops.nctugr_binary.nctugr_binary as nctugr_binary
 import dreamplace.ops.irt_egr.irt_egr as eGR
 import dreamplace.ops.adjust_node_area.adjust_node_area as adjust_node_area
 import dreamplace.ops.macro_overlap.macro_overlap as macro_overlap
@@ -347,9 +346,6 @@ class PlaceObj(nn.Module):
             )
             self.op_collections.pin_utilization_map_op = self.build_pin_utilization_map(
                 params, placedb, self.data_collections
-            )
-            self.op_collections.nctugr_congestion_map_op = (
-                self.build_nctugr_congestion_map(params, placedb, self.data_collections)
             )
             self.op_collections.irt_egr_congestion_map_op = (
                 self.build_irt_egr_congestion_map(
@@ -2361,29 +2357,6 @@ class PlaceObj(nn.Module):
             deterministic_flag=params.deterministic_flag,
         )
 
-    def build_nctugr_congestion_map(self, params, placedb, data_collections):
-        """
-        @brief call NCTUgr for congestion estimation
-        """
-        path = "%s/%s" % (params.result_dir, params.design_name())
-        return nctugr_binary.NCTUgr(
-            aux_input_file=os.path.realpath(params.aux_input),
-            param_setting_file="%s/../thirdparty/NCTUgr.ICCAD2012/DAC12.set"
-            % (os.path.dirname(os.path.realpath(__file__))),
-            tmp_pl_file="%s/%s.NCTUgr.pl"
-            % (os.path.realpath(path), params.design_name()),
-            tmp_output_file="%s/%s.NCTUgr"
-            % (os.path.realpath(path), params.design_name()),
-            horizontal_routing_capacities=torch.from_numpy(
-                placedb.unit_horizontal_capacities * placedb.routing_grid_size_y
-            ),
-            vertical_routing_capacities=torch.from_numpy(
-                placedb.unit_vertical_capacities * placedb.routing_grid_size_x
-            ),
-            params=params,
-            placedb=placedb,
-        )
-    
     def build_irt_egr_congestion_map(self, params, placedb, data_collections):
         """
         @brief call iRT egr for congestion estimation

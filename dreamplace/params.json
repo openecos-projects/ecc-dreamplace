@@ -212,7 +212,7 @@
         "default": 3
     },
     "adjust_nctugr_area_flag": {
-        "description": "whether use NCTUgr congestion map to guide area adjustment",
+        "description": "whether use ECC/iRT EGR congestion map to guide area adjustment",
         "default": 0
     },
     "adjust_rudy_area_flag": {

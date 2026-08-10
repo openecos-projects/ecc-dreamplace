@@ -54,17 +54,14 @@ DREAMPlace runs on both CPU and GPU. If it is installed on a machine without GPU
     - Recommend GCC 5.1 or later. 
     - Other compilers may also work, but not tested. 
 
-- [Boost](https://www.boost.org)
-    - Need to install and visible for linking
-  
 - [Bison](https://www.gnu.org/software/bison) >= 3.3
     - Need to install
 
 - [Limbo](https://github.com/limbo018/Limbo)
-    - Integrated as a git submodule
+    - Bundled as an ECC-only source snapshot
 
 - [Flute](https://doi.org/10.1109/TCAD.2007.907068)
-    - Integrated as a submodule
+    - Bundled as source
 
 - [CUB](https://github.com/NVlabs/cub)
     - Integrated as a git submodule
@@ -88,15 +85,9 @@ DREAMPlace runs on both CPU and GPU. If it is installed on a machine without GPU
 - [NTUPlace3](http://eda.ee.ntu.edu.tw/research.htm) (Optional)
     - If the binary is provided, it can be used to perform detailed placement.
 
-To pull git submodules in the root directory
+Initialize the remaining third-party submodules after cloning.
 ```
-git submodule init
-git submodule update
-```
-
-Or alternatively, pull all the submodules when cloning the repository. 
-```
-git clone --recursive https://github.com/limbo018/DREAMPlace.git
+git submodule update --init --recursive
 ```
 
 # How to Install Python Dependency 
@@ -164,7 +155,7 @@ make
 make install
 ```
 
-Third party submodules are automatically built except for [Boost](https://www.boost.org).
+Bundled and submodule third-party sources are built automatically by CMake.
 
 To clean, go to the root directory.
 ```
@@ -184,7 +175,7 @@ Here are the available options for CMake.
     - Example ```cmake -DCMAKE_CUDA_FLAGS=-gencode=arch=compute_60,code=sm_60```
 - CMAKE_CXX_ABI: 0|1 for the value of _GLIBCXX_USE_CXX11_ABI for C++ compiler, default is 0.
     - Example ```cmake -DCMAKE_CXX_ABI=0```
-    - It must be consistent with the _GLIBCXX_USE_CXX11_ABI for compling all the C++ dependencies, such as Boost and PyTorch.
+    - It must be consistent with the _GLIBCXX_USE_CXX11_ABI used by PyTorch and the other C++ dependencies.
     - PyTorch in default is compiled with _GLIBCXX_USE_CXX11_ABI=0, but in a customized PyTorch environment, it might be compiled with _GLIBCXX_USE_CXX11_ABI=1. 
 
 # How to Get Benchmarks

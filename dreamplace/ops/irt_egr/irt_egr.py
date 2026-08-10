@@ -1,5 +1,5 @@
 ##
-# @file   nctugr_binary.py
+# @file   irt_egr.py
 # @author Yibo Lin
 # @date   Jan 2020
 #

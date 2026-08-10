@@ -136,7 +136,6 @@ class PlacementEngine:
 
     def write_back(self, def_file="output.def"):
         # self.placedb.write_placement_back(self.params)
-        # self.engine_data_ieda.gds_save(def_file+".gds")
         self.ecc_module.def_save(def_file)
 
     def update_params(self, new_params: Params):

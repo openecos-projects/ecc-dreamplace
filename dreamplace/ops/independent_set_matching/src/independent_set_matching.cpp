@@ -285,20 +285,6 @@ void independentSetMatchingCPULauncher(DetailedPlaceDB<T> db, int batch_size,
       CPUTimer::getTimerPeriod() * apply_solution_time, apply_solution_runs,
       CPUTimer::getTimerPeriod() * apply_solution_time / apply_solution_runs);
 
-  // drawPlaceLauncher<T>(
-  //        db.x, db.y,
-  //        db.node_size_x, db.node_size_y,
-  //        db.pin_offset_x, db.pin_offset_y,
-  //        db.pin2node_map,
-  //        db.num_nodes,
-  //        db.num_movable_nodes,
-  //        0,
-  //        db.flat_net2pin_start_map[db.num_nets],
-  //        db.xl, db.yl, db.xh, db.yh,
-  //        db.site_width, db.row_height,
-  //        db.bin_size_x, db.bin_size_y,
-  //        "final.gds"
-  //        );
 }
 
 at::Tensor independent_set_matching_forward(

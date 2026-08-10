@@ -9,7 +9,6 @@ unitest/reduce_min_unitest
 unitest/diamond_search_unitest
 unitest/in.txt
 unitest/log
-*.gds
 *.bk?
 src/build
 src/dist

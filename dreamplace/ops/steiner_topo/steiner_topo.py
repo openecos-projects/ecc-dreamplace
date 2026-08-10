@@ -4,6 +4,8 @@
 # @brief  Get steiner tree topology & steiner node locations
 #
 
+from pathlib import Path
+
 import torch
 from torch import nn
 from torch.autograd import Function
@@ -13,6 +15,12 @@ import dreamplace.configure as configure
 # if configure.compile_configurations["CUDA_FOUND"] == "TRUE":
 #     import dreamplace.ops.steiner_topo.steiner_topo_cuda as steiner_topo_cuda
 #     import dreamplace.ops.steiner_topo.steiner_topo_cuda_segment as steiner_topo_cuda_segment
+
+_FLUTE_LUT_DIR = (
+    Path(__file__).resolve().parents[3] / "thirdparty" / "flute" / "lut.ICCAD2015"
+)
+_FLUTE_POWV_FILE = _FLUTE_LUT_DIR / "POWV9.dat"
+_FLUTE_POST_FILE = _FLUTE_LUT_DIR / "POST9.dat"
 
 
 class SteinerTopoFunction(Function):
@@ -133,7 +141,9 @@ class SteinerTopo(nn.Module):
             pos,
             self.flat_net2pin_map,
             self.flat_net2pin_start_map,
-            self.ignore_net_degree
+            self.ignore_net_degree,
+            str(_FLUTE_POWV_FILE),
+            str(_FLUTE_POST_FILE),
         )
 
         self.update_cache(new_outputs_tuple)

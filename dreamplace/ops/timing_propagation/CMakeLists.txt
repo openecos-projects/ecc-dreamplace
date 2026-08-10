@@ -6,13 +6,10 @@ set(INCLUDE_DIRS
   ${CMAKE_CURRENT_SOURCE_DIR}/..
   ${FLUTE_INCLUDE_DIRS}
   ${OPENTIMER_SOURCE_DIR}
-  ${LIMBO_SOURCE_DIR}
-  ${Boost_INCLUDE_DIRS}
   )
 
 set(LINK_LIBS utility_cxx
   OpenMP::OpenMP_CXX
-  programoptions
   flute
   OpenTimer
   stdc++fs
@@ -32,4 +29,3 @@ set(LINK_LIBS utility_cxx
 
 file(GLOB INSTALL_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/*.py)
 install(FILES ${INSTALL_SRCS} DESTINATION dreamplace/ops/${OP_NAME})
-

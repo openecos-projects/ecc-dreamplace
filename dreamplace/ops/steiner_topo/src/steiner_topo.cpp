@@ -10,14 +10,33 @@
 #include "utility/src/torch.h"
 #include <algorithm>
 #include <cassert>
+#include <filesystem>
 #include <iostream>
+#include <mutex>
 #include <omp.h>
 #include <queue>
+#include <string>
 #include <utility>
 #include <vector>
-#include <filesystem>
 
 DREAMPLACE_BEGIN_NAMESPACE
+
+namespace {
+
+void loadFluteLut(const std::string &powv_file,
+                  const std::string &post_file) {
+  TORCH_CHECK(std::filesystem::is_regular_file(powv_file),
+              "Flute POWV LUT file does not exist: ", powv_file);
+  TORCH_CHECK(std::filesystem::is_regular_file(post_file),
+              "Flute POST LUT file does not exist: ", post_file);
+
+  static std::once_flag load_lut_once;
+  std::call_once(load_lut_once, [&] {
+    flute::readLUT(powv_file.c_str(), post_file.c_str());
+  });
+}
+
+}  // namespace
 
 struct NetResult {
   int num_steiner = 0;
@@ -40,17 +59,6 @@ int computeSteinerTreeLauncher(
     std::vector<int> &vtx_fa, std::vector<int> &flat_vtx_to,
     std::vector<int> &flat_vtx_from, std::vector<int> &net_flat_topo_idx,
     std::vector<int> &flat_vtx_to_start, int *net_flat_topo_idx_start) {
-
-  static bool is_lut_loaded = false;
-  if (!is_lut_loaded) {
-    is_lut_loaded = true;
-    std::filesystem::path source_dir = std::filesystem::path(__FILE__).parent_path();
-    std::filesystem::path project_root = source_dir.parent_path().parent_path().parent_path().parent_path();
-    std::string powv9_path = (project_root / "thirdparty/flute/lut.ICCAD2015/POWV9.dat").string();
-    std::string post9_path = (project_root / "thirdparty/flute/lut.ICCAD2015/POST9.dat").string();
-    flute::readLUT(powv9_path.c_str(), post9_path.c_str());
-  }
-
   constexpr int scale = 1000;
   int total_steiner = 0;
   std::vector<NetResult> net_result(num_nets);
@@ -362,7 +370,9 @@ at::Tensor convertVecToTens(const std::vector<T>& vec, const at::TensorOptions& 
 
 std::vector<at::Tensor> build_tree(at::Tensor pos, at::Tensor flat_netpin,
                                    at::Tensor netpin_start,
-                                   int ignore_net_degree) {
+                                   int ignore_net_degree,
+                                   const std::string &powv_file,
+                                   const std::string &post_file) {
   CHECK_FLAT_CPU(pos);
   CHECK_EVEN(pos);
   CHECK_CONTIGUOUS(pos);
@@ -370,6 +380,8 @@ std::vector<at::Tensor> build_tree(at::Tensor pos, at::Tensor flat_netpin,
   CHECK_CONTIGUOUS(flat_netpin);
   CHECK_FLAT_CPU(netpin_start);
   CHECK_CONTIGUOUS(netpin_start);
+
+  loadFluteLut(powv_file, post_file);
 
   const int num_nets = netpin_start.numel() - 1;
   const int num_pins = pos.numel() / 2;

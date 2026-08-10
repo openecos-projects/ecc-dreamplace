@@ -322,8 +322,13 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 logging.debug(
                                     "All regions stop updating, finish global placement")
                                 return True
-                        # a heuristic to detect divergence and stop early
-                        if len(metrics) > 50:
+                        # Cell inflation intentionally restarts convergence, so this
+                        # fixed-area divergence heuristic is invalid after the first
+                        # routability-driven area adjustment.
+                        if (
+                            (not params.routability_opt_flag or num_area_adjust == 0)
+                            and len(metrics) > 50
+                        ):
                             cur_metric = metrics[-1][-1][-1]
                             prev_metric = metrics[-50][-1][-1]
                             # record HPWL and overflow increase, and check divergence

@@ -1082,7 +1082,6 @@ class MacroPlaceDB(object):
         @param params parameters 
         """
         self.dtype = datatypes[params.dtype]
-        # self.rawdb = place_io.PlaceIOFunction.read(params)
         self.initialize_from_rawdb(params)
 
     def set_net_weights(self):
@@ -1168,8 +1167,6 @@ class MacroPlaceDB(object):
         @brief initialize data members from raw database 
         @param params parameters 
         """
-        # pydb = place_io.PlaceIOFunction.pydb(self.rawdb)
-
         self.num_physical_nodes = pydb.num_nodes
         self.num_terminals = pydb.num_terminals
         self.num_terminal_NIs = pydb.num_terminal_NIs
@@ -1188,8 +1185,7 @@ class MacroPlaceDB(object):
         self.node_names = np.array(pydb.node_names, dtype=np.bytes_)
         # If the placer directly takes a global placement solution,
         # the cell positions may still be floating point numbers.
-        # It is not good to use the place_io OP to round the positions.
-        # Currently we only support BOOKSHELF format.
+        # Preserve floating-point positions when the placer consumes an ECC DB.
 
         self.node_x = np.array(pydb.node_x, dtype=self.dtype)
         self.node_y = np.array(pydb.node_y, dtype=self.dtype)
@@ -1805,7 +1801,7 @@ row height = %g, site width = %g
             )
 
         if params.enable_fillers:
-            # the way to compute this is still tricky; we need to consider place_io together on how to
+            # the way to compute this is still tricky; preserve the ECC DB contract here.
             # summarize the area of fixed cells, which may overlap with each other.
             if len(self.regions) > 0:
                 self.filler_start_map = np.cumsum(
@@ -2435,8 +2431,6 @@ row height = %g, site width = %g
             unscale_factor + params.shift_factor[1]
         # update raw database
         self.write_placement_back(node_x, node_y)
-        # update raw database
-        # place_io.PlaceIOFunction.apply(self.rawdb, node_x, node_y)
 
 
 if __name__ == "__main__":

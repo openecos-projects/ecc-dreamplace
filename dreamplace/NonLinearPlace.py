@@ -471,6 +471,20 @@ def _is_modularity_inflation_enabled(params):
     return bool(getattr(params, "modularity_inflation_flag", False))
 
 
+def _resolve_route_map_source(params):
+    """Resolve the active route map without constructing legacy operators."""
+    if getattr(params, "adjust_gpugr_area_flag", False):
+        return "gpugr"
+    if getattr(params, "adjust_nctugr_area_flag", False):
+        logging.info(
+            "adjust_nctugr_area_flag is a legacy compatibility key; "
+            "using ECC/iRT EGR route map for area adjustment "
+            "(NCTUgr is not invoked)"
+        )
+        return "irt_egr"
+    return "rudy"
+
+
 def _ensure_modularity_inflation_contract(params, route_map_source=None):
     if not _is_modularity_inflation_enabled(params):
         return
@@ -3858,13 +3872,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     )
                                 route_map_source = "none"
                                 if round_adjust_route_area_flag:
-                                    if getattr(params, "adjust_gpugr_area_flag", False):
-                                        route_map_source = "gpugr"
-                                    elif params.adjust_nctugr_area_flag:
-                                        # Legacy key retained for config compatibility; use ECC/iRT EGR.
-                                        route_map_source = "irt_egr"
-                                    else:
-                                        route_map_source = "rudy"
+                                    route_map_source = _resolve_route_map_source(params)
                                 if round_adjust_route_area_flag:
                                     _ensure_modularity_inflation_contract(
                                         params,
@@ -3918,7 +3926,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 low_util_context = None
                                 fixed_target_area = None
                                 if round_adjust_route_area_flag:
-                                    if getattr(params, "adjust_gpugr_area_flag", False):
+                                    route_map_source = _resolve_route_map_source(params)
+                                    if route_map_source == "gpugr":
                                         _sync_gpugr_route_grid_to_autodmp(
                                             params,
                                             placedb,
@@ -3939,7 +3948,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                                 pos,
                                                 eps=getattr(params, "modularity_active_bin_overflow_eps", 1e-6),
                                             )
-                                    elif params.adjust_nctugr_area_flag:
+                                    elif route_map_source == "irt_egr":
                                         route_utilization_map = model.op_collections.irt_egr_congestion_map_op(
                                             pos, stage="egr3D", resolve_congestion="high")
                                     else:

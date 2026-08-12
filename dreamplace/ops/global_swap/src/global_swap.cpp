@@ -501,7 +501,6 @@ int globalSwapCPULauncher(DetailedPlaceDB<T> db, int max_iters) {
       CPUTimer::getTimerPeriod() * apply_solution_time, apply_solution_runs,
       CPUTimer::getTimerPeriod() * apply_solution_time / apply_solution_runs);
 
-  // db.draw_place("final.gds");
 
   return 0;
 }

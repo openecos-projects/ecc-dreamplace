@@ -9,6 +9,7 @@ from torch import nn
 from torch.autograd import Function
 import logging
 import bisect
+from pathlib import Path
 
 import dreamplace.ops.steiner_topo.steiner_topo_cpp as steiner_topo_cpp
 import dreamplace.configure as configure
@@ -17,6 +18,10 @@ import dreamplace.configure as configure
 #     import dreamplace.ops.steiner_topo.steiner_topo_cuda_segment as steiner_topo_cuda_segment
 
 logger = logging.getLogger(__name__)
+
+_FLUTE_LUT_DIR = Path(__file__).resolve().parents[3] / "thirdparty" / "flute" / "lut.ICCAD2015"
+_FLUTE_POWV_FILE = _FLUTE_LUT_DIR / "POWV9.dat"
+_FLUTE_POST_FILE = _FLUTE_LUT_DIR / "POST9.dat"
 
 
 class SteinerTopoFunction(Function):
@@ -536,7 +541,9 @@ class SteinerTopo(nn.Module):
             self.flat_net2pin_map,
             self.flat_net2pin_start_map,
             self.ignore_net_degree,
-            self.deterministic_flag
+            self.deterministic_flag,
+            str(_FLUTE_POWV_FILE),
+            str(_FLUTE_POST_FILE),
         )
 
         self.update_cache(new_outputs_tuple)

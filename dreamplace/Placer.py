@@ -26,16 +26,14 @@ import json
 import os
 import sys
 import time
-
-os.environ.setdefault('eda_tool', "iEDA")
-os.environ.setdefault('CUDA_LAUNCH_BLOCKING', '0')
-os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
-
+from typing import Any
 import torch
 import random
 import numpy as np
 import logging
 
+os.environ['eda_tool'] = "ecc"
+os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
 # for consistency between python2 and python3
 root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if root_dir not in sys.path:
@@ -45,16 +43,12 @@ top_root_dir = os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))))
 if top_root_dir not in sys.path:
     sys.path.append(top_root_dir)
-    sys.path.append(top_root_dir + "/third_party/aieda")
 import dreamplace.configure as configure
 from dreamplace.Params import Params
 from dreamplace.macroPlaceDB import MacroPlaceDB as PlaceDB
-import dreamplace.NonLinearPlace as NonLinearPlace
-
-# from data_manager.aimp_dm import AimpDataManager
-from tools.iEDA.module.sta import IEDASta
-from tools.iEDA.module.io import IEDAIO
-# import dreamplace.Timer as Timer
+# NonLinearPlace is imported inside place() to avoid pulling in compiled
+# C++ extensions at module import time. This keeps `import dreamplace.Placer`
+# pure-Python so the environment check can succeed before the CMake ops exist.
 
 
 
@@ -133,15 +127,14 @@ class PlacementEngine:
         self.density = float("inf")
         self.metrics = None
 
-    def setup_rawdb(self, data_manager: IEDAIO):
+    def setup_rawdb(self, ecc_module: Any):
         # read cpp database
         tt = time.time()
         if self.placedb is None:
-            self.data_manager = data_manager
-            self.placedb = PlaceDB(data_manager)
+            self.ecc_module = ecc_module
+            self.placedb = PlaceDB(ecc_module)
             if self.params.with_sta:
-                ieda_sta = IEDASta(self.data_manager.dir_workspace)
-                ieda_sta.init_sta()
+                self.ecc_module.init_sta()
             self.placedb.setup_rawdb(self.params)
 
         logging.info("setting up raw database takes %.2f seconds" %
@@ -158,9 +151,7 @@ class PlacementEngine:
 
     def write_back(self, def_file="output.def"):
         # self.placedb.write_placement_back(self.params)
-        # self.engine_data_ieda.gds_save(def_file+".gds")
-        ieda_io = IEDAIO(self.data_manager.dir_workspace)
-        ieda_io.def_save(def_file)
+        self.ecc_module.def_save(def_file)
 
     def update_params(self, new_params: Params):
         self.params.fromJson(new_params.__dict__)
@@ -169,25 +160,16 @@ class PlacementEngine:
 
     def place(self):
         # solve placement
+        import dreamplace.NonLinearPlace as NonLinearPlace  # deferred to avoid compiled-op imports at module level
         tt = time.time()
-        timer = None
+        self.params.plot_flag = True
         if self.params.timing_opt_flag:
-            tt = time.time()
-            # timer = Timer.Timer()
-            # timer(params, self.placedb)
-            # This must be done to explicitly execute the parser builders.
-            # The parsers in OpenTimer are all in lazy mode.
-            # timer.update_timing()
-            logging.info("reading timer takes %.2f seconds" %
-                         (time.time() - tt))
-
-            # Dump example here. Some dump functions are defined.
-            # Check instance methods defined in Timer.py for debugging.
-            # timer.dump_pin_cap("pin_caps.txt")
-            # timer.dump_graph("timing_graph.txt")
+            raise RuntimeError(
+                "timing_opt_flag is no longer supported because OpenTimer integration has been removed"
+            )
 
         self.placer = NonLinearPlace.NonLinearPlace(
-            self.params, self.placedb, timer)
+            self.params, self.placedb)
         logging.info(
             "non-linear placement initialization takes %.2f seconds"
             % (time.time() - tt)
@@ -324,8 +306,7 @@ class PlacementEngine:
             "%s.tcl"
             % (self.params.design_name()),
         )
-        ieda_io = IEDAIO(self.data_manager.dir_workspace)
-        ieda_io.tcl_save(tcl_file)
+        self.ecc_module.tcl_save(tcl_file)
         # self.placedb.write(self.params, self.gp_out_file)
 
     def run(self):
@@ -392,49 +373,3 @@ class PlacementEngine:
         logging.info(f"Final PPA: {final_ppa}")
 
         return final_ppa
-
-
-if __name__ == "__main__":
-    """
-    @brief main function to invoke the entire placement flow.
-    """
-    logging.root.name = 'DREAMPlace'
-    logging.basicConfig(level=logging.INFO,
-                        format='[%(levelname)-7s] %(name)s - %(message)s',
-                        stream=sys.stdout)
-    # if len(sys.argv) == 1 or "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
-    # params.printWelcome()
-    # params.printHelp()
-    # exit()
-    # init workspace
-    # workspace_path = "/data/project_share/aimp_test/XSTop/workspace_XSTop"
-    # workspace_path = "/home/xingchaoyu/KIANV_workspace/workspace"
-    workspace_path = "/nfs/share/home/zhaoxueyan/flow_110_commercial/KIANV_workspace/workspace"
-    # init aimp
-    data_manager = DataManager(workspace_path)
-    params = Params.Params()
-    workspace = data_manager.workspace
-    ieda_io = IEDAIO(dir_workspace=workspace.workspace,
-                     input_def=workspace.json_path.def_input_path)
-    data_manager.set_ieda_io(ieda_io)
-    ieda_io.read_def()
-    # params.with_sta = False
-    # init PlacementEngine
-    # json_file = '/home/xingchaoyu/code/ai-mp/workspace_aimp/workspace_NutShell/aimp/log/run-0_0_0/parameters.json'
-    json_file = '/home/xingchaoyu/code/ai-mp/AutoDMP/dreamplace/params2.json'
-    # json_file = '/home/xingchaoyu/code/ai-eda/app/AutoDMP/test/XS_TOP_TSMC28_0208/mobohb_log/XS_TOP/run-1_0_0/parameters.json'
-    # json_file = '/home/xingchaoyu/code/ai-mp/workspace_aimp/workspace_NutShell/aimp/log/run-0_0_8/parameters.json'
-    with open(json_file, 'r') as f:
-        params.fromJson(json.load(f))
-    # params.base_design_name = data_manager.
-    engine = PlacementEngine(params)
-
-    engine.setup_rawdb(data_manager=data_manager)
-    ppa = engine.run()
-
-    ''' 
-    path = '/home/xingchaoyu/code/ai-eda/'
-    json_file = path + 'app/AutoDMP/test/ariane133_nangate45_51/mobohb_log/NV_ariane133_partition_c/run-0_0_0/parameters.json'
-
-
-    '''

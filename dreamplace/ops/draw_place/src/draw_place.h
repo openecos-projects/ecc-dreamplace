@@ -43,16 +43,19 @@ int drawPlaceLauncher(const T* x_tensor, const T* y_tensor,
       num_movable_nodes, num_filler_nodes, num_pins, xl, yl, xh, yh, site_width,
       row_height, bin_size_x, bin_size_y, show_fillers);
   typename PlaceDrawer<T, int>::FileFormat ff;
-  if (filename.substr(filename.size() - 4) == ".eps") {
-    ff = PlaceDrawer<T, int>::EPS;
-  } else if (filename.substr(filename.size() - 4) == ".pdf") {
+  if (filename.size() >= 4 &&
+      filename.substr(filename.size() - 4) == ".pdf") {
     ff = PlaceDrawer<T, int>::PDF;
-  } else if (filename.substr(filename.size() - 4) == ".svg") {
+  } else if (filename.size() >= 4 &&
+             filename.substr(filename.size() - 4) == ".svg") {
     ff = PlaceDrawer<T, int>::SVG;
-  } else if (filename.substr(filename.size() - 4) == ".png") {
+  } else if (filename.size() >= 4 &&
+             filename.substr(filename.size() - 4) == ".png") {
     ff = PlaceDrawer<T, int>::PNG;
   } else {
-    ff = PlaceDrawer<T, int>::GDSII;
+    dreamplacePrint(kERROR, "unsupported placement drawing format: %s\n",
+                    filename.c_str());
+    return false;
   }
   return drawer.run(filename, ff);
 }
@@ -60,5 +63,4 @@ int drawPlaceLauncher(const T* x_tensor, const T* y_tensor,
 DREAMPLACE_END_NAMESPACE
 
 #endif
-
 

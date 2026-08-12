@@ -1,0 +1,58 @@
+name: Build DreamPlace Wheel
+description: Compile C++ operators, build raw wheel, auditwheel repair, smoke test
+# Requires: container quay.io/pypa/manylinux_2_34_x86_64 at the job level
+
+runs:
+  using: composite
+  steps:
+    - name: Install system dependencies
+      shell: bash
+      run: |
+        dnf install -y epel-release
+        dnf config-manager --set-enabled crb || true
+        dnf install -y \
+          cmake ninja-build pkgconfig patchelf \
+          boost-devel cairo-devel gflags-devel \
+          glog-devel flex flex-devel bison eigen3-devel gtest-devel unzip zip
+
+    - name: Setup Python 3.11
+      shell: bash
+      run: echo "/opt/python/cp311-cp311/bin" >> "$GITHUB_PATH"
+
+    - name: Setup uv
+      uses: astral-sh/setup-uv@v5
+      with:
+        version: latest
+        enable-cache: true
+
+    - name: Install Python dependencies
+      shell: bash
+      run: uv sync --frozen --all-groups --python 3.11
+
+    - name: Build repaired wheel
+      shell: bash
+      run: |
+        # --no-build-isolation: the C++ ops must compile against the locked
+        # torch (build-system requires would otherwise resolve the latest
+        # torch, whose C++ ABI may not match the runtime torch used by ecc).
+        uv build --verbose --no-build-isolation
+
+        # Torch and CUDA libs excluded from auditwheel repair -- DreamPlace is built with
+        # TORCH_ENABLE_CUDA=0 and torch is a runtime dependency (not bundled). Without these
+        # exclusions auditwheel would bundle ~2 GB of shared libraries.
+        EXCLUDE_LIBS=(
+            libtorch.so libtorch_cpu.so libtorch_python.so libc10.so libshm.so
+            libgomp.so.1
+            # CUDA (not present in CPU build, but excluded as safety net)
+            libcudart.so.12 libcublasLt.so.12 libcublas.so.12 libcudnn.so.9
+            libcupti.so.12 libnvToolsExt.so.1 libnvrtc.so.12 libcufft.so.11
+            libcurand.so.10 libcusparse.so.12 libcusolver.so.11 libnccl.so.2
+            libnvJitLink.so.12 libtriton.so
+        )
+        exclude_flags=()
+        for lib in "${EXCLUDE_LIBS[@]}"; do
+            exclude_flags+=(--exclude "$lib")
+        done
+
+        mkdir -p dist/wheel/repaired
+        uv run -m auditwheel repair dist/*.whl -w dist/wheel/repaired "${exclude_flags[@]}" --disable-isa-ext-check

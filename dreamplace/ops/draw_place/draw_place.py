@@ -50,6 +50,10 @@ class DrawPlaceFunction(Function):
         filename,
         show_fillers=True,
     ):
+        suffix = os.path.splitext(filename)[1].lower()
+        if suffix not in {".png", ".pdf", ".svg"}:
+            raise ValueError(f"unsupported placement drawing format: {suffix or filename}")
+
         ret = draw_place_cpp.forward(
             pos,
             node_size_x.cpu(),
@@ -71,7 +75,7 @@ class DrawPlaceFunction(Function):
             show_fillers,
         )
         # if C/C++ API failed, try with python implementation
-        if not filename.endswith(".gds") and not ret:
+        if suffix == ".png" and not ret:
             ret = PlaceDrawer.PlaceDrawer.forward(
                 pos,
                 node_size_x.cpu(),

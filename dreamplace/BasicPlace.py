@@ -46,8 +46,7 @@ import dreamplace.ops.pin_pos.pin_pos as pin_pos
 import dreamplace.ops.global_swap.global_swap as global_swap
 import dreamplace.ops.k_reorder.k_reorder as k_reorder
 import dreamplace.ops.independent_set_matching.independent_set_matching as independent_set_matching
-# import dreamplace.ops.pin_weight_sum.pin_weight_sum as pws
-# import dreamplace.ops.timing.timing as timingimport
+import dreamplace.ops.irt_egr.irt_egr as irt_egr
 import dreamplace.ops.steiner_topo.steiner_topo as steiner_topo
 from dreamplace.ops.timing_propagation.timing_propagation import ARCS_INFO, LUTS_INFO
 import pdb
@@ -544,13 +543,11 @@ class PlaceOpCollection(object):
         self.draw_place_op = None
         self.route_utilization_map_op = None
         self.pin_utilization_map_op = None
-        self.nctugr_congestion_map_op = None
         self.irt_egr_congestion_map_op = None
         self.adjust_node_area_op = None
         self.macro_overlap_op = None
         self.update_macro_overlap_weight_op = None
         self.macro_refinement_op = None
-        self.pws_op = None
 
         # diff timing obj
         self.steiner_topo_op = None
@@ -564,7 +561,7 @@ class BasicPlace(nn.Module):
     All placement engines should be derived from this class.
     """
 
-    def __init__(self, params, placedb, timer):
+    def __init__(self, params, placedb):
         """
         @brief initialization
         @param params parameter
@@ -784,12 +781,6 @@ class BasicPlace(nn.Module):
         )
         # rectilinear minimum steiner tree wirelength from flute
         # can only be called once
-        if params.timing_opt_flag:
-            self.op_collections.pws_op = self.build_pws(
-                placedb, self.data_collections)
-            self.op_collections.timing_op = self.build_timing_op(
-                params, placedb, timer)
-
         # hpwl for nets with smaller weight than ignore_net_weight
         self.op_collections.weight_hpwl_op = self.build_weight_hpwl(
             params,
@@ -830,6 +821,11 @@ class BasicPlace(nn.Module):
         self.op_collections.detailed_place_op = self.build_detailed_placement(
             params, placedb, self.data_collections, self.device
         )
+        if (getattr(params, "egr_padding_flag", 0)
+                and getattr(params, "legalize_flag", 0)):
+            self.op_collections.irt_egr_congestion_map_op = (
+                self.build_irt_egr_congestion_map(params, placedb)
+            )
         # draw placement
         self.op_collections.draw_place_op = self.build_draw_placement(
             params, placedb, self.data_collections
@@ -933,22 +929,6 @@ class BasicPlace(nn.Module):
 
         return build_wirelength_op
 
-    def build_pws(self, placedb, data_collections):
-        """
-        @brief accumulate pin weights of a node
-        @param placedb placement database
-        @param data_collections a collection of all data and variables required for constructing the ops
-        """
-        # CPU version by default...
-        pws_op = pws.PinWeightSum(
-            flat_nodepin=data_collections.flat_node2pin_map,
-            nodepin_start=data_collections.flat_node2pin_start_map,
-            pin2net_map=data_collections.pin2net_map,
-            num_nodes=placedb.num_nodes,
-            algorithm='node-by-node')
-
-        return pws_op
-
     def build_weight_hpwl(self, params, placedb, data_collections, pin_pos_op, device):
         """
         @brief compute half-perimeter wirelength for weights less than ignore_net_weight
@@ -1020,36 +1000,6 @@ class BasicPlace(nn.Module):
                 return wls / data_collections.fp_info.scale_factor
 
         return build_wirelength_op
-
-    def build_timing_op(self, params, placedb, timer=None):
-        """
-        @brief build the operator for timing analysis and feedbacks.
-        @param placedb the placement database
-        @param timer the timer object used in timing-driven mode
-        """
-        return timing.TimingOpt(
-            timer,  # The timer should be at the same level as placedb.
-            placedb.net_names,  # The net names are required by OpenTimer.
-            placedb.pin_names,  # The pin names are required by OpenTimer.
-            placedb.flat_net2pin_map,
-            placedb.flat_net2pin_start_map,
-            placedb.net_name2id_map,
-            placedb.pin_name2id_map,
-            placedb.pin2node_map,
-            placedb.pin_offset_x,
-            placedb.pin_offset_y,
-            placedb.net_criticality,
-            placedb.net_criticality_deltas,
-            placedb.net_weights,
-            placedb.net_weight_deltas,
-            wire_resistance_per_micron=params.wire_resistance_per_micron,
-            wire_capacitance_per_micron=params.wire_capacitance_per_micron,
-            net_weighting_scheme=params.net_weighting_scheme,
-            momentum_decay_factor=params.momentum_decay_factor,
-            scale_factor=params.scale_factor,
-            lef_unit=placedb.rawdb.lefUnit(),
-            def_unit=placedb.rawdb.defUnit(),
-            ignore_net_degree=params.ignore_net_degree)
 
     def build_legality_check(self, params, placedb, data_collections, device):
         """
@@ -1750,6 +1700,15 @@ class BasicPlace(nn.Module):
                 ),
                 f,
             )
+
+    def build_irt_egr_congestion_map(self, params, placedb):
+        """
+        @brief call iRT EGR for congestion estimation.
+        """
+        return irt_egr.IRT_eGR(
+            params=params,
+            placedb=placedb,
+        )
 
     def load(self, params, placedb, filename):
         """

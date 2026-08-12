@@ -388,7 +388,6 @@ int kreorderCPULauncher(DetailedPlaceDB<T>& db, int K, int max_iters,
                     CPUTimer::getTimerPeriod() * time / runs);
   }
 
-  // db.draw_place("final.gds");
 
   return 0;
 }

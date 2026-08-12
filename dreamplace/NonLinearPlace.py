@@ -1451,14 +1451,13 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         plt.close()
         logging.info(f"EGR Steiner plot saved. Guide Length: {guide_length}, EGR Steiner Length: {steiner_length}")
 
-    def __init__(self, params, placedb, timer):
+    def __init__(self, params, placedb):
         """
         @brief initialization.
         @param params parameters
         @param placedb placement database
-        @param timer the timing analysis engine
         """
-        super(NonLinearPlace, self).__init__(params, placedb, timer)
+        super(NonLinearPlace, self).__init__(params, placedb)
 
     def __call__(self, params, placedb):
         """
@@ -3844,6 +3843,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     if getattr(params, "adjust_gpugr_area_flag", False):
                                         route_map_source = "gpugr"
                                     elif params.adjust_nctugr_area_flag:
+                                        # Legacy key retained for config compatibility; use ECC/iRT EGR.
                                         route_map_source = "irt_egr"
                                     else:
                                         route_map_source = "rudy"
@@ -4940,25 +4940,6 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     placedb.num_movable_nodes],
         )
 
-        # apply macro orientations solution
-        if False:
-            orients_map = {
-                "N": 0,
-                "S": 1,
-                "W": 2,
-                "E": 3,
-                "FN": 4,
-                "FS": 5,
-                "FW": 6,
-                "FE": 7,
-                "UNKNOWN": 8,
-            }
-            for macro, orient in macro_orients:
-                placedb.rawdb.setNodeOrient(
-                    int(macro), place_io_cpp.OrientEnum.OrientType(
-                        orients_map[orient])
-                )
-
         # update pin offsets of std cells
         # assume rows are FS = 0, N = 1, FS, ...
         # cur_orient = torch.from_numpy(
@@ -4988,25 +4969,6 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         # plot placement
         if params.plot_flag:
             self.plot(params, placedb, iteration, cur_pos)
-
-        # apply macro orientations solution
-        if False:
-            orients_map = {
-                "N": 0,
-                "S": 1,
-                "W": 2,
-                "E": 3,
-                "FN": 4,
-                "FS": 5,
-                "FW": 6,
-                "FE": 7,
-                "UNKNOWN": 8,
-            }
-            for macro, orient in macro_orients:
-                placedb.rawdb.setNodeOrient(
-                    int(macro), place_io_cpp.OrientEnum.OrientType(
-                        orients_map[orient])
-                )
 
         # update pin offsets of std cells
         # assume rows are FS = 0, N = 1, FS, ...

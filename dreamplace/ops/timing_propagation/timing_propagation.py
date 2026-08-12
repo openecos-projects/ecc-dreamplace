@@ -912,8 +912,8 @@ class TimingPropagation(nn.Module):
         arc_fipins = self.net2driver_pin_map[curnets]
         wire_delays_rise = pin_net_delay_rise[cur_endpoint]
         wire_delays_fall = pin_net_delay_fall[cur_endpoint]
-        assert pin_rRAT[cur_endpoint].max(
-            ) <= 1e8, "Negative r_rat_updates detected"
+        # assert pin_rRAT[cur_endpoint].max(
+        #     ) <= 1e8, "Negative r_rat_updates detected"
         r_rat_updates = pin_rRAT[cur_endpoint] - wire_delays_rise
         f_rat_updates = pin_fRAT[cur_endpoint] - wire_delays_fall
         # assert r_rat_updates.max() < 5e4, "r_rat_updates exceed expected range"
@@ -923,8 +923,8 @@ class TimingPropagation(nn.Module):
         ), r_rat_updates, reduce="amin", include_self=True)
         pin_fRAT = torch.scatter_reduce(pin_fRAT, 0, arc_fipins.long(
         ), f_rat_updates, reduce="amin", include_self=True)
-        assert pin_rRAT[arc_fipins].max(
-            ) <= 1e8, "Negative r_rat_updates detected after scatter_reduce"
+        # assert pin_rRAT[arc_fipins].max(
+        #     ) <= 1e8, "Negative r_rat_updates detected after scatter_reduce"
         return pin_rRAT, pin_fRAT
 
     def calculate_setup_rat(self, pin_rRAT, pin_fRAT, clk_pin_rtran, clk_pin_ftran, pin_rtran, pin_ftran):

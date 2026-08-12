@@ -6,5 +6,4 @@ unitest/a.out
 *.bk
 unitest/in.txt
 unitest/log
-*.gds
 *.bk?

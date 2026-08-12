@@ -3,8 +3,6 @@ cmake_minimum_required(VERSION 3.14)
 project(DREAMPlace LANGUAGES CXX)
 set(CMAKE_VERBOSE_MAKEFILE ON)
 
-# set(PYTHON_EXECUTABLE "/home/zhaoxueyan/anaconda3/envs/PlaceOPT/bin/python")
-
 if (CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     set (CMAKE_INSTALL_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/install" CACHE PATH "Prefix prepended to install directories" FORCE )
 endif()
@@ -31,6 +29,7 @@ if(NOT CMAKE_CXX_ABI)
         "Choose the value for _GLIBCXX_USE_CXX11_ABI, options are: 0|1."
         FORCE)
 endif(NOT CMAKE_CXX_ABI)
+
 message(STATUS "CMAKE_CXX_ABI: _GLIBCXX_USE_CXX11_ABI=${CMAKE_CXX_ABI}")
 add_definitions(-D_GLIBCXX_USE_CXX11_ABI=${CMAKE_CXX_ABI})
 
@@ -58,10 +57,6 @@ set_property(GLOBAL PROPERTY POSITION_INDEPENDENT_CODE TRUE)
 
 find_package(OpenMP REQUIRED)
 #find_program(PYTHON "python" REQUIRED)
-find_package(ZLIB REQUIRED)
-set(Boost_NO_BOOST_CMAKE TRUE)
-find_package(Boost 1.55.0 REQUIRED)
-message(STATUS "Boost_INCLUDE_DIRS = ${Boost_INCLUDE_DIRS}")
 
 #find_package(CUDA 9.0)
 find_package(Cairo)
@@ -81,11 +76,9 @@ message(STATUS "FLUTE_INCLUDE_DIRS ${FLUTE_INCLUDE_DIRS}")
 message(STATUS "FLUTE_LINK_DIRS ${FLUTE_LINK_DIRS}")
 include_directories(${FLUTE_INCLUDE_DIRS})
 
-# Limbo for parsers 
+# Minimal Limbo solver subset used by macro legalization.
 set(LIMBO_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/Limbo)
 message(STATUS "LIMBO_SOURCE_DIR ${LIMBO_SOURCE_DIR}")
-set(LIMBO_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/thirdparty/Limbo)
-message(STATUS "LIMBO_BINARY_DIR ${LIMBO_BINARY_DIR}")
 if(CUDA_FOUND)
   if (${CUDA_VERSION_MAJOR} VERSION_GREATER_EQUAL "11")
     set(CUB_DIR ${CUDA_INCLUDE_DIRS})
@@ -108,15 +101,7 @@ find_path(LEMON_SOURCE_DIR lemon PATHS ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/Li
 set(LEMON_INCLUDE_DIRS "${LEMON_SOURCE_DIR}")
 string(REPLACE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR} LEMON_BINARY_DIR ${LEMON_SOURCE_DIR})
 list(APPEND LEMON_INCLUDE_DIRS "${LEMON_BINARY_DIR}")
-set(LEMON_LINK_DIRS ${LEMON_BINARY_DIR}/lemon)
 message(STATUS "LEMON_INCLUDE_DIRS ${LEMON_INCLUDE_DIRS}")
-message(STATUS "LEMON_LINK_DIRS ${LEMON_LINK_DIRS}")
-
-set(OPENTIMER_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/OpenTimer)
-message(STATUS "OPENTIMER_SOURCE_DIR ${OPENTIMER_SOURCE_DIR}")
-set(OPENTIMER_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/thirdparty/OpenTimer)
-message(STATUS "OPENTIMER_BINARY_DIR ${OPENTIMER_BINARY_DIR}")
-# include_directories(${OPENTIMER_SOURCE_DIR})
 
 if (CUDA_FOUND)
   if (NOT CMAKE_CUDA_ARCHITECTURES)
@@ -129,7 +114,9 @@ if (CUDA_FOUND)
       # arch 8.6 removed for compatability with 3090
       # list(APPEND CMAKE_CUDA_ARCHITECTURES 8.6)
     endif(${CUDA_VERSION_MAJOR} VERSION_GREATER "10")
+    set(CMAKE_CUDA_ARCHITECTURES ${DREAMPLACE_CUDA_ARCHITECTURES})
   endif(NOT CMAKE_CUDA_ARCHITECTURES)
+  message(STATUS "DreamPlace CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 
   # for cuda_add_library
   cuda_select_nvcc_arch_flags(CUDA_ARCH_FLAGS ${CMAKE_CUDA_ARCHITECTURES})
@@ -141,8 +128,13 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/dreamplace/configure.py.in ${CMAKE_CU
 
 add_subdirectory(thirdparty)
 add_subdirectory(dreamplace)
-add_subdirectory(unittest)
+# unittest/ and test/ are disabled: their install rules copy upstream test
+# scripts into the wheel platlib as top-level `unittest`/`test` namespace
+# packages, which shadow the Python stdlib modules of the same names under
+# scikit-build-core's editable install finder (breaks pytest and any
+# `import unittest` in the environment).
+#add_subdirectory(unittest)
 add_subdirectory(benchmarks)
-add_subdirectory(test)
+#add_subdirectory(test)
 
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/dreamplace/configure.py DESTINATION dreamplace)

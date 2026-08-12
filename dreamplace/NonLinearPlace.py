@@ -3926,7 +3926,6 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 low_util_context = None
                                 fixed_target_area = None
                                 if round_adjust_route_area_flag:
-                                    route_map_source = _resolve_route_map_source(params)
                                     if route_map_source == "gpugr":
                                         _sync_gpugr_route_grid_to_autodmp(
                                             params,

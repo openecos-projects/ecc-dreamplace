@@ -16,11 +16,12 @@ This record covers the local, non-published result on
   - second parent: `8e18e1b2` (local experiment lineage containing the source baseline)
 - Safety ref: `codex/pre-routability-main-merge-20260812` -> `05d92c93f707223558b7cd4656258f106916942e`
 - Final local branch: `routability-driven-placement`
-- Final child tip: `c07da3e5f7e7695757e5d3d020dc2681495795d6`
+- Final child tip: `2cf70d6b` (local verification tip)
 
 Follow-up commits after the merge are `9cb66fa0` (ECC API integration),
-`241b5586` (compatibility hardening), and `c07da3e5` (legacy EGR boundary
-clarification and contract test).
+`241b5586` (compatibility hardening), `c07da3e5` (legacy EGR boundary
+clarification and contract test), `4bbab9a0` (verification record), and
+`2cf70d6b` (duplicate-log cleanup).
 
 ## Implementation and dependency boundary
 

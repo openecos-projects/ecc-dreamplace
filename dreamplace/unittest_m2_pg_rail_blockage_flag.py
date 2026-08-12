@@ -1,56 +1,17 @@
 import json
 import os
-import sys
 import types
 import unittest
-from pathlib import Path
-from unittest import mock
 
 import numpy as np
 
-
-AUTODMP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if AUTODMP_ROOT not in sys.path:
-    sys.path.insert(0, AUTODMP_ROOT)
-
-BENCHMARK_ROOT = Path(__file__).resolve().parents[4]
-
-
-def _install_ieda_stubs():
-    tools = types.ModuleType("tools")
-    ieda = types.ModuleType("tools.iEDA")
-    data = types.ModuleType("tools.iEDA.data")
-    design = types.ModuleType("tools.iEDA.data.design")
-    module = types.ModuleType("tools.iEDA.module")
-    io = types.ModuleType("tools.iEDA.module.io")
-
-    class IEDADesign:
-        pass
-
-    class IEDAIO:
-        pass
-
-    design.IEDADesign = IEDADesign
-    io.IEDAIO = IEDAIO
-    sys.modules.setdefault("tools", tools)
-    sys.modules.setdefault("tools.iEDA", ieda)
-    sys.modules.setdefault("tools.iEDA.data", data)
-    sys.modules.setdefault("tools.iEDA.data.design", design)
-    sys.modules.setdefault("tools.iEDA.module", module)
-    sys.modules.setdefault("tools.iEDA.module.io", io)
-
-
-_install_ieda_stubs()
 
 from dreamplace import macroPlaceDB as macro_place_db_module  # noqa: E402
 from dreamplace.macroPlaceDB import MacroPlaceDB  # noqa: E402
 
 
-class FakeIEDAIO:
+class FakeEccModule:
     calls = []
-
-    def __init__(self, workspace):
-        self.workspace = workspace
 
     def get_dmInst_ptr(self):
         return "dm-inst-ptr"
@@ -62,7 +23,7 @@ class FakeIEDAIO:
 
 class M2PgRailBlockageFlagTest(unittest.TestCase):
     def setUp(self):
-        FakeIEDAIO.calls = []
+        FakeEccModule.calls = []
 
     def _make_params(self, **overrides):
         params = {
@@ -77,10 +38,9 @@ class M2PgRailBlockageFlagTest(unittest.TestCase):
 
     def _run_setup_rawdb(self, params):
         placedb = MacroPlaceDB.__new__(MacroPlaceDB)
-        placedb.data_manager = types.SimpleNamespace(dir_workspace="/tmp/workspace")
+        placedb.ecc_module = FakeEccModule()
         placedb.pydb = None
-        with mock.patch.object(macro_place_db_module, "IEDAIO", FakeIEDAIO):
-            placedb.setup_rawdb(params)
+        placedb.setup_rawdb(params)
         return placedb
 
     def test_schema_defaults_disable_hard_blockage_and_enable_soft_density(self):
@@ -104,19 +64,19 @@ class M2PgRailBlockageFlagTest(unittest.TestCase):
             self._make_params(ieda_m2_pg_rail_blockage_flag=0)
         )
 
-        self.assertEqual(len(FakeIEDAIO.calls), 1)
+        self.assertEqual(len(FakeEccModule.calls), 1)
         self.assertEqual(
-            FakeIEDAIO.calls[0],
-            ("dm-inst-ptr", 7, 11, 1, 0, False, True),
+            FakeEccModule.calls[0],
+            ("dm-inst-ptr", 7, 11, 1, 0),
         )
 
     def test_setup_rawdb_defaults_missing_hard_flag_to_disabled_with_soft_density_on(self):
         self._run_setup_rawdb(self._make_params())
 
-        self.assertEqual(len(FakeIEDAIO.calls), 1)
+        self.assertEqual(len(FakeEccModule.calls), 1)
         self.assertEqual(
-            FakeIEDAIO.calls[0],
-            ("dm-inst-ptr", 7, 11, 1, 0, False, True),
+            FakeEccModule.calls[0],
+            ("dm-inst-ptr", 7, 11, 1, 0),
         )
 
     def test_setup_rawdb_hard_flag_on_disables_soft_density_collection(self):
@@ -124,10 +84,10 @@ class M2PgRailBlockageFlagTest(unittest.TestCase):
             self._make_params(ieda_m2_pg_rail_blockage_flag=1)
         )
 
-        self.assertEqual(len(FakeIEDAIO.calls), 1)
+        self.assertEqual(len(FakeEccModule.calls), 1)
         self.assertEqual(
-            FakeIEDAIO.calls[0],
-            ("dm-inst-ptr", 7, 11, 1, 0, True, False),
+            FakeEccModule.calls[0],
+            ("dm-inst-ptr", 7, 11, 1, 0),
         )
 
     def test_setup_rawdb_zero_soft_density_weight_disables_density_collection(self):
@@ -138,10 +98,10 @@ class M2PgRailBlockageFlagTest(unittest.TestCase):
             )
         )
 
-        self.assertEqual(len(FakeIEDAIO.calls), 1)
+        self.assertEqual(len(FakeEccModule.calls), 1)
         self.assertEqual(
-            FakeIEDAIO.calls[0],
-            ("dm-inst-ptr", 7, 11, 1, 0, False, False),
+            FakeEccModule.calls[0],
+            ("dm-inst-ptr", 7, 11, 1, 0),
         )
 
     def test_iopin_density_weight_does_not_affect_m2_pg_rail_flag(self):
@@ -149,10 +109,10 @@ class M2PgRailBlockageFlagTest(unittest.TestCase):
             self._make_params(ieda_m2_pg_rail_blockage_flag=0, iopin_density_weight=3.0)
         )
 
-        self.assertEqual(len(FakeIEDAIO.calls), 1)
+        self.assertEqual(len(FakeEccModule.calls), 1)
         self.assertEqual(
-            FakeIEDAIO.calls[0],
-            ("dm-inst-ptr", 7, 11, 1, 0, False, True),
+            FakeEccModule.calls[0],
+            ("dm-inst-ptr", 7, 11, 1, 0),
         )
 
     def test_flag_resolver_accepts_numeric_and_text_boolean_values(self):
@@ -179,32 +139,6 @@ class M2PgRailBlockageFlagTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             MacroPlaceDB._resolve_ieda_m2_pg_rail_blockage_flag(params)
-
-    def test_ieda_direct_pydb_defaults_hard_blockage_off_and_soft_density_on(self):
-        header_path = (
-            BENCHMARK_ROOT
-            / "AiEDA/third_party/iEDA/src/interface/python/py_imp/"
-            "idb_to_imp_db/PyPlaceDB.h"
-        )
-        register_path = (
-            BENCHMARK_ROOT
-            / "AiEDA/third_party/iEDA/src/interface/python/py_imp/"
-            "py_register_imp.cpp"
-        )
-
-        header = header_path.read_text(encoding="utf-8")
-        register = register_path.read_text(encoding="utf-8")
-
-        self.assertIn("bool include_m2_pg_rail_blockage = false", header)
-        self.assertIn("bool include_m2_pg_rail_density = true", header)
-        self.assertIn(
-            'py::arg("include_m2_pg_rail_blockage") = false',
-            register,
-        )
-        self.assertIn(
-            'py::arg("include_m2_pg_rail_density") = true',
-            register,
-        )
 
     def test_place_blockage_count_must_fit_trailing_fixed_terminals(self):
         placedb = MacroPlaceDB.__new__(MacroPlaceDB)
@@ -344,28 +278,6 @@ class M2PgRailBlockageFlagTest(unittest.TestCase):
         self.assertTrue(
             np.array_equal(placedb.m2_pg_rail_density_boxes[:, 2], old_hard_node_xh)
         )
-
-    def test_native_def_placement_blockage_collection_stays_outside_flag_guard(self):
-        source_path = (
-            BENCHMARK_ROOT
-            / "AiEDA/third_party/iEDA/src/interface/python/py_imp/"
-            "idb_to_imp_db/PyPlaceDB.cpp"
-        )
-        source = source_path.read_text(encoding="utf-8")
-
-        native_blockage_pos = source.index(
-            "for (auto blockage : db->get_idb_design()->get_blockage_list()->get_blockage_list())"
-        )
-        flag_guard_pos = source.index("if (include_m2_pg_rail_blockage)")
-        append_pos = source.index("blockage_ps_list.get_rectangles(vRect)")
-
-        self.assertLess(native_blockage_pos, flag_guard_pos)
-        self.assertLess(flag_guard_pos, append_pos)
-        self.assertIn("blockage_ps_list += ps;", source[native_blockage_pos:flag_guard_pos])
-        self.assertIn("blockage_ps_list += rail_ps;", source[flag_guard_pos:append_pos])
-        self.assertIn("rail_density_ps", source[flag_guard_pos:append_pos])
-        self.assertIn("m2_pg_rail_density_boxes", source[flag_guard_pos:])
-        self.assertIn("addNode(\"R0\", block_name, box, true);", source[append_pos:])
 
 
 if __name__ == "__main__":

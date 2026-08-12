@@ -45,17 +45,14 @@ import dreamplace.ops.electric_potential.electric_overflow as electric_overflow
 import dreamplace.ops.electric_potential.electric_potential as electric_potential
 import dreamplace.ops.density_potential.density_potential as density_potential
 import dreamplace.ops.rudy.rudy as rudy
-import dreamplace.ops.rudy.rudy_macros as rudy_macros
 import dreamplace.ops.pin_utilization.pin_utilization as pin_utilization
 import dreamplace.ops.irt_egr.irt_egr as eGR
-import dreamplace.ops.gpugr.gpugr as gpugr_congestion
 import dreamplace.ops.adjust_node_area.adjust_node_area as adjust_node_area
 import dreamplace.ops.macro_overlap.macro_overlap as macro_overlap
 import dreamplace.ops.macro_refinement.macro_refinement as macro_refinement
 from dreamplace.ops.timing_propagation.timing_propagation import TimingPropagation
 from dreamplace.ops.rc_timing.rc_timing import RCTiming
 from dreamplace.BasicPlace import PlaceDataCollection
-from tools.iEDA.module.sta import IEDASta
 from dreamplace.ops.routability.plot_map import plot_node_grad_directions
 from dreamplace.ops.routability.profile_timing import l_shape_log_verbose, profile_scope
 from dreamplace.ops.routability import enhanced_inflation_controller
@@ -883,8 +880,22 @@ class PlaceObj(nn.Module):
         # ==============================================================================
         # --- 步骤 2: 初始化iEDA并使用正确的线电容为其构建RC树 ---
         # ==============================================================================
-        logging.info("正在初始化iEDA STA引擎...")
-        ieda_sta = IEDASta(self.placedb.data_manager.dir_workspace)
+        logging.info("正在初始化 ECC STA 引擎...")
+        try:
+            ieda_sta = self.placedb.ecc_module
+        except AttributeError as exc:
+            raise RuntimeError(
+                "ECC STA timing data requires the injected ECCToolsModule"
+            ) from exc
+        required_methods = (
+            "build_rc_tree_from_flat_data",
+            "update_and_get_all_pin_timings",
+        )
+        if not all(hasattr(ieda_sta, method) for method in required_methods):
+            raise RuntimeError(
+                "Current ecc-tools binding does not expose the STA timing API "
+                "required by differentiable timing placement"
+            )
         num_pins = len(self.placedb.pin_names)
         self.id2net_name_map = {v: k for k, v in self.placedb.net_name2id_map.items()}
 
@@ -3926,6 +3937,13 @@ class PlaceObj(nn.Module):
         """
         @brief call Xplace gpugr for congestion estimation
         """
+        try:
+            import dreamplace.ops.gpugr.gpugr as gpugr_congestion
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "GPUGR routability is enabled, but the optional DreamPlace "
+                "GPUGR operator is not available"
+            ) from exc
         return gpugr_congestion.GPUGR(
             params=params,
             placedb=placedb,

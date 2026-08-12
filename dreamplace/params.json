@@ -468,7 +468,7 @@
         "default": 0.001
     },
     "adjust_nctugr_area_flag": {
-        "description": "whether use NCTUgr congestion map to guide area adjustment",
+        "description": "legacy compatibility key; when enabled use the ECC/iRT EGR congestion map for area adjustment (NCTUgr is not invoked)",
         "default": 0
     },
     "adjust_rudy_area_flag": {

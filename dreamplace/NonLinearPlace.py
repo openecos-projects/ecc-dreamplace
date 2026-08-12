@@ -145,7 +145,13 @@ def _get_gpugr_parser_cache_node_names(placedb):
 
 
 def _get_cached_gpugr_operator(placedb):
-    from tools.iEDA.module.gpugr import IEDAGPUGR
+    try:
+        from tools.iEDA.module.gpugr import IEDAGPUGR
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "GPUGR routability is enabled, but the optional "
+            "tools.iEDA.module.gpugr backend is not installed"
+        ) from exc
 
     gpugr_op = getattr(placedb, "_autodmp_gpugr_op", None)
     if gpugr_op is None:
@@ -914,7 +920,13 @@ def _run_gpugr_final_eval(params, placedb, pos):
     if not bool(getattr(params, "gpugr_final_eval_flag", 0)):
         return None
 
-    from tools.iEDA.module.gpugr import IEDAGPUGR
+    try:
+        from tools.iEDA.module.gpugr import IEDAGPUGR
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "GPUGR final evaluation is enabled, but the optional "
+            "tools.iEDA.module.gpugr backend is not installed"
+        ) from exc
 
     _write_back_autodmp_pos_to_ieda(pos, params, placedb)
 
@@ -1043,7 +1055,13 @@ def _run_gpugr_before_first_area_adjust_and_exit(params, placedb, pos, num_area_
     if num_area_adjust != 0:
         return
 
-    from tools.iEDA.module.gpugr import IEDAGPUGR
+    try:
+        from tools.iEDA.module.gpugr import IEDAGPUGR
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "GPUGR first-inflation evaluation is enabled, but the optional "
+            "tools.iEDA.module.gpugr backend is not installed"
+        ) from exc
 
     logging.info(
         "Run gpugr operator before the first AutoDMP area-adjust round and exit after it finishes."

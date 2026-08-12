@@ -19,8 +19,6 @@ import logging
 import pdb
 import itertools
 
-from tools.iEDA.data.design import IEDADesign
-from tools.iEDA.module.io import IEDAIO
 # import macro_placer.database.fence_region.fence_region as fence_region
 
 datatypes = {
@@ -69,12 +67,15 @@ class MacroPlaceDB(object):
     @brief placement database
     """
 
-    def __init__(self, data_manager: IEDAIO):
+    def __init__(self, ecc_module):
         """
         initialization
         To avoid the usage of list, I flatten everything.
         """
-        self.data_manager = data_manager
+        # The ECC runner owns the native database and injects its wrapper here.
+        # Keep the historical data_manager alias for optional routability hooks.
+        self.ecc_module = ecc_module
+        self.data_manager = ecc_module
         # self.rawdb = None # raw placement database, a C++ object
 
         # number of real nodes, including movable nodes, terminals, and terminal_NIs
@@ -437,8 +438,7 @@ class MacroPlaceDB(object):
     def setup_rawdb(self, params):
         self.dtype = datatypes[params.dtype]
         if self.pydb is None:
-            ieda_dm = IEDAIO(self.data_manager.dir_workspace)
-            self.get_dmInst_ptr = ieda_dm.get_dmInst_ptr()
+            self.ecc_db = self.ecc_module.get_dmInst_ptr()
             include_m2_pg_rail_blockage = (
                 self._resolve_ieda_m2_pg_rail_blockage_flag(params)
             )
@@ -455,15 +455,18 @@ class MacroPlaceDB(object):
                 m2_pg_rail_density_weight,
                 "enabled" if include_m2_pg_rail_density else "disabled",
             )
-            self.pydb = ieda_dm.pydb(
-                self.get_dmInst_ptr,
+            self.pydb = self.ecc_module.pydb(
+                self.ecc_db,
                 params.route_num_bins_x,
                 params.route_num_bins_y,
                 params.routability_opt_flag,
                 params.with_sta,
-                include_m2_pg_rail_blockage,
-                include_m2_pg_rail_density,
             )
+            if include_m2_pg_rail_blockage or include_m2_pg_rail_density:
+                logging.warning(
+                    "Current ecc-tools pydb binding has no M2 PG rail extension; "
+                    "continuing without synthetic rail density/blockages"
+                )
             self._log_ieda_m2_pg_rail_blockage_effect(
                 include_m2_pg_rail_blockage,
                 include_m2_pg_rail_density,
@@ -821,8 +824,7 @@ class MacroPlaceDB(object):
     def virtual_net_init(self):
         max_hop = 2
         print("build macro connections Begin")
-        ieda_design = IEDADesign(self.data_manager.dir_workspace)
-        macro_connections = ieda_design.build_macro_connection_map(max_hop)
+        macro_connections = self.ecc_module.build_macro_connection_map(max_hop)
         print("build macro connections finished")
         print(f" self.num_physical_nodes =  {self.num_physical_nodes}")
         print(f" self.row_height =  {self.row_height}")
@@ -2408,8 +2410,7 @@ row height = %g, site width = %g
     def write_placement_back(self, node_x, node_y):
         # unscale locations
         # TODO:
-        ieda_io = IEDAIO(self.data_manager.dir_workspace)
-        ieda_io.write_placement_back(self.get_dmInst_ptr, node_x, node_y)
+        self.ecc_module.write_placement_back(self.ecc_db, node_x, node_y)
 
     def unscale_pl(self, shift_factor, scale_factor):
         """

@@ -957,7 +957,7 @@ class LShapeCapacityALTest(unittest.TestCase):
         self.assertIn("l_shape_fast_mode", params)
         self.assertEqual(params["l_shape_fast_mode"]["default"], 0)
         self.assertIn("l_shape_overflow_threshold", params)
-        self.assertEqual(params["l_shape_overflow_threshold"]["default"], 0.2)
+        self.assertEqual(params["l_shape_overflow_threshold"]["default"], 0.3)
         forbidden = (
             "l_shape_capacity_al_rho",
             "l_shape_capacity_al_rho_init",

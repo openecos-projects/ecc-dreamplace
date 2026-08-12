@@ -16,7 +16,7 @@ This record covers the local, non-published result on
   - second parent: `8e18e1b2` (local experiment lineage containing the source baseline)
 - Safety ref: `codex/pre-routability-main-merge-20260812` -> `05d92c93f707223558b7cd4656258f106916942e`
 - Final local branch: `routability-driven-placement`
-- Final child tip: pending after EGR padding lifecycle fix (this worktree)
+- Final child tip: pending after this verification-record update
 
 Follow-up commits after the merge are `9cb66fa0` (ECC API integration),
 `241b5586` (compatibility hardening), `c07da3e5` (legacy EGR boundary
@@ -70,7 +70,7 @@ existing enhanced-inflation helper.
 
 ## ECC smoke runs
 
-Both commands were run with the editable ECC entry point and `--only place
+Both commands were rerun after the EGR padding lifecycle fix with the editable ECC entry point and `--only place
 --force --json`:
 
 ```text
@@ -107,6 +107,12 @@ map, and generated these artifacts under
 - `place.map.json` and `place.step.json`
 
 No `SIGSEGV`, NCTUgr binary lookup, or `place_io` import failure occurred.
+
+The rerun preserved the same persisted subflow states and exit status: both
+commands returned `1`, with `run placement=Incomplete`, `save data=Unstart`,
+and `analysis=Unstart`. The plain log again reported overflow `0.744` and
+`placement failed`; the routability workspace again produced the EGR maps,
+margin maps, density maps, and `place.map.json` listed above.
 
 ## Standalone fixture and timing negative check
 

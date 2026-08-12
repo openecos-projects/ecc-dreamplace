@@ -24,6 +24,8 @@ datatypes = {
     'float64': np.float64
 }
 
+MAX_MOVABLE_UTILIZATION = 0.99
+
 
 class MacroPlaceDB(object):
     """
@@ -1447,9 +1449,10 @@ row height = %g, site width = %g
             params.target_density,
         )
 
-        if utilization > 0.99:
+        if utilization > MAX_MOVABLE_UTILIZATION:
             logging.error(
-                "utilization is larger than 1. Please change the core size."                
+                "utilization is larger than %g. Please change the core size.",
+                MAX_MOVABLE_UTILIZATION,
             )
             exit(1)
         # calculate fence region virtual macro
@@ -1749,6 +1752,57 @@ row height = %g, site width = %g
         elif axis == "y":
             return self.row_height * op(v / self.row_height)
 
+    def _apply_cell_padding(self, params):
+        padding = params.cell_padding_x
+        self.cell_padding_x = padding
+        if padding <= 0:
+            return
+
+        movable_slice = slice(0, self.num_movable_nodes)
+        movable_size_x = self.node_size_x[movable_slice]
+        movable_size_y = self.node_size_y[movable_slice]
+        movable_area = float(np.sum(movable_size_x * movable_size_y))
+        padded_movable_area = float(
+            np.sum((movable_size_x + 2 * padding) * movable_size_y)
+        )
+        max_movable_area = MAX_MOVABLE_UTILIZATION * self.total_space_area
+
+        if padded_movable_area > max_movable_area:
+            total_movable_height = float(np.sum(movable_size_y))
+            if total_movable_height > 0:
+                max_padding = max(
+                    (max_movable_area - movable_area) / (2 * total_movable_height),
+                    0.0,
+                )
+                padding = min(
+                    padding,
+                    self.crop_to_site(max_padding, "x", mode="down"),
+                )
+            else:
+                padding = 0.0
+
+            logging.warning(
+                "cell_padding_x %g would increase movable area to %g, above the "
+                "%g * placeable-area limit (%g); reducing it to %g",
+                params.cell_padding_x,
+                padded_movable_area,
+                MAX_MOVABLE_UTILIZATION,
+                max_movable_area,
+                padding,
+            )
+            params.cell_padding_x = padding
+            self.cell_padding_x = padding
+
+        if padding == 0:
+            return
+
+        self.node_size_x[movable_slice] += 2 * padding
+        self.node_x[movable_slice] -= padding
+        movable_cell_tensor = np.arange(
+            0, self.num_movable_nodes, dtype=self.pin2node_map.dtype)
+        movable_cell_pins = np.isin(self.pin2node_map, movable_cell_tensor)
+        self.pin_offset_x[movable_cell_pins] += padding
+
     def update_macros(self, params, area_threshold=10, height_threshold=2):
         # set large cells as macros
         node_areas = self.node_size_x * self.node_size_y
@@ -1837,27 +1891,6 @@ row height = %g, site width = %g
             # self.fixed_macro_pins = np.isin(self.pin2node_map, self.fixed_macro_idx)
             # self.pin_offset_x[self.fixed_macro_pins] += params.macro_halo_x
             # self.pin_offset_y[self.fixed_macro_pins] += params.macro_halo_y
-        # add padding around all_cells
-        if params.cell_padding_x >= 0:
-            # increase macro sizes
-            self.node_size_x[:self.num_movable_nodes] += 2 * params.cell_padding_x
-            # self.node_size_y[:self.num_physical_nodes] += 2 * params.cell_padding_y
-            # self.node_size_x[self.fixed_macro_idx] += 2 * params.macro_halo_x
-            # self.node_size_y[self.fixed_macro_idx] += 2 * params.macro_halo_y
-
-            # shift macro positions
-            self.node_x[:self.num_movable_nodes] -= params.cell_padding_x
-            # self.node_y[:self.num_physical_nodes] -= params.cell_padding_y
-            # self.node_x[self.fixed_macro_idx] -= params.macro_halo_x
-            # self.node_y[self.fixed_macro_idx] -= params.macro_halo_y
-
-            movable_cell_tensor = np.arange(
-                0, self.num_movable_nodes, dtype=self.pin2node_map.dtype)
-            # shift macro pins
-            movable_cell_pins = np.isin(
-                self.pin2node_map, movable_cell_tensor)
-            self.pin_offset_x[movable_cell_pins] += params.cell_padding_x
-            # self.pin_offset_y += params.cell_padding_y
         if params.macro_pin_halo_x >= 0:
             self.node_size_x[self.movable_macro_idx] += self.is_pin_lower_x * \
                 params.macro_pin_halo_x + self.is_pin_upper_x * params.macro_pin_halo_x
@@ -1879,6 +1912,9 @@ row height = %g, site width = %g
             self.pin_offset_y[self.movable_macro_pins] += (
                 self.is_pin_lower_y[move_macro_idx_list[0]] * params.macro_pin_halo_y
             )
+
+        # Apply cell padding after all macro inflation so its area cap sees final cell sizes.
+        self._apply_cell_padding(params)
 
     def write(self, params, filename):
         """

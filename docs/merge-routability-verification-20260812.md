@@ -16,7 +16,7 @@ This record covers the local, non-published result on
   - second parent: `8e18e1b2` (local experiment lineage containing the source baseline)
 - Safety ref: `codex/pre-routability-main-merge-20260812` -> `05d92c93f707223558b7cd4656258f106916942e`
 - Final local branch: `routability-driven-placement`
-- Final child tip: `e48ce8ae` (local verification tip)
+- Final child tip: pending after EGR padding lifecycle fix (this worktree)
 
 Follow-up commits after the merge are `9cb66fa0` (ECC API integration),
 `241b5586` (compatibility hardening), `c07da3e5` (legacy EGR boundary
@@ -55,9 +55,18 @@ unsupported timing text, ordinary profiling timers, or fake modules in tests.
   `pytest --import-mode=importlib`: `45 passed, 1 warning`.
 - `unittest_params_l_shape_preset.py`: `9 passed`.
 - `unittest_m2_pg_rail_blockage_flag.py`: `17 passed`.
+- `egr_padding_flow_test.py`: `1 passed` after restoring the production
+  lifecycle `standard legalization -> EGR map/padding -> padded legalization ->
+  restore`; the fixture now supplies the current `timing_opt_flag` contract.
+- Final combined child focused set including EGR padding and legacy route
+  source: `68 passed, 2 warnings, 1 subtest passed`.
 
 The warning in the 45-test set is the expected CPU-only CUDA initialization
 warning on a host without a CUDA driver.
+
+The two additional warnings in the final combined set are the same expected
+CPU-only CUDA initialization warning plus a PyTorch tensor-copy warning in the
+existing enhanced-inflation helper.
 
 ## ECC smoke runs
 

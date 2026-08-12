@@ -75,6 +75,7 @@ class EGRPaddingFlowTest(unittest.TestCase):
             dump_legalize_solution_flag=0,
             detailed_place_flag=0,
             with_sta=False,
+            timing_opt_flag=0,
         )
 
         import dreamplace.NonLinearPlace as nonlinear_module

@@ -10,6 +10,7 @@
 
 import sys
 import os
+import csv
 import re
 import math
 import time
@@ -17,6 +18,9 @@ import numpy as np
 import logging
 import pdb
 import itertools
+
+from tools.iEDA.data.design import IEDADesign
+from tools.iEDA.module.io import IEDAIO
 # import macro_placer.database.fence_region.fence_region as fence_region
 
 datatypes = {
@@ -24,7 +28,40 @@ datatypes = {
     'float64': np.float64
 }
 
-MAX_MOVABLE_UTILIZATION = 0.99
+
+def _is_enabled_param(value):
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "0", "false", "no", "off")
+    return bool(value)
+
+
+def _pow2_floor(value):
+    return int(math.pow(2, math.floor(math.log2(value))))
+
+
+def _compute_enhanced_auto_adjust_bins(
+    preset_num_bins_x,
+    preset_num_bins_y,
+    layout_height,
+    row_height,
+):
+    preset_num_bins_x = int(preset_num_bins_x)
+    preset_num_bins_y = int(preset_num_bins_y)
+    if preset_num_bins_x <= 0 or preset_num_bins_y <= 0:
+        raise ValueError("preset bin counts must be positive")
+    if layout_height <= 0 or row_height <= 0:
+        return preset_num_bins_x, preset_num_bins_y
+
+    num_rows = int(math.floor(float(layout_height) / float(row_height)))
+    if num_rows <= 0 or preset_num_bins_y <= num_rows:
+        return preset_num_bins_x, preset_num_bins_y
+
+    new_num_bins_y = _pow2_floor(num_rows)
+    new_num_bins_x = max(
+        1,
+        int(round(float(preset_num_bins_x) / float(preset_num_bins_y) * new_num_bins_y)),
+    )
+    return new_num_bins_x, new_num_bins_y
 
 
 class MacroPlaceDB(object):
@@ -32,12 +69,12 @@ class MacroPlaceDB(object):
     @brief placement database
     """
 
-    def __init__(self, ecc_module):
+    def __init__(self, data_manager: IEDAIO):
         """
         initialization
         To avoid the usage of list, I flatten everything.
         """
-        self.ecc_module = ecc_module
+        self.data_manager = data_manager
         # self.rawdb = None # raw placement database, a C++ object
 
         # number of real nodes, including movable nodes, terminals, and terminal_NIs
@@ -45,6 +82,9 @@ class MacroPlaceDB(object):
         self.num_terminals = 0  # number of terminals, essentially fixed macros
         # number of terminal_NIs that can be overlapped, essentially IO pins
         self.num_terminal_NIs = 0
+        self.num_place_blockages = 0  # synthetic placement blockages appended to fixed terminals
+        self.num_fixed_macro_excluded_place_blockages = 0
+        self.m2_pg_rail_density_boxes = np.zeros((0, 4), dtype=np.float32)
         self.node_name2id_map = {}  # node name to id map, cell name
         self.node_names = None  # 1D array, cell name
         self.node_x = None  # 1D array, cell position x
@@ -128,6 +168,8 @@ class MacroPlaceDB(object):
         self.unit_vertical_capacity = None  # per unit distance, projected to one layer
         self.unit_horizontal_capacities = None  # per unit distance, layer by layer
         self.unit_vertical_capacities = None  # per unit distance, layer by layer
+        self.min_wire_widths = None  # min wire width per routing layer (scaled coords)
+        self.min_wire_spacings = None  # min wire spacing per routing layer (scaled coords)
         # routing demand map from fixed cells, indexed by (grid x, grid y), projected to one layer
         self.initial_horizontal_demand_map = None
         # routing demand map from fixed cells, indexed by (grid x, grid y), projected to one layer
@@ -139,6 +181,8 @@ class MacroPlaceDB(object):
         self.is_pin_upper_y = None
         self.dtype = None
         self.pydb = None
+        self.modularity_topology_clustering_result = None
+        self.modularity_active_clustering_result = None
 
         # Timing model
         self.start_points = None
@@ -239,6 +283,10 @@ class MacroPlaceDB(object):
         self.yh *= scale_factor
         self.row_height *= scale_factor
         self.site_width *= scale_factor
+        if self.min_wire_widths is not None:
+            self.min_wire_widths *= scale_factor
+        if self.min_wire_spacings is not None:
+            self.min_wire_spacings *= scale_factor
 
         # # bin
         # self.bin_size_x *= scale_factor
@@ -276,17 +324,150 @@ class MacroPlaceDB(object):
             # may have performance issue
             self.regions[i] -= box_shift_factor
             self.regions[i] *= scale_factor
+        if self.m2_pg_rail_density_boxes is not None and self.m2_pg_rail_density_boxes.size:
+            rail_boxes = self.m2_pg_rail_density_boxes
+            rail_xl = rail_boxes[:, 0].copy()
+            rail_yl = rail_boxes[:, 1].copy()
+            rail_w = (rail_boxes[:, 2] - rail_boxes[:, 0]).copy()
+            rail_h = (rail_boxes[:, 3] - rail_boxes[:, 1]).copy()
+            rail_boxes[:, 0] = (rail_xl - shift_factor[0]) * scale_factor
+            rail_boxes[:, 1] = (rail_yl - shift_factor[1]) * scale_factor
+            rail_boxes[:, 2] = rail_boxes[:, 0] + rail_w * scale_factor
+            rail_boxes[:, 3] = rail_boxes[:, 1] + rail_h * scale_factor
+
+    @staticmethod
+    def _resolve_ieda_m2_pg_rail_blockage_flag(params):
+        value = getattr(params, "ieda_m2_pg_rail_blockage_flag", 0)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in ("1", "true", "yes", "on"):
+                return True
+            if normalized in ("0", "false", "no", "off"):
+                return False
+            raise ValueError(
+                "ieda_m2_pg_rail_blockage_flag must be a boolean-like value "
+                "(0/1, true/false, yes/no, on/off)"
+            )
+        if isinstance(value, (int, np.integer)):
+            if value in (0, 1):
+                return bool(value)
+        raise ValueError(
+            "ieda_m2_pg_rail_blockage_flag must be a boolean-like value "
+            "(0/1, true/false, yes/no, on/off)"
+        )
+
+    @staticmethod
+    def _resolve_m2_pg_rail_density_weight(params):
+        value = getattr(params, "m2_pg_rail_density_weight", 1.0)
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            raise ValueError("m2_pg_rail_density_weight must be numeric")
+        if not np.isfinite(value):
+            raise ValueError("m2_pg_rail_density_weight must be finite")
+        if value < 0:
+            raise ValueError("m2_pg_rail_density_weight must be non-negative")
+        return value
+
+    def _validate_place_blockage_bookkeeping(self):
+        blockage_count = int(getattr(self, "num_place_blockages", 0))
+        terminal_count = int(getattr(self, "num_terminals", 0))
+        if blockage_count < 0 or blockage_count > terminal_count:
+            raise RuntimeError(
+                "Invalid iEDA placement blockage bookkeeping: "
+                "num_place_blockages=%d num_terminals=%d"
+                % (blockage_count, terminal_count)
+            )
+
+    def _import_m2_pg_rail_density_boxes(self, pydb, include_m2_pg_rail_density):
+        dtype = getattr(self, "dtype", None) or np.float32
+        if not hasattr(pydb, "m2_pg_rail_density_boxes"):
+            if include_m2_pg_rail_density:
+                raise RuntimeError(
+                    "M2 PG rail soft density is enabled, but pydb has no "
+                    "m2_pg_rail_density_boxes field. Rebuild iEDA pybind to avoid "
+                    "using stale hard-node M2 PG rail behavior."
+                )
+            logging.warning(
+                "pydb has no m2_pg_rail_density_boxes field; treating M2 PG rail "
+                "soft density as empty because soft density collection is disabled"
+            )
+            return np.zeros((0, 4), dtype=dtype)
+
+        boxes = np.array(pydb.m2_pg_rail_density_boxes, dtype=dtype)
+        if boxes.size == 0:
+            return boxes.reshape(0, 4)
+        if boxes.ndim != 2 or boxes.shape[1] != 4:
+            raise ValueError(
+                "m2_pg_rail_density_boxes must have shape [N, 4], got %s"
+                % (boxes.shape,)
+            )
+        if np.any(boxes[:, 2] <= boxes[:, 0]) or np.any(boxes[:, 3] <= boxes[:, 1]):
+            raise ValueError(
+                "m2_pg_rail_density_boxes must contain positive-width and "
+                "positive-height [xl, yl, xh, yh] rectangles"
+            )
+        return boxes
+
+    @staticmethod
+    def _log_ieda_m2_pg_rail_blockage_effect(
+        include_m2_pg_rail_blockage,
+        include_m2_pg_rail_density,
+        pydb,
+    ):
+        if include_m2_pg_rail_blockage:
+            logging.info(
+                "PyPlaceDB M2 PG rail blockage rectangles added before union: %d",
+                int(getattr(pydb, "m2_pg_rail_blockage_rects", 0)),
+            )
+        else:
+            rail_boxes = getattr(pydb, "m2_pg_rail_density_boxes", [])
+            logging.info("PyPlaceDB M2 PG rail hard blockage conversion skipped")
+            logging.info(
+                "PyPlaceDB M2 PG rail density boxes exported: %d",
+                len(rail_boxes),
+            )
+            if include_m2_pg_rail_density:
+                logging.info("PyPlaceDB M2 PG rail soft density collection enabled")
+            else:
+                logging.info("PyPlaceDB M2 PG rail soft density collection skipped")
 
     def setup_rawdb(self, params):
         self.dtype = datatypes[params.dtype]
         if self.pydb is None:
-            self.ecc_db = self.ecc_module.get_dmInst_ptr()
-            self.pydb = self.ecc_module.pydb(
-                self.ecc_db,
+            ieda_dm = IEDAIO(self.data_manager.dir_workspace)
+            self.get_dmInst_ptr = ieda_dm.get_dmInst_ptr()
+            include_m2_pg_rail_blockage = (
+                self._resolve_ieda_m2_pg_rail_blockage_flag(params)
+            )
+            m2_pg_rail_density_weight = self._resolve_m2_pg_rail_density_weight(params)
+            include_m2_pg_rail_density = (
+                m2_pg_rail_density_weight > 0 and not include_m2_pg_rail_blockage
+            )
+            logging.info(
+                "ieda_m2_pg_rail_blockage_flag resolved to %d",
+                int(include_m2_pg_rail_blockage),
+            )
+            logging.info(
+                "m2_pg_rail_density_weight resolved to %g; soft density collection %s",
+                m2_pg_rail_density_weight,
+                "enabled" if include_m2_pg_rail_density else "disabled",
+            )
+            self.pydb = ieda_dm.pydb(
+                self.get_dmInst_ptr,
                 params.route_num_bins_x,
                 params.route_num_bins_y,
                 params.routability_opt_flag,
                 params.with_sta,
+                include_m2_pg_rail_blockage,
+                include_m2_pg_rail_density,
+            )
+            self._log_ieda_m2_pg_rail_blockage_effect(
+                include_m2_pg_rail_blockage,
+                include_m2_pg_rail_density,
+                self.pydb,
             )
 
     def init_db(self, params):
@@ -296,8 +477,47 @@ class MacroPlaceDB(object):
         # self.virtual_net_init()
         self.initialize(params)
         self.params = params
+        self.build_modularity_topology_clusters(params)
         net_degrees = np.array([len(pins) for pins in self.net2pin_map])
         print("net_degrees max{} min{}", max(net_degrees), min(net_degrees))
+
+    def _validate_modularity_inflation_contract(self, params):
+        if not getattr(params, "modularity_inflation_flag", False):
+            return
+        if not getattr(params, "routability_opt_flag", False):
+            raise RuntimeError(
+                "modularity_inflation_flag=1 requires routability_opt_flag=1"
+            )
+        if not getattr(params, "modularity_require_gpugr_flag", 1):
+            return
+        if not getattr(params, "adjust_gpugr_area_flag", False):
+            raise RuntimeError(
+                "modularity_inflation_flag=1 requires adjust_gpugr_area_flag=1"
+            )
+        if getattr(params, "adjust_nctugr_area_flag", False):
+            raise RuntimeError(
+                "modularity_inflation_flag=1 does not support adjust_nctugr_area_flag=1"
+            )
+        if getattr(params, "adjust_rudy_area_flag", False):
+            raise RuntimeError(
+                "modularity_inflation_flag=1 does not support adjust_rudy_area_flag=1"
+            )
+
+    def build_modularity_topology_clusters(self, params):
+        if not getattr(params, "modularity_inflation_flag", False):
+            self.modularity_topology_clustering_result = None
+            self.modularity_active_clustering_result = None
+            return
+
+        self._validate_modularity_inflation_contract(params)
+        from dreamplace.ops.routability.leiden_clustering import (
+            build_topology_leiden_clusters,
+        )
+
+        self.modularity_topology_clustering_result = build_topology_leiden_clusters(
+            self, params
+        )
+        self.modularity_active_clustering_result = None
 
     def clustering(self, cluster_config):
         pass
@@ -601,7 +821,8 @@ class MacroPlaceDB(object):
     def virtual_net_init(self):
         max_hop = 2
         print("build macro connections Begin")
-        macro_connections = self.ecc_module.build_macro_connection_map(max_hop)
+        ieda_design = IEDADesign(self.data_manager.dir_workspace)
+        macro_connections = ieda_design.build_macro_connection_map(max_hop)
         print("build macro connections finished")
         print(f" self.num_physical_nodes =  {self.num_physical_nodes}")
         print(f" self.row_height =  {self.row_height}")
@@ -864,6 +1085,7 @@ class MacroPlaceDB(object):
         @param params parameters 
         """
         self.dtype = datatypes[params.dtype]
+        # self.rawdb = place_io.PlaceIOFunction.read(params)
         self.initialize_from_rawdb(params)
 
     def set_net_weights(self):
@@ -949,29 +1171,43 @@ class MacroPlaceDB(object):
         @brief initialize data members from raw database 
         @param params parameters 
         """
+        # pydb = place_io.PlaceIOFunction.pydb(self.rawdb)
+
         self.num_physical_nodes = pydb.num_nodes
         self.num_terminals = pydb.num_terminals
         self.num_terminal_NIs = pydb.num_terminal_NIs
+        self.num_place_blockages = int(getattr(pydb, "num_place_blockages", 0))
+        self._validate_place_blockage_bookkeeping()
+        include_m2_pg_rail_blockage = self._resolve_ieda_m2_pg_rail_blockage_flag(params)
+        include_m2_pg_rail_density = (
+            self._resolve_m2_pg_rail_density_weight(params) > 0
+            and not include_m2_pg_rail_blockage
+        )
+        self.m2_pg_rail_density_boxes = self._import_m2_pg_rail_density_boxes(
+            pydb,
+            include_m2_pg_rail_density=include_m2_pg_rail_density,
+        )
         self.node_name2id_map = pydb.node_name2id_map
-        self.node_names = np.array(pydb.node_names, dtype=np.bytes_)
+        self.node_names = np.array(pydb.node_names, dtype=np.string_)
         # If the placer directly takes a global placement solution,
         # the cell positions may still be floating point numbers.
-        # Preserve floating-point locations supplied by the iEDA database.
+        # It is not good to use the place_io OP to round the positions.
+        # Currently we only support BOOKSHELF format.
 
         self.node_x = np.array(pydb.node_x, dtype=self.dtype)
         self.node_y = np.array(pydb.node_y, dtype=self.dtype)
-        self.node_orient = np.array(pydb.node_orient, dtype=np.bytes_)
+        self.node_orient = np.array(pydb.node_orient, dtype=np.string_)
         self.node_size_x = np.array(pydb.node_size_x, dtype=self.dtype)
         self.node_size_y = np.array(pydb.node_size_y, dtype=self.dtype)
         self.node2orig_node_map = np.array(
             pydb.node2orig_node_map, dtype=np.int32)
-        self.pin_direct = np.array(pydb.pin_direct, dtype=np.bytes_)
+        self.pin_direct = np.array(pydb.pin_direct, dtype=np.string_)
         # BUG all the pin offsets are -1
         self.pin_offset_x = np.array(pydb.pin_offset_x, dtype=self.dtype)
         self.pin_offset_y = np.array(pydb.pin_offset_y, dtype=self.dtype)
-        self.pin_names = np.array(pydb.pin_names, dtype=np.bytes_)
+        self.pin_names = np.array(pydb.pin_names, dtype=np.string_)
         self.net_name2id_map = pydb.net_name2id_map
-        self.net_names = np.array(pydb.net_names, dtype=np.bytes_)
+        self.net_names = np.array(pydb.net_names, dtype=np.string_)
         self.net2pin_map = pydb.net2pin_map
         self.flat_net2pin_map = np.array(pydb.flat_net2pin_map, dtype=np.int32)
         self.flat_net2pin_start_map = np.array(
@@ -1021,6 +1257,10 @@ class MacroPlaceDB(object):
                 pydb.unit_horizontal_capacities, dtype=self.dtype)
             self.unit_vertical_capacities = np.array(
                 pydb.unit_vertical_capacities, dtype=self.dtype)
+            if hasattr(pydb, "min_wire_widths") and len(pydb.min_wire_widths):
+                self.min_wire_widths = np.array(pydb.min_wire_widths, dtype=self.dtype)
+            if hasattr(pydb, "min_wire_spacings") and len(pydb.min_wire_spacings):
+                self.min_wire_spacings = np.array(pydb.min_wire_spacings, dtype=self.dtype)
             self.initial_horizontal_demand_map = np.array(pydb.initial_horizontal_demand_map, dtype=self.dtype).reshape(
                 (-1, self.num_routing_grids_x, self.num_routing_grids_y)).sum(axis=0)
             self.initial_vertical_demand_map = np.array(pydb.initial_vertical_demand_map, dtype=self.dtype).reshape(
@@ -1053,7 +1293,7 @@ class MacroPlaceDB(object):
             self.clk_pin_rtran = np.array(pydb.clk_pin_rtran, dtype=self.dtype)
             self.clk_pin_ftran = np.array(pydb.clk_pin_ftran, dtype=self.dtype)
             self.clk_pin_names = np.array(
-                pydb.clk_pin_names, dtype=np.bytes_)            
+                pydb.clk_pin_names, dtype=np.string_)            
             self.flat_cells_by_level = np.array(
                 pydb.flat_cells_by_level, dtype=np.int32)
             self.flat_cells_by_reverse_level = np.array(
@@ -1348,7 +1588,23 @@ row height = %g, site width = %g
         # set number of bins
         # derive bin dimensions by keeping the aspect ratio
         aspect_ratio = (self.yh - self.yl) / (self.xh - self.xl)
-        if params.auto_adjust_bins:
+        if _is_enabled_param(getattr(params, "enhanced_auto_adjust_bins", 0)):
+            preset_num_bins_x = int(params.num_bins_x)
+            preset_num_bins_y = int(params.num_bins_y)
+            num_bins_x, num_bins_y = _compute_enhanced_auto_adjust_bins(
+                preset_num_bins_x,
+                preset_num_bins_y,
+                self.yh - self.yl,
+                self.row_height,
+            )
+            if (num_bins_x, num_bins_y) != (preset_num_bins_x, preset_num_bins_y):
+                logging.warning(
+                    "enhanced_auto_adjust_bins caps preset num_bins %dx%d to %dx%d by row count"
+                    % (preset_num_bins_x, preset_num_bins_y, num_bins_x, num_bins_y)
+                )
+            params.num_bins_x = num_bins_x
+            params.num_bins_y = num_bins_y
+        elif _is_enabled_param(getattr(params, "auto_adjust_bins", 0)):
             num_bins = math.pow(2, math.floor(math.log2(math.sqrt(self.num_physical_nodes))))
             num_bins_x = math.floor(num_bins)
             num_bins_y = math.floor(num_bins)
@@ -1394,7 +1650,7 @@ row height = %g, site width = %g
                 - np.maximum(self.node_y[self.num_movable_nodes:self.num_physical_nodes - self.num_terminal_NIs], self.yl),
                 0.0)
         ))
-        # self.total_space_area = self.area - self.total_fixed_node_area
+        self.total_space_area = self.area - self.total_fixed_node_area
         content += "total_movable_node_area = %g, total_fixed_node_area = %g, total_space_area = %g\n" % (
             self.total_movable_node_area, self.total_fixed_node_area, self.total_space_area)
 
@@ -1436,7 +1692,7 @@ row height = %g, site width = %g
             # )
 
         target_density = min(self.total_movable_node_area /
-                             self.total_space_area + 0.05, 1.0)
+                             self.total_space_area, 1.0)
         if target_density > params.target_density:
             logging.warn(
                 "target_density %g is smaller than utilization %g, ignored"
@@ -1449,10 +1705,9 @@ row height = %g, site width = %g
             params.target_density,
         )
 
-        if utilization > MAX_MOVABLE_UTILIZATION:
+        if utilization > 0.99:
             logging.error(
-                "utilization is larger than %g. Please change the core size.",
-                MAX_MOVABLE_UTILIZATION,
+                "utilization is larger than 1. Please change the core size."                
             )
             exit(1)
         # calculate fence region virtual macro
@@ -1553,7 +1808,8 @@ row height = %g, site width = %g
             )
 
         if params.enable_fillers:
-            # Fixed-cell area may contain overlaps and requires careful accounting.
+            # the way to compute this is still tricky; we need to consider place_io together on how to
+            # summarize the area of fixed cells, which may overlap with each other.
             if len(self.regions) > 0:
                 self.filler_start_map = np.cumsum(
                     [0] + self.num_filler_nodes_fence_region
@@ -1752,63 +2008,151 @@ row height = %g, site width = %g
         elif axis == "y":
             return self.row_height * op(v / self.row_height)
 
-    def _apply_cell_padding(self, params):
-        padding = params.cell_padding_x
-        self.cell_padding_x = padding
-        if padding <= 0:
-            return
+    def _dump_fixed_macro_mask_debug(
+        self,
+        params,
+        node_areas,
+        movable_mean_area,
+        movable_min_height,
+        area_threshold_value,
+        height_threshold_value,
+        area_threshold,
+        height_threshold,
+    ):
+        def node_name(node_id):
+            if self.node_names is None:
+                return str(node_id)
+            name = self.node_names[node_id]
+            if isinstance(name, bytes):
+                return name.decode("utf-8", errors="replace")
+            return str(name)
 
-        movable_slice = slice(0, self.num_movable_nodes)
-        movable_size_x = self.node_size_x[movable_slice]
-        movable_size_y = self.node_size_y[movable_slice]
-        movable_area = float(np.sum(movable_size_x * movable_size_y))
-        padded_movable_area = float(
-            np.sum((movable_size_x + 2 * padding) * movable_size_y)
+        area_den = max(float(movable_mean_area), 1.0e-30)
+        height_den = max(float(movable_min_height), 1.0e-30)
+        fixed_start = int(self.fixed_slice.start)
+        fixed_stop = int(self.fixed_slice.stop)
+        selected_rel = np.where(self.fixed_macro_mask)[0]
+        selected_count = int(selected_rel.shape[0])
+        fixed_count = int(max(fixed_stop - fixed_start, 0))
+
+        placement_blockage_mask = self._fixed_placement_blockage_mask()
+        excluded_place_blockages = int(
+            getattr(self, "num_fixed_macro_excluded_place_blockages", 0)
         )
-        max_movable_area = MAX_MOVABLE_UTILIZATION * self.total_space_area
 
-        if padded_movable_area > max_movable_area:
-            total_movable_height = float(np.sum(movable_size_y))
-            if total_movable_height > 0:
-                max_padding = max(
-                    (max_movable_area - movable_area) / (2 * total_movable_height),
-                    0.0,
-                )
-                padding = min(
-                    padding,
-                    self.crop_to_site(max_padding, "x", mode="down"),
-                )
-            else:
-                padding = 0.0
+        logging.info(
+            "Fixed macro heuristic mask: fixed_terminals=%d selected=%d "
+            "placement_blockages=%d excluded_place_blockages=%d "
+            "movable_mean_area=%.6g area_threshold_scale=%.6g "
+            "area_threshold=%.6g movable_min_height=%.6g "
+            "height_threshold_scale=%.6g height_threshold=%.6g",
+            fixed_count,
+            selected_count,
+            int(np.count_nonzero(placement_blockage_mask)),
+            excluded_place_blockages,
+            float(movable_mean_area),
+            float(area_threshold),
+            float(area_threshold_value),
+            float(movable_min_height),
+            float(height_threshold),
+            float(height_threshold_value),
+        )
 
-            logging.warning(
-                "cell_padding_x %g would increase movable area to %g, above the "
-                "%g * placeable-area limit (%g); reducing it to %g",
-                params.cell_padding_x,
-                padded_movable_area,
-                MAX_MOVABLE_UTILIZATION,
-                max_movable_area,
-                padding,
+        if selected_count > 0:
+            preview = []
+            for rel_idx in selected_rel[:20]:
+                node_id = fixed_start + int(rel_idx)
+                area_ratio = float(node_areas[node_id]) / area_den
+                height_ratio = float(self.node_size_y[node_id]) / height_den
+                preview.append(
+                    "%d:%s area_ratio=%.3g height_ratio=%.3g "
+                    "xy=(%.6g,%.6g) size=(%.6g,%.6g)"
+                    % (
+                        node_id,
+                        node_name(node_id),
+                        area_ratio,
+                        height_ratio,
+                        float(self.node_x[node_id]),
+                        float(self.node_y[node_id]),
+                        float(self.node_size_x[node_id]),
+                        float(self.node_size_y[node_id]),
+                    )
+                )
+            logging.info(
+                "Fixed macro heuristic mask selected preview first %d/%d: %s",
+                len(preview),
+                selected_count,
+                "; ".join(preview),
             )
-            params.cell_padding_x = padding
-            self.cell_padding_x = padding
 
-        if padding == 0:
+        result_dir = getattr(params, "result_dir", None)
+        if not result_dir:
             return
 
-        self.node_size_x[movable_slice] += 2 * padding
-        self.node_x[movable_slice] -= padding
-        movable_cell_tensor = np.arange(
-            0, self.num_movable_nodes, dtype=self.pin2node_map.dtype)
-        movable_cell_pins = np.isin(self.pin2node_map, movable_cell_tensor)
-        self.pin_offset_x[movable_cell_pins] += padding
+        out_dir = os.path.join(result_dir, "debug")
+        out_path = os.path.join(out_dir, "fixed_macro_mask_debug.csv")
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            with open(out_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(
+                    [
+                        "node_id",
+                        "fixed_rel_id",
+                        "node_name",
+                        "x",
+                        "y",
+                        "width",
+                        "height",
+                        "area",
+                        "area_ratio_to_movable_mean",
+                        "height_ratio_to_movable_min",
+                        "is_placement_blockage",
+                        "excluded_place_blockage",
+                        "is_fixed_macro",
+                    ]
+                )
+                for rel_idx, node_id in enumerate(range(fixed_start, fixed_stop)):
+                    is_placement_blockage = bool(placement_blockage_mask[rel_idx])
+                    writer.writerow(
+                        [
+                            node_id,
+                            rel_idx,
+                            node_name(node_id),
+                            float(self.node_x[node_id]),
+                            float(self.node_y[node_id]),
+                            float(self.node_size_x[node_id]),
+                            float(self.node_size_y[node_id]),
+                            float(node_areas[node_id]),
+                            float(node_areas[node_id]) / area_den,
+                            float(self.node_size_y[node_id]) / height_den,
+                            int(is_placement_blockage),
+                            int(is_placement_blockage and not self.fixed_macro_mask[rel_idx]),
+                            int(bool(self.fixed_macro_mask[rel_idx])),
+                        ]
+                    )
+            logging.info("Fixed macro heuristic mask debug CSV written to %s", out_path)
+        except Exception as e:
+            logging.warning("Failed to write fixed macro heuristic mask debug CSV: %s", e)
+
+    def _fixed_placement_blockage_mask(self):
+        fixed_count = max(int(self.fixed_slice.stop - self.fixed_slice.start), 0)
+        blockage_count = min(
+            max(int(getattr(self, "num_place_blockages", 0)), 0),
+            fixed_count,
+        )
+        mask = np.zeros(fixed_count, dtype=bool)
+        if blockage_count:
+            mask[fixed_count - blockage_count:] = True
+        return mask
 
     def update_macros(self, params, area_threshold=10, height_threshold=2):
         # set large cells as macros
         node_areas = self.node_size_x * self.node_size_y
-        mean_area = node_areas[self.movable_slice].mean() * area_threshold
-        row_height = self.node_size_y[self.movable_slice].min(
-        ) * height_threshold
+        movable_mean_area = node_areas[self.movable_slice].mean()
+        movable_min_height = self.node_size_y[self.movable_slice].min()
+        mean_area = movable_mean_area * area_threshold
+        row_height = movable_min_height * height_threshold
 
         # movable macros
         self.movable_macro_mask = (node_areas[self.movable_slice] > mean_area) & (
@@ -1822,10 +2166,25 @@ row height = %g, site width = %g
         self.fixed_macro_mask = (node_areas[self.fixed_slice] > mean_area) & (
             self.node_size_y[self.fixed_slice] > row_height
         )
+        placement_blockage_mask = self._fixed_placement_blockage_mask()
+        self.num_fixed_macro_excluded_place_blockages = int(
+            np.count_nonzero(self.fixed_macro_mask & placement_blockage_mask)
+        )
+        self.fixed_macro_mask = self.fixed_macro_mask & ~placement_blockage_mask
         self.fixed_macro_idx = (
             self.num_movable_nodes + np.where(self.fixed_macro_mask)[0]
         )
         self.num_fixed_macros = self.fixed_macro_idx.shape[0]
+        self._dump_fixed_macro_mask_debug(
+            params,
+            node_areas,
+            movable_mean_area,
+            movable_min_height,
+            mean_area,
+            row_height,
+            area_threshold,
+            height_threshold,
+        )
 
         macro_pin_offset_x_mean = []
         macro_pin_offset_y_mean = []
@@ -1891,6 +2250,27 @@ row height = %g, site width = %g
             # self.fixed_macro_pins = np.isin(self.pin2node_map, self.fixed_macro_idx)
             # self.pin_offset_x[self.fixed_macro_pins] += params.macro_halo_x
             # self.pin_offset_y[self.fixed_macro_pins] += params.macro_halo_y
+        # add padding around all_cells
+        if params.cell_padding_x >= 0:
+            # increase macro sizes
+            self.node_size_x[:self.num_movable_nodes] += 2 * params.cell_padding_x
+            # self.node_size_y[:self.num_physical_nodes] += 2 * params.cell_padding_y
+            # self.node_size_x[self.fixed_macro_idx] += 2 * params.macro_halo_x
+            # self.node_size_y[self.fixed_macro_idx] += 2 * params.macro_halo_y
+
+            # shift macro positions
+            self.node_x[:self.num_movable_nodes] -= params.cell_padding_x
+            # self.node_y[:self.num_physical_nodes] -= params.cell_padding_y
+            # self.node_x[self.fixed_macro_idx] -= params.macro_halo_x
+            # self.node_y[self.fixed_macro_idx] -= params.macro_halo_y
+
+            movable_cell_tensor = np.arange(
+                0, self.num_movable_nodes, dtype=self.pin2node_map.dtype)
+            # shift macro pins
+            movable_cell_pins = np.isin(
+                self.pin2node_map, movable_cell_tensor)
+            self.pin_offset_x[movable_cell_pins] += params.cell_padding_x
+            # self.pin_offset_y += params.cell_padding_y
         if params.macro_pin_halo_x >= 0:
             self.node_size_x[self.movable_macro_idx] += self.is_pin_lower_x * \
                 params.macro_pin_halo_x + self.is_pin_upper_x * params.macro_pin_halo_x
@@ -1912,9 +2292,6 @@ row height = %g, site width = %g
             self.pin_offset_y[self.movable_macro_pins] += (
                 self.is_pin_lower_y[move_macro_idx_list[0]] * params.macro_pin_halo_y
             )
-
-        # Apply cell padding after all macro inflation so its area cap sees final cell sizes.
-        self._apply_cell_padding(params)
 
     def write(self, params, filename):
         """
@@ -2031,7 +2408,8 @@ row height = %g, site width = %g
     def write_placement_back(self, node_x, node_y):
         # unscale locations
         # TODO:
-        self.ecc_module.write_placement_back(self.ecc_db, node_x, node_y)
+        ieda_io = IEDAIO(self.data_manager.dir_workspace)
+        ieda_io.write_placement_back(self.get_dmInst_ptr, node_x, node_y)
 
     def unscale_pl(self, shift_factor, scale_factor):
         """
@@ -2061,3 +2439,21 @@ row height = %g, site width = %g
             unscale_factor + params.shift_factor[1]
         # update raw database
         self.write_placement_back(node_x, node_y)
+        # update raw database
+        # place_io.PlaceIOFunction.apply(self.rawdb, node_x, node_y)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        logging.error("One input parameters in json format in required")
+
+    params = Params.Params()
+    params.load(sys.argv[sys.argv[1]])
+    logging.info("parameters = %s" % (params))
+
+    db = PlaceDB()
+    db(params)
+
+    db.print_node(1)
+    db.print_net(1)
+    db.print_row(1)

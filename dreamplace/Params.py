@@ -124,12 +124,87 @@ class Params:
                 data[key] = value
         return data
 
+    @staticmethod
+    def _is_enabled(value):
+        if isinstance(value, str):
+            return value.strip().lower() not in ("", "0", "false", "no", "off")
+        return bool(value)
+
+    def apply_l_shape_routability_preset(self):
+        """
+        Fill conservative hard-GGR L-shape defaults only when L-shape routability
+        is enabled. Explicit user values are preserved.
+        """
+        if not self._is_enabled(getattr(self, "l_shape_routability_flag", False)):
+            return
+
+        defaults = {
+            "l_direction_use_gpugr": 1,
+            "l_shape_use_ggr_topology": 1,
+            "l_shape_capacity_al_enable": 1,
+            "soft_l_assignment": 0,
+            "l_shape_grad_target_ratio": 0.1,
+            "l_shape_grad_target_ratio_max": 0.1,
+            "l_shape_overflow_threshold": 0.3,
+            "l_shape_keep_during_inflation": 1,
+        }
+        for key, value in defaults.items():
+            if not hasattr(self, key):
+                setattr(self, key, value)
+
+    def normalize_iopin_density_weight(self):
+        value = getattr(self, "iopin_density_weight", 3.0)
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            raise ValueError("iopin_density_weight must be numeric")
+        if not math.isfinite(value):
+            raise ValueError("iopin_density_weight must be finite")
+        if value < 0:
+            raise ValueError("iopin_density_weight must be non-negative")
+        self.iopin_density_weight = value
+
+    def normalize_m2_pg_rail_density_weight(self):
+        value = getattr(self, "m2_pg_rail_density_weight", 1.0)
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            raise ValueError("m2_pg_rail_density_weight must be numeric")
+        if not math.isfinite(value):
+            raise ValueError("m2_pg_rail_density_weight must be finite")
+        if value < 0:
+            raise ValueError("m2_pg_rail_density_weight must be non-negative")
+        self.m2_pg_rail_density_weight = value
+
+    def normalize_removed_l_shape_weight_schedule(self):
+        legacy_keys = (
+            "l_shape_use_xplace_weight_schedule",
+            "l_shape_num_route_iter",
+            "l_shape_weight_schedule_r",
+            "l_shape_weight_schedule_half_iter",
+        )
+        legacy_enable = getattr(self, legacy_keys[0], 0)
+        if self._is_enabled(legacy_enable):
+            raise ValueError(
+                "l_shape_use_xplace_weight_schedule has been removed; "
+                "the adaptive target-ratio controller is always used"
+            )
+        for key in legacy_keys:
+            self.__dict__.pop(key, None)
+
+    def normalize_params(self):
+        self.normalize_removed_l_shape_weight_schedule()
+        self.normalize_iopin_density_weight()
+        self.normalize_m2_pg_rail_density_weight()
+
     def fromJson(self, data):
         """
         @brief load from json
         """
         for key, value in data.items():
             self.__dict__[key] = value
+        self.apply_l_shape_routability_preset()
+        self.normalize_params()
 
     def dump(self, filename):
         """
@@ -195,6 +270,8 @@ class Params:
             (k.lstrip("--"), v) for k, v in (arg.split("=") for arg in args)
         ):
             self.__dict__[key] = value
+        self.apply_l_shape_routability_preset()
+        self.normalize_params()
 
     def update(self, params):
         """

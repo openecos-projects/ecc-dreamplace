@@ -23,5 +23,8 @@ unittest
 .cache
 *_unittest
 
+*.png
+dreamplace/configure.py
+.codex*
 .direnv
 result

@@ -24,6 +24,25 @@ import torch
 import pdb
 
 
+def _as_log_verbose(value, default=0):
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("", "0", "false", "no", "off"):
+            return 0
+        if normalized in ("true", "yes", "on"):
+            return 1
+        try:
+            return int(float(normalized))
+        except ValueError:
+            return int(default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
 class EvalMetrics(object):
     """
     @brief evaluation metrics at one step
@@ -53,6 +72,86 @@ class EvalMetrics(object):
         self.weight_hpwl = None
         self.macro_overlap = None
         self.macro_overlap_weight = None
+        self.l_shape_fast_mode = None
+        self.l_shape_energy_valid = None
+        self.l_shape_cost = None
+        self.l_shape_weighted_cost = None
+        self.l_shape_weight = None
+        self.l_shape_target_weight = None
+        self.l_shape_weight_candidate = None
+        self.l_shape_cap_active = None
+        self.l_shape_base_grad_norm = None
+        self.l_shape_grad_raw_norm = None
+        self.l_shape_grad_norm = None
+        self.l_shape_grad_ratio = None
+        self.l_shape_target_ratio = None
+        self.l_shape_overflow = None
+        self.l_shape_overflow_ratio = None
+        self.l_shape_overflow_ema = None
+        self.l_shape_overflow_max_density = None
+        self.l_shape_capacity_al_enabled = None
+        self.l_shape_capacity_al_updated = None
+        self.l_shape_capacity_al_g_h_max = None
+        self.l_shape_capacity_al_g_v_max = None
+        self.l_shape_capacity_al_g_h_sum = None
+        self.l_shape_capacity_al_g_v_sum = None
+        self.l_shape_capacity_al_g_h_pos_ratio = None
+        self.l_shape_capacity_al_g_v_pos_ratio = None
+        self.l_shape_capacity_al_q_h_max = None
+        self.l_shape_capacity_al_q_v_max = None
+        self.l_shape_capacity_al_q_h_sum = None
+        self.l_shape_capacity_al_q_v_sum = None
+        self.l_shape_capacity_al_lambda_h_max = None
+        self.l_shape_capacity_al_lambda_v_max = None
+        self.l_shape_capacity_al_lambda_h_sum = None
+        self.l_shape_capacity_al_lambda_v_sum = None
+        self.l_shape_capacity_al_energy_h = None
+        self.l_shape_capacity_al_energy_v = None
+        self.l_shape_capacity_al_energy_total = None
+        self.l_shape_capacity_al_pq_h_min = None
+        self.l_shape_capacity_al_pq_h_max = None
+        self.l_shape_capacity_al_pq_v_min = None
+        self.l_shape_capacity_al_pq_v_max = None
+        self.l_shape_capacity_al_active_memory_bins_h = None
+        self.l_shape_capacity_al_active_memory_bins_v = None
+        self.l_shape_macro_exclusion_enabled = None
+        self.l_shape_macro_exclusion_macro_count = None
+        self.l_shape_macro_exclusion_body_bins = None
+        self.l_shape_macro_exclusion_halo_bins = None
+        self.l_shape_macro_exclusion_active_bins = None
+        self.l_shape_macro_exclusion_source_max = None
+        self.l_shape_macro_exclusion_source_sum = None
+        self.l_shape_macro_exclusion_body_source_max = None
+        self.l_shape_macro_exclusion_body_source_sum = None
+        self.l_shape_macro_exclusion_halo_source_max = None
+        self.l_shape_macro_exclusion_halo_source_sum = None
+        self.l_shape_macro_exclusion_usage_max = None
+        self.l_shape_macro_exclusion_usage_sum = None
+        self.l_shape_macro_exclusion_usage_bins = None
+        self.l_shape_macro_exclusion_dominates_bins = None
+        self.l_shape_macro_exclusion_routing_dominates_bins = None
+        self.l_shape_log_verbose = 0
+        self.soft_l_diag_count = None
+        self.soft_l_mean_cost_gap = None
+        self.soft_l_raw_cost_gap_p50 = None
+        self.soft_l_biased_cost_gap_p50 = None
+        self.soft_l_tau_source_gap = None
+        self.soft_l_mean_max_prob = None
+        self.soft_l_mean_entropy = None
+        self.soft_l_near_tie_ratio = None
+        self.soft_l_tau = None
+        self.soft_l_effective_hotspot_weight = None
+        self.soft_l_resolver_agreement_ratio = None
+        self.soft_l_target_demand_supply_ratio = None
+        self.soft_l_current_demand_supply_ratio = None
+        self.soft_l_same_net_topo_nets = None
+        self.soft_l_same_net_topo_segments_h = None
+        self.soft_l_same_net_topo_segments_v = None
+        self.soft_l_same_net_topo_diag_edges = None
+        self.soft_l_same_net_topo_edges_with_topology = None
+        self.soft_l_same_net_topo_edges_with_observed_intervals = None
+        self.soft_l_same_net_topo_mean_gap = None
+        self.soft_l_same_net_topo_tie_ratio = None
 
     def __str__(self):
         """
@@ -116,6 +215,144 @@ class EvalMetrics(object):
         if self.macro_overlap_weight is not None:
             content += ", MacroOverlapWeight %.6E" % (
                 self.macro_overlap_weight)
+        l_shape_energy_invalid = (
+            self.l_shape_fast_mode is not None
+            and bool(self.l_shape_fast_mode)
+            and self.l_shape_energy_valid is not None
+            and not bool(self.l_shape_energy_valid)
+        )
+        if l_shape_energy_invalid:
+            content += ", LShapeCostRaw N/A(fast_mode)"
+            content += ", LShapeCostWeighted N/A(fast_mode)"
+        elif self.l_shape_cost is not None:
+            content += ", LShapeCostRaw %.6E" % (self.l_shape_cost)
+            if self.l_shape_weighted_cost is not None:
+                content += ", LShapeCostWeighted %.6E" % (self.l_shape_weighted_cost)
+        elif self.l_shape_weighted_cost is not None:
+            content += ", LShapeCostWeighted %.6E" % (self.l_shape_weighted_cost)
+        if _as_log_verbose(self.l_shape_log_verbose) >= 2:
+            if self.l_shape_weight is not None:
+                content += ", LWeight %.6E" % (self.l_shape_weight)
+            if self.l_shape_weight_candidate is not None:
+                content += ", LWCandidate %.6E" % (self.l_shape_weight_candidate)
+            if self.l_shape_target_weight is not None:
+                content += ", LWCap %.6E" % (self.l_shape_target_weight)
+            if self.l_shape_cap_active is not None:
+                content += ", LWCapAct %d" % (1 if self.l_shape_cap_active else 0)
+            if self.l_shape_base_grad_norm is not None:
+                content += ", LBaseGrad %.6E" % (self.l_shape_base_grad_norm)
+            if self.l_shape_grad_norm is not None:
+                content += ", LGrad %.6E" % (self.l_shape_grad_norm)
+            if self.l_shape_grad_raw_norm is not None:
+                content += ", LGradRaw %.6E" % (self.l_shape_grad_raw_norm)
+            if self.l_shape_grad_ratio is not None:
+                content += ", LGradRatio %.4f" % (self.l_shape_grad_ratio)
+            if self.l_shape_target_ratio is not None:
+                content += ", LTargetRatio %.4f" % (self.l_shape_target_ratio)
+            if self.l_shape_overflow is not None:
+                content += ", LOvRaw %.6E" % (self.l_shape_overflow)
+            if self.l_shape_overflow_ratio is not None:
+                content += ", LOvRatio %.6E" % (self.l_shape_overflow_ratio)
+            if self.l_shape_overflow_ema is not None:
+                content += ", LOvEma %.6E" % (self.l_shape_overflow_ema)
+            if self.l_shape_overflow_max_density is not None:
+                content += ", LMaxDen %.6E" % (self.l_shape_overflow_max_density)
+            if self.l_shape_capacity_al_energy_total is not None:
+                content += ", LCapALE %.6E" % (
+                    self.l_shape_capacity_al_energy_total
+                )
+            if self.l_shape_capacity_al_q_h_max is not None:
+                content += ", LCapALQHMax %.6E" % (
+                    self.l_shape_capacity_al_q_h_max
+                )
+            if self.l_shape_capacity_al_lambda_h_max is not None:
+                content += ", LCapALLamHMax %.6E" % (
+                    self.l_shape_capacity_al_lambda_h_max
+                )
+            if self.l_shape_capacity_al_g_h_sum is not None:
+                content += ", LCapALGHSum %.6E" % (
+                    self.l_shape_capacity_al_g_h_sum
+                )
+            if self.l_shape_capacity_al_g_h_pos_ratio is not None:
+                content += ", LCapALGHRatio %.4f" % (
+                    self.l_shape_capacity_al_g_h_pos_ratio
+                )
+            if self.l_shape_capacity_al_g_v_sum is not None:
+                content += ", LCapALGVSum %.6E" % (
+                    self.l_shape_capacity_al_g_v_sum
+                )
+            if self.l_shape_capacity_al_g_v_pos_ratio is not None:
+                content += ", LCapALGVRatio %.4f" % (
+                    self.l_shape_capacity_al_g_v_pos_ratio
+                )
+            if self.l_shape_macro_exclusion_macro_count is not None:
+                content += ", LMacroCnt %d" % (
+                    self.l_shape_macro_exclusion_macro_count
+                )
+            if self.l_shape_macro_exclusion_active_bins is not None:
+                content += ", LMacroBins %d" % (
+                    self.l_shape_macro_exclusion_active_bins
+                )
+            if self.l_shape_macro_exclusion_source_max is not None:
+                content += ", LMacroMax %.6E" % (
+                    self.l_shape_macro_exclusion_source_max
+                )
+            if self.l_shape_macro_exclusion_usage_sum is not None:
+                content += ", LMacroUsage %.6E" % (
+                    self.l_shape_macro_exclusion_usage_sum
+                )
+            if self.l_shape_macro_exclusion_usage_bins is not None:
+                content += ", LMacroUsageBins %d" % (
+                    self.l_shape_macro_exclusion_usage_bins
+                )
+            if self.soft_l_diag_count is not None:
+                content += ", SoftDiag %d" % (self.soft_l_diag_count)
+            if self.soft_l_mean_cost_gap is not None:
+                content += ", SoftGapMean %.4f" % (self.soft_l_mean_cost_gap)
+            if self.soft_l_raw_cost_gap_p50 is not None:
+                content += ", SoftGapP50Raw %.8f" % (self.soft_l_raw_cost_gap_p50)
+            if self.soft_l_biased_cost_gap_p50 is not None:
+                content += ", SoftGapP50Bias %.8f" % (self.soft_l_biased_cost_gap_p50)
+            if self.soft_l_tau_source_gap is not None:
+                content += ", SoftTauSrc %.8f" % (self.soft_l_tau_source_gap)
+            if self.soft_l_mean_max_prob is not None:
+                content += ", SoftConf %.4f" % (self.soft_l_mean_max_prob)
+            if self.soft_l_mean_entropy is not None:
+                content += ", SoftEnt %.4f" % (self.soft_l_mean_entropy)
+            if self.soft_l_near_tie_ratio is not None:
+                content += ", SoftTie %.4f" % (self.soft_l_near_tie_ratio)
+            if self.soft_l_tau is not None:
+                content += ", SoftTau %.8f" % (self.soft_l_tau)
+            if self.soft_l_effective_hotspot_weight is not None:
+                content += ", SoftHot %.4f" % (self.soft_l_effective_hotspot_weight)
+            if self.soft_l_resolver_agreement_ratio is not None:
+                content += ", SoftAgree %.4f" % (
+                    self.soft_l_resolver_agreement_ratio
+                )
+            if self.soft_l_target_demand_supply_ratio is not None:
+                content += ", SoftDSRatio %.4f" % (
+                    self.soft_l_target_demand_supply_ratio
+                )
+            if self.soft_l_current_demand_supply_ratio is not None:
+                content += ", SoftLoadRatio %.4f" % (
+                    self.soft_l_current_demand_supply_ratio
+                )
+            if self.soft_l_same_net_topo_nets is not None:
+                content += ", TopoNets %d" % (self.soft_l_same_net_topo_nets)
+            if self.soft_l_same_net_topo_diag_edges is not None:
+                content += ", TopoDiag %d" % (self.soft_l_same_net_topo_diag_edges)
+            if self.soft_l_same_net_topo_edges_with_topology is not None:
+                content += ", TopoHit %d" % (
+                    self.soft_l_same_net_topo_edges_with_topology
+                )
+            if self.soft_l_same_net_topo_edges_with_observed_intervals is not None:
+                content += ", TopoObs %d" % (
+                    self.soft_l_same_net_topo_edges_with_observed_intervals
+                )
+            if self.soft_l_same_net_topo_mean_gap is not None:
+                content += ", TopoGap %.4f" % (self.soft_l_same_net_topo_mean_gap)
+            if self.soft_l_same_net_topo_tie_ratio is not None:
+                content += ", TopoTie %.4f" % (self.soft_l_same_net_topo_tie_ratio)
         if self.gamma is not None:
             content += ", gamma %.6E" % (self.gamma)
         if self.eval_time is not None:

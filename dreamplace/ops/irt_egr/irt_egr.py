@@ -20,10 +20,10 @@ class IRT_eGR(object):
         self.params = params
         self.placedb = placedb
 
-    def __call__(self, pos, stage, resolve_congestion):
+    def __call__(self, pos, stage="egr2D", resolve_congestion="low"):
         return self.forward(pos, stage, resolve_congestion)
 
-    def forward(self, pos, stage, resolve_congestion):
+    def forward(self, pos, stage="egr2D", resolve_congestion="low"):
         pos_cpu = pos.detach().cpu().numpy()
 
         num_movable_nodes = self.placedb.num_movable_nodes

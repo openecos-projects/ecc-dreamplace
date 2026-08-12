@@ -5,13 +5,11 @@ set(TARGET_NAME ${OP_NAME})
 set(INCLUDE_DIRS 
   ${CMAKE_CURRENT_SOURCE_DIR}/..
   ${FLUTE_INCLUDE_DIRS}
-  ${OPENTIMER_SOURCE_DIR}
   )
 
 set(LINK_LIBS utility_cxx
   OpenMP::OpenMP_CXX
   flute
-  OpenTimer
   stdc++fs
   )
 

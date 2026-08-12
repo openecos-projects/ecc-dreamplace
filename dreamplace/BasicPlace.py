@@ -103,6 +103,16 @@ class PlaceDataCollection(object):
 
             self.node_size_x = torch.from_numpy(placedb.node_size_x).to(device)
             self.node_size_y = torch.from_numpy(placedb.node_size_y).to(device)
+            m2_pg_rail_density_boxes = getattr(
+                placedb,
+                "m2_pg_rail_density_boxes",
+                np.zeros((0, 4), dtype=placedb.dtype),
+            )
+            self.m2_pg_rail_density_boxes = torch.as_tensor(
+                m2_pg_rail_density_boxes,
+                dtype=self.pos[0].dtype,
+                device=device,
+            ).reshape(-1, 4)
             # original node size for legalization, since they will be adjusted in global placement
             if params.routability_opt_flag:
                 self.original_node_size_x = self.node_size_x.clone()
@@ -122,8 +132,30 @@ class PlaceDataCollection(object):
             self.target_density = torch.empty(
                 1, dtype=self.pos[0].dtype, device=device)
             self.target_density.data.fill_(params.target_density)
+            self.inflation_state = None
+            if params.routability_opt_flag:
+                self.original_target_density = self.target_density.clone()
+                self.original_num_filler_nodes = int(placedb.num_filler_nodes)
 
             self.node_areas = self.node_size_x * self.node_size_y
+            if params.routability_opt_flag:
+                self.original_total_movable_area = float(
+                    self.node_areas[: placedb.num_movable_nodes].sum().item()
+                )
+                if placedb.num_filler_nodes > 0:
+                    self.original_total_filler_area = float(
+                        self.node_areas[-placedb.num_filler_nodes :].sum().item()
+                    )
+                else:
+                    self.original_total_filler_area = 0.0
+                original_target_density = max(float(self.original_target_density.item()), 1e-12)
+                self.original_total_place_area = (
+                    self.original_total_movable_area + self.original_total_filler_area
+                ) / original_target_density
+                self.original_total_whitespace_area = (
+                    self.original_total_place_area - self.original_total_movable_area
+                )
+
             self.movable_macro_mask = torch.from_numpy(placedb.movable_macro_mask).to(
                 device
             )
@@ -193,6 +225,11 @@ class PlaceDataCollection(object):
                 placedb.flat_net2pin_start_map
             ).to(device)
             self.net_weights = torch.from_numpy(placedb.net_weights).to(device)
+            self.modularity_cluster_ids_by_level = []
+            self.modularity_num_clusters_by_level = []
+            self.modularity_resolutions_used = []
+            self.modularity_cluster_source = "none"
+            self.refresh_modularity_clusters_from_placedb(placedb)
 
             # regions
             self.flat_region_boxes = torch.from_numpy(placedb.flat_region_boxes).to(
@@ -384,6 +421,53 @@ class PlaceDataCollection(object):
                 self.flat_pin_to = None
                 self.flat_pin_to_start = None
                 self.flat_pin_from = None
+
+    def refresh_modularity_clusters_from_placedb(self, placedb):
+        self.modularity_cluster_ids_by_level = []
+        self.modularity_num_clusters_by_level = []
+        self.modularity_resolutions_used = []
+        self.modularity_cluster_source = "none"
+
+        result = getattr(placedb, "modularity_active_clustering_result", None)
+        if result is not None:
+            self.modularity_cluster_source = "active"
+        else:
+            result = getattr(placedb, "modularity_topology_clustering_result", None)
+            if result is not None:
+                self.modularity_cluster_source = "topology"
+
+        if result is None:
+            return
+
+        cluster_ids_by_level = []
+        num_clusters_by_level = []
+        expected_num_nodes = int(placedb.num_movable_nodes)
+        for level_idx, cluster_ids in enumerate(result.cluster_ids_by_level):
+            if not isinstance(cluster_ids, torch.Tensor):
+                cluster_ids = torch.as_tensor(cluster_ids, dtype=torch.int64)
+            cluster_ids = cluster_ids.to(device=self.device, dtype=torch.int64)
+            if cluster_ids.numel() != expected_num_nodes:
+                raise ValueError(
+                    "modularity cluster size mismatch at level %d: got %d nodes, expected %d"
+                    % (level_idx, cluster_ids.numel(), expected_num_nodes)
+                )
+            cluster_ids_by_level.append(cluster_ids)
+            if level_idx < len(result.num_clusters_by_level):
+                num_clusters = int(result.num_clusters_by_level[level_idx])
+            else:
+                num_clusters = int(cluster_ids.max().item()) + 1 if cluster_ids.numel() else 0
+            num_clusters_by_level.append(num_clusters)
+
+        self.modularity_cluster_ids_by_level = cluster_ids_by_level
+        self.modularity_num_clusters_by_level = num_clusters_by_level
+        self.modularity_resolutions_used = list(getattr(result, "resolutions_used", []))
+        logging.info(
+            "Loaded modularity %s clusters on %s: levels=%d counts=%s",
+            self.modularity_cluster_source,
+            str(self.device),
+            len(self.modularity_cluster_ids_by_level),
+            self.modularity_num_clusters_by_level,
+        )
 
     def bin_center_x_padded(self, placedb, padding, num_bins_x):
         """
@@ -676,7 +760,10 @@ class BasicPlace(nn.Module):
         self.op_collections.pin_pos_op = self.build_pin_pos(
             params, placedb, self.data_collections, self.device
         )
-        if params.with_sta:
+        l_shape_routability_enabled = (
+            params.routability_opt_flag and params.l_shape_routability_flag
+        )
+        if params.with_sta or l_shape_routability_enabled:
             self.op_collections.steiner_topo_op = self.build_steiner_topo(
                 params, placedb, self.data_collections, self.device)
 
@@ -788,7 +875,12 @@ class BasicPlace(nn.Module):
             flat_net2pin_start_map=data_collections.flat_net2pin_start_map.to(
                 device).cpu(),
             # pin2node_map=data_collections.pin2node_map,
-            ignore_net_degree=params.ignore_net_degree)
+            ignore_net_degree=params.ignore_net_degree,
+            deterministic_flag=getattr(params, "deterministic_flag", False),
+            collect_edge_geometry_stats=(
+                bool(getattr(params, "l_shape_profile_flag", False))
+                or bool(getattr(params, "l_shape_collect_edge_geometry_stats", False))
+            ))
 
         return steiner_topo_for_pin_op
 

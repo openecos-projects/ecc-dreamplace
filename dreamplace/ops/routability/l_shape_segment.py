@@ -12,6 +12,7 @@ import os
 import glob
 import importlib.util
 import sys
+import sysconfig
 from contextlib import contextmanager
 from torch.autograd import Function
 
@@ -25,7 +26,13 @@ def _load_local_extension(module_name):
     matches = glob.glob(os.path.join(module_dir, f"{module_name}*.so"))
     if not matches:
         return None
-    spec = importlib.util.spec_from_file_location(module_name, matches[0])
+    # Editable installs can leave extensions for more than one interpreter
+    # ABI in the package directory.  Loading the first glob result may pick a
+    # stale cpython-310 module when running under cpython-311.
+    extension_suffix = sysconfig.get_config_var("EXT_SUFFIX") or ""
+    compatible = [path for path in matches if path.endswith(extension_suffix)]
+    selected = sorted(compatible or matches)[0]
+    spec = importlib.util.spec_from_file_location(module_name, selected)
     if spec is None or spec.loader is None:
         return None
     module = importlib.util.module_from_spec(spec)

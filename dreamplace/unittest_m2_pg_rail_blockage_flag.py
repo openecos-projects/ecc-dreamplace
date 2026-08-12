@@ -226,12 +226,20 @@ class M2PgRailBlockageFlagTest(unittest.TestCase):
         self.assertEqual(boxes.shape, (0, 4))
         self.assertIn("m2_pg_rail_density_boxes", "\n".join(logs.output))
 
-    def test_flag_on_missing_rail_density_box_field_fails_as_stale_pybind(self):
+    def test_missing_rail_density_box_field_uses_empty_boxes(self):
         placedb = MacroPlaceDB.__new__(MacroPlaceDB)
         pydb = types.SimpleNamespace()
 
-        with self.assertRaises(RuntimeError):
-            placedb._import_m2_pg_rail_density_boxes(pydb, include_m2_pg_rail_density=True)
+        with self.assertLogs(level="WARNING") as logs:
+            boxes = placedb._import_m2_pg_rail_density_boxes(
+                pydb, include_m2_pg_rail_density=True
+            )
+
+        self.assertEqual(boxes.shape, (0, 4))
+        self.assertIn(
+            "current ecc-tools binding does not provide M2 PG rail data",
+            "\n".join(logs.output),
+        )
 
     def test_rail_box_scaling_matches_old_hard_node_width_semantics(self):
         placedb = MacroPlaceDB.__new__(MacroPlaceDB)

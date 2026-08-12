@@ -541,9 +541,9 @@ class SteinerTopo(nn.Module):
             self.flat_net2pin_map,
             self.flat_net2pin_start_map,
             self.ignore_net_degree,
-            self.deterministic_flag,
             str(_FLUTE_POWV_FILE),
             str(_FLUTE_POST_FILE),
+            deterministic_flag=self.deterministic_flag,
         )
 
         self.update_cache(new_outputs_tuple)

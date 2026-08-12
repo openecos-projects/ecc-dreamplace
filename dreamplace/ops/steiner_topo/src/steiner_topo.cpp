@@ -373,9 +373,9 @@ at::Tensor convertVecToTens(const std::vector<T>& vec, const at::TensorOptions& 
 std::vector<at::Tensor> build_tree(at::Tensor pos, at::Tensor flat_netpin,
                                    at::Tensor netpin_start,
                                    int ignore_net_degree,
-                                   bool deterministic_flag,
                                    const std::string &powv_file,
-                                   const std::string &post_file) {
+                                   const std::string &post_file,
+                                   bool deterministic_flag) {
   CHECK_FLAT_CPU(pos);
   CHECK_EVEN(pos);
   CHECK_CONTIGUOUS(pos);
@@ -547,7 +547,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         pybind11::arg("flat_netpin"),
         pybind11::arg("netpin_start"),
         pybind11::arg("ignore_net_degree"),
-        pybind11::arg("deterministic_flag"),
         pybind11::arg("powv_file"),
-        pybind11::arg("post_file"));
+        pybind11::arg("post_file"),
+        pybind11::arg("deterministic_flag") = false);
 }

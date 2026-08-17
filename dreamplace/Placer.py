@@ -105,6 +105,7 @@ class PlacementEngine:
 
         self.placedb = None
         self.placer = None
+        self.backend = None
 
         self.rsmt = float("inf")
         self.hpwl = float("inf")
@@ -112,15 +113,13 @@ class PlacementEngine:
         self.density = float("inf")
         self.metrics = None
 
-    def setup_rawdb(self, ecc_module: Any):
-        # read cpp database
+    def bind_backend(self, backend: Any):
+        # export the current ECC design snapshot into PlaceDB
         tt = time.time()
         if self.placedb is None:
-            self.ecc_module = ecc_module
-            self.placedb = PlaceDB(ecc_module)
-            if self.params.with_sta:
-                self.ecc_module.init_sta()
-            self.placedb.setup_rawdb(self.params)
+            self.backend = backend
+            self.placedb = PlaceDB(backend)
+            self.placedb.export_rawdb(self.params)
 
         logging.info("setting up raw database takes %.2f seconds" %
                      (time.time() - tt))
@@ -136,7 +135,7 @@ class PlacementEngine:
 
     def write_back(self, def_file="output.def"):
         # self.placedb.write_placement_back(self.params)
-        self.ecc_module.def_save(def_file)
+        self.backend.def_save(def_file)
 
     def update_params(self, new_params: Params):
         self.params.fromJson(new_params.__dict__)
@@ -291,7 +290,7 @@ class PlacementEngine:
             "%s.tcl"
             % (self.params.design_name()),
         )
-        self.ecc_module.tcl_save(tcl_file)
+        self.backend.tcl_save(tcl_file)
         # self.placedb.write(self.params, self.gp_out_file)
 
     def run(self):
@@ -300,6 +299,8 @@ class PlacementEngine:
         # self.placedb = PlaceDB(engine_data_ieda)
         # self.placedb.init_db(params)
         print('init db done')
+        if self.placedb is None:
+            raise RuntimeError("PlacementEngine.bind_backend() must be called before run()")
         tt = time.time()
         self.setup_placedb()
         self.place()

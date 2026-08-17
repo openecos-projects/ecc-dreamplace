@@ -19,12 +19,12 @@ are preserved in [README_AutoDMP.md](README_AutoDMP.md).
 `ecc-dreamplace` can run placement directly from the ECC data flow instead of
 requiring a standalone DREAMPlace benchmark conversion path.
 
-- `dreamplace/Placer.py` exposes `Placer.setup_rawdb(ecc_module)` to initialize
-  DREAMPlace from an ECC module.
-- `dreamplace/macroPlaceDB.py` builds the Python placement database from ECC
-  data via `ecc_module.pydb(...)`.
-- Placement results can be written back through ECC with
-  `ecc_module.write_placement_back(...)` / `ecc_module.def_save(...)`.
+- `dreamplace/Placer.py` exposes `PlacementEngine.bind_backend(backend)` to
+  initialize DREAMPlace from an ECC place backend.
+- `dreamplace/macroPlaceDB.py` builds the Python placement database from
+  `backend.export_place_db(...)`.
+- Placement results are written back through
+  `backend.apply_placement(...)` / `backend.def_save(...)`.
 
 ### PyTorch-Based Differentiable STA
 

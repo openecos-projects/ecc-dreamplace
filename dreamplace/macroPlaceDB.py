@@ -32,12 +32,12 @@ class MacroPlaceDB(object):
     @brief placement database
     """
 
-    def __init__(self, ecc_module):
+    def __init__(self, backend):
         """
         initialization
         To avoid the usage of list, I flatten everything.
         """
-        self.ecc_module = ecc_module
+        self.backend = backend
         # self.rawdb = None # raw placement database, a C++ object
 
         # number of real nodes, including movable nodes, terminals, and terminal_NIs
@@ -277,20 +277,18 @@ class MacroPlaceDB(object):
             self.regions[i] -= box_shift_factor
             self.regions[i] *= scale_factor
 
-    def setup_rawdb(self, params):
+    def export_rawdb(self, params):
         self.dtype = datatypes[params.dtype]
         if self.pydb is None:
-            self.ecc_db = self.ecc_module.get_dmInst_ptr()
-            self.pydb = self.ecc_module.pydb(
-                self.ecc_db,
+            self.pydb = self.backend.export_place_db(
                 params.route_num_bins_x,
                 params.route_num_bins_y,
-                params.routability_opt_flag,
-                params.with_sta,
+                routability=bool(params.routability_opt_flag),
+                with_sta=bool(params.with_sta),
             )
 
     def init_db(self, params):
-        self.setup_rawdb(params)
+        self.export_rawdb(params)
         self.initialize_from_rawdb(self.pydb, params)
         # if params.with_sta:
         # self.virtual_net_init()
@@ -601,7 +599,7 @@ class MacroPlaceDB(object):
     def virtual_net_init(self):
         max_hop = 2
         print("build macro connections Begin")
-        macro_connections = self.ecc_module.build_macro_connection_map(max_hop)
+        macro_connections = self.backend.build_macro_connection_map(max_hop)
         print("build macro connections finished")
         print(f" self.num_physical_nodes =  {self.num_physical_nodes}")
         print(f" self.row_height =  {self.row_height}")
@@ -2031,7 +2029,7 @@ row height = %g, site width = %g
     def write_placement_back(self, node_x, node_y):
         # unscale locations
         # TODO:
-        self.ecc_module.write_placement_back(self.ecc_db, node_x, node_y)
+        self.backend.apply_placement(node_x, node_y)
 
     def unscale_pl(self, shift_factor, scale_factor):
         """

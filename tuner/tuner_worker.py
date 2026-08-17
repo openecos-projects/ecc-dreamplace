@@ -110,7 +110,7 @@ class AutoDMPWorker(Worker):
     def _setup_placer(self):
         params = self._create_params({})
         self.placer = PlacementEngine(params)
-        self.placer.setup_rawdb(data_manager=self.data_manager)
+        self.placer.bind_backend(self.data_manager)
 
     def _update_logger(self, working_directory, suffix=""):
         # change logger

@@ -597,7 +597,7 @@ class PlaceObj(nn.Module):
                         edge_to_res_map.get((parent_idx, global_idx), 0.0)
                     )
                 node_wire_caps.append(node_wire_caps_np[global_idx])
-            self.placedb.ecc_module.build_rc_tree_from_flat_data(
+            self.placedb.backend.build_rc_tree_from_flat_data(
                 net_name,
                 node_sta_names,
                 node_is_pin,
@@ -616,7 +616,7 @@ class PlaceObj(nn.Module):
         at_late_cpp, at_early_cpp, rt_late_cpp, rt_early_cpp = [], [], [], []
         pin_net_delay_cpp, cell_arc_delays_cpp, net_timing_details_cpp = [], [], []
 
-        self.placedb.ecc_module.update_and_get_all_pin_timings(
+        self.placedb.backend.update_and_get_all_pin_timings(
             self.placedb.pin_names,
             at_late_cpp,
             at_early_cpp,

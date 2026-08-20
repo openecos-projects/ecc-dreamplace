@@ -1450,11 +1450,10 @@ row height = %g, site width = %g
         )
 
         if utilization > MAX_MOVABLE_UTILIZATION:
-            logging.error(
-                "utilization is larger than %g. Please change the core size.",
-                MAX_MOVABLE_UTILIZATION,
+            raise RuntimeError(
+                "utilization is larger than %g. Please change the core size."
+                % MAX_MOVABLE_UTILIZATION
             )
-            exit(1)
         # calculate fence region virtual macro
         if len(self.regions) > 0:
             virtual_macro_for_fence_region = [

@@ -147,6 +147,7 @@ class Params:
             "l_shape_grad_target_ratio_max": 0.1,
             "l_shape_overflow_threshold": 0.3,
             "l_shape_keep_during_inflation": 1,
+            "l_shape_plot_flag": 0,
         }
         for key, value in defaults.items():
             if not hasattr(self, key):

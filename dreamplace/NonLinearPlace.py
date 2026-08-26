@@ -145,18 +145,12 @@ def _get_gpugr_parser_cache_node_names(placedb):
     return node_names
 
 
-def _get_cached_gpugr_operator(placedb):
-    try:
-        from tools.iEDA.module.gpugr import IEDAGPUGR
-    except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "GPUGR routability is enabled, but the optional "
-            "tools.iEDA.module.gpugr backend is not installed"
-        ) from exc
+def _get_cached_gpugr_operator(params, placedb):
+    from dreamplace.ops.gpugr.xplace_backend import XplaceGPUGR
 
     gpugr_op = getattr(placedb, "_autodmp_gpugr_op", None)
     if gpugr_op is None:
-        gpugr_op = IEDAGPUGR(dir_workspace=placedb.data_manager.dir_workspace)
+        gpugr_op = XplaceGPUGR(params, placedb)
         setattr(placedb, "_autodmp_gpugr_op", gpugr_op)
     return gpugr_op
 
@@ -693,7 +687,7 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
     parser_cache_enable = bool(getattr(params, "gpugr_parser_cache_enable", True))
     parser_cache_node_lpos = None
     parser_cache_node_names = None
-    gpugr_op = _get_cached_gpugr_operator(placedb)
+    gpugr_op = _get_cached_gpugr_operator(params, placedb)
     if parser_cache_enable:
         with profile_scope(params, "gpugr_prepare.parser_cache_inputs", tensor=pos):
             parser_cache_node_lpos, parser_cache_node_names = _build_gpugr_parser_cache_inputs(
@@ -935,14 +929,6 @@ def _run_gpugr_final_eval(params, placedb, pos):
     if not bool(getattr(params, "gpugr_final_eval_flag", 0)):
         return None
 
-    try:
-        from tools.iEDA.module.gpugr import IEDAGPUGR
-    except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "GPUGR final evaluation is enabled, but the optional "
-            "tools.iEDA.module.gpugr backend is not installed"
-        ) from exc
-
     _write_back_autodmp_pos_to_ieda(pos, params, placedb)
 
     override_xsize = int(getattr(params, "gpugr_final_eval_route_xsize", 0))
@@ -966,7 +952,7 @@ def _run_gpugr_final_eval(params, placedb, pos):
         int(getattr(params, "gpugr_final_eval_rrr_iters", 1)),
         str(bool(getattr(params, "gpugr_final_eval_skip_m1_route", 1))),
     )
-    gpugr_op = IEDAGPUGR(dir_workspace=placedb.data_manager.dir_workspace)
+    gpugr_op = _get_cached_gpugr_operator(params, placedb)
     result = gpugr_op.run_gpugr(
         out_dir=out_dir,
         design_name=params.design_name(),
@@ -1070,14 +1056,6 @@ def _run_gpugr_before_first_area_adjust_and_exit(params, placedb, pos, num_area_
     if num_area_adjust != 0:
         return
 
-    try:
-        from tools.iEDA.module.gpugr import IEDAGPUGR
-    except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "GPUGR first-inflation evaluation is enabled, but the optional "
-            "tools.iEDA.module.gpugr backend is not installed"
-        ) from exc
-
     logging.info(
         "Run gpugr operator before the first AutoDMP area-adjust round and exit after it finishes."
     )
@@ -1085,7 +1063,7 @@ def _run_gpugr_before_first_area_adjust_and_exit(params, placedb, pos, num_area_
     route_xsize, route_ysize = _sync_gpugr_route_grid_to_autodmp(params, placedb, model=model)
 
     out_dir = os.path.join(params.result_dir, "gpugr_first_inflation")
-    gpugr_op = IEDAGPUGR(dir_workspace=placedb.data_manager.dir_workspace)
+    gpugr_op = _get_cached_gpugr_operator(params, placedb)
     result = gpugr_op.run_gpugr(
         out_dir=out_dir,
         design_name=params.design_name(),

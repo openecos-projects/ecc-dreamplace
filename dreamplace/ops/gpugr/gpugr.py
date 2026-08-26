@@ -24,14 +24,9 @@ class GPUGR(object):
 
     def _get_gpugr_op(self):
         if self._gpugr_op is None:
-            try:
-                from tools.iEDA.module.gpugr import IEDAGPUGR
-            except ModuleNotFoundError as exc:
-                raise RuntimeError(
-                    "GPUGR routability is enabled, but the optional "
-                    "tools.iEDA.module.gpugr backend is not installed"
-                ) from exc
-            self._gpugr_op = IEDAGPUGR(dir_workspace=self.placedb.data_manager.dir_workspace)
+            from dreamplace.ops.gpugr.xplace_backend import XplaceGPUGR
+
+            self._gpugr_op = XplaceGPUGR(self.params, self.placedb)
         return self._gpugr_op
 
     def _resolve_call_output_dir(self, save_artifacts: bool):

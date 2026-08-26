@@ -144,3 +144,63 @@ It exits `1` with exactly:
 At verification time `origin/main` was `390a18c3` and
 `origin/experiment/ggr-lshape-al` was `05d92c93`; `origin/routability-driven-placement`
 did not exist. No push was performed.
+
+## Built-in Xplace GPUGR verification (2026-08-26)
+
+The GPUGR orchestration now lives in `dreamplace/ops/gpugr/` and has no runtime
+import or fallback to `tools.iEDA.module.gpugr`. Xplace is a nested submodule.
+The local Xplace commit `5632aaf55f08b46835aba5e9a2fe694999edadc8`
+builds on `b74548412f9896ef9963dce5cfbc4584b0422bb9` and records nested pybind11
+`f5fbe867d2d26e4a0a9177a51f6e568868ad3dc8` for the Torch 2.11 pybind ABI.
+The submodule is found automatically; `ECC_XPLACE_ROOT` is an optional override.
+
+The build script was rerun using the parent ECC `.venv`. It detected
+`torch 2.11.0+cpu`, configured `XPLACE_ENABLE_CUDA=OFF`, retained the CPU-compatible
+GPUGR, IOParser, Flute, route-DP, and timer extensions, and removed stale CUDA
+extensions from an older build. The loader imported IOParser, GPUGR, Flute,
+`calc_gr_wl_via`, and `estimate_num_shorts`; `gpugr.cuda_enabled()` was false.
+This verifies CPU_PR only, not the CUDA backend.
+
+Focused tests passed after the final source changes:
+
+```text
+unittest_gpugr_backend_select.py       6 passed
+unittest_xplace_parser_cache.py        2 passed
+unittest_iopin_density_weight.py      13 passed
+unittest_params_l_shape_preset.py      9 passed
+unittest_shared_precondition.py        6 passed
+```
+
+The final physical rerun used:
+
+```text
+.venv/bin/ecc run --workspace /home/zhaoxueyan/gpugr-debug-lshape-fixed \
+  --only place --force --json
+```
+
+It returned status `success`, executed only `place`, and persisted
+`place=Success` with runtime `0:1:2`. The GGR L-shape topology pack was loaded
+for nine placement updates. The final metrics recorded CPU_PR, a `19x16` route
+grid, `rrr_iters=0`, `parser_cache_hit=true`, `parser_cache_active=true`, and
+`native_issue_line_count=0`. The final DreamPlace placement overflow was
+`0.0986458957`; this is a placement stopping metric, not a GPUGR routing-overflow
+or QoR claim. The GPUGR route/map/metrics artifacts and the ECC EGR
+`route.guide`, per-layer overflow maps, `place.map.json`, DEF, Verilog, and GDS
+outputs were non-empty.
+
+Two retained verification workspaces also record successful complete place
+steps: `/home/zhaoxueyan/gpugr-debug-c1-fixed` for the control path and
+`/home/zhaoxueyan/gpugr-debug-area-fixed` for `adjust_gpugr_area_flag=1`. The
+area run resolved `backend=auto` to CPU_PR and recorded no native issue lines.
+
+The earlier signal 139 was outside the Xplace backend. Union feature evaluation
+ran the default planar EGR stage, then attempted to summarize missing egr3D
+per-layer overflow maps. The empty input reached an unconditional top-one
+access in `CongestionEval::evalAvgOverflow`. ECC-Tools now selects `egr3D` for
+the union feature path and returns the unavailable sentinel for empty overflow
+data. `eval_map_layout_writer_test` and `eval_congestion_metrics_test` passed,
+and the complete ECC place analysis no longer crashes.
+
+`xplace_backend.py` remains above the repository's normal module-size guideline.
+The repository owner explicitly waived decomposition for this integration, so
+no file split is required for this delivery. No push was performed.

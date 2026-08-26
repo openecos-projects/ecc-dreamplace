@@ -15,28 +15,6 @@ if AUTODMP_ROOT not in sys.path:
 from dreamplace.ops.electric_potential.electric_overflow import ElectricOverflow  # noqa: E402
 
 
-def _install_ieda_stubs():
-    tools = types.ModuleType("tools")
-    ieda = types.ModuleType("tools.iEDA")
-    module = types.ModuleType("tools.iEDA.module")
-    sta = types.ModuleType("tools.iEDA.module.sta")
-    gpugr = types.ModuleType("tools.iEDA.module.gpugr")
-
-    class IEDASta:
-        pass
-
-    class IEDAGPUGR:
-        pass
-
-    sta.IEDASta = IEDASta
-    gpugr.IEDAGPUGR = IEDAGPUGR
-    sys.modules.setdefault("tools", tools)
-    sys.modules.setdefault("tools.iEDA", ieda)
-    sys.modules.setdefault("tools.iEDA.module", module)
-    sys.modules.setdefault("tools.iEDA.module.sta", sta)
-    sys.modules.setdefault("tools.iEDA.module.gpugr", gpugr)
-
-
 def _make_density_op(
     iopin_density_weight=0.0,
     num_terminal_NIs=1,
@@ -152,7 +130,6 @@ class IOPinDensityWeightMapTest(unittest.TestCase):
         )
 
     def test_region_design_builders_force_effective_weight_to_zero(self):
-        _install_ieda_stubs()
         from dreamplace import PlaceObj as place_obj_module
 
         dtype = torch.float64
@@ -205,7 +182,6 @@ class IOPinDensityWeightMapTest(unittest.TestCase):
         self.assertEqual(potential.iopin_density_weight, 0.0)
 
     def test_non_region_builders_pass_effective_weight_and_terminal_ni_count(self):
-        _install_ieda_stubs()
         from dreamplace import PlaceObj as place_obj_module
 
         dtype = torch.float64
@@ -423,7 +399,6 @@ class M2PgRailSoftDensityMapTest(unittest.TestCase):
         )
 
     def test_non_region_builders_default_m2_pg_rail_density_weight_to_one(self):
-        _install_ieda_stubs()
         from dreamplace import PlaceObj as place_obj_module
 
         dtype = torch.float64
@@ -477,7 +452,6 @@ class M2PgRailSoftDensityMapTest(unittest.TestCase):
         self.assertIsNotNone(overflow.m2_pg_rail_density_boxes)
 
     def test_hard_ieda_m2_flag_disables_soft_density_even_with_weight(self):
-        _install_ieda_stubs()
         from dreamplace import PlaceObj as place_obj_module
 
         dtype = torch.float64
@@ -532,7 +506,6 @@ class M2PgRailSoftDensityMapTest(unittest.TestCase):
         self.assertIsNone(overflow.m2_pg_rail_density_boxes)
 
     def test_region_specific_electric_potential_skips_rail_soft_density(self):
-        _install_ieda_stubs()
         from dreamplace import PlaceObj as place_obj_module
 
         dtype = torch.float64

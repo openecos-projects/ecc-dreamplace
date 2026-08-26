@@ -13,30 +13,6 @@ if AUTODMP_ROOT not in sys.path:
     sys.path.insert(0, AUTODMP_ROOT)
 
 
-def _install_ieda_stubs():
-    tools = types.ModuleType("tools")
-    ieda = types.ModuleType("tools.iEDA")
-    module = types.ModuleType("tools.iEDA.module")
-    sta = types.ModuleType("tools.iEDA.module.sta")
-    gpugr = types.ModuleType("tools.iEDA.module.gpugr")
-
-    class IEDASta:
-        pass
-
-    class IEDAGPUGR:
-        pass
-
-    sta.IEDASta = IEDASta
-    gpugr.IEDAGPUGR = IEDAGPUGR
-    sys.modules.setdefault("tools", tools)
-    sys.modules.setdefault("tools.iEDA", ieda)
-    sys.modules.setdefault("tools.iEDA.module", module)
-    sys.modules.setdefault("tools.iEDA.module.sta", sta)
-    sys.modules.setdefault("tools.iEDA.module.gpugr", gpugr)
-
-
-_install_ieda_stubs()
-
 from dreamplace.PlaceObj import PlaceObj, PreconditionOp  # noqa: E402
 
 

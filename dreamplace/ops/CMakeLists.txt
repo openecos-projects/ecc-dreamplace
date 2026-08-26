@@ -32,8 +32,8 @@ add_subdirectory(rc_timing)
 add_subdirectory(steiner_topo)
 add_subdirectory(routability)
 
-# Optional GPUGR wrapper.  Its native backend is supplied by the embedding
-# ECC environment, so DreamPlace only installs the Python adapter here.
+# GPUGR wrapper and its built-in Xplace backend (the native extensions are
+# built from thirdparty/xplace by thirdparty/build_xplace_gpugr.sh).
 file(GLOB GPUGR_INSTALL_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/gpugr/*.py")
 install(
     FILES ${GPUGR_INSTALL_SRCS} DESTINATION dreamplace/ops/gpugr

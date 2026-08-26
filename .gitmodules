@@ -7,3 +7,9 @@
 [submodule "thirdparty/pybind11"]
 	path = thirdparty/pybind11
 	url = https://github.com/pybind/pybind11.git
+[submodule "xplace"]
+	path = thirdparty/xplace
+	url = git@gitee.com:ieda-iai/xplace-fork.git
+	branch = feature/ggr-lshape
+	shallow = true
+	ignore = untracked

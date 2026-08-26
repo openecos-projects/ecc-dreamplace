@@ -15,7 +15,8 @@ compile_configurations = {
         "CUDA_FOUND" : "${CUDA_FOUND}", 
         "CUDA_TOOLKIT_ROOT_DIR" : "${CUDA_TOOLKIT_ROOT_DIR}", 
         "CMAKE_CUDA_FLAGS" : "${CMAKE_CUDA_FLAGS}", 
-        "CAIRO_FOUND" : "${CAIRO_FOUND}", 
-        "CAIRO_INCLUDE_DIRS" : "${CAIRO_INCLUDE_DIRS}", 
-        "CAIRO_LIBRARIES" : "${CAIRO_LIBRARIES}", 
+        "CAIRO_FOUND" : "${CAIRO_FOUND}",
+        "CAIRO_INCLUDE_DIRS" : "${CAIRO_INCLUDE_DIRS}",
+        "CAIRO_LIBRARIES" : "${CAIRO_LIBRARIES}",
+        "DREAMPLACE_SOURCE_DIR" : "${CMAKE_CURRENT_SOURCE_DIR}",
         }

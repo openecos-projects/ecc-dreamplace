@@ -301,6 +301,18 @@ class PlacementEngine:
         # self.placedb.init_db(params)
         print('init db done')
         tt = time.time()
+        if self.params.macro_only:
+            candidate_count = int(
+                np.count_nonzero(self.placedb.pydb.macro_writeback_candidate)
+            )
+            if candidate_count == 0:
+                result = {
+                    "executed": False,
+                    "candidate_count": 0,
+                    "reason": "no_unplaced_hard_macros",
+                }
+                logging.info("Macro placement skipped: %s", result)
+                return result
         self.setup_placedb()
         self.place()
         # with torch.profiler.profile(

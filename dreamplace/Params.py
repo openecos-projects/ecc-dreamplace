@@ -193,10 +193,21 @@ class Params:
         for key in legacy_keys:
             self.__dict__.pop(key, None)
 
+    def normalize_inflation_area_budget_ratio(self):
+        name = "inflation_area_budget_ratio"
+        try:
+            value = float(getattr(self, name, 0.1))
+        except (TypeError, ValueError):
+            raise ValueError("%s must be numeric" % name)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("%s must be finite and non-negative" % name)
+        self.inflation_area_budget_ratio = value
+
     def normalize_params(self):
         self.normalize_removed_l_shape_weight_schedule()
         self.normalize_iopin_density_weight()
         self.normalize_m2_pg_rail_density_weight()
+        self.normalize_inflation_area_budget_ratio()
 
     def fromJson(self, data):
         """

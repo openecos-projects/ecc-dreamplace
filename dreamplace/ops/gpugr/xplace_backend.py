@@ -443,6 +443,27 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         cg_map_v_overflow = torch.clamp(cg_map_v_raw - 1.0, min=0.0)
         cg_map_union_overflow = torch.clamp(cg_map_union_raw - 1.0, min=0.0)
 
+        effective_demand_map = wire_dmd_map + via_dmd_map
+        capacity_floor = torch.finfo(cap_map.dtype).eps
+        effective_capacity_map = torch.clamp(
+            cap_map - fix_usage_map - mov_usage_map,
+            min=capacity_floor,
+        )
+        cg_map_h_effective_raw = effective_demand_map[h_id::2].sum(
+            dim=0
+        ) / effective_capacity_map[h_id::2].sum(dim=0).clamp(min=capacity_floor)
+        cg_map_v_effective_raw = effective_demand_map[v_id::2].sum(
+            dim=0
+        ) / effective_capacity_map[v_id::2].sum(dim=0).clamp(min=capacity_floor)
+        cg_map_h_effective_overflow = torch.clamp(
+            cg_map_h_effective_raw - 1.0,
+            min=0.0,
+        )
+        cg_map_v_effective_overflow = torch.clamp(
+            cg_map_v_effective_raw - 1.0,
+            min=0.0,
+        )
+
         return {
             "cg_map_h_raw": cg_map_h_raw,
             "cg_map_v_raw": cg_map_v_raw,
@@ -450,6 +471,10 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
             "cg_map_h_overflow": cg_map_h_overflow,
             "cg_map_v_overflow": cg_map_v_overflow,
             "cg_map_union_overflow": cg_map_union_overflow,
+            "cg_map_h_effective_raw": cg_map_h_effective_raw,
+            "cg_map_v_effective_raw": cg_map_v_effective_raw,
+            "cg_map_h_effective_overflow": cg_map_h_effective_overflow,
+            "cg_map_v_effective_overflow": cg_map_v_effective_overflow,
             "dmd_map": dmd_map,
             "demand_map": dmd_map,
             "raw_wire_demand_map": raw_wire_dmd_map,
@@ -589,6 +614,26 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
             ("cg_map_h_overflow", f"{design_name}_cg_map_h_overflow.png", "Horizontal Overflow"),
             ("cg_map_v_overflow", f"{design_name}_cg_map_v_overflow.png", "Vertical Overflow"),
             ("cg_map_union_overflow", f"{design_name}_cg_map_union_overflow.png", "Union Overflow"),
+            (
+                "cg_map_h_effective_raw",
+                f"{design_name}_cg_map_h_effective_raw.png",
+                "Horizontal Effective Congestion",
+            ),
+            (
+                "cg_map_v_effective_raw",
+                f"{design_name}_cg_map_v_effective_raw.png",
+                "Vertical Effective Congestion",
+            ),
+            (
+                "cg_map_h_effective_overflow",
+                f"{design_name}_cg_map_h_effective_overflow.png",
+                "Horizontal Effective Overflow",
+            ),
+            (
+                "cg_map_v_effective_overflow",
+                f"{design_name}_cg_map_v_effective_overflow.png",
+                "Vertical Effective Overflow",
+            ),
             ("capacity_map", f"{design_name}_capacity_sum.png", "Capacity Sum"),
             ("dmd_map", f"{design_name}_demand_sum.png", "Demand Sum"),
             ("wire_demand_map", f"{design_name}_wire_demand_sum.png", "Wire Demand Sum"),
@@ -1051,6 +1096,18 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
                 cg_union_overflow_summary = self._summarize_congestion_tensor(
                     maps["cg_map_union_overflow"], overflow_threshold=0.0
                 )
+                cg_h_effective_raw_summary = self._summarize_congestion_tensor(
+                    maps["cg_map_h_effective_raw"], overflow_threshold=1.0
+                )
+                cg_v_effective_raw_summary = self._summarize_congestion_tensor(
+                    maps["cg_map_v_effective_raw"], overflow_threshold=1.0
+                )
+                cg_h_effective_overflow_summary = self._summarize_congestion_tensor(
+                    maps["cg_map_h_effective_overflow"], overflow_threshold=0.0
+                )
+                cg_v_effective_overflow_summary = self._summarize_congestion_tensor(
+                    maps["cg_map_v_effective_overflow"], overflow_threshold=0.0
+                )
 
             metrics = {
                 "design_name": design_name,
@@ -1089,6 +1146,26 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
                 "cg_map_h_overflow_bin_ratio": cg_h_overflow_summary["overflow_bin_ratio"],
                 "cg_map_v_overflow_bin_ratio": cg_v_overflow_summary["overflow_bin_ratio"],
                 "cg_map_union_overflow_bin_ratio": cg_union_overflow_summary["overflow_bin_ratio"],
+                "cg_map_h_effective_raw_max": cg_h_effective_raw_summary["max"],
+                "cg_map_v_effective_raw_max": cg_v_effective_raw_summary["max"],
+                "cg_map_h_effective_raw_mean": cg_h_effective_raw_summary["mean"],
+                "cg_map_v_effective_raw_mean": cg_v_effective_raw_summary["mean"],
+                "cg_map_h_effective_raw_top1pct_mean": cg_h_effective_raw_summary[
+                    "top1pct_mean"
+                ],
+                "cg_map_v_effective_raw_top1pct_mean": cg_v_effective_raw_summary[
+                    "top1pct_mean"
+                ],
+                "cg_map_h_effective_raw_overflow_bin_ratio": cg_h_effective_raw_summary[
+                    "overflow_bin_ratio"
+                ],
+                "cg_map_v_effective_raw_overflow_bin_ratio": cg_v_effective_raw_summary[
+                    "overflow_bin_ratio"
+                ],
+                "cg_map_h_effective_overflow_max": cg_h_effective_overflow_summary["max"],
+                "cg_map_v_effective_overflow_max": cg_v_effective_overflow_summary["max"],
+                "cg_map_h_effective_overflow_mean": cg_h_effective_overflow_summary["mean"],
+                "cg_map_v_effective_overflow_mean": cg_v_effective_overflow_summary["mean"],
                 "native_issue_line_count": len(suspicious_native_lines),
                 "export_current_db": bool(export_current_db),
                 "decompressed_def_from": decompressed_def or "",

@@ -1,9 +1,8 @@
-import json
 import importlib.util
+import json
 import os
 import sys
 import unittest
-
 
 AUTODMP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if AUTODMP_ROOT not in sys.path:
@@ -39,6 +38,31 @@ class EnhancedInflationParamsTest(unittest.TestCase):
         self.assertNotIn("enhanced_inflation_dynamic_target_density_flag", params)
         self.assertNotIn("xplace_style_inflation_flag", params)
         self.assertNotIn("xplace_inflation_max_rounds", params)
+
+    def test_inflation_area_budget_ratio_schema_and_runtime_default(self):
+        params_path = os.path.join(os.path.dirname(__file__), "params.json")
+        with open(params_path, "r", encoding="utf-8") as f:
+            schema = json.load(f)
+
+        self.assertEqual(schema["inflation_area_budget_ratio"]["default"], 0.1)
+        params = Params()
+        params.fromJson({})
+        self.assertEqual(params.inflation_area_budget_ratio, 0.1)
+
+    def test_inflation_area_budget_ratio_is_normalized(self):
+        params = Params()
+        params.fromJson({"inflation_area_budget_ratio": "0.25"})
+        self.assertEqual(params.inflation_area_budget_ratio, 0.25)
+        self.assertIsInstance(params.inflation_area_budget_ratio, float)
+
+        for invalid_value in (-0.1, "invalid", float("inf")):
+            with self.subTest(value=invalid_value):
+                with self.assertRaisesRegex(
+                    ValueError, "inflation_area_budget_ratio"
+                ):
+                    Params().fromJson(
+                        {"inflation_area_budget_ratio": invalid_value}
+                    )
 
     def test_enhanced_flag_controls_enhanced_inflation(self):
         controller = load_enhanced_inflation_controller()

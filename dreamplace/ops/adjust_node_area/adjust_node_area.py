@@ -93,6 +93,7 @@ class AdjustNodeArea(nn.Module):
         max_route_opt_adjust_rate,
         route_opt_adjust_exponent=2.5,
         max_pin_opt_adjust_rate=2.5,
+        inflation_area_budget_ratio=0.1,
         area_adjust_stop_ratio=0.01,
         route_area_adjust_stop_ratio=0.01,
         pin_area_adjust_stop_ratio=0.05,
@@ -119,6 +120,14 @@ class AdjustNodeArea(nn.Module):
         # maximum and minimum instance area adjustment rate for routability optimization
         self.max_pin_opt_adjust_rate = max_pin_opt_adjust_rate
         self.min_pin_opt_adjust_rate = 1.0 / max_pin_opt_adjust_rate
+        self.inflation_area_budget_ratio = float(inflation_area_budget_ratio)
+        if (
+            not math.isfinite(self.inflation_area_budget_ratio)
+            or self.inflation_area_budget_ratio < 0
+        ):
+            raise ValueError(
+                "inflation_area_budget_ratio must be finite and non-negative"
+            )
 
         # stop ratio
         self.area_adjust_stop_ratio = area_adjust_stop_ratio
@@ -162,6 +171,7 @@ class AdjustNodeArea(nn.Module):
         old_node_size_y_movable,
         actual_area_increment,
         inflation_round,
+        color_limits=None,
     ):
         params = self.params
         if params is None or not getattr(params, "modularity_plot_flag", False):
@@ -233,8 +243,11 @@ class AdjustNodeArea(nn.Module):
             )
         if inflated_mask.any():
             inflated_ratios = inflation_ratio_np[inflated_mask]
-            ratio_min = float(inflated_ratios.min())
-            ratio_max = float(inflated_ratios.max())
+            if color_limits is None:
+                ratio_min = float(inflated_ratios.min())
+                ratio_max = float(inflated_ratios.max())
+            else:
+                ratio_min, ratio_max = color_limits
             if math.isclose(ratio_min, ratio_max):
                 ratio_max = ratio_min + 1e-6
             norm = plt.Normalize(
@@ -317,6 +330,152 @@ class AdjustNodeArea(nn.Module):
             float(inflated_ratio_stats.max()) if inflated_ratio_stats.size else 1.0,
             output_path,
         )
+
+    def _maybe_plot_route_inflation_maps(
+        self,
+        route_power_map,
+        route_effective_map,
+        scale_factor,
+        old_movable_area,
+        actual_area_increment,
+        inflation_round,
+    ):
+        params = self.params
+        if params is None or not getattr(params, "plot_flag", False):
+            return None
+        if route_power_map is None or route_effective_map is None:
+            return None
+
+        try:
+            design_name = params.design_name()
+        except Exception:
+            design_name = "design"
+        output_dir = os.path.join(
+            getattr(params, "result_dir", "."),
+            design_name,
+            "plot",
+        )
+        os.makedirs(output_dir, exist_ok=True)
+
+        applied_scale = min(max(float(scale_factor), 0.0), 1.0)
+        with torch.no_grad():
+            raw_np = route_power_map.detach().cpu().numpy()
+            effective_np = route_effective_map.detach().cpu().numpy()
+            applied_np = 1.0 + applied_scale * np.maximum(effective_np - 1.0, 0.0)
+
+            old_area_np = old_movable_area.detach().cpu().numpy()
+            increment_np = actual_area_increment.detach().cpu().numpy()
+            cell_ratio_np = np.ones_like(increment_np)
+            positive_area_mask = old_area_np > 0
+            cell_ratio_np[positive_area_mask] += (
+                increment_np[positive_area_mask] / old_area_np[positive_area_mask]
+            )
+
+        finite_raw = raw_np[np.isfinite(raw_np)]
+        raw_vmin = float(finite_raw.min()) if finite_raw.size else 0.0
+        raw_vmax = (
+            float(np.percentile(finite_raw, 99.5)) if finite_raw.size else raw_vmin
+        )
+        if not math.isfinite(raw_vmax) or raw_vmax <= raw_vmin:
+            raw_vmax = raw_vmin + 1e-6
+
+        shared_vmin = 1.0
+        shared_vmax = max(
+            float(np.nanmax(applied_np)) if applied_np.size else shared_vmin,
+            float(np.nanmax(cell_ratio_np)) if cell_ratio_np.size else shared_vmin,
+            shared_vmin + 1e-6,
+        )
+        extent = (float(self.xl), float(self.xh), float(self.yl), float(self.yh))
+
+        def save_map(data, filename, title, colorbar_label, vmin, vmax, cmap):
+            fig, ax = plt.subplots(figsize=(10, 10))
+            image = ax.imshow(
+                data.T,
+                origin="lower",
+                extent=extent,
+                interpolation="nearest",
+                aspect="equal",
+                cmap=cmap,
+                vmin=vmin,
+                vmax=vmax,
+            )
+            ax.set_xlabel("X")
+            ax.set_ylabel("Y")
+            ax.set_title(title)
+            colorbar = fig.colorbar(
+                image,
+                ax=ax,
+                orientation="vertical",
+                fraction=0.035,
+                pad=0.02,
+            )
+            colorbar.set_label(colorbar_label)
+            output_path = os.path.join(output_dir, filename)
+            fig.savefig(output_path, dpi=240, bbox_inches="tight")
+            plt.close(fig)
+            return output_path
+
+        round_idx = int(inflation_round)
+        raw_path = save_map(
+            raw_np,
+            "route%d_raw.png" % round_idx,
+            "Raw Powered Route Signal R%d | display <= P99.5 %.4f | max %.4f"
+            % (round_idx, raw_vmax, float(np.nanmax(raw_np))),
+            "Powered Route Signal",
+            raw_vmin,
+            raw_vmax,
+            "magma",
+        )
+        effective_path = save_map(
+            effective_np,
+            "route%d_effective.png" % round_idx,
+            "Effective Route Inflation Map R%d | visible range 1.0000 to %.4f"
+            % (round_idx, self.max_route_opt_adjust_rate),
+            "Pre-budget Inflation Factor",
+            1.0,
+            self.max_route_opt_adjust_rate,
+            "turbo",
+        )
+        applied_path = save_map(
+            applied_np,
+            "route%d.png" % round_idx,
+            "Applied Route Inflation Map R%d | area scale %.6f"
+            % (round_idx, applied_scale),
+            "Applied Inflation Ratio",
+            shared_vmin,
+            shared_vmax,
+            "turbo",
+        )
+        npz_path = os.path.join(output_dir, "route%d_maps.npz" % round_idx)
+        np.savez_compressed(
+            npz_path,
+            raw_power_map=raw_np,
+            effective_map=effective_np,
+            applied_map=applied_np,
+            applied_scale=np.asarray([applied_scale], dtype=np.float64),
+            shared_color_limits=np.asarray(
+                [shared_vmin, shared_vmax], dtype=np.float64
+            ),
+        )
+        logger.info(
+            "Saved route inflation maps: round=%d raw=%s effective=%s applied=%s "
+            "npz=%s raw[min/p99.5/max]=%.4f/%.4f/%.4f "
+            "effective[min/max]=%.4f/%.4f applied[min/max]=%.4f/%.4f scale=%.6f",
+            round_idx,
+            raw_path,
+            effective_path,
+            applied_path,
+            npz_path,
+            raw_vmin,
+            raw_vmax,
+            float(np.nanmax(raw_np)),
+            float(np.nanmin(effective_np)),
+            float(np.nanmax(effective_np)),
+            float(np.nanmin(applied_np)),
+            float(np.nanmax(applied_np)),
+            applied_scale,
+        )
+        return shared_vmin, shared_vmax
 
     def _select_modularity_cluster_ids(self, inflation_round):
         if not self.modularity_enabled:
@@ -488,6 +647,8 @@ class AdjustNodeArea(nn.Module):
                 )
 
             # compute routability optimized area
+            route_power_map = None
+            route_effective_map = None
             if adjust_route_area_flag:
                 route_opt_area = None
                 if self.modularity_enabled:
@@ -504,12 +665,15 @@ class AdjustNodeArea(nn.Module):
                         inflation_round=inflation_round,
                     )
                 if route_opt_area is None:
-                    route_utilization_map_clamp = route_utilization_map.pow(
-                        self.route_opt_adjust_exponent).clamp_(
-                            min=self.min_route_opt_adjust_rate,
-                            max=self.max_route_opt_adjust_rate)
+                    route_power_map = route_utilization_map.pow(
+                        self.route_opt_adjust_exponent
+                    )
+                    route_effective_map = route_power_map.clamp(
+                        min=self.min_route_opt_adjust_rate,
+                        max=self.max_route_opt_adjust_rate,
+                    )
                     route_opt_area = self.compute_node_area_route(
-                        pos, node_size_x, node_size_y, route_utilization_map_clamp)
+                        pos, node_size_x, node_size_y, route_effective_map)
             # compute pin density optimized area
             if adjust_pin_area_flag:
                 pin_opt_area = self.compute_node_area_pin(
@@ -586,25 +750,36 @@ class AdjustNodeArea(nn.Module):
             # check whether the total area is larger than the max area requirement
             # If yes, scale the extra area to meet the requirement
             # We assume the total base area is no greater than the max area requirement
-            if fixed_target_area_tensor is not None:
-                area_budget = torch.minimum(
-                    old_movable_area_sum.new_tensor(0.1 * self.total_whitespace_area),
-                    F.relu(fixed_target_area_tensor - old_movable_area_sum),
-                )
-                logger.info(
-                    "fixed target area budget %.3E: old movable %.3E, old filler %.3E"
-                    % (
-                        fixed_target_area_tensor,
-                        old_movable_area_sum,
-                        old_filler_area_sum,
-                    )
-                )
-            else:
-                area_budget = torch.minimum(
-                    old_movable_area_sum.new_tensor(0.1 * self.total_whitespace_area),
-                    old_movable_area_sum.new_tensor(self.total_place_area)
-                    - old_movable_area_sum,
-                )
+            total_whitespace_area_tensor = torch.as_tensor(
+                self.total_whitespace_area,
+                device=old_movable_area_sum.device,
+                dtype=old_movable_area_sum.dtype,
+            )
+            total_place_area_tensor = torch.as_tensor(
+                self.total_place_area,
+                device=old_movable_area_sum.device,
+                dtype=old_movable_area_sum.dtype,
+            )
+            whitespace_area_budget = (
+                self.inflation_area_budget_ratio * total_whitespace_area_tensor
+            )
+            # Inflation may consume up to the configured share of baseline
+            # whitespace without exceeding the remaining physical place area.
+            remaining_area_budget = total_place_area_tensor - old_movable_area_sum
+            area_budget = torch.minimum(
+                whitespace_area_budget,
+                remaining_area_budget,
+            )
+            logger.info(
+                "inflation area budget %.3E: whitespace cap %.3E (ratio %.6g), "
+                "physical cap %.3E, old movable %.3E, old filler %.3E",
+                area_budget,
+                whitespace_area_budget,
+                self.inflation_area_budget_ratio,
+                remaining_area_budget,
+                old_movable_area_sum,
+                old_filler_area_sum,
+            )
             if area_increment_sum.data.item() <= 0:
                 scale_factor = 0
             else:
@@ -620,6 +795,14 @@ class AdjustNodeArea(nn.Module):
                 new_movable_area = old_movable_area + area_increment * scale_factor
                 area_increment_sum *= scale_factor
             actual_area_increment = new_movable_area - old_movable_area
+            route_color_limits = self._maybe_plot_route_inflation_maps(
+                route_power_map=route_power_map,
+                route_effective_map=route_effective_map,
+                scale_factor=scale_factor,
+                old_movable_area=old_movable_area,
+                actual_area_increment=actual_area_increment,
+                inflation_round=inflation_round,
+            )
             self._maybe_plot_inflation_cells(
                 pos=pos,
                 old_movable_area=old_movable_area,
@@ -627,6 +810,7 @@ class AdjustNodeArea(nn.Module):
                 old_node_size_y_movable=old_node_size_y_movable,
                 actual_area_increment=actual_area_increment,
                 inflation_round=inflation_round,
+                color_limits=route_color_limits,
             )
             new_movable_area_sum = old_movable_area_sum + area_increment_sum
             area_increment_ratio = area_increment_sum / old_movable_area_sum
@@ -698,12 +882,34 @@ class AdjustNodeArea(nn.Module):
             # all the filler nodes share the same deflation ratio, filler_nodes_ratio is a scalar
             # we keep the centers the same
             if fixed_target_area_tensor is not None:
-                desired_filler_area_sum = F.relu(
-                    fixed_target_area_tensor - new_movable_area_sum
-                )
                 if self.num_filler_nodes > 0 and old_filler_area_sum > 0:
-                    new_filler_area_sum = desired_filler_area_sum
+                    # Enhanced inflation consumes filler and out-of-target
+                    # whitespace at the same rate instead of exhausting filler first.
+                    old_whitespace_area_sum = F.relu(remaining_area_budget)
+                    whitespace_consumption_ratio = torch.clamp(
+                        area_increment_sum / old_whitespace_area_sum,
+                        min=0.0,
+                        max=1.0,
+                    )
+                    new_filler_area_sum = old_filler_area_sum * (
+                        1.0 - whitespace_consumption_ratio
+                    )
                     filler_nodes_ratio = new_filler_area_sum / old_filler_area_sum
+                    old_non_filler_whitespace_area_sum = F.relu(
+                        old_whitespace_area_sum - old_filler_area_sum
+                    )
+                    logger.info(
+                        "proportional whitespace consumption: ratio %g, "
+                        "filler %.3E -> %.3E, non-filler whitespace %.3E -> %.3E"
+                        % (
+                            whitespace_consumption_ratio,
+                            old_filler_area_sum,
+                            new_filler_area_sum,
+                            old_non_filler_whitespace_area_sum,
+                            old_non_filler_whitespace_area_sum
+                            * (1.0 - whitespace_consumption_ratio),
+                        )
+                    )
                     logger.info("inflation ratio for filler nodes: %g" %
                                 (filler_nodes_ratio))
                     filler_nodes_ratio.sqrt_()
@@ -755,17 +961,9 @@ class AdjustNodeArea(nn.Module):
                 % (new_movable_area_sum, new_filler_area_sum,
                    new_movable_area_sum + new_filler_area_sum,
                    self.total_place_area))
-            if fixed_target_area_tensor is not None:
-                target_density.data.copy_(
-                    (fixed_target_area_tensor / self.total_place_area).to(
-                        device=target_density.device,
-                        dtype=target_density.dtype,
-                    )
-                )
-            else:
-                target_density.data.copy_(
-                    (new_movable_area_sum + new_filler_area_sum) /
-                    self.total_place_area)
+            target_density.data.copy_(
+                (new_movable_area_sum + new_filler_area_sum) /
+                self.total_place_area)
             logger.info("new target_density %g" % (target_density))
 
             if pos.is_cuda:

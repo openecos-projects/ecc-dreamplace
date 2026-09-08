@@ -3561,9 +3561,10 @@ class PlaceObj(nn.Module):
             logging.warning(
                 "num_bins_y (%d) < max_num_bins (%d)" % (num_bins_y, max_num_bins)
             )
-        # for fence region, the target density is different from different regions
+        # Keep the shared tensor because inflation updates target density in place.
+        # For fence regions, target density is different across regions.
         target_density = (
-            data_collections.target_density.item()
+            data_collections.target_density
             if fence_regions is None
             else placedb.target_density_fence_region[region_id]
         )
@@ -4006,6 +4007,9 @@ class PlaceObj(nn.Module):
             max_route_opt_adjust_rate=params.max_route_opt_adjust_rate,
             route_opt_adjust_exponent=params.route_opt_adjust_exponent,
             max_pin_opt_adjust_rate=params.max_pin_opt_adjust_rate,
+            inflation_area_budget_ratio=getattr(
+                params, "inflation_area_budget_ratio", 0.1
+            ),
             area_adjust_stop_ratio=params.area_adjust_stop_ratio,
             route_area_adjust_stop_ratio=params.route_area_adjust_stop_ratio,
             pin_area_adjust_stop_ratio=params.pin_area_adjust_stop_ratio,

@@ -223,6 +223,10 @@
         "description": "maximum times to adjust node area",
         "default": 3
     },
+    "inflation_area_budget_ratio": {
+        "description": "maximum fraction of the total whitespace area that routability inflation may add to movable nodes in one area-adjust round",
+        "default": 0.1
+    },
     "enhanced_inflation_flag": {
         "description": "whether enable the enhanced outer-loop inflation controller skeleton",
         "default": 0
@@ -322,6 +326,10 @@
     "gpugr_parser_cache_enable": {
         "description": "whether keep the Xplace gpugr parser DB alive and update movable coordinates by instance name between diff refreshes",
         "default": 1
+    },
+    "gpugr_area_adjust_congestion_mode": {
+        "description": "congestion signal used by GPUGR area inflation: union, direction-sensitive max_hv, or direction-sensitive max_hv_effective using routed wire plus via demand over nominal capacity minus fixed and movable obstacle usage",
+        "default": "union"
     },
     "gpugr_final_eval_flag": {
         "description": "whether run a final gpugr evaluation after placement finishes, similar to Xplace final_route_eval",

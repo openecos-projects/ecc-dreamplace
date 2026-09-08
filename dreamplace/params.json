@@ -68,6 +68,10 @@
         "description": "initial weight of density cost",
         "default": 8e-5
     },
+    "precond_pin_count_flag": {
+        "description": "add original DreamPlace per-node raw pin count to the shared gradient preconditioner before clamping; 0 keeps density-area-only preconditioning, 1 enables pin count (not net-weighted PWS)",
+        "default": 0
+    },
     "random_seed": {
         "description": "random seed",
         "default": 5000

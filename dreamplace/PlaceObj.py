@@ -121,10 +121,13 @@ class PreconditionOp:
     Need to be carefully designed.
     """
 
-    def __init__(self, placedb, data_collections, op_collections):
+    def __init__(
+        self, placedb, data_collections, op_collections, precond_pin_count_flag=False
+    ):
         self.placedb = placedb
         self.data_collections = data_collections
         self.op_collections = op_collections
+        self.precond_pin_count_flag = bool(precond_pin_count_flag)
         self.iteration = 0
         self.alpha = 1.0
         self.best_overflow = None
@@ -183,7 +186,6 @@ class PreconditionOp:
         return outputs
 
     def _build_precondition(self, density_weight):
-        pin_count = self.data_collections.num_pins_in_nodes
         if density_weight.size(0) == 1:
             density_precond = (
                 self.alpha * density_weight * self.data_collections.node_areas
@@ -210,7 +212,10 @@ class PreconditionOp:
             ] *= density_weight[-1]
             density_precond = self.alpha * node_areas
 
-        precond = pin_count + density_precond
+        precond = density_precond
+        if self.precond_pin_count_flag:
+            # Original DreamPlace pin counts, including zero counts for fillers.
+            precond = precond + self.data_collections.num_pins_in_nodes
         return precond.clamp(min=1.0)
 
     def _apply_precondition_to_grad(
@@ -3850,7 +3855,12 @@ class PlaceObj(nn.Module):
         @param data_collections a collection of data and variables required for constructing ops
         """
 
-        return PreconditionOp(placedb, data_collections, op_collections)
+        pin_count_flag = bool(getattr(params, "precond_pin_count_flag", 0))
+        logging.info("Gradient preconditioner: precond_pin_count_flag=%d", pin_count_flag)
+        return PreconditionOp(
+            placedb, data_collections, op_collections,
+            precond_pin_count_flag=pin_count_flag,
+        )
 
     def build_route_utilization_map(self, params, placedb, data_collections):
         """

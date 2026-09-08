@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import types
@@ -7,7 +8,6 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/mpl-cache")
 
 import torch
 
-
 AUTODMP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if AUTODMP_ROOT not in sys.path:
     sys.path.insert(0, AUTODMP_ROOT)
@@ -16,9 +16,9 @@ if AUTODMP_ROOT not in sys.path:
 from dreamplace.PlaceObj import PlaceObj, PreconditionOp  # noqa: E402
 
 
-def _make_precondition_op(regions=(), pin_counts=None):
+def _make_precondition_op(regions=(), pin_count_flag=False, pin_counts=None):
     if pin_counts is None:
-        pin_counts = torch.zeros(4)
+        pin_counts = torch.tensor([3.0, 5.0, 7.0, 0.0])
     placedb = types.SimpleNamespace(
         num_nodes=4,
         num_movable_nodes=2,
@@ -34,32 +34,81 @@ def _make_precondition_op(regions=(), pin_counts=None):
         node2fence_region_map=torch.tensor([0, 1, 0, 0], dtype=torch.long),
     )
     op_collections = types.SimpleNamespace()
-    return PreconditionOp(placedb, data_collections, op_collections)
+    return PreconditionOp(
+        placedb, data_collections, op_collections,
+        precond_pin_count_flag=pin_count_flag,
+    )
 
 
 class SharedPreconditionTest(unittest.TestCase):
-    def test_single_density_denominator_includes_raw_pin_count(self):
-        op = _make_precondition_op(pin_counts=torch.tensor([3.0, 1.0, 0.0, 0.0]))
+    def test_pin_count_flag_restores_original_dreamplace_denominator(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                op = _make_precondition_op(pin_count_flag=enabled)
+                op.alpha = 2.0
+                original_areas = op.data_collections.node_areas.clone()
+                actual = op._build_precondition(torch.tensor([2.0]))
+                expected = torch.tensor([8.0, 16.0, 32.0, 64.0])
+                if enabled:
+                    expected += torch.tensor([3.0, 5.0, 7.0, 0.0])
+                self.assertTrue(torch.equal(actual, expected))
+                self.assertTrue(torch.equal(op.data_collections.node_areas, original_areas))
 
-        precond = op._build_precondition(torch.tensor([2.0]))
+    def test_pin_count_is_added_before_clamp_and_fillers_have_zero_pins(self):
+        op = _make_precondition_op(pin_count_flag=True)
+        actual = op._build_precondition(torch.tensor([0.0]))
+        self.assertTrue(torch.equal(actual, torch.tensor([3.0, 5.0, 7.0, 1.0])))
 
-        torch.testing.assert_close(
-            precond,
-            torch.tensor([7.0, 9.0, 16.0, 32.0]),
+    def test_pin_count_fence_region_scaling_and_shared_masks(self):
+        op = _make_precondition_op(regions=(object(), object()), pin_count_flag=True)
+        op.data_collections.node2fence_region_map[1] = 2
+        op.movablenode2fence_region_map_clamp[1] = 2
+        op.alpha = 2.0
+        density_weight = torch.tensor([2.0, 3.0, 4.0])
+        expected = torch.tensor([7.0, 37.0, 23.0, 128.0])
+        self.assertTrue(torch.equal(op._build_precondition(density_weight), expected))
+        grad = torch.ones(8)
+        a, b = op.apply_components(
+            [grad, grad * 2], density_weight,
+            update_mask=torch.tensor([False, True, True]),
+            fix_nodes_mask=torch.tensor([False, True, False, False]),
         )
-
-    def test_multi_fence_denominator_includes_raw_pin_count(self):
-        op = _make_precondition_op(
-            regions=(object(), object()),
-            pin_counts=torch.tensor([3.0, 1.0, 0.0, 0.0]),
+        expected_grad = torch.tensor(
+            [0.0, 0.0, 0.0, 1.0 / 128.0, 0.0, 0.0, 0.0, 1.0 / 128.0]
         )
+        self.assertTrue(torch.equal(a, expected_grad))
+        self.assertTrue(torch.equal(b, a * 2))
+        self.assertTrue(torch.equal(grad, torch.ones(8)))
+        self.assertEqual(op.iteration, 1)
 
-        precond = op._build_precondition(torch.tensor([0.5, 1.5, 2.0]))
+    def test_pin_count_single_call_and_components_match_without_pws(self):
+        single = _make_precondition_op(pin_count_flag=True)
+        shared = _make_precondition_op(pin_count_flag=True)
+        grad = torch.arange(1.0, 9.0)
+        weight = torch.tensor([2.0])
+        actual = single(grad.clone(), weight)
+        a, b = shared.apply_components([grad, grad * 2], weight)
+        self.assertTrue(torch.equal(actual, a))
+        self.assertTrue(torch.equal(b, a * 2))
+        self.assertEqual(shared.iteration, 1)
 
-        torch.testing.assert_close(
-            precond,
-            torch.tensor([5.0, 5.0, 8.0, 32.0]),
-        )
+    def test_parameter_default_and_place_obj_wiring(self):
+        with open(os.path.join(AUTODMP_ROOT, "dreamplace", "params.json")) as stream:
+            self.assertEqual(json.load(stream)["precond_pin_count_flag"]["default"], 0)
+        fixture = _make_precondition_op()
+        for params, expected in [
+            (types.SimpleNamespace(), False),
+            (types.SimpleNamespace(precond_pin_count_flag=0), False),
+            (types.SimpleNamespace(precond_pin_count_flag=1), True),
+        ]:
+            op = PlaceObj.build_precondition(
+                None,
+                params,
+                fixture.placedb,
+                fixture.data_collections,
+                fixture.op_collections,
+            )
+            self.assertEqual(op.precond_pin_count_flag, expected)
 
     def test_apply_components_uses_one_state_step_and_one_denominator(self):
         op = _make_precondition_op()

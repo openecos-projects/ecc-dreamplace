@@ -427,6 +427,14 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         fix_usage_map = routeforce.fix_usage_map()
         mov_usage_map = routeforce.mov_usage_map()
 
+        map_device = dmd_map.device
+        wire_dmd_map = wire_dmd_map.to(device=map_device)
+        via_dmd_map = via_dmd_map.to(device=map_device)
+        cap_map = cap_map.to(device=map_device)
+        raw_wire_dmd_map = raw_wire_dmd_map.to(device=map_device)
+        fix_usage_map = fix_usage_map.to(device=map_device)
+        mov_usage_map = mov_usage_map.to(device=map_device)
+
         m1direction = gpdb.m1direction()
         h_id = 1 if m1direction else 0
         v_id = 0 if m1direction else 1

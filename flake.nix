@@ -5,6 +5,7 @@
   outputs = inputs@{
     self, nixpkgs, flake-parts,
   }: let
+    eccJobs = builtins.getEnv "ECC_JOBS";
     ecc-dreamplace = {
       lib,
       python3Packages,
@@ -14,6 +15,7 @@
       bison,
       flex,
       pkg-config,
+      eccJobs ? "",
     }: python3Packages.buildPythonPackage rec {
       name = "dreamplace";
       format = "pyproject";
@@ -53,10 +55,8 @@
 
       buildInputs = [ cairo flex ];
       nativeBuildInputs = [ bison flex cmake ninja pkg-config ];
-
       dontUseCmakeConfigure = true;
       dontCheckRuntimeDeps = true;
-
       pythonImportsCheck = [
         "dreamplace"
         "dreamplace.Params"
@@ -64,11 +64,24 @@
 
       passthru.rawBuildInputs = buildInputs;
       passthru.rawNativeBuildInputs = nativeBuildInputs;
+
+      preConfigure = ''
+        JOBS="${eccJobs}"
+        if [ -n "$JOBS" ]; then
+          echo "dreamplace: injecting -j$JOBS"
+          sed -i '/build\.tool-args/d' pyproject.toml
+          sed -i "/^\[tool\.scikit-build\]/a build.tool-args = [\"-j$JOBS\"]" pyproject.toml
+        fi
+      '';
+
+      postBuild = ''
+        sed -i '/build\.tool-args/d' pyproject.toml 2>/dev/null || true
+      '';
     };
   in flake-parts.lib.mkFlake { inherit inputs; } {
     systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
     perSystem = { self', pkgs, system, ... }: {
-      packages.default = pkgs.callPackage ecc-dreamplace {};
+      packages.default = pkgs.callPackage ecc-dreamplace { inherit eccJobs; };
       devShells.default = pkgs.mkShell.override {} {
         buildInputs = self'.packages.default.rawBuildInputs;
         nativeBuildInputs = self'.packages.default.rawNativeBuildInputs ++ (with pkgs; [ uv ]);

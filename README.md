@@ -128,6 +128,27 @@ dist/ecc_dreamplace-*
 
 The uv build runs the package build defined by `pyproject.toml`.
 
+
+### Controlling Parallelism
+
+`ecc-dreamplace` has large C++/pybind translation units that can consume
+significant memory during parallel compilation. On systems with limited memory
+(for example, 24 GB), building with the default Ninja parallelism may trigger
+the OOM killer or cause the system to thrash.
+
+The build respects the `ECC_JOBS` environment variable to override the number
+of parallel compilation jobs.
+
+```bash
+# Default: Ninja uses all available cores (may cause OOM).
+nix build .#default
+
+# Limit to 4 parallel jobs.
+ECC_JOBS=4 nix build .#default --impure
+
+# Single job (most memory-safe, recommended for constrained environments).
+ECC_JOBS=1 nix build .#default --impure
+
 ## Repository Pointers
 
 | Path | Description |

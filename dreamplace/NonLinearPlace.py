@@ -54,6 +54,58 @@ from dreamplace.ops.routability.leiden_clustering import (
 )
 from dreamplace.ops.routability import enhanced_inflation_controller
 from dreamplace.ops.irt_egr.egr_padding import apply_egr_padding, restore_egr_padding
+from dreamplace import inflation_legalization
+from dreamplace.post_legalization_adaptive_padding import (
+    allocate_padding_sites,
+    build_smoothed_overflow_map,
+    compute_cell_box_overlap_stats,
+    score_cells_from_overflow,
+)
+
+
+def _log_inflation_macro_overlap(
+    placedb,
+    pos,
+    data_collections,
+    round_idx,
+    stage,
+    reference_pos=None,
+):
+    try:
+        overlap = compute_fixed_macro_overlap_stats(
+            pos,
+            data_collections.node_size_x,
+            data_collections.node_size_y,
+            placedb,
+        )
+        displacement = (
+            compute_movable_displacement_stats(reference_pos, pos, placedb)
+            if reference_pos is not None
+            else {}
+        )
+        logging.info(
+            "Inflation legalization telemetry: round=%d stage=%s "
+            "macro_overlap_cells=%d macro_overlap_pairs=%d "
+            "macro_overlap_area=%.6E macro_overlap_area_ratio=%.6E "
+            "moved=%d displacement_max=%.6E displacement_mean=%.6E",
+            int(round_idx),
+            stage,
+            int(overlap.get("fixed_macro_overlap_cell_count", 0)),
+            int(overlap.get("fixed_macro_overlap_pair_count", 0)),
+            float(overlap.get("fixed_macro_overlap_area", 0.0)),
+            float(overlap.get("fixed_macro_overlap_area_ratio", 0.0)),
+            int(displacement.get("movable_displacement_moved_count", 0)),
+            float(displacement.get("movable_displacement_max", 0.0)),
+            float(displacement.get("movable_displacement_mean", 0.0)),
+        )
+    except Exception as error:
+        logging.warning(
+            "Failed to compute inflation legalization telemetry for round %d "
+            "at stage %s: %s",
+            int(round_idx),
+            stage,
+            error,
+        )
 
 
 def _snapshot_l_shape_forward_source():
@@ -991,6 +1043,210 @@ def _run_gpugr_final_eval(params, placedb, pos):
     return result
 
 
+def _run_post_legalization_adaptive_padding(
+    params,
+    placedb,
+    pos,
+    model,
+):
+    if not bool(
+        getattr(params, "post_legalization_adaptive_padding_flag", 0)
+    ):
+        return pos, None
+    if not bool(getattr(params, "legalize_flag", 0)):
+        raise ValueError(
+            "post_legalization_adaptive_padding_flag requires legalize_flag=1"
+        )
+    if len(placedb.regions) > 0:
+        raise ValueError(
+            "post-legalization adaptive padding does not support fence regions"
+        )
+
+    _write_back_autodmp_pos_to_ieda(pos, params, placedb)
+    route_xsize, route_ysize = _compute_gpugr_route_grid_like_xplace(
+        params, placedb
+    )
+    rrr_iters = int(getattr(params, "post_legalization_padding_rrr_iters", 0))
+    out_dir = os.path.join(
+        params.result_dir, "gpugr_post_legalization_padding"
+    )
+    logging.info(
+        "Run gpugr for post-legalization adaptive padding: "
+        "route_grid=%dx%d rrr_iters=%d",
+        route_xsize,
+        route_ysize,
+        rrr_iters,
+    )
+    gpugr_op = _get_cached_gpugr_operator(placedb)
+    result = gpugr_op.run_gpugr(
+        out_dir=out_dir,
+        design_name=params.design_name(),
+        gpu=getattr(params, "gpu_id", 0),
+        threads=params.num_threads,
+        route_xsize=route_xsize,
+        route_ysize=route_ysize,
+        rrr_iters=rrr_iters,
+        skip_m1_route=bool(
+            getattr(params, "post_legalization_padding_skip_m1_route", 1)
+        ),
+        verbose_parser_log=False,
+        cpp_log_level=int(getattr(params, "gpugr_final_eval_cpp_log_level", 2)),
+        keep_temp_def=False,
+        save_artifacts=bool(
+            getattr(params, "post_legalization_padding_save_artifacts", 0)
+        ),
+        include_route_entries=False,
+        backend=getattr(params, "gpugr_backend", "auto"),
+    )
+    maps = result["maps"]
+    metrics = result["metrics"]
+    overflow_xy = build_smoothed_overflow_map(
+        maps["cg_map_h_overflow"],
+        maps["cg_map_v_overflow"],
+        smooth_kernel=int(
+            getattr(params, "post_legalization_padding_smooth_kernel", 3)
+        ),
+    )
+    scores = score_cells_from_overflow(
+        pos=pos,
+        node_size_x=model.data_collections.node_size_x,
+        node_size_y=model.data_collections.node_size_y,
+        num_nodes=placedb.num_nodes,
+        num_movable_nodes=placedb.num_movable_nodes,
+        overflow_xy=overflow_xy,
+        grid_xl=placedb.xl,
+        grid_yl=placedb.yl,
+        grid_xh=placedb.xh,
+        grid_yh=placedb.yh,
+    )
+    eligible_mask = np.ones(placedb.num_movable_nodes, dtype=bool)
+    movable_macro_mask = getattr(
+        model.data_collections, "movable_macro_mask", None
+    )
+    if movable_macro_mask is not None:
+        eligible_mask &= ~movable_macro_mask.detach().cpu().numpy().astype(bool)
+    plan = allocate_padding_sites(
+        scores=scores,
+        pos=pos,
+        node_size_x=model.data_collections.node_size_x,
+        node_size_y=model.data_collections.node_size_y,
+        num_nodes=placedb.num_nodes,
+        num_movable_nodes=placedb.num_movable_nodes,
+        num_physical_nodes=int(
+            getattr(
+                placedb,
+                "num_physical_nodes",
+                placedb.num_nodes - placedb.num_filler_nodes,
+            )
+        ),
+        xl=placedb.xl,
+        yl=placedb.yl,
+        xh=placedb.xh,
+        yh=placedb.yh,
+        site_width=placedb.site_width,
+        row_height=placedb.row_height,
+        hot_cell_ratio=float(
+            getattr(params, "post_legalization_padding_hot_cell_ratio", 0.2)
+        ),
+        row_free_ratio=float(
+            getattr(params, "post_legalization_padding_row_free_ratio", 0.5)
+        ),
+        max_padding_sites=int(
+            getattr(params, "post_legalization_padding_max_sites", 1)
+        ),
+        eligible_mask=eligible_mask,
+    )
+    logging.info(
+        "Post-legalization adaptive padding plan: "
+        "eligible=%d positive_score=%d requested_hot=%d allocated=%d "
+        "added_sites=%d free_sites=%d budget_sites=%d "
+        "max_score=%.6g min_allocated_score=%.6g "
+        "gpugr_overflow_nets=%d gpugr_est_shorts=%.6g",
+        plan["eligible_count"],
+        plan["positive_score_count"],
+        plan["requested_hot_count"],
+        plan["allocated_count"],
+        plan["total_added_sites"],
+        plan["total_free_sites"],
+        plan["total_budget_sites"],
+        plan["max_score"],
+        plan["min_allocated_score"],
+        metrics["num_overflow_nets"],
+        metrics["gr_est_shorts"],
+    )
+
+    rail_boxes = model.data_collections.m2_pg_rail_density_boxes
+    rail_before = compute_cell_box_overlap_stats(
+        pos,
+        model.data_collections.node_size_x,
+        model.data_collections.node_size_y,
+        rail_boxes,
+        placedb.num_nodes,
+        placedb.num_movable_nodes,
+    )
+    hpwl_before = float(model.op_collections.hpwl_op(pos).item())
+    padded_result, legalize_stats = model.run_adaptive_padding_legalization(
+        placedb=placedb,
+        pos=pos,
+        padding_sites=plan["padding_sites"],
+        scores=plan["scores"],
+        max_retries=int(
+            getattr(params, "post_legalization_padding_max_retries", 4)
+        ),
+    )
+    hpwl_after = float(model.op_collections.hpwl_op(padded_result).item())
+    rail_after = compute_cell_box_overlap_stats(
+        padded_result,
+        model.data_collections.node_size_x,
+        model.data_collections.node_size_y,
+        rail_boxes,
+        placedb.num_nodes,
+        placedb.num_movable_nodes,
+    )
+    logging.info(
+        "Post-legalization adaptive padding result: "
+        "requested=%d used=%d attempts=%d rollback=%d "
+        "padded_legal=%d physical_legal=%d greedy_fallback=%d "
+        "moved=%d displacement_total=%.6g displacement_max=%.6g "
+        "HPWL=%.6g->%.6g delta=%.6g "
+        "M2_overlap_count=%d->%d M2_overlap_area=%.6g->%.6g",
+        legalize_stats["requested_count"],
+        legalize_stats["used_count"],
+        legalize_stats["attempts"],
+        int(legalize_stats["rollback"]),
+        int(legalize_stats["padded_legal"]),
+        int(legalize_stats["physical_legal"]),
+        int(legalize_stats["greedy_fallback"]),
+        legalize_stats["moved_count"],
+        legalize_stats["total_displacement"],
+        legalize_stats["max_displacement"],
+        hpwl_before,
+        hpwl_after,
+        hpwl_after - hpwl_before,
+        rail_before["overlap_count"],
+        rail_after["overlap_count"],
+        rail_before["overlap_area"],
+        rail_after["overlap_area"],
+    )
+    telemetry = {
+        "allocated_count": plan["allocated_count"],
+        "total_added_sites": plan["total_added_sites"],
+        "used_count": legalize_stats["used_count"],
+        "attempts": legalize_stats["attempts"],
+        "rollback": int(legalize_stats["rollback"]),
+        "moved_count": legalize_stats["moved_count"],
+        "max_displacement": legalize_stats["max_displacement"],
+        "hpwl_delta": hpwl_after - hpwl_before,
+        "m2_overlap_count_before": rail_before["overlap_count"],
+        "m2_overlap_count_after": rail_after["overlap_count"],
+        "m2_overlap_area_before": rail_before["overlap_area"],
+        "m2_overlap_area_after": rail_after["overlap_area"],
+        "gpugr_overflow_nets_before": metrics["num_overflow_nets"],
+        "gpugr_est_shorts_before": metrics["gr_est_shorts"],
+    }
+    return padded_result, telemetry
+
+
 def _prepare_l_shape_inputs_from_egr(params, placedb, pos, model):
     model.op_collections.irt_egr_congestion_map_op(
         pos, stage="egr2D", resolve_congestion="low"
@@ -1562,6 +1818,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         """
         iteration = 0
         all_metrics = []
+        inflation_legalization.validate_params(params)
         validate_ggr_l_shape_topology_params(params)
         if params.timing_opt_flag:
             timing_op = self.op_collections.timing_op
@@ -2339,7 +2596,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     # 根据overflow条件启用L形routability
                     l_shape_routability_enabled = (
                         params.routability_opt_flag
-                        and params.l_shape_routability_flag
+                        and getattr(params, "l_shape_routability_flag", 0)
                     )
                     if l_shape_routability_enabled:
                         
@@ -3769,6 +4026,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     max_area_adjust_rounds = enhanced_inflation_controller.get_inflation_round_limit(params)
                     if getattr(model, "inflation_state", None) is not None:
                         model.inflation_state.num_area_adjust = 0
+                    if inflation_legalization.is_enabled(params):
+                        logging.info(
+                            "Ordinary inflation will trigger at stop_overflow=%.6g "
+                            "and legalize physical cell geometry before every round",
+                            inflation_legalization.legacy_trigger_threshold(params),
+                        )
 
                 Llambda_flat_iteration = 0
 
@@ -3788,6 +4051,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 for Lgamma_step in range(model.Lgamma_iteration):
                     Lgamma_metrics.append([])
                     Llambda_metrics = Lgamma_metrics[-1]
+                    inflation_applied_this_gamma = False
                     for Llambda_density_weight_step in range(model.Llambda_density_weight_iteration):
                         Llambda_metrics.append([])
                         Lsub_metrics = Llambda_metrics[-1]
@@ -3877,7 +4141,22 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 Llambda_flat_iteration,
                             )
                         # logging.debug("update density weight %.3f ms" % ((time.time()-t2)*1000))
-                        if Llambda_stop_criterion(Lgamma_step, Llambda_density_weight_step, Llambda_metrics):
+                        llambda_should_stop = Llambda_stop_criterion(
+                            Lgamma_step,
+                            Llambda_density_weight_step,
+                            Llambda_metrics,
+                        )
+                        defer_stop_for_inflation = (
+                            params.routability_opt_flag
+                            and inflation_legalization.is_enabled(params)
+                            and inflation_legalization.should_trigger_legacy_inflation(
+                                params,
+                                num_area_adjust,
+                                max_area_adjust_rounds,
+                                Llambda_metrics[-1][-1].overflow,
+                            )
+                        )
+                        if llambda_should_stop and not defer_stop_for_inflation:
                             break
 
                         # for routability optimization
@@ -3887,10 +4166,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 num_area_adjust=num_area_adjust,
                                 overflow=Llambda_metrics[-1][-1].overflow,
                             )
-                            trigger_legacy_inflation = (
-                                not trigger_enhanced_inflation
-                                and num_area_adjust < max_area_adjust_rounds
-                                and Llambda_metrics[-1][-1].overflow < params.node_area_adjust_overflow
+                            trigger_legacy_inflation = inflation_legalization.should_trigger_legacy_inflation(
+                                params,
+                                num_area_adjust,
+                                max_area_adjust_rounds,
+                                Llambda_metrics[-1][-1].overflow,
+                                trigger_enhanced_inflation=trigger_enhanced_inflation,
                             )
                             if trigger_enhanced_inflation or trigger_legacy_inflation:
                                 use_enhanced_inflation = bool(trigger_enhanced_inflation)
@@ -3963,8 +4244,48 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                         notes=(
                                             "enhanced_inflation_best_pos"
                                             if use_enhanced_inflation
-                                            else "legacy_area_adjust"
+                                            else (
+                                                "legacy_area_adjust_after_legalization"
+                                                if inflation_legalization.is_enabled(params)
+                                                else "legacy_area_adjust"
+                                            )
                                         ),
+                                    )
+                                physical_geometry_backup = None
+                                if inflation_legalization.is_enabled(params):
+                                    physical_geometry_backup = (
+                                        inflation_legalization.use_physical_geometry(
+                                            pos,
+                                            self.data_collections,
+                                        )
+                                    )
+                                    physical_pre_legalization_pos = (
+                                        pos.detach().clone()
+                                    )
+                                    _log_inflation_macro_overlap(
+                                        placedb,
+                                        pos,
+                                        self.data_collections,
+                                        num_area_adjust,
+                                        "after_gp_before_legalization",
+                                    )
+                                    legalization_start = time.time()
+                                    pos.data.copy_(
+                                        self.op_collections.legalize_op(pos)
+                                    )
+                                    logging.info(
+                                        "Inflation round %d physical legalization "
+                                        "takes %.3f seconds",
+                                        num_area_adjust,
+                                        time.time() - legalization_start,
+                                    )
+                                    _log_inflation_macro_overlap(
+                                        placedb,
+                                        pos,
+                                        self.data_collections,
+                                        num_area_adjust,
+                                        "after_legalization",
+                                        reference_pos=physical_pre_legalization_pos,
                                     )
                                 _run_gpugr_before_first_area_adjust_and_exit(
                                     params,
@@ -4016,25 +4337,17 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     else:
                                         route_utilization_map = model.op_collections.route_utilization_map_op(
                                             pos)
-                                    if params.plot_flag:
-                                        path = "%s/%s" % (params.result_dir,
-                                                          params.design_name())
-                                        figname = "%s/plot/route%d.png" % (
-                                            path, num_area_adjust)
-                                        os.system("mkdir -p %s" %
-                                                  (os.path.dirname(figname)))
-                                        plt.imsave(
-                                            figname, route_utilization_map.pow(
-                                                params.route_opt_adjust_exponent).data.cpu().numpy().T, origin="lower"
-                                        )
-                                        logging.info(
-                                            "plot route utilization map to %s" % (
-                                                figname)
-                                        )
-                                        logging.info(
-                                            "plot route utilization map to %s" % (
-                                                figname)
-                                        )
+                                if physical_geometry_backup is not None:
+                                    inflation_legalization.restore_inflated_geometry(
+                                        pos,
+                                        self.data_collections,
+                                        physical_geometry_backup,
+                                    )
+                                    logging.info(
+                                        "Inflation round %d restored cumulative "
+                                        "inflated geometry after congestion estimation",
+                                        num_area_adjust,
+                                    )
                                 if round_adjust_pin_area_flag:
                                     pin_utilization_map = model.op_collections.pin_utilization_map_op(
                                         pos)
@@ -4158,13 +4471,17 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     )
                                     if round_metric_value is not None:
                                         logging.info(
-                                            "Recorded enhanced inflation round %d: %s=%.4f trigger_overflow=%.6f",
+                                            "Recorded %s inflation round %d: %s=%.4f trigger_overflow=%.6f",
+                                            "enhanced"
+                                            if use_enhanced_inflation
+                                            else "ordinary",
                                             num_area_adjust,
                                             selected_metric_name,
                                             round_metric_value,
                                             float(Llambda_metrics[-1][-1].overflow),
                                         )
                                 if adjust_area_flag:
+                                    inflation_applied_this_gamma = True
                                     num_area_adjust += 1
                                     if getattr(model, "inflation_state", None) is not None:
                                         model.inflation_state.num_area_adjust = num_area_adjust
@@ -4223,7 +4540,10 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     else:
                         model.op_collections.precondition_op.set_overflow(
                             Llambda_metrics[-1][-1].overflow)
-                    if Lgamma_stop_criterion(Lgamma_step, Lgamma_metrics) or stop_placement == 1:
+                    if (
+                        not inflation_applied_this_gamma
+                        and Lgamma_stop_criterion(Lgamma_step, Lgamma_metrics)
+                    ) or stop_placement == 1:
                         break
 
                     # update learning rate
@@ -5010,6 +5330,39 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             all_metrics.append(cur_metric)
             cur_metric.evaluate(
                 placedb, {"hpwl": self.op_collections.hpwl_op}, self.pos[0])
+            logging.info(cur_metric)
+            iteration += 1
+
+        if self.op_collections.m2_pa_refine_op is not None:
+            refined_pos, _ = self.op_collections.m2_pa_refine_op(self.pos[0])
+            self.pos[0].data.copy_(refined_pos)
+            cur_metric = EvalMetrics.EvalMetrics(iteration)
+            all_metrics.append(cur_metric)
+            cur_metric.evaluate(
+                placedb, {"hpwl": self.op_collections.hpwl_op}, self.pos[0]
+            )
+            logging.info(cur_metric)
+            iteration += 1
+
+        adaptive_padding_pos, adaptive_padding_stats = (
+            _run_post_legalization_adaptive_padding(
+                params,
+                placedb,
+                self.pos[0],
+                self,
+            )
+        )
+        if adaptive_padding_stats is not None:
+            self.pos[0].data.copy_(adaptive_padding_pos)
+            for key, value in adaptive_padding_stats.items():
+                processed_metrics[
+                    "post_legalization_adaptive_padding_%s" % key
+                ] = value
+            cur_metric = EvalMetrics.EvalMetrics(iteration)
+            all_metrics.append(cur_metric)
+            cur_metric.evaluate(
+                placedb, {"hpwl": self.op_collections.hpwl_op}, self.pos[0]
+            )
             logging.info(cur_metric)
             iteration += 1
 

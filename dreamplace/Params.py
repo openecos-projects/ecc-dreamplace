@@ -193,6 +193,179 @@ class Params:
         for key in legacy_keys:
             self.__dict__.pop(key, None)
 
+    def normalize_m2_pg_rail_legalization_displacement_weight(self):
+        value = getattr(
+            self, "m2_pg_rail_legalization_displacement_weight", 0.01
+        )
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "m2_pg_rail_legalization_displacement_weight must be numeric"
+            )
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(
+                "m2_pg_rail_legalization_displacement_weight must be finite "
+                "and non-negative"
+            )
+        self.m2_pg_rail_legalization_displacement_weight = value
+
+    def normalize_m2_pg_rail_legalization_mode(self):
+        value = getattr(self, "m2_pg_rail_legalization_mode", "soft")
+        if not isinstance(value, str):
+            raise ValueError(
+                "m2_pg_rail_legalization_mode must be 'soft', 'hybrid_hard', "
+                "or 'subset_hard'"
+            )
+        value = value.strip().lower()
+        if value not in ("soft", "hybrid_hard", "subset_hard"):
+            raise ValueError(
+                "m2_pg_rail_legalization_mode must be 'soft', 'hybrid_hard', "
+                "or 'subset_hard'"
+            )
+        self.m2_pg_rail_legalization_mode = value
+
+    def normalize_m2_pg_rail_legalization_rail_range(self):
+        def normalize_index(name, default, allow_zero=False):
+            raw_value = getattr(self, name, default)
+            if isinstance(raw_value, bool):
+                raise ValueError("%s must be an integer" % name)
+            try:
+                numeric_value = float(raw_value)
+            except (TypeError, ValueError):
+                raise ValueError("%s must be an integer" % name)
+            minimum = 0 if allow_zero else 1
+            if (
+                not math.isfinite(numeric_value)
+                or not numeric_value.is_integer()
+                or numeric_value < minimum
+            ):
+                qualifier = "non-negative" if allow_zero else "positive"
+                raise ValueError("%s must be a %s integer" % (name, qualifier))
+            return int(numeric_value)
+
+        start = normalize_index(
+            "m2_pg_rail_legalization_hard_rail_start", 1
+        )
+        end = normalize_index(
+            "m2_pg_rail_legalization_hard_rail_end", 0, allow_zero=True
+        )
+        if self.m2_pg_rail_legalization_mode == "subset_hard" and end < start:
+            raise ValueError(
+                "m2_pg_rail_legalization_hard_rail_end must be greater than "
+                "or equal to m2_pg_rail_legalization_hard_rail_start in "
+                "subset_hard mode"
+            )
+        self.m2_pg_rail_legalization_hard_rail_start = start
+        self.m2_pg_rail_legalization_hard_rail_end = end
+
+    def normalize_m2_pa_refine_limits(self):
+        raw_neighbors = getattr(self, "m2_pa_refine_max_neighbors", 5)
+        if isinstance(raw_neighbors, bool):
+            raise ValueError("m2_pa_refine_max_neighbors must be a positive integer")
+        try:
+            numeric_neighbors = float(raw_neighbors)
+        except (TypeError, ValueError):
+            raise ValueError("m2_pa_refine_max_neighbors must be a positive integer")
+        if (
+            not math.isfinite(numeric_neighbors)
+            or not numeric_neighbors.is_integer()
+            or numeric_neighbors <= 0
+        ):
+            raise ValueError("m2_pa_refine_max_neighbors must be a positive integer")
+        neighbors = int(numeric_neighbors)
+        self.m2_pa_refine_max_neighbors = neighbors
+
+        raw_displacement = getattr(
+            self, "m2_pa_refine_max_displacement_sites", 50
+        )
+        try:
+            displacement = float(raw_displacement)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "m2_pa_refine_max_displacement_sites must be numeric"
+            )
+        if not math.isfinite(displacement) or displacement < 0:
+            raise ValueError(
+                "m2_pa_refine_max_displacement_sites must be finite and non-negative"
+            )
+        self.m2_pa_refine_max_displacement_sites = displacement
+
+    def normalize_post_legalization_adaptive_padding(self):
+        for name, default in (
+            ("post_legalization_adaptive_padding_flag", 0),
+            ("post_legalization_padding_skip_m1_route", 1),
+            ("post_legalization_padding_save_artifacts", 0),
+        ):
+            setattr(
+                self,
+                name,
+                int(self._is_enabled(getattr(self, name, default))),
+            )
+
+        for name, default in (
+            ("post_legalization_padding_hot_cell_ratio", 0.2),
+            ("post_legalization_padding_row_free_ratio", 0.5),
+        ):
+            try:
+                value = float(getattr(self, name, default))
+            except (TypeError, ValueError):
+                raise ValueError("%s must be numeric" % name)
+            if not math.isfinite(value) or value < 0 or value > 1:
+                raise ValueError("%s must be finite and in [0, 1]" % name)
+            setattr(self, name, value)
+
+        for name, default in (
+            ("post_legalization_padding_max_sites", 1),
+            ("post_legalization_padding_max_retries", 4),
+            ("post_legalization_padding_rrr_iters", 0),
+        ):
+            raw_value = getattr(self, name, default)
+            if isinstance(raw_value, bool):
+                raise ValueError("%s must be a non-negative integer" % name)
+            try:
+                numeric_value = float(raw_value)
+            except (TypeError, ValueError):
+                raise ValueError("%s must be a non-negative integer" % name)
+            if (
+                not math.isfinite(numeric_value)
+                or not numeric_value.is_integer()
+                or numeric_value < 0
+            ):
+                raise ValueError("%s must be a non-negative integer" % name)
+            setattr(self, name, int(numeric_value))
+
+        smooth_kernel = getattr(
+            self, "post_legalization_padding_smooth_kernel", 3
+        )
+        if isinstance(smooth_kernel, bool):
+            raise ValueError(
+                "post_legalization_padding_smooth_kernel must be a positive odd integer"
+            )
+        try:
+            numeric_kernel = float(smooth_kernel)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "post_legalization_padding_smooth_kernel must be a positive odd integer"
+            )
+        if (
+            not math.isfinite(numeric_kernel)
+            or not numeric_kernel.is_integer()
+            or int(numeric_kernel) <= 0
+            or int(numeric_kernel) % 2 == 0
+        ):
+            raise ValueError(
+                "post_legalization_padding_smooth_kernel must be a positive odd integer"
+            )
+        self.post_legalization_padding_smooth_kernel = int(numeric_kernel)
+
+    def normalize_legalize_before_each_inflation(self):
+        self.legalize_before_each_inflation_flag = int(
+            self._is_enabled(
+                getattr(self, "legalize_before_each_inflation_flag", 0)
+            )
+        )
+
     def normalize_inflation_area_budget_ratio(self):
         name = "inflation_area_budget_ratio"
         try:
@@ -207,6 +380,12 @@ class Params:
         self.normalize_removed_l_shape_weight_schedule()
         self.normalize_iopin_density_weight()
         self.normalize_m2_pg_rail_density_weight()
+        self.normalize_m2_pg_rail_legalization_mode()
+        self.normalize_m2_pg_rail_legalization_rail_range()
+        self.normalize_m2_pg_rail_legalization_displacement_weight()
+        self.normalize_m2_pa_refine_limits()
+        self.normalize_post_legalization_adaptive_padding()
+        self.normalize_legalize_before_each_inflation()
         self.normalize_inflation_area_budget_ratio()
 
     def fromJson(self, data):

@@ -17,10 +17,12 @@ add_subdirectory(legality_check)
 add_subdirectory(macro_legalize)
 add_subdirectory(greedy_legalize)
 add_subdirectory(abacus_legalize)
+add_subdirectory(m2_soft_legalize)
 # detailed placement operators
 add_subdirectory(global_swap)
 add_subdirectory(independent_set_matching)
 add_subdirectory(k_reorder)
+add_subdirectory(m2_pa_refine)
 # routing congestion operator
 add_subdirectory(pin_utilization)
 add_subdirectory(rudy)

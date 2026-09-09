@@ -58,6 +58,15 @@ class M2PgRailBlockageFlagTest(unittest.TestCase):
             "soft density",
             params["m2_pg_rail_density_weight"]["description"].lower(),
         )
+        self.assertEqual(
+            params["m2_pg_rail_legalization_blockage_flag"]["default"], 0
+        )
+        self.assertIn(
+            "legalization",
+            params["m2_pg_rail_legalization_blockage_flag"]["description"].lower(),
+        )
+        self.assertEqual(params["m2_pa_refine_flag"]["default"], 0)
+        self.assertIn("pa-refine", params["m2_pa_refine_flag"]["description"].lower())
 
     def test_setup_rawdb_passes_hard_flag_off_and_soft_density_on_by_default(self):
         self._run_setup_rawdb(
@@ -67,7 +76,7 @@ class M2PgRailBlockageFlagTest(unittest.TestCase):
         self.assertEqual(len(FakeEccModule.calls), 1)
         self.assertEqual(
             FakeEccModule.calls[0],
-            ("dm-inst-ptr", 7, 11, 1, 0),
+            ("dm-inst-ptr", 7, 11, 1, 0, False, True),
         )
 
     def test_setup_rawdb_defaults_missing_hard_flag_to_disabled_with_soft_density_on(self):
@@ -76,7 +85,7 @@ class M2PgRailBlockageFlagTest(unittest.TestCase):
         self.assertEqual(len(FakeEccModule.calls), 1)
         self.assertEqual(
             FakeEccModule.calls[0],
-            ("dm-inst-ptr", 7, 11, 1, 0),
+            ("dm-inst-ptr", 7, 11, 1, 0, False, True),
         )
 
     def test_setup_rawdb_hard_flag_on_disables_soft_density_collection(self):
@@ -87,7 +96,7 @@ class M2PgRailBlockageFlagTest(unittest.TestCase):
         self.assertEqual(len(FakeEccModule.calls), 1)
         self.assertEqual(
             FakeEccModule.calls[0],
-            ("dm-inst-ptr", 7, 11, 1, 0),
+            ("dm-inst-ptr", 7, 11, 1, 0, True, False),
         )
 
     def test_setup_rawdb_zero_soft_density_weight_disables_density_collection(self):
@@ -101,7 +110,67 @@ class M2PgRailBlockageFlagTest(unittest.TestCase):
         self.assertEqual(len(FakeEccModule.calls), 1)
         self.assertEqual(
             FakeEccModule.calls[0],
-            ("dm-inst-ptr", 7, 11, 1, 0),
+            ("dm-inst-ptr", 7, 11, 1, 0, False, False),
+        )
+
+    def test_legalization_blockage_collects_boxes_when_soft_weight_is_zero(self):
+        self._run_setup_rawdb(
+            self._make_params(
+                ieda_m2_pg_rail_blockage_flag=0,
+                m2_pg_rail_density_weight=0.0,
+                m2_pg_rail_legalization_blockage_flag=1,
+            )
+        )
+
+        self.assertEqual(len(FakeEccModule.calls), 1)
+        self.assertEqual(
+            FakeEccModule.calls[0],
+            ("dm-inst-ptr", 7, 11, 1, 0, False, True),
+        )
+
+    def test_pa_refine_collects_boxes_when_soft_weight_is_zero(self):
+        self._run_setup_rawdb(
+            self._make_params(
+                ieda_m2_pg_rail_blockage_flag=0,
+                m2_pg_rail_density_weight=0.0,
+                m2_pa_refine_flag=1,
+            )
+        )
+
+        self.assertEqual(len(FakeEccModule.calls), 1)
+        self.assertEqual(
+            FakeEccModule.calls[0],
+            ("dm-inst-ptr", 7, 11, 1, 0, False, True),
+        )
+
+    def test_global_hard_blockage_prevents_duplicate_legalization_collection(self):
+        self._run_setup_rawdb(
+            self._make_params(
+                ieda_m2_pg_rail_blockage_flag=1,
+                m2_pg_rail_density_weight=0.0,
+                m2_pg_rail_legalization_blockage_flag=1,
+            )
+        )
+
+        self.assertEqual(len(FakeEccModule.calls), 1)
+        self.assertEqual(
+            FakeEccModule.calls[0],
+            ("dm-inst-ptr", 7, 11, 1, 0, True, False),
+        )
+
+    def test_global_hard_blockage_allows_pa_refine_geometry_collection(self):
+        self._run_setup_rawdb(
+            self._make_params(
+                ieda_m2_pg_rail_blockage_flag=1,
+                m2_pg_rail_density_weight=0.0,
+                m2_pa_refine_flag=1,
+            )
+        )
+
+        self.assertEqual(len(FakeEccModule.calls), 1)
+        self.assertEqual(
+            FakeEccModule.calls[0],
+            ("dm-inst-ptr", 7, 11, 1, 0, True, True),
         )
 
     def test_iopin_density_weight_does_not_affect_m2_pg_rail_flag(self):
@@ -112,7 +181,7 @@ class M2PgRailBlockageFlagTest(unittest.TestCase):
         self.assertEqual(len(FakeEccModule.calls), 1)
         self.assertEqual(
             FakeEccModule.calls[0],
-            ("dm-inst-ptr", 7, 11, 1, 0),
+            ("dm-inst-ptr", 7, 11, 1, 0, False, True),
         )
 
     def test_flag_resolver_accepts_numeric_and_text_boolean_values(self):
@@ -139,6 +208,35 @@ class M2PgRailBlockageFlagTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             MacroPlaceDB._resolve_ieda_m2_pg_rail_blockage_flag(params)
+
+    def test_legalization_flag_resolver_accepts_boolean_like_values(self):
+        cases = [
+            (0, False),
+            (1, True),
+            ("false", False),
+            ("true", True),
+            ("off", False),
+            ("on", True),
+        ]
+        for raw_value, expected in cases:
+            params = self._make_params(
+                m2_pg_rail_legalization_blockage_flag=raw_value
+            )
+            with self.subTest(raw_value=raw_value):
+                self.assertIs(
+                    MacroPlaceDB._resolve_m2_pg_rail_legalization_blockage_flag(
+                        params
+                    ),
+                    expected,
+                )
+
+    def test_legalization_flag_resolver_rejects_unsupported_values(self):
+        params = self._make_params(
+            m2_pg_rail_legalization_blockage_flag="maybe"
+        )
+
+        with self.assertRaises(ValueError):
+            MacroPlaceDB._resolve_m2_pg_rail_legalization_blockage_flag(params)
 
     def test_place_blockage_count_must_fit_trailing_fixed_terminals(self):
         placedb = MacroPlaceDB.__new__(MacroPlaceDB)
@@ -226,20 +324,38 @@ class M2PgRailBlockageFlagTest(unittest.TestCase):
         self.assertEqual(boxes.shape, (0, 4))
         self.assertIn("m2_pg_rail_density_boxes", "\n".join(logs.output))
 
-    def test_missing_rail_density_box_field_uses_empty_boxes(self):
+    def test_missing_enabled_rail_density_box_field_fails_as_stale_pybind(self):
         placedb = MacroPlaceDB.__new__(MacroPlaceDB)
         pydb = types.SimpleNamespace()
 
-        with self.assertLogs(level="WARNING") as logs:
-            boxes = placedb._import_m2_pg_rail_density_boxes(
+        with self.assertRaisesRegex(RuntimeError, "m2_pg_rail_density_boxes"):
+            placedb._import_m2_pg_rail_density_boxes(
                 pydb, include_m2_pg_rail_density=True
             )
 
-        self.assertEqual(boxes.shape, (0, 4))
-        self.assertIn(
-            "current ecc-tools binding does not provide M2 PG rail data",
-            "\n".join(logs.output),
+    def test_import_pa_refine_rail_boxes_is_independent_from_density_boxes(self):
+        placedb = MacroPlaceDB.__new__(MacroPlaceDB)
+        pydb = types.SimpleNamespace(
+            m2_pg_rail_boxes=[[0, 0, 10, 1]],
+            m2_pg_rail_density_boxes=[],
         )
+
+        boxes = placedb._import_m2_pg_rail_boxes(
+            pydb,
+            include_m2_pg_rail_geometry=True,
+        )
+
+        self.assertEqual(boxes.tolist(), [[0.0, 0.0, 10.0, 1.0]])
+
+    def test_missing_pa_refine_rail_box_field_fails_as_stale_pybind(self):
+        placedb = MacroPlaceDB.__new__(MacroPlaceDB)
+        pydb = types.SimpleNamespace(m2_pg_rail_density_boxes=[])
+
+        with self.assertRaisesRegex(RuntimeError, "m2_pg_rail_boxes"):
+            placedb._import_m2_pg_rail_boxes(
+                pydb,
+                include_m2_pg_rail_geometry=True,
+            )
 
     def test_rail_box_scaling_matches_old_hard_node_width_semantics(self):
         placedb = MacroPlaceDB.__new__(MacroPlaceDB)
@@ -269,10 +385,14 @@ class M2PgRailBlockageFlagTest(unittest.TestCase):
         placedb.total_space_area = 1.0
         placedb.flat_region_boxes = np.zeros((0, 4), dtype=np.float32)
         placedb.regions = []
+        placedb.m2_pg_rail_boxes = np.array(
+            [[81855.0, 0.0, 82145.0, 171000.0]], dtype=np.float32
+        )
         placedb.m2_pg_rail_density_boxes = np.array(
             [[81855.0, 0.0, 82145.0, 171000.0]], dtype=np.float32
         )
 
+        original_pa_boxes = placedb.m2_pg_rail_boxes.copy()
         original = placedb.m2_pg_rail_density_boxes.copy()
         scale_factor = 0.01
         old_node_x = (original[:, 0] - 0.0) * scale_factor
@@ -286,7 +406,14 @@ class M2PgRailBlockageFlagTest(unittest.TestCase):
         self.assertTrue(
             np.array_equal(placedb.m2_pg_rail_density_boxes[:, 2], old_hard_node_xh)
         )
-
+        self.assertTrue(
+            np.array_equal(
+                placedb.m2_pg_rail_boxes[:, 2],
+                (original_pa_boxes[:, 0] - 0.0) * scale_factor
+                + (original_pa_boxes[:, 2] - original_pa_boxes[:, 0])
+                * scale_factor,
+            )
+        )
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,9 @@
 # This one is recommended from CMake 3.12+.
 # It should try to find the Python associated with the environment variable.
 # find_package(Python COMPONENTS Interpreter Development)
+if(DEFINED Python_EXECUTABLE AND NOT DEFINED PYTHON_EXECUTABLE)
+  set(PYTHON_EXECUTABLE "${Python_EXECUTABLE}")
+endif()
 add_subdirectory(thirdparty/pybind11)
 
 if (DEFINED TORCH_INSTALL_PREFIX AND DEFINED TORCH_ENABLE_CUDA AND DEFINED TORCH_VERSION)

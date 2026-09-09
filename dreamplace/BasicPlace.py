@@ -47,6 +47,9 @@ import dreamplace.ops.global_swap.global_swap as global_swap
 import dreamplace.ops.k_reorder.k_reorder as k_reorder
 import dreamplace.ops.independent_set_matching.independent_set_matching as independent_set_matching
 import dreamplace.ops.irt_egr.irt_egr as irt_egr
+import dreamplace.m2_rail_legalization as m2_rail_legalization
+# import dreamplace.ops.pin_weight_sum.pin_weight_sum as pws
+# import dreamplace.ops.timing.timing as timingimport
 import dreamplace.ops.steiner_topo.steiner_topo as steiner_topo
 from dreamplace.ops.timing_propagation.timing_propagation import ARCS_INFO, LUTS_INFO
 import pdb
@@ -110,6 +113,16 @@ class PlaceDataCollection(object):
             )
             self.m2_pg_rail_density_boxes = torch.as_tensor(
                 m2_pg_rail_density_boxes,
+                dtype=self.pos[0].dtype,
+                device=device,
+            ).reshape(-1, 4)
+            m2_pg_rail_boxes = getattr(
+                placedb,
+                "m2_pg_rail_boxes",
+                np.zeros((0, 4), dtype=placedb.dtype),
+            )
+            self.m2_pg_rail_boxes = torch.as_tensor(
+                m2_pg_rail_boxes,
                 dtype=self.pos[0].dtype,
                 device=device,
             ).reshape(-1, 4)
@@ -534,6 +547,8 @@ class PlaceOpCollection(object):
         self.legality_check_op = None
         self.legalize_op = None
         self.detailed_place_op = None
+        self.m2_soft_legalize_op = None
+        self.m2_pa_refine_op = None
         self.wirelength_op = None
         self.update_gamma_op = None
         self.density_op = None
@@ -761,7 +776,8 @@ class BasicPlace(nn.Module):
             params, placedb, self.data_collections, self.device
         )
         l_shape_routability_enabled = (
-            params.routability_opt_flag and params.l_shape_routability_flag
+            params.routability_opt_flag
+            and getattr(params, "l_shape_routability_flag", 0)
         )
         if params.with_sta or l_shape_routability_enabled:
             self.op_collections.steiner_topo_op = self.build_steiner_topo(
@@ -802,6 +818,17 @@ class BasicPlace(nn.Module):
         self.op_collections.legality_check_op = self.build_legality_check(
             params, placedb, self.data_collections, self.device
         )
+        self.op_collections.m2_soft_legalize_op = self.build_m2_soft_legalization(
+            params, placedb, self.data_collections
+        )
+        self.m2_pg_rail_hybrid_legalization_view = (
+            self.build_m2_pg_rail_hybrid_legalization_view(
+                params, placedb, self.data_collections
+            )
+        )
+        self.op_collections.m2_pa_refine_op = self.build_m2_pa_refine(
+            params, placedb, self.data_collections
+        )
         # legalization
         if len(placedb.regions) > 0:
             (
@@ -812,7 +839,10 @@ class BasicPlace(nn.Module):
             )
         else:
             self.op_collections.legalize_op = self.build_legalization(
-                params, placedb, self.data_collections, self.device
+                params,
+                placedb,
+                self.data_collections,
+                self.device,
             )
         if params.macro_place_flag:
             self.op_collections.macro_legalize_op = self.build_macro_legalization(
@@ -1054,95 +1084,14 @@ class BasicPlace(nn.Module):
             return ml(pos.clone(), pos)
         return build_macro_legalization_op
 
-    def build_legalization(self, params, placedb, data_collections, device):
-        """
-        @brief legalization
-        @param params parameters
-        @param placedb placement database
-        @param data_collections a collection of all data and variables required for constructing the ops
-        @param device cpu or cuda
-        """
-        # for movable macro legalization
-        # the number of bins control the search granularity
-        ml = macro_legalize.MacroLegalize(
-            node_size_x=data_collections.node_size_x,
-            node_size_y=data_collections.node_size_y,
-            node_weights=data_collections.num_pins_in_nodes,
-            flat_region_boxes=data_collections.flat_region_boxes,
-            flat_region_boxes_start=data_collections.flat_region_boxes_start,
-            node2fence_region_map=data_collections.node2fence_region_map,
-            xl=placedb.xl,
-            yl=placedb.yl,
-            xh=placedb.xh,
-            yh=placedb.yh,
-            site_width=placedb.site_width,
-            row_height=placedb.row_height,
-            num_bins_x=placedb.num_bins_x,
-            num_bins_y=placedb.num_bins_y,
-            num_movable_nodes=placedb.num_movable_nodes,
-            num_terminal_NIs=placedb.num_terminal_NIs,
-            num_filler_nodes=placedb.num_filler_nodes)
-        # for standard cell legalization
-        # legalize_alg = mg_legalize.MGLegalize
-        legalize_alg = greedy_legalize.GreedyLegalize
-        gl = legalize_alg(
-            node_size_x=data_collections.node_size_x,
-            node_size_y=data_collections.node_size_y,
-            node_weights=data_collections.num_pins_in_nodes,
-            flat_region_boxes=data_collections.flat_region_boxes,
-            flat_region_boxes_start=data_collections.flat_region_boxes_start,
-            node2fence_region_map=data_collections.node2fence_region_map,
-            xl=placedb.xl,
-            yl=placedb.yl,
-            xh=placedb.xh,
-            yh=placedb.yh,
-            site_width=placedb.site_width,
-            row_height=placedb.row_height,
-            num_bins_x=1,
-            num_bins_y=64,
-            # num_bins_x=64, num_bins_y=64,
-            num_movable_nodes=placedb.num_movable_nodes,
-            num_terminal_NIs=placedb.num_terminal_NIs,
-            num_filler_nodes=placedb.num_filler_nodes)
-        # for standard cell legalization
-        al = abacus_legalize.AbacusLegalize(
-            node_size_x=data_collections.node_size_x,
-            node_size_y=data_collections.node_size_y,
-            node_weights=data_collections.num_pins_in_nodes,
-            flat_region_boxes=data_collections.flat_region_boxes,
-            flat_region_boxes_start=data_collections.flat_region_boxes_start,
-            node2fence_region_map=data_collections.node2fence_region_map,
-            xl=placedb.xl,
-            yl=placedb.yl,
-            xh=placedb.xh,
-            yh=placedb.yh,
-            site_width=placedb.site_width,
-            row_height=placedb.row_height,
-            num_bins_x=1,
-            num_bins_y=64,
-            # num_bins_x=64, num_bins_y=64,
-            num_movable_nodes=placedb.num_movable_nodes,
-            num_terminal_NIs=placedb.num_terminal_NIs,
-            num_filler_nodes=placedb.num_filler_nodes)
-
-        def build_legalization_op(pos):
-            logging.info("Start legalization")
-            pos1 = ml(pos, pos)
-            pos2 = gl(pos1, pos1)
-            legal = self.op_collections.legality_check_op(pos2)
-            if not legal:
-                logging.error("legality check failed in greedy legalization, "
-                              "return illegal results after greedy legalization.")
-                return pos2
-            pos3 = al(pos1, pos2)
-            legal = self.op_collections.legality_check_op(pos3)
-            if not legal:
-                logging.error("legality check failed in abacus legalization, "
-                              "return legal results after greedy legalization.")
-                return pos2
-            return pos3
-
-        return build_legalization_op
+    build_m2_soft_legalization = m2_rail_legalization.build_m2_soft_legalization
+    build_m2_pg_rail_hybrid_legalization_view = (
+        m2_rail_legalization.build_m2_pg_rail_hybrid_legalization_view
+    )
+    build_legalization = m2_rail_legalization.build_legalization
+    run_adaptive_padding_legalization = (
+        m2_rail_legalization.run_adaptive_padding_legalization
+    )
 
     def build_multi_fence_region_legalization(
         self, params, placedb, data_collections, device
@@ -1445,6 +1394,8 @@ class BasicPlace(nn.Module):
             return pos_total
 
         return build_greedy_legalization_op, build_abacus_legalization_op
+
+    build_m2_pa_refine = m2_rail_legalization.build_m2_pa_refine
 
     def build_detailed_placement(self, params, placedb, data_collections,
                                  device):

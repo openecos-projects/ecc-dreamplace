@@ -207,6 +207,38 @@
         "description": "M2 PG rail soft density weight added to the electric initial density map when ieda_m2_pg_rail_blockage_flag is disabled; 0 disables the soft density path, 1 matches the old hard-node rail density contribution",
         "default": 1.0
     },
+    "m2_pg_rail_legalization_blockage_flag": {
+        "description": "whether run the M2 rail-aware legalization mode selected by m2_pg_rail_legalization_mode",
+        "default": 0
+    },
+    "m2_pg_rail_legalization_mode": {
+        "description": "M2 rail-aware legalization algorithm: soft runs ordinary legalization followed by soft rail-overlap reduction; hybrid_hard uses all rails as temporary hard obstacles while reserving unavoidable single-row wide cells; subset_hard uses only the inclusive left-to-right rail-index range selected by m2_pg_rail_legalization_hard_rail_start and m2_pg_rail_legalization_hard_rail_end",
+        "default": "soft"
+    },
+    "m2_pg_rail_legalization_hard_rail_start": {
+        "description": "1-based left-to-right first M2 rail used as a temporary hard obstacle in subset_hard legalization; ignored by other modes",
+        "default": 1
+    },
+    "m2_pg_rail_legalization_hard_rail_end": {
+        "description": "1-based left-to-right last M2 rail used as a temporary hard obstacle in subset_hard legalization, inclusive; ignored by other modes",
+        "default": 0
+    },
+    "m2_pg_rail_legalization_displacement_weight": {
+        "description": "displacement-area penalty relative to M2 rail overlap-area improvement in soft M2 legalization; 0 prioritizes rail overlap only",
+        "default": 0.01
+    },
+    "m2_pa_refine_flag": {
+        "description": "whether run Xplace-style row-based PA-Refine after legalization and optional detailed placement to move single-row cells away from vertical M2 PG rails",
+        "default": 0
+    },
+    "m2_pa_refine_max_neighbors": {
+        "description": "maximum local row-neighbor search depth for M2 PA-Refine",
+        "default": 5
+    },
+    "m2_pa_refine_max_displacement_sites": {
+        "description": "maximum summed displacement in site widths for one M2 PA-Refine move candidate",
+        "default": 50
+    },
     "route_num_bins_x": {
         "description": "number of routing grids/tiles",
         "default": 512
@@ -226,6 +258,10 @@
     "inflation_area_budget_ratio": {
         "description": "maximum fraction of the total whitespace area that routability inflation may add to movable nodes in one area-adjust round",
         "default": 0.1
+    },
+    "legalize_before_each_inflation_flag": {
+        "description": "whether each ordinary inflation round waits for stop_overflow, legalizes physical cell geometry, runs congestion estimation, and then reapplies cumulative inflation before area adjustment",
+        "default": 0
     },
     "enhanced_inflation_flag": {
         "description": "whether enable the enhanced outer-loop inflation controller skeleton",
@@ -365,6 +401,42 @@
     },
     "gpugr_final_eval_route_ysize": {
         "description": "optional route_ySize override for gpugr final evaluation; use 0 to follow the Xplace grid rule",
+        "default": 0
+    },
+    "post_legalization_adaptive_padding_flag": {
+        "description": "whether run gpugr after legalization and apply congestion-ranked per-cell x padding through an incremental legalization pass",
+        "default": 0
+    },
+    "post_legalization_padding_hot_cell_ratio": {
+        "description": "fraction of eligible movable cells considered for post-legalization adaptive padding",
+        "default": 0.2
+    },
+    "post_legalization_padding_row_free_ratio": {
+        "description": "fraction of each row segment's free sites available to adaptive padding",
+        "default": 0.5
+    },
+    "post_legalization_padding_max_sites": {
+        "description": "maximum adaptive x padding in sites on each side of a selected cell",
+        "default": 1
+    },
+    "post_legalization_padding_smooth_kernel": {
+        "description": "positive odd pooling kernel used to smooth the gpugr directional overflow map before cell scoring",
+        "default": 3
+    },
+    "post_legalization_padding_max_retries": {
+        "description": "maximum number of padded legalization retries; each retry drops the lower-scored half of padded cells",
+        "default": 4
+    },
+    "post_legalization_padding_rrr_iters": {
+        "description": "rrrIters passed to the post-legalization gpugr call used for adaptive padding",
+        "default": 0
+    },
+    "post_legalization_padding_skip_m1_route": {
+        "description": "whether skip M1 when building post-legalization adaptive-padding overflow maps",
+        "default": 1
+    },
+    "post_legalization_padding_save_artifacts": {
+        "description": "whether save gpugr maps, metrics, and PNGs for the post-legalization adaptive-padding call",
         "default": 0
     },
     "l_shape_grad_target_ratio": {

@@ -85,7 +85,10 @@ class MacroPlaceDB(object):
         self.num_terminal_NIs = 0
         self.num_place_blockages = 0  # synthetic placement blockages appended to fixed terminals
         self.num_fixed_macro_excluded_place_blockages = 0
+        self.m2_pg_rail_boxes = np.zeros((0, 4), dtype=np.float32)
         self.m2_pg_rail_density_boxes = np.zeros((0, 4), dtype=np.float32)
+        self.m2_pg_rail_legalization_blockage_flag = False
+        self.m2_pa_refine_flag = False
         self.node_name2id_map = {}  # node name to id map, cell name
         self.node_names = None  # 1D array, cell name
         self.node_x = None  # 1D array, cell position x
@@ -325,8 +328,13 @@ class MacroPlaceDB(object):
             # may have performance issue
             self.regions[i] -= box_shift_factor
             self.regions[i] *= scale_factor
-        if self.m2_pg_rail_density_boxes is not None and self.m2_pg_rail_density_boxes.size:
-            rail_boxes = self.m2_pg_rail_density_boxes
+        for rail_box_field in (
+            "m2_pg_rail_boxes",
+            "m2_pg_rail_density_boxes",
+        ):
+            rail_boxes = getattr(self, rail_box_field, None)
+            if rail_boxes is None or not rail_boxes.size:
+                continue
             rail_xl = rail_boxes[:, 0].copy()
             rail_yl = rail_boxes[:, 1].copy()
             rail_w = (rail_boxes[:, 2] - rail_boxes[:, 0]).copy()
@@ -337,8 +345,8 @@ class MacroPlaceDB(object):
             rail_boxes[:, 3] = rail_boxes[:, 1] + rail_h * scale_factor
 
     @staticmethod
-    def _resolve_ieda_m2_pg_rail_blockage_flag(params):
-        value = getattr(params, "ieda_m2_pg_rail_blockage_flag", 0)
+    def _resolve_boolean_like_flag(params, name, default=0):
+        value = getattr(params, name, default)
         if isinstance(value, bool):
             return value
         if isinstance(value, str):
@@ -348,16 +356,32 @@ class MacroPlaceDB(object):
             if normalized in ("0", "false", "no", "off"):
                 return False
             raise ValueError(
-                "ieda_m2_pg_rail_blockage_flag must be a boolean-like value "
-                "(0/1, true/false, yes/no, on/off)"
+                "%s must be a boolean-like value "
+                "(0/1, true/false, yes/no, on/off)" % name
             )
         if isinstance(value, (int, np.integer)):
             if value in (0, 1):
                 return bool(value)
         raise ValueError(
-            "ieda_m2_pg_rail_blockage_flag must be a boolean-like value "
-            "(0/1, true/false, yes/no, on/off)"
+            "%s must be a boolean-like value "
+            "(0/1, true/false, yes/no, on/off)" % name
         )
+
+    @classmethod
+    def _resolve_ieda_m2_pg_rail_blockage_flag(cls, params):
+        return cls._resolve_boolean_like_flag(
+            params, "ieda_m2_pg_rail_blockage_flag"
+        )
+
+    @classmethod
+    def _resolve_m2_pg_rail_legalization_blockage_flag(cls, params):
+        return cls._resolve_boolean_like_flag(
+            params, "m2_pg_rail_legalization_blockage_flag"
+        )
+
+    @classmethod
+    def _resolve_m2_pa_refine_flag(cls, params):
+        return cls._resolve_boolean_like_flag(params, "m2_pa_refine_flag")
 
     @staticmethod
     def _resolve_m2_pg_rail_density_weight(params):
@@ -377,7 +401,7 @@ class MacroPlaceDB(object):
         terminal_count = int(getattr(self, "num_terminals", 0))
         if blockage_count < 0 or blockage_count > terminal_count:
             raise RuntimeError(
-                "Invalid iEDA placement blockage bookkeeping: "
+                "Invalid ecc-tools placement blockage bookkeeping: "
                 "num_place_blockages=%d num_terminals=%d"
                 % (blockage_count, terminal_count)
             )
@@ -385,10 +409,15 @@ class MacroPlaceDB(object):
     def _import_m2_pg_rail_density_boxes(self, pydb, include_m2_pg_rail_density):
         dtype = getattr(self, "dtype", None) or np.float32
         if not hasattr(pydb, "m2_pg_rail_density_boxes"):
+            if include_m2_pg_rail_density:
+                raise RuntimeError(
+                    "M2 PG rail geometry collection is enabled, but pydb has no "
+                    "m2_pg_rail_density_boxes field. Rebuild ecc-tools pybind to avoid "
+                    "using stale hard-node M2 PG rail behavior."
+                )
             logging.warning(
-                "pydb has no m2_pg_rail_density_boxes field; current ecc-tools "
-                "binding does not provide M2 PG rail data, so using empty rail "
-                "soft-density boxes"
+                "pydb has no m2_pg_rail_density_boxes field; M2 PG rail geometry "
+                "collection is disabled, so using empty rail boxes"
             )
             return np.zeros((0, 4), dtype=dtype)
 
@@ -407,11 +436,40 @@ class MacroPlaceDB(object):
             )
         return boxes
 
+    def _import_m2_pg_rail_boxes(self, pydb, include_m2_pg_rail_geometry):
+        dtype = getattr(self, "dtype", None) or np.float32
+        if not include_m2_pg_rail_geometry:
+            return np.zeros((0, 4), dtype=dtype)
+        if not hasattr(pydb, "m2_pg_rail_boxes"):
+            raise RuntimeError(
+                "M2 PA-Refine rail geometry collection is enabled, but pydb has "
+                "no m2_pg_rail_boxes field. Rebuild ecc-tools pybind before enabling "
+                "m2_pa_refine_flag."
+            )
+
+        boxes = np.array(pydb.m2_pg_rail_boxes, dtype=dtype)
+        if boxes.size == 0:
+            return boxes.reshape(0, 4)
+        if boxes.ndim != 2 or boxes.shape[1] != 4:
+            raise ValueError(
+                "m2_pg_rail_boxes must have shape [N, 4], got %s"
+                % (boxes.shape,)
+            )
+        if np.any(boxes[:, 2] <= boxes[:, 0]) or np.any(boxes[:, 3] <= boxes[:, 1]):
+            raise ValueError(
+                "m2_pg_rail_boxes must contain positive-width and "
+                "positive-height [xl, yl, xh, yh] rectangles"
+            )
+        return boxes
+
     @staticmethod
     def _log_ieda_m2_pg_rail_blockage_effect(
         include_m2_pg_rail_blockage,
         include_m2_pg_rail_density,
         pydb,
+        soft_density_enabled=None,
+        legalization_blockage_enabled=False,
+        pa_refine_enabled=False,
     ):
         if include_m2_pg_rail_blockage:
             logging.info(
@@ -425,10 +483,21 @@ class MacroPlaceDB(object):
                 "PyPlaceDB M2 PG rail density boxes exported: %d",
                 len(rail_boxes),
             )
-            if include_m2_pg_rail_density:
+            if soft_density_enabled is None:
+                soft_density_enabled = include_m2_pg_rail_density
+            if soft_density_enabled:
                 logging.info("PyPlaceDB M2 PG rail soft density collection enabled")
             else:
                 logging.info("PyPlaceDB M2 PG rail soft density collection skipped")
+            if legalization_blockage_enabled:
+                logging.info(
+                    "PyPlaceDB M2 PG rail soft legalization geometry enabled"
+                )
+        if pa_refine_enabled:
+            logging.info(
+                "PyPlaceDB M2 PG rail PA-Refine geometry boxes exported: %d",
+                len(getattr(pydb, "m2_pg_rail_boxes", [])),
+            )
 
     def setup_rawdb(self, params):
         self.dtype = datatypes[params.dtype]
@@ -438,8 +507,23 @@ class MacroPlaceDB(object):
                 self._resolve_ieda_m2_pg_rail_blockage_flag(params)
             )
             m2_pg_rail_density_weight = self._resolve_m2_pg_rail_density_weight(params)
+            m2_pg_rail_legalization_blockage = (
+                self._resolve_m2_pg_rail_legalization_blockage_flag(params)
+            )
+            m2_pa_refine = self._resolve_m2_pa_refine_flag(params)
+            soft_density_enabled = (
+                m2_pg_rail_density_weight > 0
+                and not include_m2_pg_rail_blockage
+            )
+            legalization_blockage_enabled = (
+                m2_pg_rail_legalization_blockage
+                and not include_m2_pg_rail_blockage
+            )
+            pa_refine_enabled = m2_pa_refine
             include_m2_pg_rail_density = (
-                m2_pg_rail_density_weight > 0 and not include_m2_pg_rail_blockage
+                soft_density_enabled
+                or legalization_blockage_enabled
+                or pa_refine_enabled
             )
             logging.info(
                 "ieda_m2_pg_rail_blockage_flag resolved to %d",
@@ -448,7 +532,18 @@ class MacroPlaceDB(object):
             logging.info(
                 "m2_pg_rail_density_weight resolved to %g; soft density collection %s",
                 m2_pg_rail_density_weight,
-                "enabled" if include_m2_pg_rail_density else "disabled",
+                "enabled" if soft_density_enabled else "disabled",
+            )
+            logging.info(
+                "m2_pg_rail_legalization_blockage_flag resolved to %d; "
+                "soft legalization geometry collection %s",
+                int(m2_pg_rail_legalization_blockage),
+                "enabled" if legalization_blockage_enabled else "disabled",
+            )
+            logging.info(
+                "m2_pa_refine_flag resolved to %d; rail geometry collection %s",
+                int(m2_pa_refine),
+                "enabled" if pa_refine_enabled else "disabled",
             )
             self.pydb = self.ecc_module.pydb(
                 self.ecc_db,
@@ -456,16 +551,16 @@ class MacroPlaceDB(object):
                 params.route_num_bins_y,
                 params.routability_opt_flag,
                 params.with_sta,
+                include_m2_pg_rail_blockage,
+                include_m2_pg_rail_density,
             )
-            if include_m2_pg_rail_blockage or include_m2_pg_rail_density:
-                logging.warning(
-                    "Current ecc-tools pydb binding has no M2 PG rail extension; "
-                    "continuing without synthetic rail density/blockages"
-                )
             self._log_ieda_m2_pg_rail_blockage_effect(
                 include_m2_pg_rail_blockage,
                 include_m2_pg_rail_density,
                 self.pydb,
+                soft_density_enabled=soft_density_enabled,
+                legalization_blockage_enabled=legalization_blockage_enabled,
+                pa_refine_enabled=pa_refine_enabled,
             )
 
     def init_db(self, params):
@@ -1173,13 +1268,24 @@ class MacroPlaceDB(object):
         self.num_place_blockages = int(getattr(pydb, "num_place_blockages", 0))
         self._validate_place_blockage_bookkeeping()
         include_m2_pg_rail_blockage = self._resolve_ieda_m2_pg_rail_blockage_flag(params)
+        self.m2_pg_rail_legalization_blockage_flag = (
+            self._resolve_m2_pg_rail_legalization_blockage_flag(params)
+        )
+        self.m2_pa_refine_flag = self._resolve_m2_pa_refine_flag(params)
         include_m2_pg_rail_density = (
-            self._resolve_m2_pg_rail_density_weight(params) > 0
+            (
+                self._resolve_m2_pg_rail_density_weight(params) > 0
+                or self.m2_pg_rail_legalization_blockage_flag
+            )
             and not include_m2_pg_rail_blockage
         )
         self.m2_pg_rail_density_boxes = self._import_m2_pg_rail_density_boxes(
             pydb,
             include_m2_pg_rail_density=include_m2_pg_rail_density,
+        )
+        self.m2_pg_rail_boxes = self._import_m2_pg_rail_boxes(
+            pydb,
+            include_m2_pg_rail_geometry=self.m2_pa_refine_flag,
         )
         self.node_name2id_map = pydb.node_name2id_map
         self.node_names = np.array(pydb.node_names, dtype=np.bytes_)

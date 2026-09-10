@@ -5,7 +5,6 @@
   outputs = inputs@{
     self, nixpkgs, flake-parts,
   }: let
-    eccJobs = builtins.getEnv "ECC_JOBS";
     ecc-dreamplace = {
       lib,
       python3Packages,
@@ -15,7 +14,6 @@
       bison,
       flex,
       pkg-config,
-      eccJobs ? "",
     }: python3Packages.buildPythonPackage rec {
       name = "dreamplace";
       format = "pyproject";
@@ -65,13 +63,12 @@
       passthru.rawBuildInputs = buildInputs;
       passthru.rawNativeBuildInputs = nativeBuildInputs;
 
+      # Honor Nix --cores via NIX_BUILD_CORES (no impure getEnv needed).
+      # https://nix.dev/manual/nix/2.24/advanced-topics/cores-vs-jobs
       preConfigure = ''
-        JOBS="${eccJobs}"
-        if [ -n "$JOBS" ]; then
-          echo "dreamplace: injecting -j$JOBS"
-          sed -i '/build\.tool-args/d' pyproject.toml
-          sed -i "/^\[tool\.scikit-build\]/a build.tool-args = [\"-j$JOBS\"]" pyproject.toml
-        fi
+        echo "dreamplace: injecting -j$NIX_BUILD_CORES"
+        sed -i '/build\.tool-args/d' pyproject.toml
+        sed -i "/^\[tool\.scikit-build\]/a build.tool-args = [\"-j$NIX_BUILD_CORES\"]" pyproject.toml
       '';
 
       postBuild = ''
@@ -81,7 +78,7 @@
   in flake-parts.lib.mkFlake { inherit inputs; } {
     systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
     perSystem = { self', pkgs, system, ... }: {
-      packages.default = pkgs.callPackage ecc-dreamplace { inherit eccJobs; };
+      packages.default = pkgs.callPackage ecc-dreamplace {};
       devShells.default = pkgs.mkShell.override {} {
         buildInputs = self'.packages.default.rawBuildInputs;
         nativeBuildInputs = self'.packages.default.rawNativeBuildInputs ++ (with pkgs; [ uv ]);

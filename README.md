@@ -136,18 +136,19 @@ significant memory during parallel compilation. On systems with limited memory
 (for example, 24 GB), building with the default Ninja parallelism may trigger
 the OOM killer or cause the system to thrash.
 
-The build respects the `ECC_JOBS` environment variable to override the number
-of parallel compilation jobs.
+The Nix build honors `--cores` via `NIX_BUILD_CORES` (no `--impure` needed).
+See https://nix.dev/manual/nix/2.24/advanced-topics/cores-vs-jobs.
 
 ```bash
-# Default: Ninja uses all available cores (may cause OOM).
+# Default: uses the machine's configured Nix cores setting.
 nix build .#default
 
 # Limit to 4 parallel jobs.
-ECC_JOBS=4 nix build .#default --impure
+nix build .#default --cores 4
 
 # Single job (most memory-safe, recommended for constrained environments).
-ECC_JOBS=1 nix build .#default --impure
+nix build .#default --cores 1
+```
 
 ## Repository Pointers
 

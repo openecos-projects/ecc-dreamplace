@@ -187,6 +187,10 @@
         "description": "whether enable two-stage macro placement",
         "default": 0
     },
+    "macro_only": {
+        "description": "commit only frozen unplaced hard macro coordinates",
+        "default": 0
+    },
     "use_bb": {
         "description": "whether use the Barzilai-Borwein step size in Nesterov optimization",
         "default": 0

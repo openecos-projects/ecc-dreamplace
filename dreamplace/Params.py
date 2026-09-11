@@ -376,6 +376,18 @@ class Params:
             raise ValueError("%s must be finite and non-negative" % name)
         self.inflation_area_budget_ratio = value
 
+    def normalize_gpugr_area_adjust_congestion_mode(self):
+        name = "gpugr_area_adjust_congestion_mode"
+        value = getattr(self, name, "max_hv")
+        if not isinstance(value, str):
+            raise ValueError("%s must be a string" % name)
+        value = value.strip().lower()
+        if value not in ("union", "max_hv", "max_hv_effective"):
+            raise ValueError(
+                "%s must be one of: union, max_hv, max_hv_effective" % name
+            )
+        self.gpugr_area_adjust_congestion_mode = value
+
     def normalize_params(self):
         self.normalize_removed_l_shape_weight_schedule()
         self.normalize_iopin_density_weight()
@@ -387,6 +399,7 @@ class Params:
         self.normalize_post_legalization_adaptive_padding()
         self.normalize_legalize_before_each_inflation()
         self.normalize_inflation_area_budget_ratio()
+        self.normalize_gpugr_area_adjust_congestion_mode()
 
     def fromJson(self, data):
         """

@@ -162,7 +162,6 @@ class PlacementEngine:
         # solve placement
         import dreamplace.NonLinearPlace as NonLinearPlace  # deferred to avoid compiled-op imports at module level
         tt = time.time()
-        self.params.plot_flag = True
         if self.params.timing_opt_flag:
             raise RuntimeError(
                 "timing_opt_flag is no longer supported because OpenTimer integration has been removed"

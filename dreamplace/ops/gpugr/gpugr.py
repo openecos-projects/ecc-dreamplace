@@ -121,6 +121,8 @@ class GPUGR(object):
             keep_temp_def=bool(getattr(self.params, "gpugr_area_adjust_keep_temp_def", 0)),
             save_artifacts=save_artifacts,
             backend=getattr(self.params, "gpugr_backend", "auto"),
+            bottom_routing_layer=getattr(self.params, "gpugr_bottom_routing_layer", ""),
+            top_routing_layer=getattr(self.params, "gpugr_top_routing_layer", ""),
         )
         self.last_result = result
         self.last_route_grid = (route_xsize, route_ysize)
@@ -129,7 +131,7 @@ class GPUGR(object):
         congestion_mode = getattr(
             self.params,
             "gpugr_area_adjust_congestion_mode",
-            "union",
+            "max_hv",
         )
         overflow_xy = self._select_inflation_overflow(maps, congestion_mode)
         overflow_xy = overflow_xy.detach().to(device=pos.device, dtype=pos.dtype)

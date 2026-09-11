@@ -49,6 +49,19 @@ class EnhancedInflationParamsTest(unittest.TestCase):
         params.fromJson({})
         self.assertEqual(params.inflation_area_budget_ratio, 0.1)
 
+    def test_gpugr_area_adjust_defaults_to_directional_max_overflow(self):
+        params_path = os.path.join(os.path.dirname(__file__), "params.json")
+        with open(params_path, "r", encoding="utf-8") as f:
+            schema = json.load(f)
+
+        self.assertEqual(
+            schema["gpugr_area_adjust_congestion_mode"]["default"],
+            "max_hv",
+        )
+        params = Params()
+        params.fromJson({})
+        self.assertEqual(params.gpugr_area_adjust_congestion_mode, "max_hv")
+
     def test_inflation_area_budget_ratio_is_normalized(self):
         params = Params()
         params.fromJson({"inflation_area_budget_ratio": "0.25"})

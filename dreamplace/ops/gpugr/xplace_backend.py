@@ -110,9 +110,11 @@ def gpugr_run_metadata(
     route_ysize: int,
     rrr_iters: int,
     skip_m1_route: bool,
+    routing_layer_range=None,
+    routing_layer_names=None,
 ) -> dict:
     """Return JSON-safe configuration evidence for one GPUGR invocation."""
-    return {
+    metadata = {
         "route_xsize": int(route_xsize),
         "route_ysize": int(route_ysize),
         "rrr_iters": int(rrr_iters),
@@ -120,6 +122,18 @@ def gpugr_run_metadata(
         "gpugr_backend_requested": str(requested_backend),
         "gpugr_backend": str(resolved_backend),
     }
+    if routing_layer_range is not None:
+        begin, end = routing_layer_range
+        metadata["routing_layer_begin"] = int(begin)
+        metadata["routing_layer_end"] = int(end)
+    if routing_layer_names is not None:
+        metadata["routing_layer_names"] = [str(name) for name in routing_layer_names]
+        if routing_layer_range is not None:
+            begin, end = routing_layer_range
+            metadata["enabled_routing_layer_names"] = [
+                str(name) for name in routing_layer_names[int(begin) : int(end) + 1]
+            ]
+    return metadata
 
 
 def _install_optional_route_force_stubs():
@@ -181,6 +195,8 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         self._xplace_modules = None
         self._flute_lut_paths = None
         self._flute_register_cache = set()
+        self._last_routing_layer_range = None
+        self._last_routing_layer_names = None
 
     @property
     def _ecc_module(self):
@@ -420,6 +436,44 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
                 pass
         return str(name)
 
+    @staticmethod
+    def _routing_layer_metadata(routeforce, layer_count):
+        default_range = (0, max(0, int(layer_count) - 1))
+        range_getter = getattr(routeforce, "routing_layer_range", None)
+        if not callable(range_getter):
+            return default_range, []
+        raw_range = range_getter()
+        if raw_range is None or len(raw_range) != 2:
+            raise RuntimeError(f"Invalid GPUGR routing layer range: {raw_range!r}")
+        begin, end = int(raw_range[0]), int(raw_range[1])
+        if begin < 0 or end >= int(layer_count) or begin > end:
+            raise RuntimeError(
+                f"GPUGR routing layer range [{begin}, {end}] is invalid for "
+                f"{int(layer_count)} layers"
+            )
+        names_getter = getattr(routeforce, "routing_layer_names", None)
+        names = list(names_getter()) if callable(names_getter) else []
+        if names and len(names) != int(layer_count):
+            raise RuntimeError(
+                "GPUGR routing layer name count does not match map layer count: "
+                f"{len(names)} != {int(layer_count)}"
+            )
+        return (begin, end), names
+
+    @staticmethod
+    def _aggregate_layer_maps(demand_map, capacity_map, layer_ids):
+        if layer_ids.numel() == 0:
+            empty = torch.zeros_like(demand_map[0])
+            return empty
+        demand = demand_map.index_select(0, layer_ids).sum(dim=0)
+        capacity = capacity_map.index_select(0, layer_ids).sum(dim=0)
+        floor = torch.finfo(capacity.dtype).eps
+        return torch.where(
+            capacity > floor,
+            demand / capacity.clamp(min=floor),
+            torch.zeros_like(demand),
+        )
+
     def _compute_maps(self, routeforce, gpdb, skip_m1_route=True):
         dmd_map, wire_dmd_map, via_dmd_map = routeforce.dmd_map()
         cap_map = routeforce.cap_map()
@@ -435,18 +489,49 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         fix_usage_map = fix_usage_map.to(device=map_device)
         mov_usage_map = mov_usage_map.to(device=map_device)
 
+        routing_layer_range, routing_layer_names = self._routing_layer_metadata(
+            routeforce, dmd_map.size(0)
+        )
+        self._last_routing_layer_range = routing_layer_range
+        self._last_routing_layer_names = routing_layer_names
+        layer_ids = torch.arange(dmd_map.size(0), device=map_device)
+        enabled_layers = (layer_ids >= routing_layer_range[0]) & (
+            layer_ids <= routing_layer_range[1]
+        )
+
+        # Keep the layer dimension stable for callers, but make the native
+        # routing window explicit in every map consumed by DreamPlace.
+        layer_mask = enabled_layers.view(-1, 1, 1)
+        zero = torch.zeros_like(dmd_map)
+        dmd_map = torch.where(layer_mask, dmd_map, zero)
+        wire_dmd_map = torch.where(layer_mask, wire_dmd_map, torch.zeros_like(wire_dmd_map))
+        via_dmd_map = torch.where(layer_mask, via_dmd_map, torch.zeros_like(via_dmd_map))
+        raw_wire_dmd_map = torch.where(
+            layer_mask, raw_wire_dmd_map, torch.zeros_like(raw_wire_dmd_map)
+        )
+        fix_usage_map = torch.where(layer_mask, fix_usage_map, torch.zeros_like(fix_usage_map))
+        mov_usage_map = torch.where(layer_mask, mov_usage_map, torch.zeros_like(mov_usage_map))
+        cap_map = torch.where(layer_mask, cap_map, torch.zeros_like(cap_map))
+
         m1direction = gpdb.m1direction()
         h_id = 1 if m1direction else 0
         v_id = 0 if m1direction else 1
-        a_id = 0
+        route_layers = enabled_layers.clone()
         if skip_m1_route:
-            a_id = 1
-            h_id = h_id + 2 if h_id == 0 else h_id
-            v_id = v_id + 2 if v_id == 0 else v_id
+            route_layers &= layer_ids != 0
+            if h_id == 0:
+                h_id += 2
+            if v_id == 0:
+                v_id += 2
+        h_layers = route_layers & ((layer_ids % 2) == (h_id % 2))
+        v_layers = route_layers & ((layer_ids % 2) == (v_id % 2))
 
-        cg_map_h_raw = dmd_map[h_id::2].sum(dim=0) / cap_map[h_id::2].sum(dim=0)
-        cg_map_v_raw = dmd_map[v_id::2].sum(dim=0) / cap_map[v_id::2].sum(dim=0)
-        cg_map_union_raw = dmd_map[a_id:].sum(dim=0) / cap_map[a_id:].sum(dim=0)
+        h_ids = torch.nonzero(h_layers, as_tuple=False).flatten()
+        v_ids = torch.nonzero(v_layers, as_tuple=False).flatten()
+        union_ids = torch.nonzero(route_layers, as_tuple=False).flatten()
+        cg_map_h_raw = self._aggregate_layer_maps(dmd_map, cap_map, h_ids)
+        cg_map_v_raw = self._aggregate_layer_maps(dmd_map, cap_map, v_ids)
+        cg_map_union_raw = self._aggregate_layer_maps(dmd_map, cap_map, union_ids)
         cg_map_h_overflow = torch.clamp(cg_map_h_raw - 1.0, min=0.0)
         cg_map_v_overflow = torch.clamp(cg_map_v_raw - 1.0, min=0.0)
         cg_map_union_overflow = torch.clamp(cg_map_union_raw - 1.0, min=0.0)
@@ -457,12 +542,12 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
             cap_map - fix_usage_map - mov_usage_map,
             min=capacity_floor,
         )
-        cg_map_h_effective_raw = effective_demand_map[h_id::2].sum(
-            dim=0
-        ) / effective_capacity_map[h_id::2].sum(dim=0).clamp(min=capacity_floor)
-        cg_map_v_effective_raw = effective_demand_map[v_id::2].sum(
-            dim=0
-        ) / effective_capacity_map[v_id::2].sum(dim=0).clamp(min=capacity_floor)
+        cg_map_h_effective_raw = self._aggregate_layer_maps(
+            effective_demand_map, effective_capacity_map, h_ids
+        )
+        cg_map_v_effective_raw = self._aggregate_layer_maps(
+            effective_demand_map, effective_capacity_map, v_ids
+        )
         cg_map_h_effective_overflow = torch.clamp(
             cg_map_h_effective_raw - 1.0,
             min=0.0,
@@ -700,6 +785,8 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         profile_enabled: bool = False,
         profile_prefix: str = "gpugr.run",
         backend: str = "auto",
+        bottom_routing_layer: str = None,
+        top_routing_layer: str = None,
     ):
         """Run gpugr and return maps plus metrics.
 
@@ -708,6 +795,12 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         re-exported nor re-parsed.
         """
         requested_backend = normalize_gpugr_backend(backend)
+        if bottom_routing_layer is None:
+            bottom_routing_layer = getattr(self.params, "gpugr_bottom_routing_layer", "")
+        if top_routing_layer is None:
+            top_routing_layer = getattr(self.params, "gpugr_top_routing_layer", "")
+        bottom_routing_layer = str(bottom_routing_layer or "")
+        top_routing_layer = str(top_routing_layer or "")
         profile_enabled = bool(profile_enabled)
         topology_net_name_to_id = topology_net_name_to_id or {}
         topology_pin_name_to_id = topology_pin_name_to_id or {}
@@ -924,6 +1017,8 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
                                 "rrrIters": rrr_iters,
                                 "route_guide": route_guide,
                                 "backend": resolved_backend,
+                                "bottom_routing_layer": bottom_routing_layer,
+                                "top_routing_layer": top_routing_layer,
                             }
                         )
                     with self._profile_phase(
@@ -1187,6 +1282,8 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
                     route_ysize=route_ysize,
                     rrr_iters=rrr_iters,
                     skip_m1_route=skip_m1_route,
+                    routing_layer_range=self._last_routing_layer_range,
+                    routing_layer_names=self._last_routing_layer_names,
                 ),
             }
             self._add_metric_aliases(metrics)

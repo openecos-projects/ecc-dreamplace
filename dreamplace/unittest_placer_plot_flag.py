@@ -30,7 +30,7 @@ class PlacementEnginePlotFlagTest(unittest.TestCase):
         observed = {}
 
         class FakeNonLinearPlace:
-            def __init__(self, params, placedb, timer):
+            def __init__(self, params, placedb):
                 observed["constructor_plot_flag"] = params.plot_flag
 
             def __call__(self, params, placedb):
@@ -43,12 +43,16 @@ class PlacementEnginePlotFlagTest(unittest.TestCase):
                 }
                 return 0.0, 2.0, metrics
 
-        original_non_linear_place = Placer.NonLinearPlace
-        Placer.NonLinearPlace = types.SimpleNamespace(NonLinearPlace=FakeNonLinearPlace)
+        module_name = "dreamplace.NonLinearPlace"
+        original_non_linear_place = sys.modules.get(module_name)
+        sys.modules[module_name] = types.SimpleNamespace(NonLinearPlace=FakeNonLinearPlace)
         try:
             engine.place()
         finally:
-            Placer.NonLinearPlace = original_non_linear_place
+            if original_non_linear_place is None:
+                del sys.modules[module_name]
+            else:
+                sys.modules[module_name] = original_non_linear_place
 
         self.assertEqual(observed["constructor_plot_flag"], 0)
         self.assertEqual(observed["call_plot_flag"], 0)

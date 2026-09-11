@@ -291,6 +291,14 @@
         "description": "GGR backend selection: auto chooses cuda when available and cpu_pr otherwise; cuda requires a CUDA-capable gpugr build; cpu_pr supports pattern routing with rrrIters=0",
         "default": "auto"
     },
+    "gpugr_bottom_routing_layer": {
+        "description": "inclusive bottom routing-layer name passed to GPUGR; empty uses the first LEF routing layer",
+        "default": ""
+    },
+    "gpugr_top_routing_layer": {
+        "description": "inclusive top routing-layer name passed to GPUGR; empty uses the last LEF routing layer",
+        "default": ""
+    },
     "adjust_gpugr_area_flag": {
         "description": "whether use Xplace gpugr overflow map to guide area adjustment",
         "default": 0
@@ -365,7 +373,7 @@
     },
     "gpugr_area_adjust_congestion_mode": {
         "description": "congestion signal used by GPUGR area inflation: union, direction-sensitive max_hv, or direction-sensitive max_hv_effective using routed wire plus via demand over nominal capacity minus fixed and movable obstacle usage",
-        "default": "union"
+        "default": "max_hv"
     },
     "gpugr_final_eval_flag": {
         "description": "whether run a final gpugr evaluation after placement finishes, similar to Xplace final_route_eval",

@@ -152,8 +152,8 @@ class MacroPlaceDB(object):
         self.num_movable_pins = None
 
         self.total_movable_node_area = None  # total movable cell area
-        self.total_fixed_node_area = None  # total fixed cell area
-        self.total_space_area = None  # total placeable space area excluding fixed cells
+        self.total_fixed_node_area = None  # native union area of fixed geometry
+        self.total_space_area = None  # native placeable core area after fixed geometry
 
         # enable filler cells
         # the Idea from e-place and RePlace
@@ -287,6 +287,8 @@ class MacroPlaceDB(object):
         self.yh *= scale_factor
         self.row_height *= scale_factor
         self.site_width *= scale_factor
+        if getattr(self, "total_fixed_node_area", None) is not None:
+            self.total_fixed_node_area *= scale_factor * scale_factor
         if self.min_wire_widths is not None:
             self.min_wire_widths *= scale_factor
         if self.min_wire_spacings is not None:
@@ -1338,6 +1340,7 @@ class MacroPlaceDB(object):
         self.row_height = float(pydb.row_height)
         self.site_width = float(pydb.site_width)
         self.num_movable_pins = pydb.num_movable_pins
+        self.total_fixed_node_area = float(pydb.total_fixed_node_area)
         self.total_space_area = float(pydb.total_space_area)
 
         self.routing_grid_xl = float(pydb.routing_grid_xl)
@@ -1737,19 +1740,10 @@ row height = %g, site width = %g
         # set total cell area
         self.total_movable_node_area = float(np.sum(
             self.node_size_x[:self.num_movable_nodes] * self.node_size_y[:self.num_movable_nodes]))
-        # total fixed node area should exclude the area outside the layout and the area of terminal_NIs
-        self.total_fixed_node_area = float(np.sum(
-            np.maximum(
-                np.minimum(self.node_x[self.num_movable_nodes:self.num_physical_nodes - self.num_terminal_NIs] +
-                           self.node_size_x[self.num_movable_nodes:self.num_physical_nodes - self.num_terminal_NIs], self.xh)
-                - np.maximum(self.node_x[self.num_movable_nodes:self.num_physical_nodes - self.num_terminal_NIs], self.xl),
-                0.0) * np.maximum(
-                np.minimum(self.node_y[self.num_movable_nodes:self.num_physical_nodes - self.num_terminal_NIs] +
-                           self.node_size_y[self.num_movable_nodes:self.num_physical_nodes - self.num_terminal_NIs], self.yh)
-                - np.maximum(self.node_y[self.num_movable_nodes:self.num_physical_nodes - self.num_terminal_NIs], self.yl),
-                0.0)
-        ))
-        self.total_space_area = self.area - self.total_fixed_node_area
+        # Fixed geometry is unioned by ecc-tools before it reaches Python.  Do
+        # not sum terminal rectangles here: overlapping bodies and synthetic
+        # obstacles would otherwise be counted more than once and overwrite
+        # the native placeable-area calculation.
         content += "total_movable_node_area = %g, total_fixed_node_area = %g, total_space_area = %g\n" % (
             self.total_movable_node_area, self.total_fixed_node_area, self.total_space_area)
 

@@ -87,5 +87,74 @@ class MacroPlaceDBFixedMacroMaskTest(unittest.TestCase):
         self.assertEqual(placedb.num_fixed_macros, 1)
 
 
+class MacroPlaceDBFixedAreaTest(unittest.TestCase):
+    def test_initialize_preserves_native_union_area(self):
+        placedb = MacroPlaceDB(None)
+        placedb.dtype = np.float32
+        placedb.num_physical_nodes = 4
+        placedb.num_terminals = 2
+        placedb.num_terminal_NIs = 0
+        placedb.num_movable_macros = 0
+        placedb.num_fixed_macros = 0
+        placedb.movable_slice = slice(0, 2)
+        placedb.fixed_slice = slice(2, 4)
+        placedb.io_slice = slice(4, 4)
+        placedb.node_size_x = np.array([2.0, 2.0, 10.0, 10.0], dtype=np.float32)
+        placedb.node_size_y = np.array([1.0, 1.0, 10.0, 10.0], dtype=np.float32)
+        placedb.node_x = np.zeros(4, dtype=np.float32)
+        placedb.node_y = np.zeros(4, dtype=np.float32)
+        placedb.node_names = np.array([b"cell0", b"cell1", b"fixed0", b"fixed1"])
+        placedb.net_names = np.array([], dtype=np.bytes_)
+        placedb.pin2node_map = np.array([], dtype=np.int32)
+        placedb.pin2net_map = np.array([], dtype=np.int32)
+        placedb.regions = []
+        placedb.flat_region_boxes = np.zeros((0, 4), dtype=np.float32)
+        placedb.rows = np.zeros((0, 4), dtype=np.float32)
+        placedb.xl = 0.0
+        placedb.yl = 0.0
+        placedb.xh = 100.0
+        placedb.yh = 100.0
+        placedb.row_height = 1.0
+        placedb.site_width = 1.0
+        placedb.num_movable_pins = 0
+        placedb.movable_macro_mask = np.zeros(2, dtype=bool)
+        placedb.cell_padding_x = 0.0
+        placedb.bndry_padding_x = 0.0
+        placedb.bndry_padding_y = 0.0
+        placedb.total_fixed_node_area = 35.0
+        placedb.total_space_area = 65.0
+
+        placedb.update_macros = lambda params: None
+        placedb.pin_density_inflation = lambda *args: None
+        placedb.set_routing_info = lambda route_file: None
+        placedb.scale = lambda shift_factor, scale_factor: None
+
+        params = types.SimpleNamespace(
+            risa_weights=0,
+            pin_density=0.0,
+            route_info_input="unused.route_info",
+            shift_factor=[0.0, 0.0],
+            scale_factor=1.0,
+            macro_halo_x=0.0,
+            macro_halo_y=0.0,
+            macro_pin_halo_x=0.0,
+            macro_pin_halo_y=0.0,
+            cell_padding_x=0.0,
+            target_density=0.5,
+            macro_place_flag=True,
+            enable_fillers=False,
+            routability_opt_flag=False,
+            auto_adjust_bins=False,
+            enhanced_auto_adjust_bins=False,
+            num_bins_x=4,
+            num_bins_y=4,
+        )
+
+        placedb.initialize(params)
+
+        self.assertEqual(placedb.total_fixed_node_area, 35.0)
+        self.assertEqual(placedb.total_space_area, 65.0)
+
+
 if __name__ == "__main__":
     unittest.main()

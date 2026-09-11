@@ -57,4 +57,4 @@ runs:
         done
 
         mkdir -p dist/wheel/repaired
-        uv run -m auditwheel repair dist/*.whl -w dist/wheel/repaired "${exclude_flags[@]}" --disable-isa-ext-check
+        uv run --no-sync -m auditwheel repair dist/*.whl -w dist/wheel/repaired "${exclude_flags[@]}" --disable-isa-ext-check

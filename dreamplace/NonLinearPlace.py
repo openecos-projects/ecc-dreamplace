@@ -136,6 +136,18 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         """
         iteration = 0
         all_metrics = []
+        original_stop_overflow = params.stop_overflow
+        if params.macro_only and params.macro_place_flag:
+            params.stop_overflow = (
+                placedb.total_movable_cell_area * 0.2
+                / placedb.total_movable_node_area
+            )
+            logging.info(
+                "macro-only stop_overflow = %.6E (cell_area=%.6E, movable_area=%.6E)",
+                params.stop_overflow,
+                placedb.total_movable_cell_area,
+                placedb.total_movable_node_area,
+            )
 
         # global placement
         if params.global_place_flag:
@@ -1310,4 +1322,5 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         #     with open("%s/risa_weights.pkl" % path, "wb") as f:
         #         pickle.dump(weights_dict, f)
 
+        params.stop_overflow = original_stop_overflow
         return float(rsmt_wl), float(hpwl), processed_metrics

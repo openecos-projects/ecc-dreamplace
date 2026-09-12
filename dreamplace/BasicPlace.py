@@ -21,6 +21,7 @@
 
 from dataclasses import dataclass, fields
 import os
+from pathlib import Path
 import sys
 import time
 import gzip
@@ -1563,7 +1564,7 @@ class BasicPlace(nn.Module):
         tt = time.time()
         path = "%s/%s" % (params.result_dir, params.design_name())
         figname = "%s/plot/iter%s.png" % (path, "{:04}".format(iteration))
-        os.system("mkdir -p %s" % (os.path.dirname(figname)))
+        Path(os.path.dirname(figname)).mkdir(parents=True, exist_ok=True)
         if isinstance(pos, np.ndarray):
             pos = torch.from_numpy(pos)
         self.op_collections.draw_place_op(pos, figname)

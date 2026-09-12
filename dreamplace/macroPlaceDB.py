@@ -1791,7 +1791,11 @@ row height = %g, site width = %g
                 "target_density %g is smaller than utilization %g, ignored"
                 % (params.target_density, target_density)
             )
-            params.target_density = target_density
+            # Raising the target to exactly the utilization leaves zero filler
+            # area, so the density force has no slack: the overflow floors at a
+            # nonzero plateau and the placement diverges.  Keep 10% headroom so
+            # filler cells exist and the spread remains compressible.
+            params.target_density = target_density * 1.1
         utilization = self.total_movable_node_area / self.total_space_area
         content += "utilization = %g, target_density = %g\n" % (
             self.total_movable_node_area / self.total_space_area,

@@ -3957,18 +3957,16 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 f"Divergence detected: overflow increases too much than best overflow ({overflow_ratio:.4f} > {threshold:.4f})"
                             )
                             return True
-                        elif overflow_range / overflow_mean < threshold:
-                            logging.warning(
-                                f"Divergence detected: overflow plateau ({overflow_range/overflow_mean:.4f} < {threshold:.4f})"
-                            )
-                            return True
-                        elif overflow_diff > 0.6:
-                            logging.warning(
-                                f"Divergence detected: overflow fluctuate too frequently ({overflow_diff:.2f} > 0.6)"
-                            )
-                            return True
-                        else:
-                            return False
+                    elif (not params.routability_opt_flag) and overflow_range / overflow_mean < threshold:
+                        logging.warning(
+                            f"Divergence detected: overflow plateau ({overflow_range/overflow_mean:.4f} < {threshold:.4f})"
+                        )
+                        return True
+                    elif overflow_diff > 0.6:
+                        logging.warning(
+                            f"Divergence detected: overflow fluctuate too frequently ({overflow_diff:.2f} > 0.6)"
+                        )
+                        return True
                     else:
                         return False
 
@@ -4554,6 +4552,16 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
                 # in case of divergence, use the best metric
                 last_metric = all_metrics[-1][-1][-1]
+                if best_pos[0] is not None and (
+                    not torch.isfinite(self.pos[0].data).all()
+                    or not torch.isfinite(last_metric.hpwl)
+                ):
+                    logging.warning(
+                        "non-finite placement state after global placement; "
+                        "restore best position (overflow %.6f)"
+                        % best_metric[0].overflow[-1].item()
+                    )
+                    self.pos[0].data.copy_(best_pos[0].data)
                 # if (
                 #     last_metric.overflow[-1] > max(params.stop_overflow, best_metric[0].overflow[-1])
                 #     and last_metric.hpwl > best_metric[0].hpwl

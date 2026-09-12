@@ -2007,8 +2007,11 @@ class PlaceObj(nn.Module):
                 "num_bins_y (%d) < max_num_bins (%d)" % (num_bins_y, max_num_bins)
             )
         # for fence region, the target density is different from different regions
+        # Keep the global target density tensor live so routability-driven
+        # inflation updates are visible to the potential operator.  Fence
+        # regions use their immutable per-region scalar target density.
         target_density = (
-            data_collections.target_density.item()
+            data_collections.target_density
             if fence_regions is None
             else placedb.target_density_fence_region[region_id]
         )

@@ -160,6 +160,10 @@ class ElectricOverflow(nn.Module):
         self.reset()
 
     def reset(self):
+        # Node sizes and target density can change after routability-driven
+        # inflation.  The fixed-cell density map depends on both, so it must
+        # be rebuilt on the next forward pass instead of reusing the old map.
+        self.initial_density_map = None
         sqrt2 = math.sqrt(2)
         # clamped means stretch a cell to bin size
         # clamped = max(bin_size*sqrt2, node_size)

@@ -138,9 +138,10 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         all_metrics = []
         original_stop_overflow = params.stop_overflow
         if params.macro_only and params.macro_place_flag:
-            params.stop_overflow = (
+            params.stop_overflow = min(
+                0.1,
                 placedb.total_movable_cell_area * 0.2
-                / placedb.total_movable_node_area
+                / placedb.total_movable_node_area,
             )
             logging.info(
                 "macro-only stop_overflow = %.6E (cell_area=%.6E, movable_area=%.6E)",

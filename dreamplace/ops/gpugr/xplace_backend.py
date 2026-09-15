@@ -1323,6 +1323,10 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
                 "l_shape_topology_pack": dict(l_shape_topology_pack_result),
             }
         finally:
-            if not keep_temp_def:
+            # Preserve the complete native workspace when routing raises.  It
+            # contains the DEF and native log needed to diagnose GPU/maze
+            # routing failures; successful calls still use the requested
+            # cleanup policy.
+            if not keep_temp_def and sys.exc_info()[0] is None:
                 with self._profile_phase(profile_enabled, f"{profile_prefix}.cleanup_temp_dir"):
                     shutil.rmtree(temp_dir, ignore_errors=True)

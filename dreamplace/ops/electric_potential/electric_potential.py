@@ -456,6 +456,9 @@ class ElectricPotential(ElectricOverflow):
         self.idct2 = None
         self.idct_idxst = None
         self.idxst_idct = None
+        # Fixed-cell density depends on target_density.  Invalidate it so the
+        # next forward rebuilds the map with the current target density.
+        self.initial_density_map = None
 
     def forward(self, pos, mode="density"):
         assert mode in {"density", "overflow"}, "Only support density mode or overflow mode"

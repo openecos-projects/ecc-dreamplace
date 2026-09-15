@@ -12,7 +12,7 @@ if AUTODMP_ROOT not in sys.path:
 
 
 class InflationTargetDensitySyncTest(unittest.TestCase):
-    def test_electric_potential_reset_uses_updated_shared_target_density(self):
+    def test_electric_potential_refreshes_fixed_map_after_target_density_change(self):
         import types
 
         from dreamplace import PlaceObj as place_obj_module
@@ -71,15 +71,21 @@ class InflationTargetDensitySyncTest(unittest.TestCase):
         self.assertIs(potential.target_density, data_collections.target_density)
         self.assertAlmostEqual(float(potential.ratio[0]), 0.5)
 
-        data_collections.target_density.fill_(0.75)
-        potential.reset()
-
-        self.assertAlmostEqual(float(potential.ratio[0]), 0.75)
         pos = torch.tensor(
             [0.0, 2.0, 3.0, 0.0, 2.0, 3.0],
             dtype=dtype,
         )
         potential.compute_initial_density_map(pos)
+        fixed_map_before = potential.initial_density_map.clone()
+
+        data_collections.target_density.fill_(0.75)
+        potential(pos)
+
+        self.assertAlmostEqual(float(potential.ratio[0]), 0.75)
+        self.assertTrue(torch.allclose(
+            potential.initial_density_map,
+            fixed_map_before * 1.5,
+        ))
         self.assertTrue(
             torch.allclose(
                 potential.initial_density_map,

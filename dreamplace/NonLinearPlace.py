@@ -793,7 +793,9 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
             route_ysize=route_ysize,
             rrr_iters=int(getattr(params, "gpugr_l_direction_rrr_iters", 0)),
             skip_m1_route=True,
-            keep_temp_def=False,
+            # Keep the DEF for every L-shape GPUGR evaluation so the selected
+            # intermediate placement can be replayed by Innovus after the run.
+            keep_temp_def=True,
             save_artifacts=bool(getattr(params, "gpugr_l_direction_save_artifacts", 0)),
             include_route_entries=need_route_entries,
             include_topology_pack=need_same_net_topology_pack,

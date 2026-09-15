@@ -961,7 +961,7 @@ class AdjustNodeArea(nn.Module):
                 % (new_movable_area_sum, new_filler_area_sum,
                    new_movable_area_sum + new_filler_area_sum,
                    self.total_place_area))
-            target_density.data.copy_(
+            target_density.copy_(
                 (new_movable_area_sum + new_filler_area_sum) /
                 self.total_place_area)
             logger.info("new target_density %g" % (target_density))

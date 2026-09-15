@@ -195,6 +195,14 @@
         "description": "whether enable routability optimization",
         "default": 0
     },
+    "macro_only": {
+        "description": "commit only frozen unplaced hard macro coordinates",
+        "default": 0
+    },
+    "use_bb": {
+        "description": "whether use the Barzilai-Borwein step size in Nesterov optimization",
+        "default": 0
+    },
     "iopin_density_weight": {
         "description": "extra I/O pin density weight added to the electric initial density map; 0 disables the extra I/O pin density increment, 3 matches Xplace's extra 3*Diopin term",
         "default": 3.0

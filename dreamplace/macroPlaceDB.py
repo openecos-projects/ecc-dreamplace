@@ -1798,11 +1798,6 @@ row height = %g, site width = %g
             params.target_density,
         )
 
-        if utilization > 0.99:
-            logging.error(
-                "utilization is larger than 1. Please change the core size."                
-            )
-            exit(1)
         # calculate fence region virtual macro
         if len(self.regions) > 0:
             virtual_macro_for_fence_region = [

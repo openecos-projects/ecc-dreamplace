@@ -34,7 +34,9 @@ sdist.include = [
   "thirdparty/pybind11/**",
 ]
 build.verbose = true
-editable.rebuild = true
+# Native extensions are rebuilt explicitly; importing DreamPlace must not
+# mutate or replace the loaded shared objects in a running process.
+editable.rebuild = false
 build-dir = "build"
 
 [dependency-groups]

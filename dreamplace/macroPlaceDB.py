@@ -96,6 +96,8 @@ class MacroPlaceDB(object):
         self.node_orient = None  # 1D array, cell orientation
         self.node_size_x = None  # 1D array, cell width
         self.node_size_y = None  # 1D array, cell height
+        self.node_is_hard_macro = None
+        self.macro_writeback_candidate = None
 
         # some fixed cells may have non-rectangular shapes; we flatten them and create new nodes
         self.node2orig_node_map = None
@@ -1300,6 +1302,15 @@ class MacroPlaceDB(object):
         self.node_orient = np.array(pydb.node_orient, dtype=np.bytes_)
         self.node_size_x = np.array(pydb.node_size_x, dtype=self.dtype)
         self.node_size_y = np.array(pydb.node_size_y, dtype=self.dtype)
+        self.node_is_hard_macro = np.array(
+            pydb.node_is_hard_macro, dtype=np.bool_, copy=True)
+        self.macro_writeback_candidate = np.array(
+            pydb.macro_writeback_candidate, dtype=np.bool_, copy=True)
+        if (self.node_is_hard_macro.shape != (self.num_physical_nodes,)
+                or self.macro_writeback_candidate.shape != (self.num_physical_nodes,)):
+            raise ValueError("Native macro masks must align with DreamPlace nodes")
+        self.node_is_hard_macro.setflags(write=False)
+        self.macro_writeback_candidate.setflags(write=False)
         self.node2orig_node_map = np.array(
             pydb.node2orig_node_map, dtype=np.int32)
         self.pin_direct = np.array(pydb.pin_direct, dtype=np.bytes_)
@@ -1707,7 +1718,7 @@ row height = %g, site width = %g
             params.num_bins_x = num_bins_x
             params.num_bins_y = num_bins_y
         elif _is_enabled_param(getattr(params, "auto_adjust_bins", 0)):
-            num_bins = math.pow(2, math.floor(math.log2(math.sqrt(self.num_physical_nodes))))
+            num_bins = min(512, math.pow(2, math.floor(math.log2(math.sqrt(self.num_physical_nodes))) - 1))
             num_bins_x = math.floor(num_bins)
             num_bins_y = math.floor(num_bins)
             params.num_bins_x = num_bins_x
@@ -2246,6 +2257,9 @@ row height = %g, site width = %g
         self.movable_macro_mask = (node_areas[self.movable_slice] > mean_area) & (
             self.node_size_y[self.movable_slice] > row_height
         )
+        if params.macro_only:
+            self.movable_macro_mask = self.macro_writeback_candidate[
+                self.movable_slice].copy()
         self.movable_macro_pins = np.isin(self.pin2node_map, np.arange(
             0, self.num_movable_nodes)[self.movable_macro_mask])
         self.movable_macro_idx = np.where(self.movable_macro_mask)[0]
@@ -2254,6 +2268,8 @@ row height = %g, site width = %g
         self.fixed_macro_mask = (node_areas[self.fixed_slice] > mean_area) & (
             self.node_size_y[self.fixed_slice] > row_height
         )
+        if params.macro_only:
+            self.fixed_macro_mask = self.node_is_hard_macro[self.fixed_slice].copy()
         placement_blockage_mask = self._fixed_placement_blockage_mask()
         self.num_fixed_macro_excluded_place_blockages = int(
             np.count_nonzero(self.fixed_macro_mask & placement_blockage_mask)
@@ -2278,9 +2294,13 @@ row height = %g, site width = %g
         macro_pin_offset_y_mean = []
 
         for macro_id in self.movable_macro_idx:
-            pins = self.node2pin_map[macro_id]
-            macro_pin_offset_x_mean.append(np.mean(self.pin_offset_x[pins]))
-            macro_pin_offset_y_mean.append(np.mean(self.pin_offset_y[pins]))
+            pins = np.asarray(self.node2pin_map[macro_id], dtype=np.int32)
+            if pins.size:
+                macro_pin_offset_x_mean.append(np.mean(self.pin_offset_x[pins]))
+                macro_pin_offset_y_mean.append(np.mean(self.pin_offset_y[pins]))
+            else:
+                macro_pin_offset_x_mean.append(0.5 * self.node_size_x[macro_id])
+                macro_pin_offset_y_mean.append(0.5 * self.node_size_y[macro_id])
 
         self.is_pin_lower_x = (np.array(macro_pin_offset_x_mean) <= 0.1 *
                                self.node_size_x[self.movable_slice][self.movable_macro_mask]).astype('float64')

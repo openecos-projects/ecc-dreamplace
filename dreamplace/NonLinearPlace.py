@@ -4585,15 +4585,19 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             params.macro_halo_y = 0
                     if params.macro_pin_halo_x >= 0:
                         with torch.no_grad():
+                            macro_pin_to_macro = np.searchsorted(
+                                placedb.movable_macro_idx,
+                                placedb.pin2node_map[placedb.movable_macro_pins],
+                            )
                             self.data_collections.node_size_x[placedb.movable_macro_idx] -= torch.tensor(
                                 placedb.is_pin_lower_x * params.macro_pin_halo_x + placedb.is_pin_upper_x * params.macro_pin_halo_x, device=self.pos[0].device)
                             self.data_collections.node_size_y[placedb.movable_macro_idx] -= torch.tensor(
                                 placedb.is_pin_lower_y * params.macro_pin_halo_y + placedb.is_pin_upper_y * params.macro_pin_halo_y, device=self.pos[0].device)
 
                             self.data_collections.pin_offset_x[placedb.movable_macro_pins] -= torch.tensor(
-                                placedb.is_pin_lower_x[placedb.pin2node_map[placedb.movable_macro_pins]] * params.macro_pin_halo_x, device=self.pos[0].device)
+                                placedb.is_pin_lower_x[macro_pin_to_macro] * params.macro_pin_halo_x, device=self.pos[0].device)
                             self.data_collections.pin_offset_y[placedb.movable_macro_pins] -= torch.tensor(
-                                placedb.is_pin_lower_y[placedb.pin2node_map[placedb.movable_macro_pins]] * params.macro_pin_halo_y, device=self.pos[0].device)
+                                placedb.is_pin_lower_y[macro_pin_to_macro] * params.macro_pin_halo_y, device=self.pos[0].device)
                             # macro locations
 
                             self.pos[0][placedb.movable_slice][
@@ -4978,15 +4982,19 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     # ] -= params.macro_halo_y
             if params.macro_pin_halo_x >= 0:
                 with torch.no_grad():
+                    macro_pin_to_macro = np.searchsorted(
+                        placedb.movable_macro_idx,
+                        placedb.pin2node_map[placedb.movable_macro_pins],
+                    )
                     self.data_collections.node_size_x[placedb.movable_macro_idx] -= torch.tensor(
                         placedb.is_pin_lower_x * params.macro_pin_halo_x + placedb.is_pin_upper_x * params.macro_pin_halo_x, device=self.pos[0].device)
                     self.data_collections.node_size_y[placedb.movable_macro_idx] -= torch.tensor(
                         placedb.is_pin_lower_y * params.macro_pin_halo_y + placedb.is_pin_upper_y * params.macro_pin_halo_y, device=self.pos[0].device)
 
                     self.data_collections.pin_offset_x[placedb.movable_macro_pins] -= torch.tensor(
-                        placedb.is_pin_lower_x[placedb.pin2node_map[placedb.movable_macro_pins]] * params.macro_pin_halo_x, device=self.pos[0].device)
+                        placedb.is_pin_lower_x[macro_pin_to_macro] * params.macro_pin_halo_x, device=self.pos[0].device)
                     self.data_collections.pin_offset_y[placedb.movable_macro_pins] -= torch.tensor(
-                        placedb.is_pin_lower_y[placedb.pin2node_map[placedb.movable_macro_pins]] * params.macro_pin_halo_y, device=self.pos[0].device)
+                        placedb.is_pin_lower_y[macro_pin_to_macro] * params.macro_pin_halo_y, device=self.pos[0].device)
                     # macro locations
 
                     self.pos[0][placedb.movable_slice][

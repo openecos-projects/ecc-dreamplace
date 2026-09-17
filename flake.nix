@@ -53,10 +53,8 @@
 
       buildInputs = [ cairo flex ];
       nativeBuildInputs = [ bison flex cmake ninja pkg-config ];
-
       dontUseCmakeConfigure = true;
       dontCheckRuntimeDeps = true;
-
       pythonImportsCheck = [
         "dreamplace"
         "dreamplace.Params"
@@ -64,6 +62,18 @@
 
       passthru.rawBuildInputs = buildInputs;
       passthru.rawNativeBuildInputs = nativeBuildInputs;
+
+      # Honor Nix --cores via NIX_BUILD_CORES (no impure getEnv needed).
+      # https://nix.dev/manual/nix/2.24/advanced-topics/cores-vs-jobs
+      preConfigure = ''
+        echo "dreamplace: injecting -j$NIX_BUILD_CORES"
+        sed -i '/build\.tool-args/d' pyproject.toml
+        sed -i "/^\[tool\.scikit-build\]/a build.tool-args = [\"-j$NIX_BUILD_CORES\"]" pyproject.toml
+      '';
+
+      postBuild = ''
+        sed -i '/build\.tool-args/d' pyproject.toml 2>/dev/null || true
+      '';
     };
   in flake-parts.lib.mkFlake { inherit inputs; } {
     systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];

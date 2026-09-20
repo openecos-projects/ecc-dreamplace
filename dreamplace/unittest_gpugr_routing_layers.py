@@ -6,6 +6,7 @@ from pathlib import Path
 from textwrap import dedent
 from types import SimpleNamespace
 
+import numpy as np
 import torch
 
 AUTODMP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -137,12 +138,12 @@ def _params(lef: Path, result_dir: Path):
 
 @unittest.skipUnless(_gpugr_extension_ready(), "Xplace gpugr extension is not built")
 class GPUGRRoutingLayerWindowTest(unittest.TestCase):
-    def _run(self, backend, bottom, top):
+    def _run(self, backend, bottom, top, include_l_shape_topology=False):
         with tempfile.TemporaryDirectory(prefix="gpugr_layer_") as tmp:
             root = Path(tmp)
             lef, design_def = _write_range_design(root)
             backend_obj = XplaceGPUGR(params=_params(lef, root), placedb=None)
-            return backend_obj.run_gpugr(
+            kwargs = dict(
                 input_def=str(design_def),
                 out_dir=str(root / "out"),
                 design_name="RANGE_SMOKE",
@@ -157,6 +158,17 @@ class GPUGRRoutingLayerWindowTest(unittest.TestCase):
                 top_routing_layer=top,
                 include_route_entries=True,
             )
+            if include_l_shape_topology:
+                kwargs.update(
+                    include_l_shape_topology_pack=True,
+                    topology_pin_name_to_id={"U1:Y": 0, "U2:A": 1},
+                    topology_net_name_to_id={"N1": 0},
+                    topology_flat_net2pin_map=np.asarray([0, 1], dtype=np.int64),
+                    topology_flat_net2pin_start_map=np.asarray([0, 2], dtype=np.int64),
+                    topology_num_pins=2,
+                    topology_num_nets=1,
+                )
+            return backend_obj.run_gpugr(**kwargs)
 
     def test_cpu_pr_window_reports_enabled_met2_met3(self):
         result = self._run("cpu_pr", "MET2", "MET3")
@@ -196,6 +208,13 @@ class GPUGRRoutingLayerWindowTest(unittest.TestCase):
         }
         self.assertTrue(layers)
         self.assertTrue(layers <= {1, 2})
+
+    def test_cugr2_l_shape_topology_pack_has_route_edge(self):
+        result = self._run("cugr2", "MET1", "MET4", include_l_shape_topology=True)
+        metadata = result["l_shape_topology_pack"]["metadata"]
+        self.assertEqual(metadata["num_edges"], 1)
+        self.assertEqual(metadata["route_failed_count"], 0)
+        self.assertEqual(metadata["unmapped_pin_access_count"], 0)
 
     def test_unknown_layer_name_is_rejected(self):
         with self.assertRaises(RuntimeError) as raised:

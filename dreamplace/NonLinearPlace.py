@@ -198,11 +198,11 @@ def _get_gpugr_parser_cache_node_names(placedb):
 
 
 def _get_cached_gpugr_operator(params, placedb):
-    from dreamplace.ops.gpugr.xplace_backend import XplaceGPUGR
+    from dreamplace.ops.gpugr.backend_select import create_gpugr_backend
 
     gpugr_op = getattr(placedb, "_autodmp_gpugr_op", None)
     if gpugr_op is None:
-        gpugr_op = XplaceGPUGR(params, placedb)
+        gpugr_op = create_gpugr_backend(params, placedb)
         setattr(placedb, "_autodmp_gpugr_op", gpugr_op)
     return gpugr_op
 
@@ -254,13 +254,33 @@ def _normalize_placedb_name(name):
 
 def _build_gpugr_topology_net_name_to_id(placedb):
     net_names = getattr(placedb, "net_names", [])
-    cache_key = (id(net_names), int(len(net_names)))
+    native_name_map = getattr(placedb, "net_name2id_map", None)
+    cache_key = (
+        id(net_names),
+        int(len(net_names)),
+        id(native_name_map),
+        int(len(native_name_map)) if hasattr(native_name_map, "__len__") else -1,
+    )
     cache = getattr(placedb, "_gpugr_topology_net_name_to_id_cache", None)
     if isinstance(cache, dict) and cache.get("key") == cache_key:
         return cache["mapping"]
     mapping = {}
     for net_id, net_name in enumerate(net_names):
         mapping[_normalize_placedb_name(net_name)] = int(net_id)
+    # ECC's native name-to-id map is the authoritative identity source when
+    # the exported name array has been filtered or reordered (for example,
+    # clock nets can be absent from a derived array while remaining in DEF).
+    if isinstance(native_name_map, dict):
+        for raw_name, raw_net_id in native_name_map.items():
+            name = _normalize_placedb_name(raw_name)
+            net_id = int(raw_net_id)
+            previous = mapping.get(name)
+            if previous is not None and previous != net_id:
+                raise RuntimeError(
+                    "ECC net identity conflict for %r: net_names=%d, "
+                    "net_name2id_map=%d" % (name, previous, net_id)
+                )
+            mapping[name] = net_id
     setattr(
         placedb,
         "_gpugr_topology_net_name_to_id_cache",
@@ -806,6 +826,7 @@ def _prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
             topology_flat_net2pin_start_map=topology_flat_net2pin_start_map,
             topology_num_pins=len(getattr(placedb, "pin_names", [])),
             topology_num_nets=int(getattr(placedb, "num_nets", 0)),
+            topology_ignored_net_names=getattr(placedb, "clock_net_names", ()),
             topology_max_gap=1,
             topology_xl=topology_xl,
             topology_yl=topology_yl,
@@ -1079,7 +1100,7 @@ def _run_post_legalization_adaptive_padding(
         route_ysize,
         rrr_iters,
     )
-    gpugr_op = _get_cached_gpugr_operator(placedb)
+    gpugr_op = _get_cached_gpugr_operator(params, placedb)
     result = gpugr_op.run_gpugr(
         out_dir=out_dir,
         design_name=params.design_name(),
@@ -3036,7 +3057,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 
                             # exit(0)
                         # 定期更新Steiner树和L方向（每N次迭代）
-                        elif model.use_l_shape_routability and (iteration % getattr(params, 'l_shape_update_interval', 10) == 0):
+                        elif model.use_l_shape_routability and (iteration % params.l_shape_update_interval == 0):
                             t_l_shape_update = time.time()
                             
                             # 重置L形segment缓存（EGR将重新运行）

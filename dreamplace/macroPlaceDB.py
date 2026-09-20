@@ -1320,6 +1320,10 @@ class MacroPlaceDB(object):
         self.pin_names = np.array(pydb.pin_names, dtype=np.bytes_)
         self.net_name2id_map = pydb.net_name2id_map
         self.net_names = np.array(pydb.net_names, dtype=np.bytes_)
+        self.clock_net_names = tuple(
+            name.decode("utf-8") if isinstance(name, bytes) else str(name)
+            for name in getattr(pydb, "clock_net_names", [])
+        )
         self.net2pin_map = pydb.net2pin_map
         self.flat_net2pin_map = np.array(pydb.flat_net2pin_map, dtype=np.int32)
         self.flat_net2pin_start_map = np.array(

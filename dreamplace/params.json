@@ -195,6 +195,10 @@
         "description": "whether enable routability optimization",
         "default": 0
     },
+    "l_shape_routability_flag": {
+        "description": "whether enable L-shape routability optimization",
+        "default": 0
+    },
     "macro_only": {
         "description": "commit only frozen unplaced hard macro coordinates",
         "default": 0
@@ -296,8 +300,16 @@
         "default": 0
     },
     "gpugr_backend": {
-        "description": "GGR backend selection: auto chooses cuda when available and cpu_pr otherwise; cuda requires a CUDA-capable gpugr build; cpu_pr supports pattern routing with rrrIters=0",
+        "description": "GGR backend selection: auto chooses cuda when available and cpu_pr otherwise; cuda requires a CUDA-capable gpugr build; cpu_pr is diagnostic pattern routing with rrrIters=0; cugr2 is the explicit Xplace-integrated CPU CUGR2 router with rrrIters=0; cugr is the legacy source-built CPU CUGR backend",
         "default": "auto"
+    },
+    "cugr_session_cache_enable": {
+        "description": "whether the in-process CUGR backend may reuse immutable technology state between placement-coordinate updates",
+        "default": 1
+    },
+    "cugr_require_clean_source": {
+        "description": "fail explicit CUGR runs when embedded source metadata is dirty; enable for qualification, not source development",
+        "default": 0
     },
     "gpugr_bottom_routing_layer": {
         "description": "inclusive bottom routing-layer name passed to GPUGR; empty uses the first LEF routing layer",
@@ -462,6 +474,10 @@
     "l_shape_overflow_threshold": {
         "description": "placement overflow threshold below which disabled L-shape diff/routability force is allowed to start or re-enable",
         "default": 0.3
+    },
+    "l_shape_update_interval": {
+        "description": "number of global-placement iterations between L-shape topology and direction refreshes",
+        "default": 30
     },
     "l_shape_filler_reverse_force": {
         "description": "strength of filler reverse force: push fillers TOWARD congested areas using the L-shape Poisson field, so fillers occupy congested bins and density gradient locks real cells away; 0 disables",

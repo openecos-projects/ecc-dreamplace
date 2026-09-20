@@ -146,6 +146,7 @@ class Params:
             "l_shape_grad_target_ratio": 0.1,
             "l_shape_grad_target_ratio_max": 0.1,
             "l_shape_overflow_threshold": 0.3,
+            "l_shape_update_interval": 30,
             "l_shape_keep_during_inflation": 1,
             "l_shape_plot_flag": 0,
         }
@@ -388,6 +389,25 @@ class Params:
             )
         self.gpugr_area_adjust_congestion_mode = value
 
+    def normalize_l_shape_update_interval(self):
+        name = "l_shape_update_interval"
+        if not hasattr(self, name):
+            return
+        value = getattr(self, name)
+        if isinstance(value, bool):
+            raise ValueError("%s must be a positive integer" % name)
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            raise ValueError("%s must be a positive integer" % name)
+        if (
+            not math.isfinite(numeric_value)
+            or not numeric_value.is_integer()
+            or numeric_value <= 0
+        ):
+            raise ValueError("%s must be a positive integer" % name)
+        setattr(self, name, int(numeric_value))
+
     def normalize_params(self):
         self.normalize_removed_l_shape_weight_schedule()
         self.normalize_iopin_density_weight()
@@ -400,6 +420,7 @@ class Params:
         self.normalize_legalize_before_each_inflation()
         self.normalize_inflation_area_budget_ratio()
         self.normalize_gpugr_area_adjust_congestion_mode()
+        self.normalize_l_shape_update_interval()
 
     def fromJson(self, data):
         """

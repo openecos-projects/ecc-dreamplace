@@ -29,6 +29,7 @@ class LShapePresetParamsTest(unittest.TestCase):
         with open(params_path, "r", encoding="utf-8") as f:
             params = json.load(f)
         self.assertEqual(params["l_shape_overflow_threshold"]["default"], 0.3)
+        self.assertEqual(params["l_shape_update_interval"]["default"], 30)
 
     def test_l_shape_flag_applies_conservative_hard_ggr_defaults(self):
         params = Params()
@@ -41,9 +42,9 @@ class LShapePresetParamsTest(unittest.TestCase):
         self.assertEqual(params.l_shape_grad_target_ratio, 0.1)
         self.assertEqual(params.l_shape_grad_target_ratio_max, 0.1)
         self.assertEqual(params.l_shape_overflow_threshold, 0.3)
+        self.assertEqual(params.l_shape_update_interval, 30)
         self.assertEqual(params.l_shape_keep_during_inflation, 1)
         self.assertFalse(hasattr(params, "l_shape_use_xplace_weight_schedule"))
-        self.assertFalse(hasattr(params, "l_shape_update_interval"))
 
     def test_l_shape_preset_does_not_override_explicit_values(self):
         params = Params()
@@ -54,6 +55,7 @@ class LShapePresetParamsTest(unittest.TestCase):
                 "l_shape_grad_target_ratio": 0.2,
                 "l_shape_grad_target_ratio_max": 0.2,
                 "l_shape_overflow_threshold": 0.3,
+                "l_shape_update_interval": 45,
                 "l_shape_keep_during_inflation": 0,
             }
         )
@@ -62,10 +64,20 @@ class LShapePresetParamsTest(unittest.TestCase):
         self.assertEqual(params.l_shape_grad_target_ratio, 0.2)
         self.assertEqual(params.l_shape_grad_target_ratio_max, 0.2)
         self.assertEqual(params.l_shape_overflow_threshold, 0.3)
+        self.assertEqual(params.l_shape_update_interval, 45)
         self.assertEqual(params.l_shape_keep_during_inflation, 0)
         self.assertEqual(params.l_shape_use_ggr_topology, 1)
         self.assertEqual(params.l_shape_capacity_al_enable, 1)
         self.assertEqual(params.soft_l_assignment, 0)
+
+    def test_l_shape_update_interval_requires_positive_integer(self):
+        params = Params()
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            params.fromJson({"l_shape_update_interval": 0})
+
+        params = Params()
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            params.fromJson({"l_shape_update_interval": 1.5})
 
     def test_l_shape_preset_is_inactive_when_flag_is_off(self):
         params = Params()

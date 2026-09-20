@@ -10,14 +10,18 @@
 #      matching the pybind11 bundled with torch 2.11 (xplace pins 2.14-dev,
 #      whose pybind11 internals are ABI-incompatible with torch 2.11).
 #      The vendored Xplace commit records this nested submodule version.
-#   2. Configures an out-of-source build in thirdparty/xplace-build with the
-#      ECC venv Python and the venv torch CMAKE_PREFIX_PATH. CUDA targets are
-#      enabled only when the active torch build includes CUDA.
+#   2. Configures an out-of-source build with the ECC venv Python and the venv
+#      torch CMAKE_PREFIX_PATH. Set XPLACE_ENABLE_CUDA=OFF for a CPU-only build;
+#      the default follows whether the active torch build includes CUDA. Set
+#      XPLACE_INSTALL=OFF to validate an isolated build without replacing the
+#      active runtime extensions in cpp_to_py/cpybin.
 #   3. Builds the extension set supported by the active torch. GPUGR only needs
 #      gpugr, io_parser and flute_cpp, but xplace's Python side
 #      (src/__init__.py) imports every extension at package import time, so a
 #      partial build cannot satisfy `from src import Flute`. A CUDA-enabled
 #      build provides both cuda and cpu_pr; a CPU torch build provides cpu_pr.
+#      The old Rsyn-backed CUGR extension is opt-in because its integration
+#      branch is maintained separately from the CUGR2 route core.
 #   4. Installs into xplace's runtime lib dir cpp_to_py/cpybin (the location
 #      upstream cpp_to_py/__init__.py imports from).
 #
@@ -29,8 +33,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DREAMPLACE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ECC_ROOT="$(cd "${DREAMPLACE_ROOT}/../../.." && pwd)"
 XPLACE_ROOT="${DREAMPLACE_ROOT}/thirdparty/xplace"
-BUILD_DIR="${DREAMPLACE_ROOT}/thirdparty/xplace-build"
-CPYBIN_DIR="${XPLACE_ROOT}/cpp_to_py/cpybin"
+CPYBIN_DIR="${XPLACE_RUNTIME_DIR:-${XPLACE_ROOT}/cpp_to_py/cpybin}"
 
 # Pinned toolchain: ECC venv interpreter (torch 2.11, Python 3.11).
 PYTHON_BIN="${ECC_VENV_PYTHON:-${ECC_ROOT}/.venv/bin/python}"
@@ -45,6 +48,50 @@ fi
 
 TORCH_PREFIX="$("${PYTHON_BIN}" -c 'import torch; print(torch.utils.cmake_prefix_path)')"
 TORCH_CUDA_ENABLED="$("${PYTHON_BIN}" -c 'import torch; print("ON" if torch.backends.cuda.is_built() else "OFF")')"
+XPLACE_CUDA_REQUEST="${XPLACE_ENABLE_CUDA:-AUTO}"
+XPLACE_CUDA_REQUEST="${XPLACE_CUDA_REQUEST^^}"
+XPLACE_INSTALL_REQUEST="${XPLACE_INSTALL:-ON}"
+XPLACE_INSTALL_REQUEST="${XPLACE_INSTALL_REQUEST^^}"
+XPLACE_LEGACY_CUGR_REQUEST="${XPLACE_BUILD_LEGACY_CUGR:-OFF}"
+XPLACE_LEGACY_CUGR_REQUEST="${XPLACE_LEGACY_CUGR_REQUEST^^}"
+case "${XPLACE_CUDA_REQUEST}" in
+    AUTO)
+        XPLACE_CUDA_ENABLED="${TORCH_CUDA_ENABLED}"
+        ;;
+    ON)
+        if [[ "${TORCH_CUDA_ENABLED}" != "ON" ]]; then
+            echo "error: XPLACE_ENABLE_CUDA=ON requires a CUDA-enabled torch build" >&2
+            exit 1
+        fi
+        XPLACE_CUDA_ENABLED="ON"
+        ;;
+    OFF)
+        XPLACE_CUDA_ENABLED="OFF"
+        ;;
+    *)
+        echo "error: XPLACE_ENABLE_CUDA must be AUTO, ON, or OFF; got ${XPLACE_CUDA_REQUEST}" >&2
+        exit 1
+        ;;
+esac
+case "${XPLACE_INSTALL_REQUEST}" in
+    ON|OFF) ;;
+    *)
+        echo "error: XPLACE_INSTALL must be ON or OFF; got ${XPLACE_INSTALL_REQUEST}" >&2
+        exit 1
+        ;;
+esac
+case "${XPLACE_LEGACY_CUGR_REQUEST}" in
+    ON|OFF) ;;
+    *)
+        echo "error: XPLACE_BUILD_LEGACY_CUGR must be ON or OFF; got ${XPLACE_LEGACY_CUGR_REQUEST}" >&2
+        exit 1
+        ;;
+esac
+if [[ "${XPLACE_CUDA_ENABLED}" == "ON" ]]; then
+    BUILD_DIR="${XPLACE_BUILD_DIR:-${DREAMPLACE_ROOT}/thirdparty/xplace-build}"
+else
+    BUILD_DIR="${XPLACE_BUILD_DIR:-${XPLACE_ROOT}/build_cpu_pr}"
+fi
 PYTHON_EXT_SUFFIX="$("${PYTHON_BIN}" -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))')"
 # xplace's cmake passes ${PYTHON_INCLUDE_DIRS} into the static libs (ggr,
 # xplace_common); pybind11 3.x no longer sets that legacy variable, so pin it
@@ -52,7 +99,11 @@ PYTHON_EXT_SUFFIX="$("${PYTHON_BIN}" -c 'import sysconfig; print(sysconfig.get_c
 PYTHON_INCLUDE_DIR="$("${PYTHON_BIN}" -c 'import sysconfig; print(sysconfig.get_paths()["include"])')"
 echo "== python:  ${PYTHON_BIN}"
 echo "== torch:   $("${PYTHON_BIN}" -c 'import torch; print(torch.__version__)') (prefix ${TORCH_PREFIX})"
-echo "== cuda:    ${TORCH_CUDA_ENABLED}"
+echo "== torch cuda:  ${TORCH_CUDA_ENABLED}"
+echo "== xplace cuda: ${XPLACE_CUDA_ENABLED}"
+echo "== install:     ${XPLACE_INSTALL_REQUEST}"
+echo "== legacy cugr: ${XPLACE_LEGACY_CUGR_REQUEST}"
+echo "== build dir:   ${BUILD_DIR}"
 
 # 1. pybind11 alignment with the venv torch.
 PYBIND11_DIR="${XPLACE_ROOT}/thirdparty/pybind11"
@@ -80,9 +131,12 @@ cmake_args=(
     -DPython3_EXECUTABLE="${PYTHON_BIN}"
     -DCMAKE_PREFIX_PATH="${TORCH_PREFIX}"
     -DCMAKE_CXX_ABI=1
-    -DXPLACE_ENABLE_CUDA="${TORCH_CUDA_ENABLED}"
+    -DXPLACE_ENABLE_CUDA="${XPLACE_CUDA_ENABLED}"
+    -DXPLACE_BUILD_LEGACY_CUGR="${XPLACE_LEGACY_CUGR_REQUEST}"
+    -DXPLACE_LIB_DIR="${CPYBIN_DIR}"
+    -DXPLACE_LICENSE_DIR="${XPLACE_ROOT}/licenses/cugr"
 )
-if [[ "${TORCH_CUDA_ENABLED}" == "ON" ]]; then
+if [[ "${XPLACE_CUDA_ENABLED}" == "ON" ]]; then
     cmake_args+=(
         -DCMAKE_CUDA_COMPILER="${CMAKE_CUDA_COMPILER:-/usr/local/cuda-12.8/bin/nvcc}"
         -DCMAKE_CUDA_ARCHITECTURES="${CMAKE_CUDA_ARCHITECTURES:-89}"
@@ -93,18 +147,34 @@ cmake "${cmake_args[@]}"
 # 3. Build all extension targets (see note 3 above).
 cmake --build "${BUILD_DIR}" -j "${JOBS}"
 
-# 4. Install into cpp_to_py/cpybin.
-cmake --install "${BUILD_DIR}" --config Release
-
-if [[ "${TORCH_CUDA_ENABLED}" == "OFF" ]]; then
-    rm -f \
-        "${CPYBIN_DIR}/density_map_cuda${PYTHON_EXT_SUFFIX}" \
-        "${CPYBIN_DIR}/dct_cuda${PYTHON_EXT_SUFFIX}" \
-        "${CPYBIN_DIR}/gpudp${PYTHON_EXT_SUFFIX}" \
-        "${CPYBIN_DIR}/hpwl_cuda${PYTHON_EXT_SUFFIX}" \
-        "${CPYBIN_DIR}/wa_wirelength_hpwl_cuda${PYTHON_EXT_SUFFIX}" \
-        "${CPYBIN_DIR}/wirelength_timing_cuda${PYTHON_EXT_SUFFIX}"
+if [[ "${XPLACE_LEGACY_CUGR_REQUEST}" == "ON" ]]; then
+    CUGR_EXTENSION="${BUILD_DIR}/cpp_to_py/cugr/cugr${PYTHON_EXT_SUFFIX}"
+    if [[ ! -f "${CUGR_EXTENSION}" ]]; then
+        echo "error: legacy CUGR target did not produce ${CUGR_EXTENSION}" >&2
+        exit 1
+    fi
+    echo "== built legacy CUGR: ${CUGR_EXTENSION}"
 fi
 
-echo "== installed extensions:"
-ls -1 "${CPYBIN_DIR}/"
+if [[ "${XPLACE_INSTALL_REQUEST}" == "ON" ]]; then
+    # 4. Install into cpp_to_py/cpybin.
+    cmake --install "${BUILD_DIR}" --config Release
+
+    if [[ "${XPLACE_CUDA_ENABLED}" == "OFF" ]]; then
+        rm -f \
+            "${CPYBIN_DIR}/density_map_cuda${PYTHON_EXT_SUFFIX}" \
+            "${CPYBIN_DIR}/dct_cuda${PYTHON_EXT_SUFFIX}" \
+            "${CPYBIN_DIR}/gpudp${PYTHON_EXT_SUFFIX}" \
+            "${CPYBIN_DIR}/hpwl_cuda${PYTHON_EXT_SUFFIX}" \
+            "${CPYBIN_DIR}/wa_wirelength_hpwl_cuda${PYTHON_EXT_SUFFIX}" \
+            "${CPYBIN_DIR}/wirelength_timing_cuda${PYTHON_EXT_SUFFIX}"
+    fi
+    if [[ "${XPLACE_LEGACY_CUGR_REQUEST}" == "OFF" ]]; then
+        rm -f "${CPYBIN_DIR}/cugr${PYTHON_EXT_SUFFIX}"
+    fi
+
+    echo "== installed extensions:"
+    ls -1 "${CPYBIN_DIR}/"
+else
+    echo "== build complete; install skipped"
+fi

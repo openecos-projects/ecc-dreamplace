@@ -24,7 +24,6 @@ architectural replacements:
 import gzip
 import json
 import logging
-import math
 import os
 import shutil
 import sys
@@ -37,12 +36,13 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from .result_maps import aggregate_layer_maps, summarize_congestion_tensor, validate_map_planes
 from .xplace_native_output import XplaceNativeOutputMixin
 from .xplace_parser_cache import XplaceParserCacheMixin
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_GPUGR_BACKENDS = ("cuda", "cpu_pr", "auto")
+SUPPORTED_GPUGR_BACKENDS = ("cuda", "cpu_pr", "cugr2", "cugr", "auto")
 
 
 def normalize_gpugr_backend(backend: str = "auto") -> str:
@@ -96,10 +96,11 @@ def resolve_gpugr_backend(
 
 def validate_gpugr_backend_request(backend: str, rrr_iters: int):
     normalized = normalize_gpugr_backend(backend)
-    if normalized == "cpu_pr" and int(rrr_iters) > 0:
+    if normalized in ("cpu_pr", "cugr2") and int(rrr_iters) > 0:
         raise RuntimeError(
-            f"gpugr backend=cpu_pr only supports pattern routing with rrr_iters=0; "
-            f"got rrr_iters={int(rrr_iters)}. CPU RRR is unsupported in this phase."
+            f"gpugr backend={normalized} only supports one CPU routing pass with "
+            f"rrr_iters=0; got rrr_iters={int(rrr_iters)}. CPU RRR is unsupported "
+            "in this phase."
         )
 
 
@@ -293,9 +294,11 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         io_parser_module = load_file(
             "_xplace_utils_io_parser", xplace_root / "utils" / "io_parser.py"
         )
+        from cpp_to_py import gpugr
+
         shell_package("_xplace_src", xplace_root / "src")
         shell_package("_xplace_src.core", xplace_root / "src" / "core")
-        if not torch.backends.cuda.is_built():
+        if not _extension_cuda_enabled(gpugr):
             dct_module = types.ModuleType("_xplace_src.core.dct2_fft2")
 
             def cuda_only_dct(*_args, **_kwargs):
@@ -310,7 +313,6 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         route_force_module = load_file(
             "_xplace_src.core.route_force", xplace_root / "src" / "core" / "route_force.py"
         )
-        from cpp_to_py import gpugr
 
         return (
             io_parser_module.IOParser,
@@ -357,6 +359,20 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         Flute.register(int(threads), powv_path, post_path)
         self._flute_register_cache.add(key)
         return True
+
+    @contextmanager
+    def _cugr2_flute_lut_environment(self, powv_path: str):
+        """Give the in-process CUGR2 bridge an absolute FLUTE LUT directory."""
+
+        previous = os.environ.get("XPLACE_FLUTE_LUT_ROOT")
+        os.environ["XPLACE_FLUTE_LUT_ROOT"] = str(Path(powv_path).resolve().parent)
+        try:
+            yield
+        finally:
+            if previous is None:
+                os.environ.pop("XPLACE_FLUTE_LUT_ROOT", None)
+            else:
+                os.environ["XPLACE_FLUTE_LUT_ROOT"] = previous
 
     def _dedup_paths(self, paths):
         unique_paths = []
@@ -462,17 +478,7 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
 
     @staticmethod
     def _aggregate_layer_maps(demand_map, capacity_map, layer_ids):
-        if layer_ids.numel() == 0:
-            empty = torch.zeros_like(demand_map[0])
-            return empty
-        demand = demand_map.index_select(0, layer_ids).sum(dim=0)
-        capacity = capacity_map.index_select(0, layer_ids).sum(dim=0)
-        floor = torch.finfo(capacity.dtype).eps
-        return torch.where(
-            capacity > floor,
-            demand / capacity.clamp(min=floor),
-            torch.zeros_like(demand),
-        )
+        return aggregate_layer_maps(demand_map, capacity_map, layer_ids)
 
     def _compute_maps(self, routeforce, gpdb, skip_m1_route=True):
         dmd_map, wire_dmd_map, via_dmd_map = routeforce.dmd_map()
@@ -557,7 +563,7 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
             min=0.0,
         )
 
-        return {
+        maps = {
             "cg_map_h_raw": cg_map_h_raw,
             "cg_map_v_raw": cg_map_v_raw,
             "cg_map_union_raw": cg_map_union_raw,
@@ -577,6 +583,8 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
             "mov_usage_map": mov_usage_map,
             "capacity_map": cap_map,
         }
+        validate_map_planes(maps, expected_layers=int(dmd_map.size(0)))
+        return maps
 
     def _add_metric_aliases(self, metrics: dict):
         if "gr_num_vias" in metrics:
@@ -584,24 +592,7 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         return metrics
 
     def _summarize_congestion_tensor(self, tensor: torch.Tensor, overflow_threshold: float):
-        flat = tensor.detach().reshape(-1).to(dtype=torch.float32)
-        if flat.numel() <= 0:
-            return {
-                "max": 0.0,
-                "mean": 0.0,
-                "top1pct_mean": 0.0,
-                "overflow_bin_ratio": 0.0,
-            }
-        topk = max(1, int(math.ceil(flat.numel() * 0.01)))
-        top_vals = torch.topk(flat, k=topk).values
-        return {
-            "max": float(flat.max().item()),
-            "mean": float(flat.mean().item()),
-            "top1pct_mean": float(top_vals.mean().item()),
-            "overflow_bin_ratio": float(
-                (flat > float(overflow_threshold)).to(dtype=torch.float32).mean().item()
-            ),
-        }
+        return summarize_congestion_tensor(tensor, overflow_threshold)
 
     def _format_profile_fields(self, fields: dict):
         parts = []
@@ -773,6 +764,7 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         topology_flat_net2pin_start_map=None,
         topology_num_pins: int = 0,
         topology_num_nets: int = 0,
+        topology_ignored_net_names=None,
         topology_max_gap: int = 1,
         topology_xl: float = 0.0,
         topology_yl: float = 0.0,
@@ -795,6 +787,7 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         re-exported nor re-parsed.
         """
         requested_backend = normalize_gpugr_backend(backend)
+        del topology_ignored_net_names
         if bottom_routing_layer is None:
             bottom_routing_layer = getattr(self.params, "gpugr_bottom_routing_layer", "")
         if top_routing_layer is None:
@@ -1045,7 +1038,11 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
                         rrr_iters=rrr_iters,
                         **native_profile_kwargs,
                     ):
-                        routeforce.run_ggr()
+                        if resolved_backend == "cugr2":
+                            with self._cugr2_flute_lut_environment(powv_path):
+                                routeforce.run_ggr()
+                        else:
+                            routeforce.run_ggr()
                         if resolved_backend == "cuda":
                             torch.cuda.synchronize(f"cuda:{gpu}")
                     elapsed = time.time() - start_time

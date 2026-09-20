@@ -24,9 +24,9 @@ class GPUGR(object):
 
     def _get_gpugr_op(self):
         if self._gpugr_op is None:
-            from dreamplace.ops.gpugr.xplace_backend import XplaceGPUGR
+            from dreamplace.ops.gpugr.backend_select import create_gpugr_backend
 
-            self._gpugr_op = XplaceGPUGR(self.params, self.placedb)
+            self._gpugr_op = create_gpugr_backend(self.params, self.placedb)
         return self._gpugr_op
 
     def _resolve_call_output_dir(self, save_artifacts: bool):

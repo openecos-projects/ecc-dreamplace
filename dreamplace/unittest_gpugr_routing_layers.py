@@ -100,6 +100,23 @@ def _gpugr_extension_ready():
     return cpybin.is_dir() and any(cpybin.glob("gpugr*.so"))
 
 
+def _cuda_gpugr_ready():
+    """Require both the CUDA runtime and a CUDA-built native GPUGR module."""
+
+    if not _gpugr_extension_ready() or not torch.cuda.is_available():
+        return False
+    xplace_root = Path(__file__).resolve().parents[1] / "thirdparty" / "xplace"
+    xplace_root_str = str(xplace_root)
+    if xplace_root_str not in sys.path:
+        sys.path.insert(0, xplace_root_str)
+    try:
+        from cpp_to_py.cpybin import gpugr
+
+        return bool(gpugr.cuda_enabled())
+    except Exception:
+        return False
+
+
 def _write_range_design(root: Path):
     lef = root / "range.lef"
     design_def = root / "range.def"
@@ -160,12 +177,32 @@ class GPUGRRoutingLayerWindowTest(unittest.TestCase):
         self.assertTrue(layers)
         self.assertTrue(layers <= {1, 2})
 
+    def test_cugr2_window_reports_enabled_met2_met3(self):
+        result = self._run("cugr2", "MET2", "MET3")
+        metrics = result["metrics"]
+        self.assertEqual(metrics["gpugr_backend"], "cugr2")
+        self.assertEqual(metrics["routing_layer_begin"], 1)
+        self.assertEqual(metrics["routing_layer_end"], 2)
+        self.assertEqual(metrics["enabled_routing_layer_names"], ["MET2", "MET3"])
+        demand = result["maps"]["wire_demand_map"]
+        self.assertEqual(tuple(demand.shape[:1]), (4,))
+        self.assertEqual(float(demand[0].sum()), 0.0)
+        self.assertEqual(float(demand[3].sum()), 0.0)
+        self.assertGreater(float(demand[1:3].sum()), 0.0)
+        layers = {
+            int(entry["layer_idx"])
+            for net in result["route_entries"]
+            for entry in net.get("entries", [])
+        }
+        self.assertTrue(layers)
+        self.assertTrue(layers <= {1, 2})
+
     def test_unknown_layer_name_is_rejected(self):
         with self.assertRaises(RuntimeError) as raised:
             self._run("cpu_pr", "MET9", "MET3")
         self.assertIn("Unknown GPUGR bottom routing layer", str(raised.exception))
 
-    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
+    @unittest.skipUnless(_cuda_gpugr_ready(), "CUDA GPUGR extension/runtime is unavailable")
     def test_cuda_window_matches_cpu_pr_enabled_layers(self):
         result = self._run("cuda", "MET2", "MET3")
         metrics = result["metrics"]

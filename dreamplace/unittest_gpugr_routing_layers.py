@@ -189,6 +189,23 @@ class GPUGRRoutingLayerWindowTest(unittest.TestCase):
         self.assertTrue(layers)
         self.assertTrue(layers <= {1, 2})
 
+    def test_cpu_pr_mt_window_and_native_stats_match_cpu_contract(self):
+        result = self._run("cpu_pr_mt", "MET2", "MET3")
+        metrics = result["metrics"]
+        stats = result["native_stats"]
+        self.assertEqual(metrics["gpugr_backend"], "cpu_pr_mt")
+        self.assertEqual(metrics["parser_threads"], 1)
+        self.assertEqual(metrics["native_route_stats"], stats)
+        self.assertEqual(stats["terminal_status"], "completed")
+        self.assertEqual(stats["requested_workers"], 1)
+        self.assertEqual(stats["effective_workers"], 1)
+        self.assertFalse(stats["flute_parallel"])
+        self.assertEqual(metrics["enabled_routing_layer_names"], ["MET2", "MET3"])
+        demand = result["maps"]["wire_demand_map"]
+        self.assertEqual(float(demand[0].sum()), 0.0)
+        self.assertEqual(float(demand[3].sum()), 0.0)
+        self.assertGreater(float(demand[1:3].sum()), 0.0)
+
     def test_cugr2_window_reports_enabled_met2_met3(self):
         result = self._run("cugr2", "MET2", "MET3")
         metrics = result["metrics"]

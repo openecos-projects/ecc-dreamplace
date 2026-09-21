@@ -42,7 +42,7 @@ from .xplace_parser_cache import XplaceParserCacheMixin
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_GPUGR_BACKENDS = ("cuda", "cpu_pr", "cugr2", "cugr", "auto")
+SUPPORTED_GPUGR_BACKENDS = ("cuda", "cpu_pr", "cpu_pr_mt", "cugr2", "cugr", "auto")
 
 
 def normalize_gpugr_backend(backend: str = "auto") -> str:
@@ -96,7 +96,7 @@ def resolve_gpugr_backend(
 
 def validate_gpugr_backend_request(backend: str, rrr_iters: int):
     normalized = normalize_gpugr_backend(backend)
-    if normalized in ("cpu_pr", "cugr2") and int(rrr_iters) > 0:
+    if normalized in ("cpu_pr", "cpu_pr_mt", "cugr2") and int(rrr_iters) > 0:
         raise RuntimeError(
             f"gpugr backend={normalized} only supports one CPU routing pass with "
             f"rrr_iters=0; got rrr_iters={int(rrr_iters)}. CPU RRR is unsupported "
@@ -1008,6 +1008,7 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
                                 "route_xSize": route_xsize,
                                 "route_ySize": route_ysize,
                                 "rrrIters": rrr_iters,
+                                "threads": int(threads),
                                 "route_guide": route_guide,
                                 "backend": resolved_backend,
                                 "bottom_routing_layer": bottom_routing_layer,
@@ -1045,6 +1046,12 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
                             routeforce.run_ggr()
                         if resolved_backend == "cuda":
                             torch.cuda.synchronize(f"cuda:{gpu}")
+                    native_stats = (
+                        dict(routeforce.run_stats())
+                        if resolved_backend in ("cpu_pr", "cpu_pr_mt")
+                        and hasattr(routeforce, "run_stats")
+                        else {}
+                    )
                     elapsed = time.time() - start_time
                     topology_pack_result = {}
                     l_shape_topology_pack_result = {}
@@ -1215,6 +1222,8 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
                 "def_path": materialized_def,
                 "guide_path": route_guide,
                 "elapsed_sec": elapsed,
+                "parser_threads": int(threads),
+                "native_route_stats": native_stats,
                 "num_overflow_nets": num_ovfl_nets,
                 "gr_wirelength": float(gr_wirelength),
                 "gr_num_vias": float(gr_num_vias),
@@ -1312,6 +1321,7 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
 
             return {
                 "metrics": metrics,
+                "native_stats": native_stats,
                 "maps": maps,
                 "artifact_paths": artifact_paths,
                 "route_entries": route_entries,

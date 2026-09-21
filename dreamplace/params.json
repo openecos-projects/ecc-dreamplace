@@ -300,7 +300,7 @@
         "default": 0
     },
     "gpugr_backend": {
-        "description": "GGR backend selection: auto chooses cuda when available and cpu_pr otherwise; cuda requires a CUDA-capable gpugr build; cpu_pr is diagnostic pattern routing with rrrIters=0; cugr2 is the explicit Xplace-integrated CPU CUGR2 router with rrrIters=0; cugr is the legacy source-built CPU CUGR backend",
+        "description": "GGR backend selection: auto chooses cuda when available and cpu_pr otherwise; cuda requires a CUDA-capable gpugr build; cpu_pr is serial diagnostic pattern routing; cpu_pr_mt is explicit deterministic parallel CPU pattern routing and uses num_threads as its requested worker count; cugr2 is the explicit Xplace-integrated CPU CUGR2 router; all CPU pattern backends require rrrIters=0; cugr is the legacy source-built CPU CUGR backend",
         "default": "auto"
     },
     "cugr_session_cache_enable": {

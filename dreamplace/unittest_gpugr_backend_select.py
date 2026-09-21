@@ -55,6 +55,13 @@ class GPUGRBackendSelectTest(unittest.TestCase):
             "cpu_pr",
         )
 
+    def test_explicit_cpu_pr_mt_always_resolves(self):
+        self.assertEqual(normalize_gpugr_backend("cpu_pr_mt"), "cpu_pr_mt")
+        self.assertEqual(
+            resolve_gpugr_backend("cpu_pr_mt", cuda_available=False, extension_cuda_enabled=False),
+            "cpu_pr_mt",
+        )
+
     def test_explicit_cugr2_does_not_depend_on_cuda_readiness(self):
         self.assertEqual(
             resolve_gpugr_backend("cugr2", cuda_available=False, extension_cuda_enabled=False),
@@ -89,6 +96,11 @@ class GPUGRBackendSelectTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             validate_gpugr_backend_request("cpu_pr", 1)
         validate_gpugr_backend_request("cuda", 1)
+
+    def test_cpu_pr_mt_rejects_rrr_iters(self):
+        validate_gpugr_backend_request("cpu_pr_mt", 0)
+        with self.assertRaisesRegex(RuntimeError, "backend=cpu_pr_mt"):
+            validate_gpugr_backend_request("cpu_pr_mt", 1)
 
     def test_cugr2_rejects_rrr_iters(self):
         validate_gpugr_backend_request("cugr2", 0)

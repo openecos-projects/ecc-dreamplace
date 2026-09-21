@@ -33,6 +33,7 @@ class GPUGRRequest(TypedDict, total=False):
 
 class GPUGRResult(TypedDict, total=False):
     metrics: Mapping[str, Any]
+    native_stats: Mapping[str, Any]
     maps: Mapping[str, torch.Tensor]
     route_entries: Sequence[Mapping[str, Any]]
     artifact_paths: Mapping[str, str]

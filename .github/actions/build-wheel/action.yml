@@ -58,8 +58,9 @@ runs:
         # --no-build-isolation: the C++ ops must compile against the locked
         # torch (build-system requires would otherwise resolve the latest
         # torch, whose C++ ABI may not match the runtime torch used by ecc).
-        uv build --wheel --verbose --no-build-isolation \
-          --config-setting=cmake.define.DREAMPLACE_REQUIRE_XPLACE_RUNTIME=ON
+        # The smoke step below fails when the prebuilt Xplace runtime was not
+        # packaged, so no configure-time guard is needed here.
+        uv build --wheel --verbose --no-build-isolation
 
         # Torch and CUDA libs excluded from auditwheel repair -- DreamPlace is built with
         # TORCH_ENABLE_CUDA=0 and torch is a runtime dependency (not bundled). Without these

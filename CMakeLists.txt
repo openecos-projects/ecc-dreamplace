@@ -139,37 +139,34 @@ add_subdirectory(benchmarks)
 
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/dreamplace/configure.py DESTINATION dreamplace)
 
+# Package the prebuilt Xplace GPUGR runtime (thirdparty/build_xplace_gpugr.sh)
+# so an installed wheel works without the source checkout. The Python file
+# lists mirror exactly what the GPUGR backend loads at runtime.
 set(XPLACE_RUNTIME_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/xplace")
-option(
-  DREAMPLACE_REQUIRE_XPLACE_RUNTIME
-  "Fail configuration when the prebuilt Xplace GPUGR runtime is unavailable"
-  OFF
-)
-set(
-  XPLACE_RUNTIME_CPYBIN
-  "${XPLACE_RUNTIME_ROOT}/cpp_to_py/cpybin"
-  CACHE PATH "Directory containing the prebuilt Xplace runtime extensions"
-)
-file(GLOB XPLACE_GPUGR_EXTENSIONS "${XPLACE_RUNTIME_CPYBIN}/gpugr*.so")
+file(GLOB XPLACE_GPUGR_EXTENSIONS "${XPLACE_RUNTIME_ROOT}/cpp_to_py/cpybin/gpugr*.so")
 if(XPLACE_GPUGR_EXTENSIONS)
   install(
     FILES "${XPLACE_RUNTIME_ROOT}/cpp_to_py/__init__.py"
     DESTINATION thirdparty/xplace/cpp_to_py
   )
   install(
-    DIRECTORY "${XPLACE_RUNTIME_CPYBIN}/"
+    DIRECTORY "${XPLACE_RUNTIME_ROOT}/cpp_to_py/cpybin/"
     DESTINATION thirdparty/xplace/cpp_to_py/cpybin
     FILES_MATCHING PATTERN "*.so"
   )
   install(
-    DIRECTORY "${XPLACE_RUNTIME_ROOT}/src/core/"
+    FILES
+      "${XPLACE_RUNTIME_ROOT}/src/core/flute.py"
+      "${XPLACE_RUNTIME_ROOT}/src/core/route_force.py"
+      "${XPLACE_RUNTIME_ROOT}/src/core/torch_dct.py"
+      "${XPLACE_RUNTIME_ROOT}/src/core/dct2_fft2.py"
     DESTINATION thirdparty/xplace/src/core
-    FILES_MATCHING PATTERN "*.py"
   )
   install(
-    DIRECTORY "${XPLACE_RUNTIME_ROOT}/utils/"
+    FILES
+      "${XPLACE_RUNTIME_ROOT}/utils/io_parser.py"
+      "${XPLACE_RUNTIME_ROOT}/utils/logger.py"
     DESTINATION thirdparty/xplace/utils
-    FILES_MATCHING PATTERN "*.py"
   )
   install(
     FILES
@@ -178,8 +175,5 @@ if(XPLACE_GPUGR_EXTENSIONS)
     DESTINATION thirdparty/xplace/thirdparty/flute
   )
 else()
-  if(DREAMPLACE_REQUIRE_XPLACE_RUNTIME)
-    message(FATAL_ERROR "Required Xplace GPUGR runtime is unavailable in ${XPLACE_RUNTIME_CPYBIN}")
-  endif()
   message(STATUS "Xplace GPUGR runtime not built; wheel will omit GPUGR native artifacts")
 endif()

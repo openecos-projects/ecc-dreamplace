@@ -208,6 +208,17 @@ def _get_cached_gpugr_operator(params, placedb):
 
 
 def _compute_gpugr_route_grid_like_xplace(params, placedb):
+    configured_route_x = int(getattr(params, "route_num_bins_x", 0) or 0)
+    configured_route_y = int(getattr(params, "route_num_bins_y", 0) or 0)
+    auto_adjust_bins = bool(getattr(params, "auto_adjust_bins", 0))
+    if not auto_adjust_bins and configured_route_x > 0 and configured_route_y > 0:
+        logging.info(
+            "Use explicit gpugr route grid: route_num_bins=%dx%d (auto_adjust_bins=0)",
+            configured_route_x,
+            configured_route_y,
+        )
+        return configured_route_x, configured_route_y
+
     place_num_bins_y = int(getattr(placedb, "num_bins_y", getattr(params, "num_bins_y", 512)))
     if place_num_bins_y <= 0:
         place_num_bins_y = 512

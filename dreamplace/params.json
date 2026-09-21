@@ -300,16 +300,8 @@
         "default": 0
     },
     "gpugr_backend": {
-        "description": "GGR backend selection: auto chooses cuda when available and cpu_pr otherwise; cuda requires a CUDA-capable gpugr build; cpu_pr is serial diagnostic pattern routing; cpu_pr_mt is explicit deterministic parallel CPU pattern routing and uses num_threads as its requested worker count; cugr2 is the explicit Xplace-integrated CPU CUGR2 router; all CPU pattern backends require rrrIters=0; cugr is the legacy source-built CPU CUGR backend",
+        "description": "GGR backend selection: auto chooses cuda when available and cpu_pr otherwise; cuda requires a CUDA-capable gpugr build; cpu_pr is serial diagnostic pattern routing; cpu_pr_mt is explicit deterministic parallel CPU pattern routing and uses num_threads as its requested worker count; all CPU pattern backends require rrrIters=0",
         "default": "auto"
-    },
-    "cugr_session_cache_enable": {
-        "description": "whether the in-process CUGR backend may reuse immutable technology state between placement-coordinate updates",
-        "default": 1
-    },
-    "cugr_require_clean_source": {
-        "description": "fail explicit CUGR runs when embedded source metadata is dirty; enable for qualification, not source development",
-        "default": 0
     },
     "gpugr_bottom_routing_layer": {
         "description": "inclusive bottom routing-layer name passed to GPUGR; empty uses the first LEF routing layer",

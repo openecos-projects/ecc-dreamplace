@@ -42,7 +42,7 @@ from .xplace_parser_cache import XplaceParserCacheMixin
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_GPUGR_BACKENDS = ("cuda", "cpu_pr", "cpu_pr_mt", "cugr2", "cugr", "auto")
+SUPPORTED_GPUGR_BACKENDS = ("cuda", "cpu_pr", "cpu_pr_mt", "auto")
 
 
 def normalize_gpugr_backend(backend: str = "auto") -> str:
@@ -96,7 +96,7 @@ def resolve_gpugr_backend(
 
 def validate_gpugr_backend_request(backend: str, rrr_iters: int):
     normalized = normalize_gpugr_backend(backend)
-    if normalized in ("cpu_pr", "cpu_pr_mt", "cugr2") and int(rrr_iters) > 0:
+    if normalized in ("cpu_pr", "cpu_pr_mt") and int(rrr_iters) > 0:
         raise RuntimeError(
             f"gpugr backend={normalized} only supports one CPU routing pass with "
             f"rrr_iters=0; got rrr_iters={int(rrr_iters)}. CPU RRR is unsupported "
@@ -359,20 +359,6 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         Flute.register(int(threads), powv_path, post_path)
         self._flute_register_cache.add(key)
         return True
-
-    @contextmanager
-    def _cugr2_flute_lut_environment(self, powv_path: str):
-        """Give the in-process CUGR2 bridge an absolute FLUTE LUT directory."""
-
-        previous = os.environ.get("XPLACE_FLUTE_LUT_ROOT")
-        os.environ["XPLACE_FLUTE_LUT_ROOT"] = str(Path(powv_path).resolve().parent)
-        try:
-            yield
-        finally:
-            if previous is None:
-                os.environ.pop("XPLACE_FLUTE_LUT_ROOT", None)
-            else:
-                os.environ["XPLACE_FLUTE_LUT_ROOT"] = previous
 
     def _dedup_paths(self, paths):
         unique_paths = []
@@ -1039,11 +1025,7 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
                         rrr_iters=rrr_iters,
                         **native_profile_kwargs,
                     ):
-                        if resolved_backend == "cugr2":
-                            with self._cugr2_flute_lut_environment(powv_path):
-                                routeforce.run_ggr()
-                        else:
-                            routeforce.run_ggr()
+                        routeforce.run_ggr()
                         if resolved_backend == "cuda":
                             torch.cuda.synchronize(f"cuda:{gpu}")
                     native_stats = (

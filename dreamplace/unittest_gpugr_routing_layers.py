@@ -206,33 +206,6 @@ class GPUGRRoutingLayerWindowTest(unittest.TestCase):
         self.assertEqual(float(demand[3].sum()), 0.0)
         self.assertGreater(float(demand[1:3].sum()), 0.0)
 
-    def test_cugr2_window_reports_enabled_met2_met3(self):
-        result = self._run("cugr2", "MET2", "MET3")
-        metrics = result["metrics"]
-        self.assertEqual(metrics["gpugr_backend"], "cugr2")
-        self.assertEqual(metrics["routing_layer_begin"], 1)
-        self.assertEqual(metrics["routing_layer_end"], 2)
-        self.assertEqual(metrics["enabled_routing_layer_names"], ["MET2", "MET3"])
-        demand = result["maps"]["wire_demand_map"]
-        self.assertEqual(tuple(demand.shape[:1]), (4,))
-        self.assertEqual(float(demand[0].sum()), 0.0)
-        self.assertEqual(float(demand[3].sum()), 0.0)
-        self.assertGreater(float(demand[1:3].sum()), 0.0)
-        layers = {
-            int(entry["layer_idx"])
-            for net in result["route_entries"]
-            for entry in net.get("entries", [])
-        }
-        self.assertTrue(layers)
-        self.assertTrue(layers <= {1, 2})
-
-    def test_cugr2_l_shape_topology_pack_has_route_edge(self):
-        result = self._run("cugr2", "MET1", "MET4", include_l_shape_topology=True)
-        metadata = result["l_shape_topology_pack"]["metadata"]
-        self.assertEqual(metadata["num_edges"], 1)
-        self.assertEqual(metadata["route_failed_count"], 0)
-        self.assertEqual(metadata["unmapped_pin_access_count"], 0)
-
     def test_unknown_layer_name_is_rejected(self):
         with self.assertRaises(RuntimeError) as raised:
             self._run("cpu_pr", "MET9", "MET3")

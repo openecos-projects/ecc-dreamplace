@@ -84,11 +84,12 @@ def validate_map_contract(maps: dict, expected_layers: int = None) -> None:
 
     The legacy validator intentionally checks only the six mandatory 3-D
     planes because CUDA callers expose a wider, historically inconsistent map
-    vocabulary.  CUGR has a stricter result contract: every exported tensor
-    must be finite and non-negative, ``cg_map_*`` aggregates are 2-D, and all
-    other map planes retain the layer dimension.  Keeping this check explicit
-    prevents accidental broadcasting from turning an orientation or layer
-    projection error into a plausible-looking congestion result.
+    vocabulary.  This validator holds every backend to a stricter result
+    contract: every exported tensor must be finite and non-negative,
+    ``cg_map_*`` aggregates are 2-D, and all other map planes retain the
+    layer dimension.  Keeping this check explicit prevents accidental
+    broadcasting from turning an orientation or layer projection error into
+    a plausible-looking congestion result.
     """
 
     validate_map_planes(maps, expected_layers=expected_layers)

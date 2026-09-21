@@ -43,7 +43,7 @@ class GPUGRResult(TypedDict, total=False):
 
 
 class GPUGRBackend(Protocol):
-    """Minimal operator surface shared by CUDA, CPU_PR, and CUGR."""
+    """Minimal operator surface shared by the CUDA and CPU pattern backends."""
 
     def run_gpugr(self, **kwargs: Any) -> GPUGRResult:
         ...

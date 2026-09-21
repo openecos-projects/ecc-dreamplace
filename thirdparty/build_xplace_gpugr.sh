@@ -20,8 +20,6 @@
 #      (src/__init__.py) imports every extension at package import time, so a
 #      partial build cannot satisfy `from src import Flute`. A CUDA-enabled
 #      build provides both cuda and cpu_pr; a CPU torch build provides cpu_pr.
-#      The old Rsyn-backed CUGR extension is opt-in because its integration
-#      branch is maintained separately from the CUGR2 route core.
 #   4. Installs into xplace's runtime lib dir cpp_to_py/cpybin (the location
 #      upstream cpp_to_py/__init__.py imports from).
 #
@@ -52,8 +50,6 @@ XPLACE_CUDA_REQUEST="${XPLACE_ENABLE_CUDA:-AUTO}"
 XPLACE_CUDA_REQUEST="${XPLACE_CUDA_REQUEST^^}"
 XPLACE_INSTALL_REQUEST="${XPLACE_INSTALL:-ON}"
 XPLACE_INSTALL_REQUEST="${XPLACE_INSTALL_REQUEST^^}"
-XPLACE_LEGACY_CUGR_REQUEST="${XPLACE_BUILD_LEGACY_CUGR:-OFF}"
-XPLACE_LEGACY_CUGR_REQUEST="${XPLACE_LEGACY_CUGR_REQUEST^^}"
 case "${XPLACE_CUDA_REQUEST}" in
     AUTO)
         XPLACE_CUDA_ENABLED="${TORCH_CUDA_ENABLED}"
@@ -80,13 +76,6 @@ case "${XPLACE_INSTALL_REQUEST}" in
         exit 1
         ;;
 esac
-case "${XPLACE_LEGACY_CUGR_REQUEST}" in
-    ON|OFF) ;;
-    *)
-        echo "error: XPLACE_BUILD_LEGACY_CUGR must be ON or OFF; got ${XPLACE_LEGACY_CUGR_REQUEST}" >&2
-        exit 1
-        ;;
-esac
 if [[ "${XPLACE_CUDA_ENABLED}" == "ON" ]]; then
     BUILD_DIR="${XPLACE_BUILD_DIR:-${DREAMPLACE_ROOT}/thirdparty/xplace-build}"
 else
@@ -102,7 +91,6 @@ echo "== torch:   $("${PYTHON_BIN}" -c 'import torch; print(torch.__version__)')
 echo "== torch cuda:  ${TORCH_CUDA_ENABLED}"
 echo "== xplace cuda: ${XPLACE_CUDA_ENABLED}"
 echo "== install:     ${XPLACE_INSTALL_REQUEST}"
-echo "== legacy cugr: ${XPLACE_LEGACY_CUGR_REQUEST}"
 echo "== build dir:   ${BUILD_DIR}"
 
 # 1. pybind11 alignment with the venv torch.
@@ -132,9 +120,7 @@ cmake_args=(
     -DCMAKE_PREFIX_PATH="${TORCH_PREFIX}"
     -DCMAKE_CXX_ABI=1
     -DXPLACE_ENABLE_CUDA="${XPLACE_CUDA_ENABLED}"
-    -DXPLACE_BUILD_LEGACY_CUGR="${XPLACE_LEGACY_CUGR_REQUEST}"
     -DXPLACE_LIB_DIR="${CPYBIN_DIR}"
-    -DXPLACE_LICENSE_DIR="${XPLACE_ROOT}/licenses/cugr"
 )
 if [[ "${XPLACE_CUDA_ENABLED}" == "ON" ]]; then
     cmake_args+=(
@@ -146,15 +132,6 @@ cmake "${cmake_args[@]}"
 
 # 3. Build all extension targets (see note 3 above).
 cmake --build "${BUILD_DIR}" -j "${JOBS}"
-
-if [[ "${XPLACE_LEGACY_CUGR_REQUEST}" == "ON" ]]; then
-    CUGR_EXTENSION="${BUILD_DIR}/cpp_to_py/cugr/cugr${PYTHON_EXT_SUFFIX}"
-    if [[ ! -f "${CUGR_EXTENSION}" ]]; then
-        echo "error: legacy CUGR target did not produce ${CUGR_EXTENSION}" >&2
-        exit 1
-    fi
-    echo "== built legacy CUGR: ${CUGR_EXTENSION}"
-fi
 
 if [[ "${XPLACE_INSTALL_REQUEST}" == "ON" ]]; then
     # 4. Install into cpp_to_py/cpybin.
@@ -169,9 +146,8 @@ if [[ "${XPLACE_INSTALL_REQUEST}" == "ON" ]]; then
             "${CPYBIN_DIR}/wa_wirelength_hpwl_cuda${PYTHON_EXT_SUFFIX}" \
             "${CPYBIN_DIR}/wirelength_timing_cuda${PYTHON_EXT_SUFFIX}"
     fi
-    if [[ "${XPLACE_LEGACY_CUGR_REQUEST}" == "OFF" ]]; then
-        rm -f "${CPYBIN_DIR}/cugr${PYTHON_EXT_SUFFIX}"
-    fi
+    # Drop any stale legacy cugr extension left by older builds.
+    rm -f "${CPYBIN_DIR}/cugr${PYTHON_EXT_SUFFIX}"
 
     echo "== installed extensions:"
     ls -1 "${CPYBIN_DIR}/"

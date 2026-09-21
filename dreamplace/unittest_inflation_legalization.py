@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import torch
 
-from dreamplace import inflation_legalization
+from dreamplace.ops.routability import inflation_legalization
 from dreamplace.Params import Params
 
 

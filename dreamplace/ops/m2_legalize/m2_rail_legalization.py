@@ -10,7 +10,7 @@ import dreamplace.ops.legality_check.legality_check as legality_check
 import dreamplace.ops.m2_pa_refine.m2_pa_refine as m2_pa_refine
 import dreamplace.ops.m2_soft_legalize.m2_soft_legalize as m2_soft_legalize
 import dreamplace.ops.macro_legalize.macro_legalize as macro_legalize
-from dreamplace.m2_pg_rail_hybrid_legalization import (
+from dreamplace.ops.m2_legalize.m2_pg_rail_hybrid_legalization import (
     M2PgRailHybridLegalizationView,
 )
 

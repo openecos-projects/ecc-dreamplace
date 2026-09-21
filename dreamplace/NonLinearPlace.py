@@ -54,8 +54,8 @@ from dreamplace.ops.routability.leiden_clustering import (
 )
 from dreamplace.ops.routability import enhanced_inflation_controller
 from dreamplace.ops.irt_egr.egr_padding import apply_egr_padding, restore_egr_padding
-from dreamplace import inflation_legalization
-from dreamplace.post_legalization_adaptive_padding import (
+from dreamplace.ops.routability import inflation_legalization
+from dreamplace.ops.routability.post_legalization_adaptive_padding import (
     allocate_padding_sites,
     build_smoothed_overflow_map,
     compute_cell_box_overlap_stats,

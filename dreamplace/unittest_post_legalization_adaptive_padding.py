@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from dreamplace.Params import Params
-from dreamplace.post_legalization_adaptive_padding import (
+from dreamplace.ops.routability.post_legalization_adaptive_padding import (
     allocate_padding_sites,
     build_smoothed_overflow_map,
     compute_cell_box_overlap_stats,

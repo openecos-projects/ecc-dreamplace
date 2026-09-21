@@ -48,7 +48,7 @@ import dreamplace.ops.global_swap.global_swap as global_swap
 import dreamplace.ops.k_reorder.k_reorder as k_reorder
 import dreamplace.ops.independent_set_matching.independent_set_matching as independent_set_matching
 import dreamplace.ops.irt_egr.irt_egr as irt_egr
-import dreamplace.m2_rail_legalization as m2_rail_legalization
+import dreamplace.ops.m2_legalize.m2_rail_legalization as m2_rail_legalization
 # import dreamplace.ops.pin_weight_sum.pin_weight_sum as pws
 # import dreamplace.ops.timing.timing as timingimport
 import dreamplace.ops.steiner_topo.steiner_topo as steiner_topo

@@ -17,7 +17,7 @@ if AUTODMP_ROOT not in sys.path:
 import dreamplace.BasicPlace as basic_place_module  # noqa: E402
 from dreamplace.BasicPlace import BasicPlace  # noqa: E402
 from dreamplace.Params import Params  # noqa: E402
-from dreamplace.m2_pg_rail_hybrid_legalization import (  # noqa: E402
+from dreamplace.ops.m2_legalize.m2_pg_rail_hybrid_legalization import (  # noqa: E402
     M2PgRailHybridLegalizationView,
 )
 

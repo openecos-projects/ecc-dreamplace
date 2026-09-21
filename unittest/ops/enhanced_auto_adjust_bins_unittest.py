@@ -3,8 +3,8 @@ import sys
 import unittest
 
 
-AIEDA_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-AUTODMP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+AIEDA_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+AUTODMP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 for path in (AIEDA_ROOT, AUTODMP_ROOT):
     if path not in sys.path:
         sys.path.insert(0, path)

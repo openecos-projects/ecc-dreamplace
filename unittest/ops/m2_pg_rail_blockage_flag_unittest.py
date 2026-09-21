@@ -44,7 +44,9 @@ class M2PgRailBlockageFlagTest(unittest.TestCase):
         return placedb
 
     def test_schema_defaults_disable_hard_blockage_and_enable_soft_density(self):
-        params_path = os.path.join(os.path.dirname(__file__), "params.json")
+        params_path = os.path.join(
+            os.path.dirname(__file__), "..", "..", "dreamplace", "params.json"
+        )
         with open(params_path, "r", encoding="utf-8") as f:
             params = json.load(f)
 

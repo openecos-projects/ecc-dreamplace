@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-AUTODMP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+AUTODMP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if AUTODMP_ROOT not in sys.path:
     sys.path.insert(0, AUTODMP_ROOT)
 
@@ -96,7 +96,7 @@ _RANGE_DEF = dedent(
 
 
 def _gpugr_extension_ready():
-    xplace_root = Path(__file__).resolve().parents[1] / "thirdparty" / "xplace"
+    xplace_root = Path(__file__).resolve().parents[2] / "thirdparty" / "xplace"
     cpybin = xplace_root / "cpp_to_py" / "cpybin"
     return cpybin.is_dir() and any(cpybin.glob("gpugr*.so"))
 
@@ -106,7 +106,7 @@ def _cuda_gpugr_ready():
 
     if not _gpugr_extension_ready() or not torch.cuda.is_available():
         return False
-    xplace_root = Path(__file__).resolve().parents[1] / "thirdparty" / "xplace"
+    xplace_root = Path(__file__).resolve().parents[2] / "thirdparty" / "xplace"
     xplace_root_str = str(xplace_root)
     if xplace_root_str not in sys.path:
         sys.path.insert(0, xplace_root_str)

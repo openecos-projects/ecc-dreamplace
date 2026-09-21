@@ -8,7 +8,7 @@ from unittest import mock
 import torch
 
 
-AUTODMP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+AUTODMP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if AUTODMP_ROOT not in sys.path:
     sys.path.insert(0, AUTODMP_ROOT)
 
@@ -234,7 +234,7 @@ class M2PARefineIntegrationTest(unittest.TestCase):
         )
         original = torch.tensor([4.0, 0.0])
         with mock.patch(
-            "dreamplace.m2_rail_legalization.m2_pa_refine.M2PARefine",
+            "dreamplace.ops.m2_legalize.m2_rail_legalization.m2_pa_refine.M2PARefine",
             FakeRefine,
         ):
             op = place.build_m2_pa_refine(
@@ -283,7 +283,7 @@ class M2PARefineIntegrationTest(unittest.TestCase):
         self.assertTrue(callable(op))
 
     def test_schema_and_parameter_normalization(self):
-        params_path = os.path.join(os.path.dirname(__file__), "params.json")
+        params_path = os.path.join(os.path.dirname(__file__), "..", "..", "dreamplace", "params.json")
         with open(params_path, "r", encoding="utf-8") as stream:
             schema = json.load(stream)
         self.assertEqual(schema["m2_pa_refine_flag"]["default"], 0)

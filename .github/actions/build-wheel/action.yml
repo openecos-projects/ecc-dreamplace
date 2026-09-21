@@ -46,7 +46,7 @@ runs:
         fi
 
         .venv/bin/python -m unittest -v \
-          dreamplace/unittest_gpugr_backend_select.py \
+          unittest/ops/gpugr_backend_select_unittest.py \
           thirdparty/xplace/cpp_to_py/gpugr/unittest_cpu_backend_build_guards.py \
           thirdparty/xplace/cpp_to_py/gpugr/unittest_cpu_pattern_route.py \
           thirdparty/xplace/cpp_to_py/gpugr/unittest_portless_io_pin_grnet.py \

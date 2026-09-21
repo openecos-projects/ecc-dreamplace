@@ -4,7 +4,7 @@ import sys
 import unittest
 
 
-AUTODMP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+AUTODMP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if AUTODMP_ROOT not in sys.path:
     sys.path.insert(0, AUTODMP_ROOT)
 
@@ -13,7 +13,7 @@ from dreamplace.Params import Params  # noqa: E402
 
 class IOPinDensityWeightParamsTest(unittest.TestCase):
     def test_schema_default_enables_xplace_iopin_density_weight(self):
-        params_path = os.path.join(os.path.dirname(__file__), "params.json")
+        params_path = os.path.join(os.path.dirname(__file__), "..", "..", "dreamplace", "params.json")
         with open(params_path, "r", encoding="utf-8") as f:
             params = json.load(f)
 

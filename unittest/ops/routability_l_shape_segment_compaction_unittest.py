@@ -3,7 +3,6 @@
 import os
 import sys
 import unittest
-import importlib.util
 import ast
 from unittest import mock
 
@@ -11,16 +10,13 @@ import torch
 
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-AUTODMP_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "..", "..", ".."))
+AUTODMP_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "..", ".."))
 if AUTODMP_ROOT not in sys.path:
     sys.path.insert(0, AUTODMP_ROOT)
-MODULE_PATH = os.path.join(CURRENT_DIR, "l_shape_segment.py")
-ELECTRIC_POTENTIAL_PATH = os.path.join(CURRENT_DIR, "l_shape_electric_potential.py")
-SPEC = importlib.util.spec_from_file_location("l_shape_segment", MODULE_PATH)
-if SPEC is None or SPEC.loader is None:
-    raise RuntimeError("Failed to load l_shape_segment.py")
-MODULE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MODULE)
+ELECTRIC_POTENTIAL_PATH = os.path.join(
+    AUTODMP_ROOT, "dreamplace", "ops", "routability", "l_shape_electric_potential.py"
+)
+from dreamplace.ops.routability import l_shape_segment as MODULE  # noqa: E402
 
 H_FIRST = MODULE.H_FIRST
 LShapeSegmentOp = MODULE.LShapeSegmentOp

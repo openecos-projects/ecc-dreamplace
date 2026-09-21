@@ -1,34 +1,25 @@
-import importlib.util
 import json
 import os
 import sys
 import unittest
 
-AUTODMP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+AUTODMP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if AUTODMP_ROOT not in sys.path:
     sys.path.insert(0, AUTODMP_ROOT)
 
 from dreamplace.Params import Params  # noqa: E402
+from dreamplace.ops.routability import (  # noqa: E402
+    enhanced_inflation_controller as _enhanced_inflation_controller,
+)
 
 
 def load_enhanced_inflation_controller():
-    module_path = os.path.join(
-        os.path.dirname(__file__),
-        "ops",
-        "routability",
-        "enhanced_inflation_controller.py",
-    )
-    spec = importlib.util.spec_from_file_location(
-        "enhanced_inflation_controller", module_path
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return _enhanced_inflation_controller
 
 
 class EnhancedInflationParamsTest(unittest.TestCase):
     def test_schema_uses_enhanced_inflation_names(self):
-        params_path = os.path.join(os.path.dirname(__file__), "params.json")
+        params_path = os.path.join(os.path.dirname(__file__), "..", "..", "dreamplace", "params.json")
         with open(params_path, "r", encoding="utf-8") as f:
             params = json.load(f)
 
@@ -40,7 +31,7 @@ class EnhancedInflationParamsTest(unittest.TestCase):
         self.assertNotIn("xplace_inflation_max_rounds", params)
 
     def test_inflation_area_budget_ratio_schema_and_runtime_default(self):
-        params_path = os.path.join(os.path.dirname(__file__), "params.json")
+        params_path = os.path.join(os.path.dirname(__file__), "..", "..", "dreamplace", "params.json")
         with open(params_path, "r", encoding="utf-8") as f:
             schema = json.load(f)
 
@@ -50,7 +41,7 @@ class EnhancedInflationParamsTest(unittest.TestCase):
         self.assertEqual(params.inflation_area_budget_ratio, 0.1)
 
     def test_gpugr_area_adjust_defaults_to_directional_max_overflow(self):
-        params_path = os.path.join(os.path.dirname(__file__), "params.json")
+        params_path = os.path.join(os.path.dirname(__file__), "..", "..", "dreamplace", "params.json")
         with open(params_path, "r", encoding="utf-8") as f:
             schema = json.load(f)
 

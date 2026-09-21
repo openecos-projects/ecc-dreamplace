@@ -5,7 +5,7 @@ import unittest
 
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-AUTODMP_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
+AUTODMP_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "..", ".."))
 AIEDA_ROOT = os.path.abspath(os.path.join(AUTODMP_ROOT, "..", ".."))
 for path in (AUTODMP_ROOT, AIEDA_ROOT):
     if path not in sys.path:

@@ -8,7 +8,7 @@ import torch
 
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-AUTODMP_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "..", "..", ".."))
+AUTODMP_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "..", ".."))
 if AUTODMP_ROOT not in sys.path:
     sys.path.insert(0, AUTODMP_ROOT)
 AIEDA_ROOT = os.path.abspath(os.path.join(AUTODMP_ROOT, "..", ".."))
@@ -947,7 +947,7 @@ class LShapeCapacityALTest(unittest.TestCase):
 
     def test_schema_exposes_only_enable_flag(self):
         params_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "params.json"
+            os.path.dirname(__file__), "..", "..", "dreamplace", "params.json"
         )
         params_path = os.path.abspath(params_path)
         with open(params_path, "r", encoding="utf-8") as f:

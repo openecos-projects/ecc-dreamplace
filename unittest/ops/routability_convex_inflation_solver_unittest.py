@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 
-import importlib.util
 import os
+import sys
 import unittest
 
 import numpy as np
@@ -9,12 +9,11 @@ import torch
 
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-MODULE_PATH = os.path.join(CURRENT_DIR, "convex_inflation_solver.py")
-SPEC = importlib.util.spec_from_file_location("convex_inflation_solver", MODULE_PATH)
-if SPEC is None or SPEC.loader is None:
-    raise RuntimeError("Failed to load convex_inflation_solver.py")
-MODULE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MODULE)
+AUTODMP_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "..", ".."))
+if AUTODMP_ROOT not in sys.path:
+    sys.path.insert(0, AUTODMP_ROOT)
+
+from dreamplace.ops.routability import convex_inflation_solver as MODULE  # noqa: E402
 
 
 class FakePlaceDB(object):

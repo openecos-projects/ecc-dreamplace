@@ -3,7 +3,6 @@
 import os
 import sys
 import unittest
-import importlib.util
 from types import SimpleNamespace
 from unittest import mock
 
@@ -11,25 +10,14 @@ import torch
 
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-AUTODMP_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "..", "..", ".."))
+AUTODMP_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "..", ".."))
 if AUTODMP_ROOT not in sys.path:
     sys.path.insert(0, AUTODMP_ROOT)
 
-from dreamplace.ops.steiner_topo.steiner_topo import SteinerTopo
-
-
-SEGMENT_MODULE_PATH = os.path.abspath(
-    os.path.join(CURRENT_DIR, "..", "routability", "l_shape_segment.py")
+from dreamplace.ops.steiner_topo.steiner_topo import SteinerTopo  # noqa: E402
+from dreamplace.ops.routability.l_shape_segment import (  # noqa: E402
+    LShapeSegmentBuilder,
 )
-SEGMENT_SPEC = importlib.util.spec_from_file_location(
-    "l_shape_segment_for_ggr_topology_test",
-    SEGMENT_MODULE_PATH,
-)
-if SEGMENT_SPEC is None or SEGMENT_SPEC.loader is None:
-    raise RuntimeError("Failed to load l_shape_segment.py")
-SEGMENT_MODULE = importlib.util.module_from_spec(SEGMENT_SPEC)
-SEGMENT_SPEC.loader.exec_module(SEGMENT_MODULE)
-LShapeSegmentBuilder = SEGMENT_MODULE.LShapeSegmentBuilder
 
 
 def tiny_pack():

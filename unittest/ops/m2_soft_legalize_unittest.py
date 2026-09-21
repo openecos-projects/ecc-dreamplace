@@ -8,7 +8,7 @@ from unittest import mock
 import torch
 
 
-AUTODMP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+AUTODMP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if AUTODMP_ROOT not in sys.path:
     sys.path.insert(0, AUTODMP_ROOT)
 
@@ -188,7 +188,7 @@ class M2SoftLegalizeIntegrationTest(unittest.TestCase):
 
     def test_insufficient_hard_capacity_is_advisory_not_fallback(self):
         with mock.patch(
-            "dreamplace.m2_rail_legalization.m2_soft_legalize.M2SoftLegalize"
+            "dreamplace.ops.m2_legalize.m2_rail_legalization.m2_soft_legalize.M2SoftLegalize"
         ) as constructor, self.assertLogs(level="INFO") as logs:
             op = self._place().build_m2_soft_legalization(
                 self._params(),
@@ -223,7 +223,7 @@ class M2SoftLegalizeIntegrationTest(unittest.TestCase):
 
         original = torch.tensor([4.0, 0.0])
         with mock.patch(
-            "dreamplace.m2_rail_legalization.m2_soft_legalize.M2SoftLegalize",
+            "dreamplace.ops.m2_legalize.m2_rail_legalization.m2_soft_legalize.M2SoftLegalize",
             FakeSoftLegalize,
         ):
             op = self._place(legal=False).build_m2_soft_legalization(
@@ -236,7 +236,7 @@ class M2SoftLegalizeIntegrationTest(unittest.TestCase):
         self.assertFalse(stats["legal"])
 
     def test_schema_and_parameter_normalization(self):
-        params_path = os.path.join(os.path.dirname(__file__), "params.json")
+        params_path = os.path.join(os.path.dirname(__file__), "..", "..", "dreamplace", "params.json")
         with open(params_path, "r", encoding="utf-8") as stream:
             schema = json.load(stream)
         self.assertEqual(

@@ -11,7 +11,7 @@ from dreamplace.Params import Params
 
 class InflationLegalizationParamsTest(unittest.TestCase):
     def test_schema_defaults_to_disabled(self):
-        params_path = os.path.join(os.path.dirname(__file__), "params.json")
+        params_path = os.path.join(os.path.dirname(__file__), "..", "..", "dreamplace", "params.json")
         with open(params_path, "r", encoding="utf-8") as stream:
             schema = json.load(stream)
 

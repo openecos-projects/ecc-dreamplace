@@ -4,7 +4,7 @@ import sys
 import unittest
 
 
-AUTODMP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+AUTODMP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if AUTODMP_ROOT not in sys.path:
     sys.path.insert(0, AUTODMP_ROOT)
 
@@ -13,7 +13,7 @@ from dreamplace.Params import Params  # noqa: E402
 
 class LShapePresetParamsTest(unittest.TestCase):
     def test_removed_xplace_weight_schedule_keys_are_absent_from_schema(self):
-        params_path = os.path.join(os.path.dirname(__file__), "params.json")
+        params_path = os.path.join(os.path.dirname(__file__), "..", "..", "dreamplace", "params.json")
         with open(params_path, "r", encoding="utf-8") as f:
             params = json.load(f)
         for key in (
@@ -25,7 +25,7 @@ class LShapePresetParamsTest(unittest.TestCase):
             self.assertNotIn(key, params)
 
     def test_l_shape_overflow_threshold_schema_default_is_point_three(self):
-        params_path = os.path.join(os.path.dirname(__file__), "params.json")
+        params_path = os.path.join(os.path.dirname(__file__), "..", "..", "dreamplace", "params.json")
         with open(params_path, "r", encoding="utf-8") as f:
             params = json.load(f)
         self.assertEqual(params["l_shape_overflow_threshold"]["default"], 0.3)

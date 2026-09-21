@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 
-AUTODMP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+AUTODMP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if AUTODMP_ROOT not in sys.path:
     sys.path.insert(0, AUTODMP_ROOT)
 
@@ -66,7 +66,7 @@ def _make_data():
 
 class M2PgRailSoftLegalizationFlowTest(unittest.TestCase):
     def test_schema_defaults_to_disabled_soft_mode(self):
-        params_path = os.path.join(os.path.dirname(__file__), "params.json")
+        params_path = os.path.join(os.path.dirname(__file__), "..", "..", "dreamplace", "params.json")
         with open(params_path, "r", encoding="utf-8") as stream:
             params = json.load(stream)
 

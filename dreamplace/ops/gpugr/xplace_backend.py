@@ -269,10 +269,13 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
 
         ``src/__init__.py`` and ``utils/__init__.py`` pull in placement-only
         dependencies (pulp, visualization stacks) that the GPUGR path never
-        uses and the ECC venv does not install. The modules we need are
-        self-contained apart from relative imports inside ``src/core``, so we
-        load them under private package names whose __path__ points at the
-        real directories.
+        uses and the ECC venv does not install. ``route_force.py`` reaches
+        ``utils.logger`` through an absolute import, so register a shell for
+        the top-level ``utils`` name as well: the import machinery then loads
+        ``utils/logger.py`` directly without executing ``utils/__init__.py``.
+        The modules we need are self-contained apart from relative imports
+        inside ``src/core``, so we load them under private package names whose
+        __path__ points at the real directories.
         """
         import importlib.util
 
@@ -296,6 +299,7 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         )
         from cpp_to_py import gpugr
 
+        shell_package("utils", xplace_root / "utils")
         shell_package("_xplace_src", xplace_root / "src")
         shell_package("_xplace_src.core", xplace_root / "src" / "core")
         if not _extension_cuda_enabled(gpugr):

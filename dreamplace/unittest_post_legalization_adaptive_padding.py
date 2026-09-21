@@ -1,4 +1,6 @@
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 import torch
@@ -13,13 +15,51 @@ from dreamplace.post_legalization_adaptive_padding import (
 
 
 class PostLegalizationAdaptivePaddingTest(unittest.TestCase):
+    def test_gpugr_operator_receives_params_and_placedb(self):
+        from dreamplace import NonLinearPlace
+
+        params = SimpleNamespace(
+            post_legalization_adaptive_padding_flag=1,
+            legalize_flag=1,
+            post_legalization_padding_rrr_iters=0,
+            result_dir="/tmp",
+            gpu_id=0,
+            num_threads=1,
+            gpugr_backend="cpu_pr",
+            design_name=lambda: "cpu_padding_test",
+        )
+        placedb = SimpleNamespace(regions=[])
+        operator = mock.Mock()
+        operator.run_gpugr.side_effect = RuntimeError("stop after operator dispatch")
+
+        with (
+            mock.patch.object(NonLinearPlace, "_write_back_autodmp_pos_to_ieda"),
+            mock.patch.object(
+                NonLinearPlace,
+                "_compute_gpugr_route_grid_like_xplace",
+                return_value=(8, 8),
+            ),
+            mock.patch.object(
+                NonLinearPlace,
+                "_get_cached_gpugr_operator",
+                return_value=operator,
+            ) as get_operator,
+            self.assertRaisesRegex(RuntimeError, "stop after operator dispatch"),
+        ):
+            NonLinearPlace._run_post_legalization_adaptive_padding(
+                params,
+                placedb,
+                pos=object(),
+                model=object(),
+            )
+
+        get_operator.assert_called_once_with(params, placedb)
+
     def test_scores_wide_cell_from_all_overlapped_bins(self):
         horizontal = torch.zeros((4, 2), dtype=torch.float32)
         vertical = torch.zeros_like(horizontal)
         vertical[2, 0] = 2.0
-        overflow = build_smoothed_overflow_map(
-            horizontal, vertical, smooth_kernel=1
-        )
+        overflow = build_smoothed_overflow_map(horizontal, vertical, smooth_kernel=1)
         pos = torch.tensor([0.0, 1.0, 0.0, 0.0], dtype=torch.float32)
         size_x = torch.tensor([0.5, 2.0], dtype=torch.float32)
         size_y = torch.tensor([0.5, 0.5], dtype=torch.float32)
@@ -42,9 +82,7 @@ class PostLegalizationAdaptivePaddingTest(unittest.TestCase):
 
     def test_allocates_padding_with_independent_row_segment_budgets(self):
         # A fixed blockage [9, 11] splits the row into two 9-site segments.
-        pos = torch.tensor(
-            [0.0, 12.0, 9.0, 0.0, 0.0, 0.0], dtype=torch.float32
-        )
+        pos = torch.tensor([0.0, 12.0, 9.0, 0.0, 0.0, 0.0], dtype=torch.float32)
         size_x = torch.tensor([2.0, 2.0, 2.0], dtype=torch.float32)
         size_y = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float32)
         plan = allocate_padding_sites(
@@ -71,9 +109,7 @@ class PostLegalizationAdaptivePaddingTest(unittest.TestCase):
         self.assertEqual(plan["total_added_sites"], 4)
 
     def test_capacity_clipping_keeps_highest_score(self):
-        pos = torch.tensor(
-            [0.0, 2.0, 4.0, 0.0, 0.0, 0.0], dtype=torch.float32
-        )
+        pos = torch.tensor([0.0, 2.0, 4.0, 0.0, 0.0, 0.0], dtype=torch.float32)
         size_x = torch.tensor([2.0, 2.0, 2.0], dtype=torch.float32)
         size_y = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float32)
         plan = allocate_padding_sites(
@@ -137,9 +173,7 @@ class PostLegalizationAdaptivePaddingTest(unittest.TestCase):
     def test_params_reject_even_smoothing_kernel(self):
         params = Params()
         with self.assertRaisesRegex(ValueError, "positive odd integer"):
-            params.fromJson(
-                {"post_legalization_padding_smooth_kernel": 2}
-            )
+            params.fromJson({"post_legalization_padding_smooth_kernel": 2})
 
 
 if __name__ == "__main__":

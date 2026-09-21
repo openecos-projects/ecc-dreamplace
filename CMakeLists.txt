@@ -138,3 +138,48 @@ add_subdirectory(benchmarks)
 #add_subdirectory(test)
 
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/dreamplace/configure.py DESTINATION dreamplace)
+
+set(XPLACE_RUNTIME_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/xplace")
+option(
+  DREAMPLACE_REQUIRE_XPLACE_RUNTIME
+  "Fail configuration when the prebuilt Xplace GPUGR runtime is unavailable"
+  OFF
+)
+set(
+  XPLACE_RUNTIME_CPYBIN
+  "${XPLACE_RUNTIME_ROOT}/cpp_to_py/cpybin"
+  CACHE PATH "Directory containing the prebuilt Xplace runtime extensions"
+)
+file(GLOB XPLACE_GPUGR_EXTENSIONS "${XPLACE_RUNTIME_CPYBIN}/gpugr*.so")
+if(XPLACE_GPUGR_EXTENSIONS)
+  install(
+    FILES "${XPLACE_RUNTIME_ROOT}/cpp_to_py/__init__.py"
+    DESTINATION thirdparty/xplace/cpp_to_py
+  )
+  install(
+    DIRECTORY "${XPLACE_RUNTIME_CPYBIN}/"
+    DESTINATION thirdparty/xplace/cpp_to_py/cpybin
+    FILES_MATCHING PATTERN "*.so"
+  )
+  install(
+    DIRECTORY "${XPLACE_RUNTIME_ROOT}/src/core/"
+    DESTINATION thirdparty/xplace/src/core
+    FILES_MATCHING PATTERN "*.py"
+  )
+  install(
+    DIRECTORY "${XPLACE_RUNTIME_ROOT}/utils/"
+    DESTINATION thirdparty/xplace/utils
+    FILES_MATCHING PATTERN "*.py"
+  )
+  install(
+    FILES
+      "${XPLACE_RUNTIME_ROOT}/thirdparty/flute/POWV9.dat"
+      "${XPLACE_RUNTIME_ROOT}/thirdparty/flute/POST9.dat"
+    DESTINATION thirdparty/xplace/thirdparty/flute
+  )
+else()
+  if(DREAMPLACE_REQUIRE_XPLACE_RUNTIME)
+    message(FATAL_ERROR "Required Xplace GPUGR runtime is unavailable in ${XPLACE_RUNTIME_CPYBIN}")
+  endif()
+  message(STATUS "Xplace GPUGR runtime not built; wheel will omit GPUGR native artifacts")
+endif()

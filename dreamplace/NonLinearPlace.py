@@ -1980,11 +1980,14 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             Llambda_density_weight_step,
                             Llambda_metrics,
                         )
-                        defer_stop_for_inflation = routability_controller.should_defer_stop_for_legacy_inflation(
-                            params,
-                            num_area_adjust,
-                            max_area_adjust_rounds,
-                            Llambda_metrics[-1][-1].overflow,
+                        defer_stop_for_inflation = (
+                            params.routability_opt_flag
+                            and routability_controller.should_defer_stop_for_legacy_inflation(
+                                params,
+                                num_area_adjust,
+                                max_area_adjust_rounds,
+                                Llambda_metrics[-1][-1].overflow,
+                            )
                         )
                         if llambda_should_stop and not defer_stop_for_inflation:
                             break

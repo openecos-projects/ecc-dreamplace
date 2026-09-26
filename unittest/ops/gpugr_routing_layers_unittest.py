@@ -96,7 +96,12 @@ _RANGE_DEF = dedent(
 
 
 def _gpugr_extension_ready():
-    xplace_root = Path(__file__).resolve().parents[2] / "thirdparty" / "xplace"
+    try:
+        xplace_root = XplaceGPUGR(
+            SimpleNamespace(), SimpleNamespace()
+        )._ensure_xplace_python_path()
+    except RuntimeError:
+        return False
     cpybin = xplace_root / "cpp_to_py" / "cpybin"
     return cpybin.is_dir() and any(cpybin.glob("gpugr*.so"))
 
@@ -106,13 +111,10 @@ def _cuda_gpugr_ready():
 
     if not _gpugr_extension_ready() or not torch.cuda.is_available():
         return False
-    xplace_root = Path(__file__).resolve().parents[2] / "thirdparty" / "xplace"
-    xplace_root_str = str(xplace_root)
-    if xplace_root_str not in sys.path:
-        sys.path.insert(0, xplace_root_str)
     try:
-        from cpp_to_py.cpybin import gpugr
-
+        _, gpugr, _, _, _ = XplaceGPUGR(
+            SimpleNamespace(), SimpleNamespace()
+        )._import_xplace_modules()
         return bool(gpugr.cuda_enabled())
     except Exception:
         return False

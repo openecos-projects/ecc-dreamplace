@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.14)
+cmake_minimum_required(VERSION 3.24)
 
 project(DREAMPlace LANGUAGES CXX)
 set(CMAKE_VERBOSE_MAKEFILE ON)
@@ -114,7 +114,9 @@ if (CUDA_FOUND)
       # arch 8.6 removed for compatability with 3090
       # list(APPEND CMAKE_CUDA_ARCHITECTURES 8.6)
     endif(${CUDA_VERSION_MAJOR} VERSION_GREATER "10")
-    set(CMAKE_CUDA_ARCHITECTURES ${DREAMPLACE_CUDA_ARCHITECTURES})
+    if(DREAMPLACE_CUDA_ARCHITECTURES)
+      set(CMAKE_CUDA_ARCHITECTURES ${DREAMPLACE_CUDA_ARCHITECTURES})
+    endif()
   endif(NOT CMAKE_CUDA_ARCHITECTURES)
   message(STATUS "DreamPlace CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 
@@ -139,41 +141,77 @@ add_subdirectory(benchmarks)
 
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/dreamplace/configure.py DESTINATION dreamplace)
 
-# Package the prebuilt Xplace GPUGR runtime (thirdparty/build_xplace_gpugr.sh)
-# so an installed wheel works without the source checkout. The Python file
-# lists mirror exactly what the GPUGR backend loads at runtime.
+# Build Xplace independently: its Torch/Flute target names overlap DreamPlace's.
+# Both projects use the wheel interpreter and Torch, never source-tree binaries.
+include(ExternalProject)
 set(XPLACE_RUNTIME_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/xplace")
-file(GLOB XPLACE_GPUGR_EXTENSIONS "${XPLACE_RUNTIME_ROOT}/cpp_to_py/cpybin/gpugr*.so")
-if(XPLACE_GPUGR_EXTENSIONS)
-  install(
-    FILES "${XPLACE_RUNTIME_ROOT}/cpp_to_py/__init__.py"
-    DESTINATION thirdparty/xplace/cpp_to_py
-  )
-  install(
-    DIRECTORY "${XPLACE_RUNTIME_ROOT}/cpp_to_py/cpybin/"
-    DESTINATION thirdparty/xplace/cpp_to_py/cpybin
-    FILES_MATCHING PATTERN "*.so"
-  )
-  install(
-    FILES
-      "${XPLACE_RUNTIME_ROOT}/src/core/flute.py"
-      "${XPLACE_RUNTIME_ROOT}/src/core/route_force.py"
-      "${XPLACE_RUNTIME_ROOT}/src/core/torch_dct.py"
-      "${XPLACE_RUNTIME_ROOT}/src/core/dct2_fft2.py"
-    DESTINATION thirdparty/xplace/src/core
-  )
-  install(
-    FILES
-      "${XPLACE_RUNTIME_ROOT}/utils/io_parser.py"
-      "${XPLACE_RUNTIME_ROOT}/utils/logger.py"
-    DESTINATION thirdparty/xplace/utils
-  )
-  install(
-    FILES
-      "${XPLACE_RUNTIME_ROOT}/thirdparty/flute/POWV9.dat"
-      "${XPLACE_RUNTIME_ROOT}/thirdparty/flute/POST9.dat"
-    DESTINATION thirdparty/xplace/thirdparty/flute
-  )
+if(TORCH_ENABLE_CUDA)
+  set(XPLACE_BUILD_VARIANT cuda)
 else()
-  message(STATUS "Xplace GPUGR runtime not built; wheel will omit GPUGR native artifacts")
+  set(XPLACE_BUILD_VARIANT cpu)
 endif()
+set(XPLACE_NATIVE_DIR "${CMAKE_CURRENT_BINARY_DIR}/xplace-runtime-${XPLACE_BUILD_VARIANT}")
+set(XPLACE_BUILD_JOBS 4)
+if(DEFINED ENV{CMAKE_BUILD_PARALLEL_LEVEL})
+  set(XPLACE_BUILD_JOBS "$ENV{CMAKE_BUILD_PARALLEL_LEVEL}")
+endif()
+set(XPLACE_CMAKE_ARGS
+  -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+  -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+  -DPYTHON_EXECUTABLE=${PYTHON_EXECUTABLE}
+  -DPython_EXECUTABLE=${PYTHON_EXECUTABLE}
+  -DPython3_EXECUTABLE=${PYTHON_EXECUTABLE}
+  -DCMAKE_CXX_ABI=${CMAKE_CXX_ABI}
+  -DXPLACE_ENABLE_CUDA=${TORCH_ENABLE_CUDA}
+  -DXPLACE_LIB_DIR=${XPLACE_NATIVE_DIR}
+)
+if(CMAKE_C_COMPILER)
+  list(APPEND XPLACE_CMAKE_ARGS -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER})
+endif()
+if(TORCH_ENABLE_CUDA)
+  list(APPEND XPLACE_CMAKE_ARGS -DCMAKE_CUDA_COMPILER=${CUDA_NVCC_EXECUTABLE})
+  if(CMAKE_CUDA_ARCHITECTURES)
+    string(REPLACE "." "" XPLACE_CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+    string(REPLACE ";" "|" XPLACE_CUDA_ARCHITECTURES "${XPLACE_CUDA_ARCHITECTURES}")
+    list(APPEND XPLACE_CMAKE_ARGS -DCMAKE_CUDA_ARCHITECTURES=${XPLACE_CUDA_ARCHITECTURES})
+  endif()
+endif()
+ExternalProject_Add(xplace_gpugr
+  SOURCE_DIR "${XPLACE_RUNTIME_ROOT}"
+  BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/xplace-build-${XPLACE_BUILD_VARIANT}"
+  DOWNLOAD_COMMAND ""
+  UPDATE_COMMAND ""
+  CMAKE_ARGS ${XPLACE_CMAKE_ARGS}
+  LIST_SEPARATOR "|"
+  BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --parallel ${XPLACE_BUILD_JOBS}
+  BUILD_ALWAYS TRUE
+)
+install(
+  FILES "${XPLACE_RUNTIME_ROOT}/cpp_to_py/__init__.py"
+  DESTINATION thirdparty/xplace/cpp_to_py
+)
+install(
+  DIRECTORY "${XPLACE_NATIVE_DIR}/"
+  DESTINATION thirdparty/xplace/cpp_to_py/cpybin
+  FILES_MATCHING PATTERN "*.so"
+)
+install(
+  FILES
+    "${XPLACE_RUNTIME_ROOT}/src/core/flute.py"
+    "${XPLACE_RUNTIME_ROOT}/src/core/route_force.py"
+    "${XPLACE_RUNTIME_ROOT}/src/core/torch_dct.py"
+    "${XPLACE_RUNTIME_ROOT}/src/core/dct2_fft2.py"
+  DESTINATION thirdparty/xplace/src/core
+)
+install(
+  FILES
+    "${XPLACE_RUNTIME_ROOT}/utils/io_parser.py"
+    "${XPLACE_RUNTIME_ROOT}/utils/logger.py"
+  DESTINATION thirdparty/xplace/utils
+)
+install(
+  FILES
+    "${XPLACE_RUNTIME_ROOT}/thirdparty/flute/POWV9.dat"
+    "${XPLACE_RUNTIME_ROOT}/thirdparty/flute/POST9.dat"
+  DESTINATION thirdparty/xplace/thirdparty/flute
+)

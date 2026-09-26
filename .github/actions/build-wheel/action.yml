@@ -27,30 +27,10 @@ runs:
 
     - name: Install Python dependencies
       shell: bash
-      # Do not trigger an isolated editable build here: build-system's torch
-      # requirement is unpinned. The wheel build below uses the locked torch.
-      run: uv sync --frozen --all-groups --python 3.11 --no-install-project
-
-    - name: Build and test CPU-only Xplace GPUGR
-      shell: bash
+      # Install the locked CPU Torch before compiling native extensions.
       run: |
-        ECC_VENV_PYTHON="$PWD/.venv/bin/python" \
-          XPLACE_ENABLE_CUDA=OFF \
-          JOBS="$(nproc)" \
-          ./thirdparty/build_xplace_gpugr.sh
-
-        if ldd thirdparty/xplace/build_cpu_pr/cpp_to_py/gpugr/gpugr*.so \
-          | grep -Eqi 'cuda|cublas|cudnn|nccl|nvjit|nvshmem'; then
-          echo "CPU-only GPUGR unexpectedly depends on CUDA libraries" >&2
-          exit 1
-        fi
-
-        .venv/bin/python -m unittest -v \
-          unittest/ops/gpugr_backend_select_unittest.py \
-          thirdparty/xplace/cpp_to_py/gpugr/unittest_cpu_backend_build_guards.py \
-          thirdparty/xplace/cpp_to_py/gpugr/unittest_cpu_pattern_route.py \
-          thirdparty/xplace/cpp_to_py/gpugr/unittest_portless_io_pin_grnet.py \
-          thirdparty/xplace/cpp_to_py/io_parser/unittest_portless_lef_pin.py
+        uv sync --frozen --all-groups --python 3.11 --no-install-project
+        uv pip install --python .venv/bin/python 'cmake>=3.24,<4'
 
     - name: Build repaired wheel
       shell: bash
@@ -58,15 +38,21 @@ runs:
         # --no-build-isolation: the C++ ops must compile against the locked
         # torch (build-system requires would otherwise resolve the latest
         # torch, whose C++ ABI may not match the runtime torch used by ecc).
-        # The smoke step below fails when the prebuilt Xplace runtime was not
-        # packaged, so no configure-time guard is needed here.
-        uv build --wheel --verbose --no-build-isolation
+        CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)" \
+          uv build --wheel --verbose --no-build-isolation
+
+        if ldd build/xplace-runtime-cpu/*.so \
+          | grep -Eqi 'cuda|cublas|cudnn|nccl|nvjit|nvshmem'; then
+          echo "CPU-only GPUGR unexpectedly depends on CUDA libraries" >&2
+          exit 1
+        fi
 
         # Torch and CUDA libs excluded from auditwheel repair -- DreamPlace is built with
         # TORCH_ENABLE_CUDA=0 and torch is a runtime dependency (not bundled). Without these
         # exclusions auditwheel would bundle ~2 GB of shared libraries.
         EXCLUDE_LIBS=(
             libtorch.so libtorch_cpu.so libtorch_python.so libc10.so libshm.so
+            libtorch_cuda.so libc10_cuda.so
             libgomp.so.1
             # CUDA (not present in CPU build, but excluded as safety net)
             libcudart.so.12 libcublasLt.so.12 libcublas.so.12 libcudnn.so.9
@@ -82,7 +68,7 @@ runs:
         mkdir -p dist/wheel/repaired
         uv run --no-sync -m auditwheel repair dist/*.whl -w dist/wheel/repaired "${exclude_flags[@]}" --disable-isa-ext-check
 
-    - name: Smoke installed CPU-only GPUGR wheel
+    - name: Test installed CPU-only routability wheel
       shell: bash
       run: |
         wheel="$(find dist/wheel/repaired -maxdepth 1 -name 'ecc_dreamplace-*.whl' -print -quit)"
@@ -91,29 +77,5 @@ runs:
 
         repo_root="$PWD"
         cd /tmp
-        ECC_XPLACE_ROOT= REPO_ROOT="$repo_root" "$repo_root/.venv/bin/python" - <<'PY'
-        import os
-        import subprocess
-        import sys
-        from pathlib import Path
-        from types import SimpleNamespace
-
-        from dreamplace.ops.gpugr.xplace_backend import XplaceGPUGR
-
-        operator = XplaceGPUGR(
-            SimpleNamespace(lef_input=[], result_dir="/tmp"),
-            SimpleNamespace(data_manager=None),
-        )
-        xplace_root = operator._ensure_xplace_python_path()
-        _, gpugr, _, _, _ = operator._import_xplace_modules()
-        assert gpugr.cuda_enabled() is False
-        assert "site-packages" in str(xplace_root), xplace_root
-        env = os.environ.copy()
-        env["XPLACE_CPU_RUNTIME_ROOT"] = str(xplace_root)
-        test_path = (
-            Path(os.environ["REPO_ROOT"])
-            / "thirdparty/xplace/cpp_to_py/gpugr/unittest_cpu_pattern_route.py"
-        )
-        subprocess.run([sys.executable, str(test_path)], check=True, env=env)
-        print(f"installed_cpu_gpugr_route_ok root={xplace_root}")
-        PY
+        "$repo_root/.venv/bin/python" \
+          "$repo_root/unittest/ops/routability_wheel_smoke.py"

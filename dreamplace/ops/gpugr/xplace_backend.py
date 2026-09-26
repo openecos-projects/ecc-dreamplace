@@ -2,8 +2,9 @@
 
 This replaces the external ``tools.iEDA.module.gpugr`` dependency. The Xplace
 fork lives at ``<ecc-dreamplace>/thirdparty/xplace`` (git submodule, branch
-feature/ggr-lshape); its native extensions are built by
-``thirdparty/build_xplace_gpugr.sh`` against the ECC venv torch.
+feature/ggr-lshape); wheel builds compile its native extensions against the
+same Torch as DreamPlace. ``thirdparty/build_xplace_gpugr.sh`` is available
+for standalone native development.
 
 Ported from the pinned AiEDA reference implementation
 (tools/iEDA/module/gpugr.py @ 9b8aa46, sha256 b3981e71...) with three
@@ -27,6 +28,7 @@ import logging
 import os
 import shutil
 import sys
+import sysconfig
 import tempfile
 import time
 import types
@@ -215,9 +217,11 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         env_root = os.environ.get("ECC_XPLACE_ROOT")
         if env_root:
             yield Path(env_root).expanduser()
-        # 2. running from the repo checkout (unit tests, in-repo scripts)
+        # 2. wheel runtime, including native artifacts for inplace editable sources
+        yield Path(sysconfig.get_path("platlib")) / "thirdparty" / "xplace"
+        # 3. standalone development without an installed wheel
         yield Path(__file__).resolve().parents[3] / "thirdparty" / "xplace"
-        # 3. running from the installed (editable) package: the cmake-configured
+        # 4. running from the installed (editable) package: the cmake-configured
         #    source dir recorded in dreamplace/configure.py
         try:
             import dreamplace.configure as configure
@@ -232,17 +236,25 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         if self._xplace_root is not None:
             return self._xplace_root
         tried = []
+        source_root = None
         for candidate in self._xplace_root_candidates():
             candidate = candidate.resolve()
             if candidate in tried:
                 continue
             tried.append(candidate)
             if (candidate / "cpp_to_py").is_dir():
+                if source_root is None:
+                    source_root = candidate
+                if not any((candidate / "cpp_to_py" / "cpybin").glob("gpugr*.so")):
+                    continue
                 xplace_root_str = str(candidate)
                 if xplace_root_str not in sys.path:
                     sys.path.insert(0, xplace_root_str)
                 self._xplace_root = candidate
                 return candidate
+        if source_root is not None:
+            self._xplace_root = source_root
+            return source_root
         raise RuntimeError(
             "Xplace submodule not found; tried: "
             + ", ".join(str(path) for path in tried)

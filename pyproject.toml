@@ -1,5 +1,5 @@
 [build-system]
-requires = ["scikit-build-core", "torch"]
+requires = ["scikit-build-core", "torch>=2.11,<2.12"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -15,7 +15,7 @@ dependencies = [
   "cairocffi>=0.9.0",
   "pkgconfig>=1.4.0",
   "setuptools>=39.1.0",
-  "torch>=1.6.0",
+  "torch>=2.11,<2.12",
   "shapely>=1.7.0",
   "pygmo>=2.16.1",
   "pyDOE2>=1.3.0",
@@ -27,6 +27,7 @@ dependencies = [
 ]
 
 [tool.scikit-build]
+cmake.version = ">=3.24,<4"
 wheel.packages = ["dreamplace"]
 cmake.define.CMAKE_CXX_ABI = 1
 sdist.include = [

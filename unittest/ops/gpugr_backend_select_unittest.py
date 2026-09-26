@@ -4,12 +4,14 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 AUTODMP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if AUTODMP_ROOT not in sys.path:
     sys.path.insert(0, AUTODMP_ROOT)
 
+from dreamplace.ops.gpugr import xplace_backend  # noqa: E402
 from dreamplace.ops.gpugr.xplace_backend import (  # noqa: E402
     XplaceGPUGR,
     normalize_gpugr_backend,
@@ -19,6 +21,45 @@ from dreamplace.ops.gpugr.xplace_backend import (  # noqa: E402
 
 
 class GPUGRBackendSelectTest(unittest.TestCase):
+    def test_installed_runtime_precedes_stale_checkout_extensions(self):
+        with tempfile.TemporaryDirectory(prefix="xplace_runtime_lookup_") as tmp:
+            root = Path(tmp)
+            checkout = root / "checkout"
+            platlib = root / "site-packages"
+            installed = platlib / "thirdparty/xplace"
+            source = checkout / "thirdparty/xplace"
+            for candidate in (installed, source):
+                extensions = candidate / "cpp_to_py/cpybin"
+                extensions.mkdir(parents=True)
+                (extensions / "gpugr.so").touch()
+            with (
+                mock.patch.dict(os.environ, {"ECC_XPLACE_ROOT": ""}),
+                mock.patch.object(xplace_backend.sysconfig, "get_path", return_value=str(platlib)),
+                mock.patch.object(
+                    xplace_backend,
+                    "__file__",
+                    str(checkout / "dreamplace/ops/gpugr/xplace_backend.py"),
+                ),
+                mock.patch.object(sys, "path", list(sys.path)),
+            ):
+                operator = XplaceGPUGR(SimpleNamespace(), SimpleNamespace())
+                self.assertEqual(operator._ensure_xplace_python_path(), installed)
+                self.assertEqual(sys.path[0], str(installed))
+                os.environ["ECC_XPLACE_ROOT"] = str(source)
+                operator = XplaceGPUGR(SimpleNamespace(), SimpleNamespace())
+                self.assertEqual(operator._ensure_xplace_python_path(), source)
+
+    def test_missing_extensions_report_the_incomplete_runtime(self):
+        with tempfile.TemporaryDirectory(prefix="xplace_runtime_missing_") as tmp:
+            root = Path(tmp)
+            (root / "cpp_to_py").mkdir()
+            with mock.patch.object(
+                XplaceGPUGR, "_xplace_root_candidates", return_value=iter([root])
+            ):
+                operator = XplaceGPUGR(SimpleNamespace(), SimpleNamespace())
+                with self.assertRaisesRegex(RuntimeError, "Xplace gpugr extensions are not built"):
+                    operator._import_xplace_modules()
+
     def test_normalize_rejects_unknown_backend(self):
         with self.assertRaises(ValueError):
             normalize_gpugr_backend("gpu")

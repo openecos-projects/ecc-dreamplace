@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from dreamplace.Params import Params
+from dreamplace.ops.routability import route_evaluation
 from dreamplace.ops.routability.post_legalization_adaptive_padding import (
     allocate_padding_sites,
     build_smoothed_overflow_map,
@@ -16,8 +17,6 @@ from dreamplace.ops.routability.post_legalization_adaptive_padding import (
 
 class PostLegalizationAdaptivePaddingTest(unittest.TestCase):
     def test_gpugr_operator_receives_params_and_placedb(self):
-        from dreamplace import NonLinearPlace
-
         params = SimpleNamespace(
             post_legalization_adaptive_padding_flag=1,
             legalize_flag=1,
@@ -33,20 +32,20 @@ class PostLegalizationAdaptivePaddingTest(unittest.TestCase):
         operator.run_gpugr.side_effect = RuntimeError("stop after operator dispatch")
 
         with (
-            mock.patch.object(NonLinearPlace, "_write_back_autodmp_pos_to_ieda"),
+            mock.patch.object(route_evaluation, "write_back_movable_lpos"),
             mock.patch.object(
-                NonLinearPlace,
-                "_compute_gpugr_route_grid_like_xplace",
+                route_evaluation,
+                "compute_route_grid_like_xplace",
                 return_value=(8, 8),
             ),
             mock.patch.object(
-                NonLinearPlace,
-                "_get_cached_gpugr_operator",
+                route_evaluation,
+                "get_cached_gpugr_operator",
                 return_value=operator,
             ) as get_operator,
             self.assertRaisesRegex(RuntimeError, "stop after operator dispatch"),
         ):
-            NonLinearPlace._run_post_legalization_adaptive_padding(
+            route_evaluation.run_post_legalization_adaptive_padding(
                 params,
                 placedb,
                 pos=object(),

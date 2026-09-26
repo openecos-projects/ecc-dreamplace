@@ -75,10 +75,11 @@ class InflationTargetDensitySyncTest(unittest.TestCase):
             [0.0, 2.0, 3.0, 0.0, 2.0, 3.0],
             dtype=dtype,
         )
-        potential.compute_initial_density_map(pos)
+        potential(pos)
         fixed_map_before = potential.initial_density_map.clone()
 
         data_collections.target_density.fill_(0.75)
+        potential.reset()
         potential(pos)
 
         self.assertAlmostEqual(float(potential.ratio[0]), 0.75)

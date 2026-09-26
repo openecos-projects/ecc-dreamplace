@@ -564,6 +564,50 @@ class PlaceObj(nn.Module):
         self.l_shape_capacity_al_last_summary = {}
         self.l_shape_macro_exclusion_last_summary = {}
 
+    def collect_l_shape_telemetry(self, metric):
+        from dreamplace.ops.routability.l_shape_telemetry import collect_l_shape_telemetry
+
+        collect_l_shape_telemetry(self, metric)
+
+    def snapshot_l_shape_forward_state(self):
+        """Capture diagnostic forward maps before a non-objective query."""
+        from dreamplace.ops.routability.l_shape_electric_potential import (
+            SegmentElectricPotentialFunction,
+        )
+
+        return (
+            SegmentElectricPotentialFunction.last_rho_map,
+            SegmentElectricPotentialFunction.last_rho_map_h,
+            SegmentElectricPotentialFunction.last_rho_map_v,
+        )
+
+    def restore_l_shape_forward_state(self, snapshot):
+        """Restore diagnostic forward maps after a non-objective query."""
+        from dreamplace.ops.routability.l_shape_electric_potential import (
+            SegmentElectricPotentialFunction,
+        )
+
+        (
+            SegmentElectricPotentialFunction.last_rho_map,
+            SegmentElectricPotentialFunction.last_rho_map_h,
+            SegmentElectricPotentialFunction.last_rho_map_v,
+        ) = snapshot
+
+    def refresh_routability_operators(self):
+        """Rebuild the operators whose bins follow the active routing grid."""
+        self.op_collections.pin_utilization_map_op = self.build_pin_utilization_map(
+            self.params, self.placedb, self.data_collections
+        )
+        self.op_collections.adjust_node_area_op = self.build_adjust_node_area(
+            self.params, self.placedb, self.data_collections
+        )
+
+    def refresh_after_geometry_change(self):
+        """Invalidate density and pin caches after area or geometry changes."""
+        self.op_collections.density_op.reset()
+        self.op_collections.density_overflow_op.reset()
+        self.op_collections.pin_utilization_map_op.reset()
+
     @staticmethod
     def _telemetry_scalar(value):
         if value is None:

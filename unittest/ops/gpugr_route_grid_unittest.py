@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from dreamplace.NonLinearPlace import _compute_gpugr_route_grid_like_xplace
+from dreamplace.ops.routability.gpugr_context import compute_route_grid_like_xplace
 
 
 class GpugrRouteGridTest(unittest.TestCase):
@@ -22,7 +22,7 @@ class GpugrRouteGridTest(unittest.TestCase):
         )
 
         self.assertEqual(
-            _compute_gpugr_route_grid_like_xplace(params, placedb),
+            compute_route_grid_like_xplace(params, placedb),
             (512, 512),
         )
 
@@ -43,7 +43,7 @@ class GpugrRouteGridTest(unittest.TestCase):
         )
 
         self.assertEqual(
-            _compute_gpugr_route_grid_like_xplace(params, placedb),
+            compute_route_grid_like_xplace(params, placedb),
             (64, 32),
         )
 

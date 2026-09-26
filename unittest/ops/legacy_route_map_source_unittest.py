@@ -2,10 +2,7 @@ import sys
 import types
 import unittest
 
-from dreamplace.NonLinearPlace import (
-    _ensure_modularity_inflation_contract,
-    _resolve_route_map_source,
-)
+from dreamplace.ops.routability.routability_controller import RoutabilityController
 
 
 class LegacyRouteMapSourceTest(unittest.TestCase):
@@ -16,7 +13,7 @@ class LegacyRouteMapSourceTest(unittest.TestCase):
         )
 
         with self.assertLogs(level="INFO") as logs:
-            source = _resolve_route_map_source(params)
+            source = RoutabilityController.resolve_route_map_source(params)
 
         self.assertEqual(source, "irt_egr")
         self.assertIn("NCTUgr is not invoked", "\n".join(logs.output))
@@ -29,7 +26,7 @@ class LegacyRouteMapSourceTest(unittest.TestCase):
             adjust_nctugr_area_flag=1,
         )
 
-        self.assertEqual(_resolve_route_map_source(params), "gpugr")
+        self.assertEqual(RoutabilityController.resolve_route_map_source(params), "gpugr")
 
     def test_modularity_rejects_legacy_route_key(self):
         params = types.SimpleNamespace(
@@ -44,7 +41,9 @@ class LegacyRouteMapSourceTest(unittest.TestCase):
         with self.assertRaisesRegex(
             RuntimeError, "does not support adjust_nctugr_area_flag"
         ):
-            _ensure_modularity_inflation_contract(params, route_map_source="irt_egr")
+            RoutabilityController.ensure_modularity_inflation_contract(
+                params, route_map_source="irt_egr"
+            )
 
 
 if __name__ == "__main__":

@@ -20,6 +20,12 @@ install
 bin
 include
 unittest
+!unittest/
+unittest/ops/*
+!unittest/ops/cell_padding_geometry_unittest.py
+!unittest/ops/egr_padding_flow_unittest.py
+!unittest/ops/routability_controller_unittest.py
+!unittest/ops/routability_l_shape_inputs_unittest.py
 .cache
 *_unittest
 

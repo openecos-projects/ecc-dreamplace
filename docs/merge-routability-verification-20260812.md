@@ -55,7 +55,7 @@ unsupported timing text, ordinary profiling timers, or fake modules in tests.
   `pytest --import-mode=importlib`: `45 passed, 1 warning`.
 - `unittest_params_l_shape_preset.py`: `9 passed`.
 - `unittest_m2_pg_rail_blockage_flag.py`: `17 passed`.
-- `egr_padding_flow_test.py`: `1 passed` after restoring the production
+- `unittest/ops/egr_padding_flow_unittest.py`: `1 passed` after restoring the production
   lifecycle `standard legalization -> EGR map/padding -> padded legalization ->
   restore`; the fixture now supplies the current `timing_opt_flag` contract.
 - Final combined child focused set including EGR padding and legacy route

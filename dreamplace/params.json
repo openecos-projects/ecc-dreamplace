@@ -1,4 +1,68 @@
 {
+    "auto_adjust_bins": {
+        "description": "automatically derive num_bins_x and num_bins_y from the number of physical nodes",
+        "default": 0
+    },
+    "differentiable_timing_obj": {
+        "description": "compatibility flag for differentiable timing objective configuration",
+        "default": 1
+    },
+    "enable_net_weighting": {
+        "description": "enable timing-aware net weighting during global placement",
+        "default": 1
+    },
+    "macro_place_flag": {
+        "description": "whether enable two-stage macro placement",
+        "default": 0
+    },
+    "max_net_weight": {
+        "description": "maximum net weight for timing optimization; negative values or \"inf\" mean no limit",
+        "default": "inf"
+    },
+    "momentum_decay_factor": {
+        "description": "momentum decay factor used in timing-aware net-weight updates",
+        "default": 0.5
+    },
+    "net_weighting_scheme": {
+        "description": "net-weighting scheme for timing-aware optimization, e.g. adam | lilith",
+        "default": "lilith"
+    },
+    "pin2pin_accumulate_weight": {
+        "description": "increment added when accumulating an extra critical path",
+        "default": 0.2
+    },
+    "pin2pin_max_weight": {
+        "description": "maximum pin-to-pin timing weight",
+        "default": 50
+    },
+    "pin2pin_min_weight": {
+        "description": "minimum pin-to-pin timing weight",
+        "default": 10
+    },
+    "pin2pin_net_weighting": {
+        "description": "enable pin-to-pin net weighting for timing optimization",
+        "default": 0
+    },
+    "pin2pin_weight": {
+        "description": "base multiplier for pin-to-pin net weights",
+        "default": 2.5e-05
+    },
+    "start_iter": {
+        "description": "iteration to start pin-to-pin timing weighting",
+        "default": 500
+    },
+    "timing_eval_flag": {
+        "description": "enable timing evaluation reporting",
+        "default": 0
+    },
+    "timing_opt_flag": {
+        "description": "legacy timing-driven global placement flag; enabling it raises an error because OpenTimer integration has been removed",
+        "default": 0
+    },
+    "two_stage_density_scaler": {
+        "description": "scale density weight after the macro placement stage",
+        "default": 1000
+    },
     "egr_stage": {
         "description": "EGR stage: 2D or 3D",
         "default": "2D"
@@ -300,7 +364,7 @@
         "default": 0
     },
     "gpugr_backend": {
-        "description": "GGR backend selection: auto chooses cuda when available and cpu_pr otherwise; cuda requires a CUDA-capable gpugr build; cpu_pr is serial diagnostic pattern routing; cpu_pr_mt is explicit deterministic parallel CPU pattern routing and uses num_threads as its requested worker count; all CPU pattern backends require rrrIters=0",
+        "description": "GGR backend selection: auto chooses cuda when available and cpu_pr_mt otherwise; cuda requires a CUDA-capable gpugr build; cpu_pr is explicit serial diagnostic pattern routing; cpu_pr_mt is deterministic parallel CPU pattern routing and uses num_threads as its requested worker count; all CPU pattern backends require rrrIters=0",
         "default": "auto"
     },
     "gpugr_bottom_routing_layer": {
@@ -688,15 +752,15 @@
         "default": 0
     },
     "macro_pin_halo_x": {
-        "description": "whether use weighted smooth HPWL with RISA net weights",
+        "description": "horizontal halo applied to macro pins for pin-aware macro shaping",
         "default": 1000
     },
     "macro_pin_halo_y": {
-        "description": "whether use weighted smooth HPWL with RISA net weights",
+        "description": "vertical halo applied to macro pins for pin-aware macro shaping",
         "default": 1000
     },
     "with_sta": {
-        "description": "Open STA for Place",
+        "description": "enable integrated STA initialization and differentiable timing updates during placement",
         "default": 1
     }
 }

@@ -64,21 +64,25 @@ class GPUGRBackendSelectTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             normalize_gpugr_backend("gpu")
 
-    def test_auto_prefers_cuda_when_ready(self):
-        self.assertEqual(
-            resolve_gpugr_backend("auto", cuda_available=True, extension_cuda_enabled=True),
-            "cuda",
-        )
-
-    def test_auto_falls_back_to_cpu_pr_without_cuda_extension(self):
-        self.assertEqual(
-            resolve_gpugr_backend("auto", cuda_available=True, extension_cuda_enabled=False),
-            "cpu_pr",
-        )
-        self.assertEqual(
-            resolve_gpugr_backend("auto", cuda_available=False, extension_cuda_enabled=True),
-            "cpu_pr",
-        )
+    def test_auto_uses_parallel_cpu_unless_cuda_is_ready(self):
+        for cuda_available, extension_cuda_enabled, expected in (
+            (True, True, "cuda"),
+            (True, False, "cpu_pr_mt"),
+            (False, True, "cpu_pr_mt"),
+            (False, False, "cpu_pr_mt"),
+        ):
+            with self.subTest(
+                cuda_available=cuda_available,
+                extension_cuda_enabled=extension_cuda_enabled,
+            ):
+                self.assertEqual(
+                    resolve_gpugr_backend(
+                        "auto",
+                        cuda_available=cuda_available,
+                        extension_cuda_enabled=extension_cuda_enabled,
+                    ),
+                    expected,
+                )
 
     def test_explicit_cuda_requires_cuda_readiness(self):
         self.assertEqual(

@@ -80,10 +80,10 @@ def resolve_gpugr_backend(
 
     cuda_ready = cuda_available and extension_cuda_enabled
     if normalized == "auto":
-        resolved = "cuda" if cuda_ready else "cpu_pr"
-        if resolved == "cpu_pr" and not extension_cuda_enabled:
+        resolved = "cuda" if cuda_ready else "cpu_pr_mt"
+        if resolved == "cpu_pr_mt" and not extension_cuda_enabled:
             logger.warning(
-                "gpugr backend=auto resolved to cpu_pr because the gpugr extension "
+                "gpugr backend=auto resolved to cpu_pr_mt because the gpugr extension "
                 "was built without CUDA"
             )
         return resolved

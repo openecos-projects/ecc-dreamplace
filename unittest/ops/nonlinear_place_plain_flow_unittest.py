@@ -28,7 +28,8 @@ def make_placement_database(params):
     db.node_names = np.array([b"U0", b"U1", b"U2", b"U3", b"MOVABLE_MEM", b"FIXED_MEM"])
     db.node_x = np.array([1, 13, 1, 13, 3, 7], dtype=np.float32)
     db.node_y = np.array([1, 1, 12, 12, 3, 7], dtype=np.float32)
-    db.node_size_x = db.node_size_y = np.array([1, 1, 1, 1, 2, 2], dtype=np.float32)
+    db.node_size_x = np.array([1, 1, 1, 1, 2, 2], dtype=np.float32)
+    db.node_size_y = db.node_size_x.copy()
     db.node_orient = np.array([b"N"] * 6)
     db.node_is_hard_macro = np.array([False] * 4 + [True, True])
     db.macro_writeback_candidate = np.array([False] * 4 + [True, False])
@@ -69,6 +70,27 @@ def make_placement_database(params):
 
 
 class PlainPlacementFlowTest(unittest.TestCase):
+    def test_auto_bins_use_site_aligned_padded_geometry(self):
+        params = Params()
+        schema = json.loads((Path(configure.__file__).parent / "params.json").read_text())
+        params.fromJson({key: value["default"] for key, value in schema.items()})
+        params.aux_input = ""
+        params.pin_density = 0
+        params.macro_halo_x = params.macro_halo_y = 0
+        params.auto_adjust_bins = 1
+        params.target_density = 0.2
+
+        with tempfile.TemporaryDirectory(prefix="auto-placement-bins-") as directory:
+            params.result_dir = directory
+            params.cell_padding_x = 0
+            unpadded = make_placement_database(params)
+            params.cell_padding_x = 1
+            padded = make_placement_database(params)
+
+        self.assertEqual((unpadded.num_bins_x, unpadded.num_bins_y), (4, 4))
+        self.assertEqual((padded.num_bins_x, padded.num_bins_y), (2, 2))
+        self.assertGreater(padded.total_movable_node_area, unpadded.total_movable_node_area)
+
     def _run(self, gpu, macro_only):
         params = Params()
         schema = json.loads((Path(configure.__file__).parent / "params.json").read_text())

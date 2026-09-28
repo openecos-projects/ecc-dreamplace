@@ -3,10 +3,32 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from dreamplace.macroPlaceDB import MacroPlaceDB
+from dreamplace.macroPlaceDB import MacroPlaceDB, compute_auto_bin_counts
 
 
 class CellPaddingGeometryTest(unittest.TestCase):
+    def test_bm64_padded_area_selects_64_bins(self):
+        self.assertEqual(
+            compute_auto_bin_counts(978502, 11465, 0.913443, 1046, 1050),
+            (64, 64),
+        )
+
+    def test_bins_follow_layout_aspect_ratio(self):
+        self.assertEqual(compute_auto_bin_counts(10000, 1000, 0.5, 200, 100), (32, 16))
+        self.assertEqual(compute_auto_bin_counts(10000, 1000, 0.5, 100, 200), (16, 32))
+
+    def test_large_design_is_capped_at_512(self):
+        self.assertEqual(
+            compute_auto_bin_counts(1000000, 1000000, 0.8, 1000, 1000),
+            (512, 512),
+        )
+
+    def test_konder_padded_area_reaches_cap(self):
+        self.assertEqual(
+            compute_auto_bin_counts(6.91784e7, 844534, 0.367778, 14206, 14210),
+            (512, 512),
+        )
+
     def test_site_aligned_padding_updates_movable_geometry_and_pins(self):
         placedb = MacroPlaceDB(None)
         placedb.num_physical_nodes = 2
@@ -35,6 +57,7 @@ class CellPaddingGeometryTest(unittest.TestCase):
             bndry_padding_y=0.0,
             result_dir=None,
         )
+        unpadded_area = float(np.sum(placedb.node_size_x * placedb.node_size_y))
 
         placedb.update_macros(params)
 
@@ -42,6 +65,13 @@ class CellPaddingGeometryTest(unittest.TestCase):
         np.testing.assert_array_equal(placedb.node_size_x, [22.0, 32.0])
         np.testing.assert_array_equal(placedb.node_x, [-6.0, 4.0])
         np.testing.assert_array_equal(placedb.pin_offset_x, [7.0, 8.0])
+        padded_area = float(np.sum(placedb.node_size_x * placedb.node_size_y))
+        self.assertEqual(
+            compute_auto_bin_counts(unpadded_area, 2, 0.5, 40, 40), (4, 4)
+        )
+        self.assertEqual(
+            compute_auto_bin_counts(padded_area, 2, 0.5, 40, 40), (2, 2)
+        )
 
 
 if __name__ == "__main__":

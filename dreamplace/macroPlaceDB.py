@@ -62,6 +62,23 @@ def _compute_enhanced_auto_adjust_bins(
     return new_num_bins_x, new_num_bins_y
 
 
+def compute_auto_bin_counts(movable_area, movable_count, target_density, width, height):
+    """Use GPL's area and aspect-ratio rule within DreamPlace's 512-bin limit."""
+    average_area = movable_area / movable_count
+    ideal_bin_count = max(4, width * height * target_density / average_area)
+    ratio = 2 ** math.floor(math.log2(max(width, height) / min(width, height)))
+    # The shortest axis has at least two bins, so the ratio cannot exceed 256.
+    ratio = min(ratio, 256)
+
+    bin_count = 2
+    while bin_count < 512 and 4 * bin_count * bin_count * ratio <= ideal_bin_count:
+        bin_count *= 2
+
+    if width > height:
+        return min(512, bin_count * ratio), bin_count
+    return bin_count, min(512, bin_count * ratio)
+
+
 class MacroPlaceDB(object):
     """
     @brief placement database
@@ -1702,9 +1719,17 @@ row height = %g, site width = %g
             self.row_height, self.site_width
         )
 
+        self.total_movable_node_area = float(np.sum(
+            self.node_size_x[:self.num_movable_nodes] * self.node_size_y[:self.num_movable_nodes]))
+        target_density = min(self.total_movable_node_area / self.total_space_area, 1.0)
+        if target_density > params.target_density:
+            logging.warn(
+                "target_density %g is smaller than utilization %g, ignored"
+                % (params.target_density, target_density)
+            )
+            params.target_density = target_density
+
         # set number of bins
-        # derive bin dimensions by keeping the aspect ratio
-        aspect_ratio = (self.yh - self.yl) / (self.xh - self.xl)
         if _is_enabled_param(getattr(params, "enhanced_auto_adjust_bins", 0)):
             preset_num_bins_x = int(params.num_bins_x)
             preset_num_bins_y = int(params.num_bins_y)
@@ -1722,9 +1747,22 @@ row height = %g, site width = %g
             params.num_bins_x = num_bins_x
             params.num_bins_y = num_bins_y
         elif _is_enabled_param(getattr(params, "auto_adjust_bins", 0)):
-            num_bins = min(512, math.pow(2, math.floor(math.log2(math.sqrt(self.num_physical_nodes))) - 1))
-            num_bins_x = math.floor(num_bins)
-            num_bins_y = math.floor(num_bins)
+            num_bins_x, num_bins_y = compute_auto_bin_counts(
+                self.total_movable_node_area,
+                self.num_movable_nodes,
+                params.target_density,
+                self.xh - self.xl,
+                self.yh - self.yl,
+            )
+            logging.info(
+                "auto placement bins from padded movable area %g, movable nodes %d, "
+                "target density %g: %dx%d",
+                self.total_movable_node_area,
+                self.num_movable_nodes,
+                params.target_density,
+                num_bins_x,
+                num_bins_y,
+            )
             params.num_bins_x = num_bins_x
             params.num_bins_y = num_bins_y
 
@@ -1753,8 +1791,6 @@ row height = %g, site width = %g
         content += "#pins = %d, #movable_pins = %d\n" % (
             self.num_pins, self.num_movable_pins)
         # set total cell area
-        self.total_movable_node_area = float(np.sum(
-            self.node_size_x[:self.num_movable_nodes] * self.node_size_y[:self.num_movable_nodes]))
         # Fixed geometry is unioned by ecc-tools before it reaches Python.  Do
         # not sum terminal rectangles here: overlapping bodies and synthetic
         # obstacles would otherwise be counted more than once and overwrite
@@ -1799,14 +1835,6 @@ row height = %g, site width = %g
             #     )
             # )
 
-        target_density = min(self.total_movable_node_area /
-                             self.total_space_area, 1.0)
-        if target_density > params.target_density:
-            logging.warn(
-                "target_density %g is smaller than utilization %g, ignored"
-                % (params.target_density, target_density)
-            )
-            params.target_density = target_density
         utilization = self.total_movable_node_area / self.total_space_area
         content += "utilization = %g, target_density = %g\n" % (
             self.total_movable_node_area / self.total_space_area,

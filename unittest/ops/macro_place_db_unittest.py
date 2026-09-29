@@ -51,6 +51,7 @@ class MacroPlaceDBFixedMacroMaskTest(unittest.TestCase):
             macro_pin_halo_x=0.0,
             macro_pin_halo_y=0.0,
             cell_padding_x=0.0,
+            macro_only=False,
         )
 
     def _make_minimal_placedb(self):
@@ -154,6 +155,36 @@ class MacroPlaceDBFixedAreaTest(unittest.TestCase):
 
         self.assertEqual(placedb.total_fixed_node_area, 35.0)
         self.assertEqual(placedb.total_space_area, 65.0)
+
+
+class MacroPlaceDBWritebackTest(unittest.TestCase):
+    def test_macro_only_apply_uses_native_selective_writeback(self):
+        placedb = MacroPlaceDB.__new__(MacroPlaceDB)
+        placedb.num_physical_nodes = 2
+        placedb.num_terminals = 0
+        placedb.num_terminal_NIs = 0
+        placedb.node_x = np.zeros(2, dtype=np.float32)
+        placedb.node_y = np.zeros(2, dtype=np.float32)
+        placedb.ecc_db = object()
+        placedb.ecc_module = types.SimpleNamespace(
+            write_placement_back=lambda *args: self.fail("dense writeback used")
+        )
+        calls = []
+        placedb.pydb = types.SimpleNamespace(
+            write_macro_placement_back=lambda node_x, node_y: calls.append(
+                (node_x.copy(), node_y.copy())
+            )
+        )
+
+        placedb.apply(
+            types.SimpleNamespace(macro_only=1, scale_factor=2.0, shift_factor=[10.0, 20.0]),
+            np.array([2.0, 4.0], dtype=np.float32),
+            np.array([8.0, 10.0], dtype=np.float32),
+        )
+
+        self.assertEqual(len(calls), 1)
+        np.testing.assert_array_equal(calls[0][0], [11.0, 12.0])
+        np.testing.assert_array_equal(calls[0][1], [24.0, 25.0])
 
 
 if __name__ == "__main__":

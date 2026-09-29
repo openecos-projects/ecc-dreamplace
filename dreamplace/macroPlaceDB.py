@@ -2577,7 +2577,10 @@ row height = %g, site width = %g
         node_y = self.node_y[:self.num_movable_nodes] * \
             unscale_factor + params.shift_factor[1]
         # update raw database
-        self.write_placement_back(node_x, node_y)
+        if params.macro_only:
+            self.pydb.write_macro_placement_back(node_x, node_y)
+        else:
+            self.write_placement_back(node_x, node_y)
 
 
 if __name__ == "__main__":

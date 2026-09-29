@@ -1,5 +1,5 @@
 [build-system]
-requires = ["scikit-build-core", "torch"]
+requires = ["scikit-build-core", "torch>=2.11,<2.12"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -15,7 +15,7 @@ dependencies = [
   "cairocffi>=0.9.0",
   "pkgconfig>=1.4.0",
   "setuptools>=39.1.0",
-  "torch>=1.6.0",
+  "torch>=2.11,<2.12",
   "shapely>=1.7.0",
   "pygmo>=2.16.1",
   "pyDOE2>=1.3.0",
@@ -27,15 +27,43 @@ dependencies = [
 ]
 
 [tool.scikit-build]
-cmake.define.PYTHON_EXECUTABLE = "python3"
+cmake.version = ">=3.24,<4"
+wheel.packages = ["dreamplace"]
 cmake.define.CMAKE_CXX_ABI = 1
 sdist.include = [
   "thirdparty/cub/**",
   "thirdparty/munkres-cpp/**",
   "thirdparty/pybind11/**",
+  "thirdparty/build_xplace_gpugr.sh",
+  "thirdparty/xplace/**",
+  "!thirdparty/xplace/build*/**",
+  "!thirdparty/xplace/cpp_to_py/cpybin/**",
+  "!thirdparty/xplace/**/__pycache__/**",
+  "!thirdparty/xplace/**/*.pyc",
+  "!thirdparty/xplace/data/**",
+  "!thirdparty/xplace/examples/**",
+  "!thirdparty/xplace/img/**",
+  "!thirdparty/xplace/tool/**",
+  "!thirdparty/xplace/thirdparty/placers/**",
+]
+sdist.exclude = [
+  "thirdparty/xplace/build*/**",
+  "thirdparty/xplace/cpp_to_py/cpybin/**",
+  "thirdparty/xplace/**/__pycache__/**",
+  "thirdparty/xplace/**/*.pyc",
+  "thirdparty/xplace/data/**",
+  "thirdparty/xplace/examples/**",
+  "thirdparty/xplace/img/**",
+  "thirdparty/xplace/tool/**",
+  "thirdparty/xplace/thirdparty/placers/**",
 ]
 build.verbose = true
-editable.rebuild = true
+# Native extensions are rebuilt explicitly; importing DreamPlace must not
+# mutate or replace the loaded shared objects in a running process.  Inplace
+# editable mode keeps Python orchestration on this checkout instead of a
+# stale wheel-file redirect, while CMake still owns native/runtime artifacts.
+editable.mode = "inplace"
+editable.rebuild = false
 build-dir = "build"
 
 [dependency-groups]

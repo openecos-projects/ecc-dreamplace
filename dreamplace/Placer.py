@@ -34,7 +34,6 @@ import logging
 
 os.environ['eda_tool'] = "ecc"
 os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
-
 # for consistency between python2 and python3
 root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if root_dir not in sys.path:
@@ -54,7 +53,11 @@ from dreamplace.macroPlaceDB import MacroPlaceDB as PlaceDB
 
 
 
-def seed_all(seed):
+def seed_all(seed, deterministic=False):
+    deterministic = bool(deterministic)
+    if deterministic:
+        os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     random.seed(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
     np.random.seed(seed)
@@ -63,6 +66,15 @@ def seed_all(seed):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
+    if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
+        torch.backends.cuda.matmul.allow_tf32 = False
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.allow_tf32 = False
+    if hasattr(torch, "use_deterministic_algorithms"):
+        try:
+            torch.use_deterministic_algorithms(deterministic, warn_only=True)
+        except TypeError:
+            torch.use_deterministic_algorithms(deterministic)
 
 
 class PlacementEngine:
@@ -93,7 +105,10 @@ class PlacementEngine:
             logging.critical("running in evaluation mode")
 
         # seed for reproducibility
-        seed_all(self.params.random_seed)
+        seed_all(
+            self.params.random_seed,
+            deterministic=getattr(self.params, "deterministic_flag", False),
+        )
 
         # control multithreading
         os.environ["OMP_NUM_THREADS"] = "%d" % (self.params.num_threads)
@@ -147,7 +162,6 @@ class PlacementEngine:
         # solve placement
         import dreamplace.NonLinearPlace as NonLinearPlace  # deferred to avoid compiled-op imports at module level
         tt = time.time()
-        self.params.plot_flag = True
         if self.params.timing_opt_flag:
             raise RuntimeError(
                 "timing_opt_flag is no longer supported because OpenTimer integration has been removed"

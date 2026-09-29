@@ -1,11 +1,7 @@
-import sys
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 
 import torch
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dreamplace.NonLinearPlace import NonLinearPlace
 
@@ -52,6 +48,7 @@ class EGRPaddingFlowTest(unittest.TestCase):
             irt_egr_congestion_map_op=congestion_map_op,
             hpwl_op=lambda *args, **kwargs: 0,
             rsmt_wl_op=lambda *args, **kwargs: torch.tensor(0.0),
+            m2_pa_refine_op=None,
         )
 
         placedb = SimpleNamespace(
@@ -75,6 +72,7 @@ class EGRPaddingFlowTest(unittest.TestCase):
             dump_legalize_solution_flag=0,
             detailed_place_flag=0,
             with_sta=False,
+            timing_opt_flag=0,
         )
 
         import dreamplace.NonLinearPlace as nonlinear_module

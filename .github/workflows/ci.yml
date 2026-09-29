@@ -3,6 +3,11 @@ name: CI
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      cuda-tests:
+        description: Build and test a CUDA wheel on a GPU runner with CUDA Toolkit installed.
+        type: boolean
+        default: false
   push:
     branches: [main]
 
@@ -30,3 +35,28 @@ jobs:
           name: ecc-dreamplace-wheel
           path: dist/wheel/repaired/ecc_dreamplace-*.whl
           if-no-files-found: error
+
+  cuda-routability:
+    if: github.event_name == 'workflow_dispatch' && inputs.cuda-tests
+    runs-on: [self-hosted, linux, x64, gpu]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: astral-sh/setup-uv@v5
+      - name: Prepare CUDA Torch environment
+        run: |
+          uv sync --frozen --all-groups --python 3.11 --no-install-project
+          uv pip install --python .venv/bin/python 'cmake>=3.24,<4'
+          uv pip install --python .venv/bin/python --reinstall \
+            torch==2.11.0+cu128 --index-url https://download.pytorch.org/whl/cu128
+      - name: Build CUDA wheel
+        run: |
+          CMAKE_BUILD_PARALLEL_LEVEL=4 uv build --wheel --no-build-isolation
+          uv pip install --python .venv/bin/python --reinstall --no-deps dist/*.whl
+      - name: Test installed CUDA routability wheel
+        run: |
+          repo_root="$PWD"
+          cd /tmp
+          "$repo_root/.venv/bin/python" \
+            "$repo_root/unittest/ops/routability_wheel_smoke.py" --cuda

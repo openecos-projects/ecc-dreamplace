@@ -27,9 +27,10 @@ runs:
 
     - name: Install Python dependencies
       shell: bash
-      # Do not trigger an isolated editable build here: build-system's torch
-      # requirement is unpinned. The wheel build below uses the locked torch.
-      run: uv sync --frozen --all-groups --python 3.11 --no-install-project
+      # Install the locked CPU Torch before compiling native extensions.
+      run: |
+        uv sync --frozen --all-groups --python 3.11 --no-install-project
+        uv pip install --python .venv/bin/python 'cmake>=3.24,<4'
 
     - name: Build repaired wheel
       shell: bash
@@ -37,13 +38,21 @@ runs:
         # --no-build-isolation: the C++ ops must compile against the locked
         # torch (build-system requires would otherwise resolve the latest
         # torch, whose C++ ABI may not match the runtime torch used by ecc).
-        uv build --verbose --no-build-isolation
+        CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)" \
+          uv build --wheel --verbose --no-build-isolation
+
+        if ldd build/xplace-runtime-cpu/*.so \
+          | grep -Eqi 'cuda|cublas|cudnn|nccl|nvjit|nvshmem'; then
+          echo "CPU-only GPUGR unexpectedly depends on CUDA libraries" >&2
+          exit 1
+        fi
 
         # Torch and CUDA libs excluded from auditwheel repair -- DreamPlace is built with
         # TORCH_ENABLE_CUDA=0 and torch is a runtime dependency (not bundled). Without these
         # exclusions auditwheel would bundle ~2 GB of shared libraries.
         EXCLUDE_LIBS=(
             libtorch.so libtorch_cpu.so libtorch_python.so libc10.so libshm.so
+            libtorch_cuda.so libc10_cuda.so
             libgomp.so.1
             # CUDA (not present in CPU build, but excluded as safety net)
             libcudart.so.12 libcublasLt.so.12 libcublas.so.12 libcudnn.so.9
@@ -58,3 +67,15 @@ runs:
 
         mkdir -p dist/wheel/repaired
         uv run --no-sync -m auditwheel repair dist/*.whl -w dist/wheel/repaired "${exclude_flags[@]}" --disable-isa-ext-check
+
+    - name: Test installed CPU-only routability wheel
+      shell: bash
+      run: |
+        wheel="$(find dist/wheel/repaired -maxdepth 1 -name 'ecc_dreamplace-*.whl' -print -quit)"
+        test -n "$wheel"
+        uv pip install --python .venv/bin/python --reinstall --no-deps "$wheel"
+
+        repo_root="$PWD"
+        cd /tmp
+        "$repo_root/.venv/bin/python" \
+          "$repo_root/unittest/ops/routability_wheel_smoke.py"

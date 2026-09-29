@@ -1,4 +1,76 @@
 {
+    "auto_adjust_bins": {
+        "description": "automatically derive num_bins_x and num_bins_y from the number of physical nodes",
+        "default": 0
+    },
+    "differentiable_timing_obj": {
+        "description": "compatibility flag for differentiable timing objective configuration",
+        "default": 1
+    },
+    "enable_net_weighting": {
+        "description": "enable timing-aware net weighting during global placement",
+        "default": 1
+    },
+    "macro_place_flag": {
+        "description": "whether enable two-stage macro placement",
+        "default": 0
+    },
+    "max_net_weight": {
+        "description": "maximum net weight for timing optimization; negative values or \"inf\" mean no limit",
+        "default": "inf"
+    },
+    "momentum_decay_factor": {
+        "description": "momentum decay factor used in timing-aware net-weight updates",
+        "default": 0.5
+    },
+    "net_weighting_scheme": {
+        "description": "net-weighting scheme for timing-aware optimization, e.g. adam | lilith",
+        "default": "lilith"
+    },
+    "pin2pin_accumulate_weight": {
+        "description": "increment added when accumulating an extra critical path",
+        "default": 0.2
+    },
+    "pin2pin_max_weight": {
+        "description": "maximum pin-to-pin timing weight",
+        "default": 50
+    },
+    "pin2pin_min_weight": {
+        "description": "minimum pin-to-pin timing weight",
+        "default": 10
+    },
+    "pin2pin_net_weighting": {
+        "description": "enable pin-to-pin net weighting for timing optimization",
+        "default": 0
+    },
+    "pin2pin_weight": {
+        "description": "base multiplier for pin-to-pin net weights",
+        "default": 2.5e-05
+    },
+    "start_iter": {
+        "description": "iteration to start pin-to-pin timing weighting",
+        "default": 500
+    },
+    "timing_eval_flag": {
+        "description": "enable timing evaluation reporting",
+        "default": 0
+    },
+    "timing_opt_flag": {
+        "description": "legacy timing-driven global placement flag; enabling it raises an error because OpenTimer integration has been removed",
+        "default": 0
+    },
+    "two_stage_density_scaler": {
+        "description": "scale density weight after the macro placement stage",
+        "default": 1000
+    },
+    "egr_stage": {
+        "description": "EGR stage: 2D or 3D",
+        "default": "2D"
+    },
+    "egr_resolve_congestion": {
+        "description": "EGR resolve congestion level",
+        "default": "off"
+    },
     "aux_input": {
         "description": "input .aux file",
         "default": "",
@@ -60,6 +132,10 @@
         "description": "initial weight of density cost",
         "default": 8e-5
     },
+    "precond_pin_count_flag": {
+        "description": "add original DreamPlace per-node raw pin count to the shared gradient preconditioner before clamping; 0 keeps density-area-only preconditioning, 1 enables pin count (not net-weighted PWS)",
+        "default": 0
+    },
     "random_seed": {
         "description": "random seed",
         "default": 5000
@@ -91,8 +167,8 @@
         "description": "noise to initial positions for global placement",
         "default": 0.025
     },
-    "auto_adjust_bins": {
-        "description": "automatically derive num_bins_x and num_bins_y from the number of physical nodes",
+    "enhanced_auto_adjust_bins": {
+        "description": "enable enhanced automatic placement bin adjustment; when enabled, it overrides auto_adjust_bins, keeps the configured bin preset unless num_bins_y exceeds the placement row count, and then caps num_bins_y to the largest power of two not exceeding the row count while preserving the configured num_bins_x/num_bins_y ratio",
         "default": 0
     },
     "enable_fillers": {
@@ -183,8 +259,8 @@
         "description": "whether enable routability optimization",
         "default": 0
     },
-    "macro_place_flag": {
-        "description": "whether enable two-stage macro placement",
+    "l_shape_routability_flag": {
+        "description": "whether enable L-shape routability optimization",
         "default": 0
     },
     "macro_only": {
@@ -194,6 +270,50 @@
     "use_bb": {
         "description": "whether use the Barzilai-Borwein step size in Nesterov optimization",
         "default": 0
+    },
+    "iopin_density_weight": {
+        "description": "extra I/O pin density weight added to the electric initial density map; 0 disables the extra I/O pin density increment, 3 matches Xplace's extra 3*Diopin term",
+        "default": 3.0
+    },
+    "ieda_m2_pg_rail_blockage_flag": {
+        "description": "whether convert iEDA VDD/VSS special-net shapes on the second routing layer into synthetic placement blockages",
+        "default": 0
+    },
+    "m2_pg_rail_density_weight": {
+        "description": "M2 PG rail soft density weight added to the electric initial density map when ieda_m2_pg_rail_blockage_flag is disabled; 0 disables the soft density path, 1 matches the old hard-node rail density contribution",
+        "default": 1.0
+    },
+    "m2_pg_rail_legalization_blockage_flag": {
+        "description": "whether run the M2 rail-aware legalization mode selected by m2_pg_rail_legalization_mode",
+        "default": 0
+    },
+    "m2_pg_rail_legalization_mode": {
+        "description": "M2 rail-aware legalization algorithm: soft runs ordinary legalization followed by soft rail-overlap reduction; hybrid_hard uses all rails as temporary hard obstacles while reserving unavoidable single-row wide cells; subset_hard uses only the inclusive left-to-right rail-index range selected by m2_pg_rail_legalization_hard_rail_start and m2_pg_rail_legalization_hard_rail_end",
+        "default": "soft"
+    },
+    "m2_pg_rail_legalization_hard_rail_start": {
+        "description": "1-based left-to-right first M2 rail used as a temporary hard obstacle in subset_hard legalization; ignored by other modes",
+        "default": 1
+    },
+    "m2_pg_rail_legalization_hard_rail_end": {
+        "description": "1-based left-to-right last M2 rail used as a temporary hard obstacle in subset_hard legalization, inclusive; ignored by other modes",
+        "default": 0
+    },
+    "m2_pg_rail_legalization_displacement_weight": {
+        "description": "displacement-area penalty relative to M2 rail overlap-area improvement in soft M2 legalization; 0 prioritizes rail overlap only",
+        "default": 0.01
+    },
+    "m2_pa_refine_flag": {
+        "description": "whether run Xplace-style row-based PA-Refine after legalization and optional detailed placement to move single-row cells away from vertical M2 PG rails",
+        "default": 0
+    },
+    "m2_pa_refine_max_neighbors": {
+        "description": "maximum local row-neighbor search depth for M2 PA-Refine",
+        "default": 5
+    },
+    "m2_pa_refine_max_displacement_sites": {
+        "description": "maximum summed displacement in site widths for one M2 PA-Refine move candidate",
+        "default": 50
     },
     "route_num_bins_x": {
         "description": "number of routing grids/tiles",
@@ -207,16 +327,324 @@
         "description": "the overflow where to adjust node area",
         "default": 0.15
     },
-    "two_stage_density_scaler": {
-        "description": "scale density weight after the macro placement stage",
-        "default": 1000
-    },
     "max_num_area_adjust": {
         "description": "maximum times to adjust node area",
         "default": 3
     },
+    "inflation_area_budget_ratio": {
+        "description": "maximum fraction of the total whitespace area that routability inflation may add to movable nodes in one area-adjust round",
+        "default": 0.1
+    },
+    "legalize_before_each_inflation_flag": {
+        "description": "whether each ordinary inflation round waits for stop_overflow, legalizes physical cell geometry, runs congestion estimation, and then reapplies cumulative inflation before area adjustment",
+        "default": 0
+    },
+    "enhanced_inflation_flag": {
+        "description": "whether enable the enhanced outer-loop inflation controller skeleton",
+        "default": 0
+    },
+    "enhanced_inflation_min_area_inc": {
+        "description": "minimum relative area increment ratio to keep an enhanced inflation round",
+        "default": 0.01
+    },
+    "enhanced_inflation_replay_best_round_flag": {
+        "description": "whether replay the best recorded enhanced inflation round after rolling back inflated geometry",
+        "default": 0
+    },
+    "enhanced_inflation_select_metric": {
+        "description": "metric name used to select the best enhanced inflation round",
+        "default": "est_shorts"
+    },
+    "gpugr_first_inflation_exit": {
+        "description": "run the external gpugr operator before the first routability area-adjust round, then exit immediately",
+        "default": 0
+    },
+    "gpugr_first_inflation_rrr_iters": {
+        "description": "rrrIters passed to gpugr when gpugr_first_inflation_exit is enabled",
+        "default": 0
+    },
+    "gpugr_backend": {
+        "description": "GGR backend selection: auto chooses cuda when available and cpu_pr_mt otherwise; cuda requires a CUDA-capable gpugr build; cpu_pr is explicit serial diagnostic pattern routing; cpu_pr_mt is deterministic parallel CPU pattern routing and uses num_threads as its requested worker count; all CPU pattern backends require rrrIters=0",
+        "default": "auto"
+    },
+    "gpugr_bottom_routing_layer": {
+        "description": "inclusive bottom routing-layer name passed to GPUGR; empty uses the first LEF routing layer",
+        "default": ""
+    },
+    "gpugr_top_routing_layer": {
+        "description": "inclusive top routing-layer name passed to GPUGR; empty uses the last LEF routing layer",
+        "default": ""
+    },
+    "adjust_gpugr_area_flag": {
+        "description": "whether use Xplace gpugr overflow map to guide area adjustment",
+        "default": 0
+    },
+    "gpugr_area_adjust_rrr_iters": {
+        "description": "rrrIters passed to gpugr when adjust_gpugr_area_flag is enabled",
+        "default": 0
+    },
+    "gpugr_area_adjust_skip_m1_route": {
+        "description": "whether skip M1 when converting gpugr demand/capacity into overflow maps for area adjustment",
+        "default": 1
+    },
+    "gpugr_area_adjust_keep_temp_def": {
+        "description": "whether keep temporary DEF files produced by the gpugr area-adjust operator",
+        "default": 0
+    },
+    "gpugr_area_adjust_save_artifacts": {
+        "description": "whether save npz/json/png artifacts for each gpugr area-adjust call",
+        "default": 0
+    },
+    "gpugr_area_adjust_verbose_parser_log": {
+        "description": "whether print verbose Xplace parser logs during gpugr area adjustment",
+        "default": 0
+    },
+    "gpugr_area_adjust_cpp_log_level": {
+        "description": "Xplace C++ parser log level for gpugr area adjustment",
+        "default": 2
+    },
+    "l_direction_use_gpugr": {
+        "description": "whether use Xplace gpugr route entries instead of iRT EGR guide to resolve L directions",
+        "default": 0
+    },
+    "l_shape_use_ggr_topology": {
+        "description": "whether use GGR-exported L-shape topology pack instead of diff-side FLUTE refresh for L-shape routability",
+        "default": 0
+    },
+    "l_shape_plot_flag": {
+        "description": "whether plot L-shape steiner/guide figures during L-shape routability iterations",
+        "default": 0
+    },
+    "l_shape_capacity_al_enable": {
+        "description": "whether use per-routing-bin AL multiplier memory as the hard-GGR L-shape capacity-pressure source",
+        "default": 0
+    },
+    "l_shape_fast_mode": {
+        "description": "whether L-shape electric potential skips scalar potential-energy computation while preserving current-iteration electric-field gradients; invalid energy telemetry is reported with l_shape_energy_valid=0",
+        "default": 0
+    },
+    "l_shape_boundary_source_enable": {
+        "description": "whether add a fixed boundary-ring capacity-occupancy source to L-shape electric potential",
+        "default": 0
+    },
+    "l_shape_boundary_source_width_bins": {
+        "description": "number of L-shape bins in the boundary-ring fixed source",
+        "default": 1
+    },
+    "l_shape_boundary_source_strength": {
+        "description": "fraction of min(local capacity, capacity p95) occupied by the L-shape boundary-ring source",
+        "default": 0.5
+    },
+    "gpugr_l_direction_rrr_iters": {
+        "description": "rrrIters passed to gpugr when l_direction_use_gpugr is enabled",
+        "default": 0
+    },
+    "gpugr_l_direction_save_artifacts": {
+        "description": "whether save gpugr artifacts when l_direction_use_gpugr is enabled",
+        "default": 0
+    },
+    "gpugr_parser_cache_enable": {
+        "description": "whether keep the Xplace gpugr parser DB alive and update movable coordinates by instance name between diff refreshes",
+        "default": 1
+    },
+    "gpugr_area_adjust_congestion_mode": {
+        "description": "congestion signal used by GPUGR area inflation: union, direction-sensitive max_hv, or direction-sensitive max_hv_effective using routed wire plus via demand over nominal capacity minus fixed and movable obstacle usage",
+        "default": "max_hv"
+    },
+    "gpugr_final_eval_flag": {
+        "description": "whether run a final gpugr evaluation after placement finishes, similar to Xplace final_route_eval",
+        "default": 0
+    },
+    "gpugr_final_eval_rrr_iters": {
+        "description": "rrrIters passed to gpugr final evaluation",
+        "default": 1
+    },
+    "gpugr_final_eval_skip_m1_route": {
+        "description": "whether skip M1 when converting gpugr demand/capacity into final evaluation metrics",
+        "default": 1
+    },
+    "gpugr_final_eval_save_artifacts": {
+        "description": "whether save npz/json/png artifacts for gpugr final evaluation",
+        "default": 1
+    },
+    "gpugr_final_eval_keep_temp_def": {
+        "description": "whether keep temporary DEF files produced by gpugr final evaluation",
+        "default": 0
+    },
+    "gpugr_final_eval_verbose_parser_log": {
+        "description": "whether print verbose Xplace parser logs during gpugr final evaluation",
+        "default": 0
+    },
+    "gpugr_final_eval_cpp_log_level": {
+        "description": "Xplace C++ parser log level for gpugr final evaluation",
+        "default": 2
+    },
+    "gpugr_final_eval_route_xsize": {
+        "description": "optional route_xSize override for gpugr final evaluation; use 0 to follow the Xplace grid rule",
+        "default": 0
+    },
+    "gpugr_final_eval_route_ysize": {
+        "description": "optional route_ySize override for gpugr final evaluation; use 0 to follow the Xplace grid rule",
+        "default": 0
+    },
+    "post_legalization_adaptive_padding_flag": {
+        "description": "whether run gpugr after legalization and apply congestion-ranked per-cell x padding through an incremental legalization pass",
+        "default": 0
+    },
+    "post_legalization_padding_hot_cell_ratio": {
+        "description": "fraction of eligible movable cells considered for post-legalization adaptive padding",
+        "default": 0.2
+    },
+    "post_legalization_padding_row_free_ratio": {
+        "description": "fraction of each row segment's free sites available to adaptive padding",
+        "default": 0.5
+    },
+    "post_legalization_padding_max_sites": {
+        "description": "maximum adaptive x padding in sites on each side of a selected cell",
+        "default": 1
+    },
+    "post_legalization_padding_smooth_kernel": {
+        "description": "positive odd pooling kernel used to smooth the gpugr directional overflow map before cell scoring",
+        "default": 3
+    },
+    "post_legalization_padding_max_retries": {
+        "description": "maximum number of padded legalization retries; each retry drops the lower-scored half of padded cells",
+        "default": 4
+    },
+    "post_legalization_padding_rrr_iters": {
+        "description": "rrrIters passed to the post-legalization gpugr call used for adaptive padding",
+        "default": 0
+    },
+    "post_legalization_padding_skip_m1_route": {
+        "description": "whether skip M1 when building post-legalization adaptive-padding overflow maps",
+        "default": 1
+    },
+    "post_legalization_padding_save_artifacts": {
+        "description": "whether save gpugr maps, metrics, and PNGs for the post-legalization adaptive-padding call",
+        "default": 0
+    },
+    "l_shape_grad_target_ratio": {
+        "description": "target ratio between weighted preconditioned L-shape gradient norm and preconditioned base wirelength+density gradient norm",
+        "default": 0.2
+    },
+    "l_shape_overflow_threshold": {
+        "description": "placement overflow threshold below which disabled L-shape diff/routability force is allowed to start or re-enable",
+        "default": 0.3
+    },
+    "l_shape_update_interval": {
+        "description": "number of global-placement iterations between L-shape topology and direction refreshes",
+        "default": 30
+    },
+    "l_shape_filler_reverse_force": {
+        "description": "strength of filler reverse force: push fillers TOWARD congested areas using the L-shape Poisson field, so fillers occupy congested bins and density gradient locks real cells away; 0 disables",
+        "default": 0.0
+    },
+    "l_shape_filler_pseudo_wire_ratio": {
+        "description": "ratio of fillers to pull toward the most congested point using pseudo wire force; 0.05 means 5% of fillers are selected randomly and attracted to the max congestion bin",
+        "default": 0.0
+    },
+    "l_shape_keep_during_inflation": {
+        "description": "keep L-shape routability enabled during inflation (normally disabled); enables filler pseudo wire force to work with inflation",
+        "default": false
+    },
+    "l_shape_weight_momentum": {
+        "description": "EMA momentum used by the adaptive per-iteration L-shape weight controller",
+        "default": 0.1
+    },
+    "l_shape_weight_min": {
+        "description": "minimum allowed l_shape_routability_weight after adaptive update",
+        "default": 1e-12
+    },
+    "l_shape_weight_max": {
+        "description": "maximum allowed l_shape_routability_weight after adaptive update",
+        "default": 1.0
+    },
+    "l_shape_log_verbose": {
+        "description": "verbosity for non-timing L-shape/Soft-L diagnostic logs: 0 keeps production logs quiet, 1 adds one-line refresh summaries, 2 enables detailed per-iteration and per-refresh diagnostics",
+        "default": 0
+    },
+    "l_shape_mask_debug": {
+        "description": "force periodic L-shape gradient mask diagnostics regardless of l_shape_log_verbose; disabled by default",
+        "default": 0
+    },
+    "l_shape_mask_debug_interval": {
+        "description": "iteration interval for L-shape gradient mask diagnostics when l_shape_mask_debug is enabled or l_shape_log_verbose >= 2",
+        "default": 20
+    },
+    "l_shape_profile_flag": {
+        "description": "enable scoped timing logs for diff/soft-L routability profiling; inserts CUDA synchronizations around timed regions",
+        "default": 0
+    },
+    "l_shape_collect_edge_geometry_stats": {
+        "description": "collect diagnostic Steiner/GGR edge geometry statistics during topology rebuild/load; disabled by default to avoid production refresh overhead",
+        "default": 0
+    },
+    "l_shape_edge_net_ids_cache_flag": {
+        "description": "whether cache per-edge net ids used by soft-L same-net topology scoring; disable for profiling or QoR isolation",
+        "default": 1
+    },
+    "l_shape_debug_hash_flag": {
+        "description": "enable debug tensor hashes for soft-L routability divergence localization",
+        "default": 0
+    },
+    "l_shape_debug_hash_start_iter": {
+        "description": "first global placement iteration to emit soft-L debug tensor hashes; negative means no lower bound",
+        "default": 337
+    },
+    "l_shape_debug_hash_end_iter": {
+        "description": "last global placement iteration to emit soft-L debug tensor hashes; negative means no upper bound",
+        "default": 345
+    },
+    "l_shape_debug_hash_sample": {
+        "description": "number of tensor elements sampled for debug hashes; 0 hashes full tensors",
+        "default": 4096
+    },
+    "soft_l_adaptive_tau": {
+        "description": "whether adapt soft-L temperature from the current batch median absolute H/V cost gap",
+        "default": 1
+    },
+    "soft_l_adaptive_scale": {
+        "description": "scale factor multiplied onto the median absolute H/V cost gap when soft_l_adaptive_tau is enabled",
+        "default": 1.0
+    },
+    "soft_l_same_net_diag_split_sigma": {
+        "description": "distance-decay scale for per-net topology diagonal-split geometric scoring",
+        "default": 1.0
+    },
+    "soft_l_same_net_diag_split_min_support": {
+        "description": "minimum accumulated per-net topology diagonal-split support required before converting support into topo cost",
+        "default": 1e-6
+    },
+    "soft_l_same_net_diag_split_max_distance": {
+        "description": "optional raw-distance cutoff for per-net topology diagonal-split scoring; use 0 to disable truncation and rely on soft decay only",
+        "default": 0.0
+    },
+    "l_shape_auto_disable_flag": {
+        "description": "whether auto-disable soft L-shape when telemetry indicates late-stage overshoot in diff-style runs",
+        "default": 0
+    },
+    "l_shape_auto_disable_warmup_updates": {
+        "description": "number of L-shape outer-loop updates to observe before considering auto-disable",
+        "default": 3
+    },
+    "l_shape_auto_disable_patience": {
+        "description": "number of consecutive qualifying outer-loop updates required before auto-disabling soft L-shape",
+        "default": 2
+    },
+    "l_shape_auto_disable_grad_overshoot_margin": {
+        "description": "minimum LGradRatio overshoot above LTargetRatio to count toward soft L-shape auto-disable",
+        "default": 0.01
+    },
+    "l_shape_auto_disable_lcost_rebound_ratio": {
+        "description": "fractional rebound above the best observed L-shape cost required to count toward auto-disable",
+        "default": 0.05
+    },
+    "l_shape_auto_disable_ov_ema_plateau_eps": {
+        "description": "maximum L-shape overflow EMA improvement treated as a plateau for auto-disable",
+        "default": 0.001
+    },
     "adjust_nctugr_area_flag": {
-        "description": "whether use ECC/iRT EGR congestion map to guide area adjustment",
+        "description": "legacy compatibility key; when enabled use the ECC/iRT EGR congestion map for area adjustment (NCTUgr is not invoked)",
         "default": 0
     },
     "adjust_rudy_area_flag": {
@@ -271,96 +699,8 @@
         "description": "whether require run-to-run determinism, may have efficiency overhead",
         "default": 0
     },
-    "timing_opt_flag": {
-        "description": "legacy timing-driven global placement flag; enabling it raises an error because OpenTimer integration has been removed",
-        "default": 0
-    },
-    "early_lib_input": {
-        "description": "legacy early cell library file for the removed timing_opt flow",
-        "default": "",
-        "required": "required for the legacy timing_opt flow"
-    },
-    "late_lib_input": {
-        "description": "legacy late cell library file for the removed timing_opt flow",
-        "default": "",
-        "required": "required for the legacy timing_opt flow"
-    },
-    "lib_input": {
-        "description": "legacy shared cell library file for the removed timing_opt flow",
-        "default": "",
-        "required": "required for the legacy timing_opt flow"
-    },
-    "sdc_input": {
-        "description": "legacy SDC file for the removed timing_opt flow",
-        "default": "",
-        "required": "required for the legacy timing_opt flow"
-    },
-    "wire_resistance_per_micron": {
-        "description": "legacy unit-length wire resistance for the removed timing_opt flow",
-        "default": 0
-    },
-    "wire_capacitance_per_micron": {
-        "description": "legacy unit-length wire capacitance for the removed timing_opt flow",
-        "default": 0
-    },
-    "net_weighting_scheme": {
-        "description": "net-weighting scheme for timing-aware optimization, e.g. adam | lilith",
-        "default": "lilith"
-    },
-    "momentum_decay_factor": {
-        "description": "momentum decay factor used in timing-aware net-weight updates",
-        "default": 0.5
-    },
-    "enable_net_weighting": {
-        "description": "enable timing-aware net weighting during global placement",
-        "default": 1
-    },
-    "max_net_weight": {
-        "description": "maximum net weight for timing optimization; negative values or \"inf\" mean no limit",
-        "default": "inf"
-    },
-    "pin2pin_net_weighting": {
-        "description": "enable pin-to-pin net weighting for timing optimization",
-        "default": 0
-    },
-    "timing_eval_flag": {
-        "description": "enable timing evaluation reporting",
-        "default": 0
-    },
-    "show_important_info": {
-        "description": "print condensed timing-related summary information",
-        "default": 0
-    },
-    "pin2pin_weight": {
-        "description": "base multiplier for pin-to-pin net weights",
-        "default": 2.5e-05
-    },
-    "start_iter": {
-        "description": "iteration to start pin-to-pin timing weighting",
-        "default": 500
-    },
-    "min_stop_iter": {
-        "description": "minimum iteration before convergence checking in timing-aware mode",
-        "default": 700
-    },
-    "pin2pin_max_weight": {
-        "description": "maximum pin-to-pin timing weight",
-        "default": 50
-    },
-    "pin2pin_min_weight": {
-        "description": "minimum pin-to-pin timing weight",
-        "default": 10
-    },
-    "pin2pin_accumulate_weight": {
-        "description": "increment added when accumulating an extra critical path",
-        "default": 0.2
-    },
     "get_congestion_map": {
         "description": "compute congestion map after placement complete",
-        "default": 0
-    },
-    "egr_padding_flag": {
-        "description": "run internal iRT EGR local padding before legalization",
         "default": 0
     },
     "macro_halo_x": {
@@ -422,13 +762,5 @@
     "with_sta": {
         "description": "enable integrated STA initialization and differentiable timing updates during placement",
         "default": 1
-    },
-    "differentiable_timing_obj": {
-        "description": "compatibility flag for differentiable timing objective configuration",
-        "default": 1
-    },
-    "base_design_name": {
-        "description": "base design name used when naming dumped solutions and reports",
-        "default": ""
     }
 }

@@ -29,7 +29,6 @@ void loadFluteLut(const std::string &powv_file,
               "Flute POWV LUT file does not exist: ", powv_file);
   TORCH_CHECK(std::filesystem::is_regular_file(post_file),
               "Flute POST LUT file does not exist: ", post_file);
-
   static std::once_flag load_lut_once;
   std::call_once(load_lut_once, [&] {
     flute::readLUT(powv_file.c_str(), post_file.c_str());
@@ -58,12 +57,14 @@ int computeSteinerTreeLauncher(
     std::vector<int> &vtx_relate_y, int *netsteiner_start,
     std::vector<int> &vtx_fa, std::vector<int> &flat_vtx_to,
     std::vector<int> &flat_vtx_from, std::vector<int> &net_flat_topo_idx,
-    std::vector<int> &flat_vtx_to_start, int *net_flat_topo_idx_start) {
+    std::vector<int> &flat_vtx_to_start, int *net_flat_topo_idx_start,
+    bool deterministic_flag) {
+
   constexpr int scale = 1000;
   int total_steiner = 0;
   std::vector<NetResult> net_result(num_nets);
 
-#pragma omp parallel for reduction(+ : total_steiner)
+#pragma omp parallel for reduction(+ : total_steiner) if(!deterministic_flag)
   for (int netid = 0; netid < num_nets; ++netid) {
     int degree = netpin_start[netid + 1] - netpin_start[netid];
     bool duplicate_pin = false;
@@ -338,11 +339,12 @@ int computeSteinerPosLauncher(const T *pin_pos_x, const T *pin_pos_y,
                               const std::vector<int> &vtx_relate_x,
                               const std::vector<int> &vtx_relate_y,
                               const int num_vertices,
-                              std::vector<T> &updated_newx, std::vector<T> &updated_newy) {
+                              std::vector<T> &updated_newx, std::vector<T> &updated_newy,
+                              bool deterministic_flag) {
   updated_newx.resize(num_vertices);
   updated_newy.resize(num_vertices);
 
-#pragma omp parallel for
+#pragma omp parallel for if(!deterministic_flag)
   for (int vtx_id = 0; vtx_id < num_vertices; ++vtx_id) {
     updated_newx[vtx_id] = pin_pos_x[vtx_relate_x[vtx_id]];
     updated_newy[vtx_id] = pin_pos_y[vtx_relate_y[vtx_id]];
@@ -372,7 +374,8 @@ std::vector<at::Tensor> build_tree(at::Tensor pos, at::Tensor flat_netpin,
                                    at::Tensor netpin_start,
                                    int ignore_net_degree,
                                    const std::string &powv_file,
-                                   const std::string &post_file) {
+                                   const std::string &post_file,
+                                   bool deterministic_flag) {
   CHECK_FLAT_CPU(pos);
   CHECK_EVEN(pos);
   CHECK_CONTIGUOUS(pos);
@@ -416,7 +419,8 @@ std::vector<at::Tensor> build_tree(at::Tensor pos, at::Tensor flat_netpin,
         DREAMPLACE_TENSOR_DATA_PTR(net_steiner_start, int), vtx_fa_vec,
         flat_vtx_to_vec, flat_vtx_from_vec, net_flat_topo_idx_vec,
         flat_vtx_to_start_vec,
-        DREAMPLACE_TENSOR_DATA_PTR(net_flat_topo_idx_start_tensor, int));
+        DREAMPLACE_TENSOR_DATA_PTR(net_flat_topo_idx_start_tensor, int),
+        deterministic_flag);
 
     auto newx                     = convertVecToTens(newx_vec, options_float);
     auto newy                     = convertVecToTens(newy_vec, options_float);
@@ -448,7 +452,8 @@ std::vector<at::Tensor> build_tree(at::Tensor pos, at::Tensor flat_netpin,
 std::vector<at::Tensor> steiner_topo_forward(at::Tensor pin_pos,
                                              at::Tensor cached_vtx_relate_x,
                                              at::Tensor cached_vtx_relate_y,
-                                             int num_vertices) {
+                                             int num_vertices,
+                                             bool deterministic_flag) {
   CHECK_FLAT_CPU(pin_pos);
   CHECK_EVEN(pin_pos);
   CHECK_CONTIGUOUS(pin_pos);
@@ -477,7 +482,8 @@ std::vector<at::Tensor> steiner_topo_forward(at::Tensor pin_pos,
         DREAMPLACE_TENSOR_DATA_PTR(pin_pos, scalar_t) + num_pins,
         vtx_relate_x_vec, vtx_relate_y_vec, num_vertices, 
         updated_newx_vec,
-        updated_newy_vec);
+        updated_newy_vec,
+        deterministic_flag);
 
     auto updated_newx = convertVecToTens(updated_newx_vec, options_float);
     auto updated_newy = convertVecToTens(updated_newy_vec, options_float);
@@ -527,8 +533,21 @@ DREAMPLACE_END_NAMESPACE
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward", &DREAMPLACE_NAMESPACE::steiner_topo_forward,
-        "SteinerTopo forward");
+        "SteinerTopo forward",
+        pybind11::arg("pin_pos"),
+        pybind11::arg("cached_vtx_relate_x"),
+        pybind11::arg("cached_vtx_relate_y"),
+        pybind11::arg("num_vertices"),
+        pybind11::arg("deterministic_flag") = false);
   m.def("backward", &DREAMPLACE_NAMESPACE::steiner_topo_backward,
         "SteinerTopo backward");
-  m.def("build_tree", &DREAMPLACE_NAMESPACE::build_tree, "Build Tree");
+  m.def("build_tree", &DREAMPLACE_NAMESPACE::build_tree,
+        "Build Tree",
+        pybind11::arg("pos"),
+        pybind11::arg("flat_netpin"),
+        pybind11::arg("netpin_start"),
+        pybind11::arg("ignore_net_degree"),
+        pybind11::arg("powv_file"),
+        pybind11::arg("post_file"),
+        pybind11::arg("deterministic_flag") = false);
 }

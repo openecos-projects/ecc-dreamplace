@@ -7,3 +7,9 @@
 [submodule "thirdparty/pybind11"]
 	path = thirdparty/pybind11
 	url = https://github.com/pybind/pybind11.git
+[submodule "xplace"]
+	path = thirdparty/xplace
+	url = https://github.com/zhaoxueyan1/Xplace.git
+	branch = routability-driven-placement
+	shallow = true
+	ignore = untracked

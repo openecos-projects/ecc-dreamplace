@@ -20,8 +20,40 @@ install
 bin
 include
 unittest
+!unittest/
+unittest/ops/*
+!unittest/ops/cell_padding_geometry_unittest.py
+!unittest/ops/egr_padding_flow_unittest.py
+!unittest/ops/routability_controller_unittest.py
+!unittest/ops/routability_l_shape_inputs_unittest.py
+!unittest/ops/nonlinear_place_plain_flow_unittest.py
+!unittest/ops/routability_wheel_smoke.py
 .cache
 *_unittest
 
+*.png
+dreamplace/configure.py
+.codex*
 .direnv
 result
+
+# Xplace gpugr build artifacts (out-of-source build tree; the in-submodule
+# cpp_to_py/cpybin output is covered by the submodule ignore rule in .gitmodules)
+thirdparty/xplace-build/
+
+# CMake/Ninja metadata generated in the source checkout by local builds.
+CMakeFiles/
+cmake_install.cmake
+CMakeCache.txt
+CMakeInit.txt
+build.ninja
+.ninja_deps
+.ninja_log
+compile_commands.json
+.cmake/
+.skbuild-info.json
+
+# Generated LEMON configuration from an in-tree CMake configure.
+thirdparty/Limbo/limbo/thirdparty/lemon/cmake/LEMONConfig.cmake
+thirdparty/Limbo/limbo/thirdparty/lemon/lemon/config.h
+thirdparty/Limbo/limbo/thirdparty/lemon/lemon/lemon.pc

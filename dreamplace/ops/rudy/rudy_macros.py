@@ -15,7 +15,6 @@
 
 import torch
 from torch import nn
-import torchvision.transforms as T
 import matplotlib.pyplot as plt
 import matplotlib
 import matplotlib.cm as cm
@@ -27,6 +26,11 @@ opj = os.path.join
 
 import dreamplace.ops.rudy.rudy_cpp as rudy_cpp
 import dreamplace.configure as configure
+
+try:
+    import torchvision.transforms as T
+except ModuleNotFoundError:
+    T = None
 
 if configure.compile_configurations["CUDA_FOUND"] == "TRUE":
     import dreamplace.ops.rudy.rudy_cuda as rudy_cuda
@@ -74,6 +78,11 @@ class RudyWithMacros(nn.Module):
 
     @torch.no_grad()
     def forward(self, pos, pin_pos):
+        if T is None:
+            raise RuntimeError(
+                "RudyWithMacros requires torchvision; install it to enable "
+                "the optional macro RUDY visualization path"
+            )
         self.bin_size_x = (
             self.fp_info.routing_grid_xh - self.fp_info.routing_grid_xl
         ) / self.num_bins_x

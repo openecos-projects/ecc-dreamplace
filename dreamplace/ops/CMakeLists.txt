@@ -17,10 +17,12 @@ add_subdirectory(legality_check)
 add_subdirectory(macro_legalize)
 add_subdirectory(greedy_legalize)
 add_subdirectory(abacus_legalize)
+add_subdirectory(m2_soft_legalize)
 # detailed placement operators
 add_subdirectory(global_swap)
 add_subdirectory(independent_set_matching)
 add_subdirectory(k_reorder)
+add_subdirectory(m2_pa_refine)
 # routing congestion operator
 add_subdirectory(pin_utilization)
 add_subdirectory(rudy)
@@ -30,6 +32,14 @@ add_subdirectory(adjust_node_area)
 add_subdirectory(timing_propagation)
 add_subdirectory(rc_timing)
 add_subdirectory(steiner_topo)
+add_subdirectory(routability)
+
+# GPUGR wrapper and its built-in Xplace backend (the native extensions are
+# built from thirdparty/xplace by thirdparty/build_xplace_gpugr.sh).
+file(GLOB GPUGR_INSTALL_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/gpugr/*.py")
+install(
+    FILES ${GPUGR_INSTALL_SRCS} DESTINATION dreamplace/ops/gpugr
+    )
 
 file(GLOB INSTALL_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/*.py")
 install(

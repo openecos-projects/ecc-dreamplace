@@ -39,6 +39,8 @@ result
 
 # Xplace gpugr build artifacts (out-of-source build tree; the in-submodule
 # cpp_to_py/cpybin output is covered by the submodule ignore rule in .gitmodules)
+xplace-build-cpu/
+xplace_gpugr-prefix/
 thirdparty/xplace-build/
 
 # CMake/Ninja metadata generated in the source checkout by local builds.

@@ -13,6 +13,7 @@ import dreamplace.ops.macro_legalize.macro_legalize as macro_legalize
 from dreamplace.ops.m2_legalize.m2_pg_rail_hybrid_legalization import (
     M2PgRailHybridLegalizationView,
 )
+from dreamplace.ops.m2_legalize.row_segment_repair import repair_row_segments
 
 
 def _resolve_boolean_like_flag(params, name, default=0):
@@ -292,6 +293,7 @@ def build_legalization(
         num_terminal_NIs,
         num_filler_nodes,
         check_op,
+        greedy_num_bins_x=1,
     ):
         # The number of bins controls the search granularity.
         macro_op = macro_legalize.MacroLegalize(
@@ -326,7 +328,7 @@ def build_legalization(
             yh=placedb.yh,
             site_width=placedb.site_width,
             row_height=placedb.row_height,
-            num_bins_x=1,
+            num_bins_x=greedy_num_bins_x,
             num_bins_y=64,
             num_movable_nodes=num_movable_nodes,
             num_terminal_NIs=num_terminal_NIs,
@@ -364,24 +366,105 @@ def build_legalization(
         check_op=self.op_collections.legality_check_op,
     )
 
-    def run_legalizer(pos, ops, label):
+    retry_ops = build_legalizer_ops(
+        node_size_x=data_collections.node_size_x,
+        node_size_y=data_collections.node_size_y,
+        node_weights=data_collections.num_pins_in_nodes,
+        node2fence_region_map=data_collections.node2fence_region_map,
+        num_movable_nodes=placedb.num_movable_nodes,
+        num_terminal_NIs=placedb.num_terminal_NIs,
+        num_filler_nodes=placedb.num_filler_nodes,
+        check_op=self.op_collections.legality_check_op,
+        greedy_num_bins_x=max(1, min(int(placedb.num_bins_x), 64)),
+    )
+
+    def run_legalizer(
+        pos,
+        ops,
+        label,
+        retry_ops_for_run,
+        row_repair_context=None,
+    ):
         macro_op, greedy_op, abacus_op, check_op = ops
         pos1 = macro_op(pos, pos)
         pos2 = greedy_op(pos1, pos1)
-        if not check_op(pos2):
+        greedy_legal = bool(check_op(pos2))
+        if not greedy_legal:
             logging.error(
                 "%s legality check failed in greedy legalization",
+                label,
+            )
+            retry_macro_op, retry_greedy_op, retry_abacus_op, retry_check_op = (
+                retry_ops_for_run
+            )
+            retry_pos1 = retry_macro_op(pos, pos)
+            retry_pos2 = retry_greedy_op(retry_pos1, retry_pos1)
+            if bool(retry_check_op(retry_pos2)):
+                logging.info(
+                    "%s retry Greedy legalization recovered a legal placement",
+                    label,
+                )
+                retry_pos3 = retry_abacus_op(retry_pos1, retry_pos2)
+                if bool(retry_check_op(retry_pos3)):
+                    return retry_pos3, True
+                logging.info(
+                    "%s retry Abacus legalization failed; using retry Greedy result",
+                    label,
+                )
+                return retry_pos2, True
+            logging.error(
+                "%s retry Greedy legalization also failed",
+                label,
+            )
+            repaired_pos = None
+            if row_repair_context is not None:
+                repair_placedb, repair_data_collections = row_repair_context
+                repaired_pos = repair_row_segments(
+                    pos2,
+                    repair_placedb,
+                    repair_data_collections,
+                )
+            if repaired_pos is not None and bool(check_op(repaired_pos)):
+                if repaired_pos.ndim == 1:
+                    num_nodes = repaired_pos.numel() // 2
+                    moved = (
+                        repaired_pos[: placedb.num_movable_nodes]
+                        - pos[: placedb.num_movable_nodes]
+                    ).abs() + (
+                        repaired_pos[
+                            num_nodes : num_nodes + placedb.num_movable_nodes
+                        ]
+                        - pos[num_nodes : num_nodes + placedb.num_movable_nodes]
+                    ).abs()
+                else:
+                    moved = (
+                        repaired_pos[:, : placedb.num_movable_nodes]
+                        - pos[:, : placedb.num_movable_nodes]
+                    ).abs().sum(dim=0)
+                logging.info(
+                    "%s row-segment repair recovered a legal placement: "
+                    "moved_cells=%d max_displacement=%.6g "
+                    "total_displacement=%.6g",
+                    label,
+                    int((moved > 0).sum().item()),
+                    float(moved.max().item()),
+                    float(moved.sum().item()),
+                )
+                return repaired_pos, True
+            logging.error(
+                "%s row-segment repair could not recover a legal placement",
                 label,
             )
             return pos2, False
 
         pos3 = abacus_op(pos1, pos2)
-        if not check_op(pos3):
+        abacus_legal = bool(check_op(pos3))
+        if not abacus_legal:
             logging.error(
-                "%s legality check failed in abacus legalization; "
-                "using legal greedy result",
+                "%s legality check failed in abacus legalization",
                 label,
             )
+            logging.info("%s using legal greedy result", label)
             return pos2, True
         return pos3, True
 
@@ -412,10 +495,22 @@ def build_legalization(
                 num_filler_nodes=problem.num_filler_nodes,
                 check_op=hybrid_check_op,
             )
+            hybrid_retry_ops = build_legalizer_ops(
+                node_size_x=problem.node_size_x,
+                node_size_y=problem.node_size_y,
+                node_weights=problem.node_weights,
+                node2fence_region_map=problem.node2fence_region_map,
+                num_movable_nodes=problem.num_movable_nodes,
+                num_terminal_NIs=problem.num_terminal_NIs,
+                num_filler_nodes=problem.num_filler_nodes,
+                check_op=hybrid_check_op,
+                greedy_num_bins_x=max(1, min(int(placedb.num_bins_x), 64)),
+            )
             hybrid_result, legal = run_legalizer(
                 problem.packed_pos,
                 hybrid_ops,
                 "M2 %s" % hybrid_view.legalization_mode.replace("_", "-"),
+                hybrid_retry_ops,
             )
             if not legal:
                 raise RuntimeError(
@@ -470,7 +565,13 @@ def build_legalization(
                 )
             return result
 
-        result, legal = run_legalizer(pos, ordinary_ops, "ordinary")
+        result, legal = run_legalizer(
+            pos,
+            ordinary_ops,
+            "ordinary",
+            retry_ops,
+            row_repair_context=(placedb, data_collections),
+        )
         if not legal:
             raise RuntimeError(
                 "ordinary legalization failed before M2 soft legalization"
@@ -488,6 +589,7 @@ def run_adaptive_padding_legalization(
     padding_sites,
     scores,
     max_retries=4,
+    prefer_direct_abacus=False,
 ):
     if len(placedb.regions) > 0:
         raise ValueError(
@@ -557,44 +659,6 @@ def run_adaptive_padding_legalization(
             num_terminals=placedb.num_terminals,
             num_movable_nodes=placedb.num_movable_nodes,
         )
-        macro_op = macro_legalize.MacroLegalize(
-            node_size_x=padded_size_x,
-            node_size_y=data_collections.node_size_y,
-            node_weights=data_collections.num_pins_in_nodes,
-            flat_region_boxes=data_collections.flat_region_boxes,
-            flat_region_boxes_start=data_collections.flat_region_boxes_start,
-            node2fence_region_map=data_collections.node2fence_region_map,
-            xl=placedb.xl,
-            yl=placedb.yl,
-            xh=placedb.xh,
-            yh=placedb.yh,
-            site_width=placedb.site_width,
-            row_height=placedb.row_height,
-            num_bins_x=placedb.num_bins_x,
-            num_bins_y=placedb.num_bins_y,
-            num_movable_nodes=placedb.num_movable_nodes,
-            num_terminal_NIs=placedb.num_terminal_NIs,
-            num_filler_nodes=placedb.num_filler_nodes,
-        )
-        greedy_op = greedy_legalize.GreedyLegalize(
-            node_size_x=padded_size_x,
-            node_size_y=data_collections.node_size_y,
-            node_weights=data_collections.num_pins_in_nodes,
-            flat_region_boxes=data_collections.flat_region_boxes,
-            flat_region_boxes_start=data_collections.flat_region_boxes_start,
-            node2fence_region_map=data_collections.node2fence_region_map,
-            xl=placedb.xl,
-            yl=placedb.yl,
-            xh=placedb.xh,
-            yh=placedb.yh,
-            site_width=placedb.site_width,
-            row_height=placedb.row_height,
-            num_bins_x=1,
-            num_bins_y=64,
-            num_movable_nodes=placedb.num_movable_nodes,
-            num_terminal_NIs=placedb.num_terminal_NIs,
-            num_filler_nodes=placedb.num_filler_nodes,
-        )
         abacus_op = abacus_legalize.AbacusLegalize(
             node_size_x=padded_size_x,
             node_size_y=data_collections.node_size_y,
@@ -615,18 +679,65 @@ def run_adaptive_padding_legalization(
             num_filler_nodes=placedb.num_filler_nodes,
         )
 
-        macro_result = macro_op(padded_pos, padded_pos)
-        greedy_result = greedy_op(macro_result, macro_result)
-        padded_legal = bool(padded_check_op(greedy_result))
-        if padded_legal:
-            abacus_result = abacus_op(macro_result, greedy_result)
+        padded_result = None
+        if prefer_direct_abacus:
+            abacus_result = abacus_op(padded_pos, padded_pos)
             if bool(padded_check_op(abacus_result)):
                 padded_result = abacus_result
                 greedy_fallback = False
-            else:
-                padded_result = greedy_result
-                greedy_fallback = True
+                logging.info("Direct Abacus padded legalization is legal")
 
+        if padded_result is None:
+            macro_op = macro_legalize.MacroLegalize(
+                node_size_x=padded_size_x,
+                node_size_y=data_collections.node_size_y,
+                node_weights=data_collections.num_pins_in_nodes,
+                flat_region_boxes=data_collections.flat_region_boxes,
+                flat_region_boxes_start=data_collections.flat_region_boxes_start,
+                node2fence_region_map=data_collections.node2fence_region_map,
+                xl=placedb.xl,
+                yl=placedb.yl,
+                xh=placedb.xh,
+                yh=placedb.yh,
+                site_width=placedb.site_width,
+                row_height=placedb.row_height,
+                num_bins_x=placedb.num_bins_x,
+                num_bins_y=placedb.num_bins_y,
+                num_movable_nodes=placedb.num_movable_nodes,
+                num_terminal_NIs=placedb.num_terminal_NIs,
+                num_filler_nodes=placedb.num_filler_nodes,
+            )
+            greedy_op = greedy_legalize.GreedyLegalize(
+                node_size_x=padded_size_x,
+                node_size_y=data_collections.node_size_y,
+                node_weights=data_collections.num_pins_in_nodes,
+                flat_region_boxes=data_collections.flat_region_boxes,
+                flat_region_boxes_start=data_collections.flat_region_boxes_start,
+                node2fence_region_map=data_collections.node2fence_region_map,
+                xl=placedb.xl,
+                yl=placedb.yl,
+                xh=placedb.xh,
+                yh=placedb.yh,
+                site_width=placedb.site_width,
+                row_height=placedb.row_height,
+                num_bins_x=1,
+                num_bins_y=64,
+                num_movable_nodes=placedb.num_movable_nodes,
+                num_terminal_NIs=placedb.num_terminal_NIs,
+                num_filler_nodes=placedb.num_filler_nodes,
+            )
+            macro_result = macro_op(padded_pos, padded_pos)
+            greedy_result = greedy_op(macro_result, macro_result)
+            if bool(padded_check_op(greedy_result)):
+                abacus_result = abacus_op(macro_result, greedy_result)
+                if bool(padded_check_op(abacus_result)):
+                    padded_result = abacus_result
+                    greedy_fallback = False
+                else:
+                    padded_result = greedy_result
+                    greedy_fallback = True
+
+        if padded_result is not None:
             physical_result = padded_result.detach().clone()
             physical_result[: placedb.num_movable_nodes].add_(
                 full_padding[: placedb.num_movable_nodes]

@@ -26,6 +26,8 @@ datatypes = {
     'float64': np.float64
 }
 
+MAX_MOVABLE_UTILIZATION = 0.99
+
 
 def _is_enabled_param(value):
     if isinstance(value, str):
@@ -1707,6 +1709,12 @@ class MacroPlaceDB(object):
         self.bndry_padding_x *= params.scale_factor
         self.bndry_padding_y *= params.scale_factor
 
+        # Apply cell padding only after all movable geometry inflation has
+        # completed.  In particular, pin-density inflation runs before this
+        # point; checking the area budget earlier could accept padding that
+        # later makes the placement too large for the placeable core.
+        self._apply_cell_padding(params)
+
         content = """
 ================================= Benchmark Statistics =================================
 #nodes = %d, #terminals = %d, # terminal_NIs = %d, #movable = %d, #nets = %d
@@ -1840,6 +1848,12 @@ row height = %g, site width = %g
             self.total_movable_node_area / self.total_space_area,
             params.target_density,
         )
+
+        if utilization > MAX_MOVABLE_UTILIZATION:
+            raise RuntimeError(
+                "utilization is larger than %g. Please change the core size."
+                % MAX_MOVABLE_UTILIZATION
+            )
 
         # calculate fence region virtual macro
         if len(self.regions) > 0:
@@ -2139,6 +2153,82 @@ row height = %g, site width = %g
         elif axis == "y":
             return self.row_height * op(v / self.row_height)
 
+    def _apply_cell_padding(self, params):
+        requested_padding = float(params.cell_padding_x)
+        padding = requested_padding
+        self.cell_padding_x = padding
+        if padding <= 0:
+            return
+
+        movable_slice = slice(0, self.num_movable_nodes)
+        movable_size_x = self.node_size_x[movable_slice]
+        movable_size_y = self.node_size_y[movable_slice]
+        movable_area = float(np.sum(movable_size_x * movable_size_y))
+        padded_movable_area = float(
+            np.sum((movable_size_x + 2 * padding) * movable_size_y)
+        )
+        placeable_area = getattr(self, "total_space_area", None)
+        if placeable_area is not None and np.isfinite(placeable_area):
+            max_movable_area = MAX_MOVABLE_UTILIZATION * float(placeable_area)
+            if padded_movable_area > max_movable_area:
+                total_movable_height = float(np.sum(movable_size_y))
+                if total_movable_height > 0:
+                    max_padding = max(
+                        (max_movable_area - movable_area)
+                        / (2 * total_movable_height),
+                        0.0,
+                    )
+                    padding = min(
+                        padding,
+                        self.crop_to_site(max_padding, "x", mode="down"),
+                    )
+                else:
+                    padding = 0.0
+
+                logging.warning(
+                    "cell_padding_x %g would increase movable area to %g, "
+                    "above the %g * placeable-area limit (%g); reducing it to %g",
+                    requested_padding,
+                    padded_movable_area,
+                    MAX_MOVABLE_UTILIZATION,
+                    max_movable_area,
+                    padding,
+                )
+                params.cell_padding_x = padding
+                self.cell_padding_x = padding
+
+        if padding == 0:
+            logging.info(
+                "cell padding geometry: requested=%.6g effective=0 "
+                "movable_area_before=%.6g movable_area_after=%.6g "
+                "placeable_area=%.6g",
+                requested_padding,
+                movable_area,
+                movable_area,
+                float(placeable_area) if placeable_area is not None else float("nan"),
+            )
+            return
+
+        self.node_size_x[movable_slice] += 2 * padding
+        self.node_x[movable_slice] -= padding
+        movable_cell_tensor = np.arange(
+            0, self.num_movable_nodes, dtype=self.pin2node_map.dtype
+        )
+        movable_cell_pins = np.isin(self.pin2node_map, movable_cell_tensor)
+        self.pin_offset_x[movable_cell_pins] += padding
+        logging.info(
+            "cell padding geometry: requested=%.6g effective=%.6g "
+            "movable_area_before=%.6g movable_area_after=%.6g "
+            "placeable_area=%.6g",
+            requested_padding,
+            padding,
+            movable_area,
+            float(np.sum(
+                self.node_size_x[movable_slice] * self.node_size_y[movable_slice]
+            )),
+            float(placeable_area) if placeable_area is not None else float("nan"),
+        )
+
     def _dump_fixed_macro_mask_debug(
         self,
         params,
@@ -2390,27 +2480,6 @@ row height = %g, site width = %g
             # self.fixed_macro_pins = np.isin(self.pin2node_map, self.fixed_macro_idx)
             # self.pin_offset_x[self.fixed_macro_pins] += params.macro_halo_x
             # self.pin_offset_y[self.fixed_macro_pins] += params.macro_halo_y
-        # add padding around all_cells
-        if params.cell_padding_x >= 0:
-            # increase macro sizes
-            self.node_size_x[:self.num_movable_nodes] += 2 * params.cell_padding_x
-            # self.node_size_y[:self.num_physical_nodes] += 2 * params.cell_padding_y
-            # self.node_size_x[self.fixed_macro_idx] += 2 * params.macro_halo_x
-            # self.node_size_y[self.fixed_macro_idx] += 2 * params.macro_halo_y
-
-            # shift macro positions
-            self.node_x[:self.num_movable_nodes] -= params.cell_padding_x
-            # self.node_y[:self.num_physical_nodes] -= params.cell_padding_y
-            # self.node_x[self.fixed_macro_idx] -= params.macro_halo_x
-            # self.node_y[self.fixed_macro_idx] -= params.macro_halo_y
-
-            movable_cell_tensor = np.arange(
-                0, self.num_movable_nodes, dtype=self.pin2node_map.dtype)
-            # shift macro pins
-            movable_cell_pins = np.isin(
-                self.pin2node_map, movable_cell_tensor)
-            self.pin_offset_x[movable_cell_pins] += params.cell_padding_x
-            # self.pin_offset_y += params.cell_padding_y
         if params.macro_pin_halo_x >= 0:
             self.node_size_x[self.movable_macro_idx] += self.is_pin_lower_x * \
                 params.macro_pin_halo_x + self.is_pin_upper_x * params.macro_pin_halo_x

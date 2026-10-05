@@ -316,10 +316,19 @@ class Params:
                 raise ValueError("%s must be finite and in [0, 1]" % name)
             setattr(self, name, value)
 
+        try:
+            bin_ratio = float(getattr(self, "post_legalization_padding_overflow_bin_ratio", 0.2))
+        except (TypeError, ValueError):
+            raise ValueError("post_legalization_padding_overflow_bin_ratio must be numeric")
+        if not math.isfinite(bin_ratio) or not 0 < bin_ratio <= 1:
+            raise ValueError("post_legalization_padding_overflow_bin_ratio must be in (0, 1]")
+        self.post_legalization_padding_overflow_bin_ratio = bin_ratio
+
         for name, default in (
             ("post_legalization_padding_max_sites", 1),
             ("post_legalization_padding_max_retries", 4),
             ("post_legalization_padding_rrr_iters", 0),
+            ("post_legalization_padding_rounds", 1),
         ):
             raw_value = getattr(self, name, default)
             if isinstance(raw_value, bool):

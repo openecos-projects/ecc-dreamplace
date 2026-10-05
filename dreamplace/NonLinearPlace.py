@@ -3202,14 +3202,21 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             logging.info(cur_metric)
             iteration += 1
 
-        adaptive_padding_pos, adaptive_padding_stats = (
-            route_evaluation.run_post_legalization_adaptive_padding(
-                params,
-                placedb,
-                self.pos[0],
-                self,
+        if (getattr(params, "post_legalization_adaptive_padding_flag", 0)
+                and not params.global_place_flag
+                and int(getattr(params, "post_legalization_padding_rounds", 1)) > 1):
+            from dreamplace.ops.routability.iterative_legalization_padding import (
+                run_iterative_legalization_padding,
             )
-        )
+            adaptive_padding_pos, adaptive_padding_stats = (
+                run_iterative_legalization_padding(params, placedb, self.pos[0], self)
+            )
+        else:
+            adaptive_padding_pos, adaptive_padding_stats = (
+                route_evaluation.run_post_legalization_adaptive_padding(
+                    params, placedb, self.pos[0], self
+                )
+            )
         if adaptive_padding_stats is not None:
             self.pos[0].data.copy_(adaptive_padding_pos)
             for key, value in adaptive_padding_stats.items():

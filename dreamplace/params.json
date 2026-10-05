@@ -491,6 +491,14 @@
         "description": "whether run gpugr after legalization and apply congestion-ranked per-cell x padding through an incremental legalization pass",
         "default": 0
     },
+    "post_legalization_padding_rounds": {
+        "description": "number of cumulative GGR padding and legalization rounds (1 retains the existing single-pass mode)",
+        "default": 1
+    },
+    "post_legalization_padding_overflow_bin_ratio": {
+        "description": "fraction of positive-overflow GGR bins considered in iterative legalization-only padding",
+        "default": 0.2
+    },
     "post_legalization_padding_hot_cell_ratio": {
         "description": "fraction of eligible movable cells considered for post-legalization adaptive padding",
         "default": 0.2

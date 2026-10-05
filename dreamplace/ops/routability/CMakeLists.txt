@@ -21,6 +21,10 @@ add_pytorch_extension(segment_compaction_cpp
   EXTRA_LINK_LIBRARIES ${LINK_LIBS}
 )
 
+add_pytorch_extension(adaptive_padding_cpp
+  src/adaptive_padding.cpp
+)
+
 if(TORCH_ENABLE_CUDA)
 add_pytorch_extension(segment_compaction_cuda
   src/segment_compaction_cuda.cpp
@@ -33,6 +37,7 @@ endif(TORCH_ENABLE_CUDA)
 install(TARGETS
   same_net_topo_scoring_cpp
   segment_compaction_cpp
+  adaptive_padding_cpp
   DESTINATION dreamplace/ops/${OP_NAME}
 )
 

@@ -43,6 +43,23 @@ def build_smoothed_overflow_map(
     ).squeeze(0).squeeze(0).contiguous()
 
 
+def select_top_overflow_bins(horizontal_overflow, vertical_overflow, ratio=0.2):
+    if not 0 < ratio <= 1:
+        raise ValueError("overflow bin ratio must be in (0, 1]")
+    horizontal = _as_numpy(horizontal_overflow)
+    vertical = _as_numpy(vertical_overflow)
+    if horizontal.ndim != 2 or horizontal.shape != vertical.shape:
+        raise ValueError("directional overflow maps must have the same 2D shape")
+    overflow = np.maximum(np.maximum(horizontal, vertical), 0)
+    positive = np.flatnonzero(overflow > 0)
+    selected = np.zeros(overflow.size, dtype=overflow.dtype)
+    if positive.size:
+        ranked = positive[np.argsort(-overflow.flat[positive], kind="stable")]
+        hot = ranked[: math.ceil(positive.size * ratio)]
+        selected[hot] = overflow.flat[hot]
+    return selected.reshape(overflow.shape)
+
+
 def score_cells_from_overflow(
     pos,
     node_size_x,
@@ -148,6 +165,7 @@ def allocate_padding_sites(
     row_free_ratio=0.5,
     max_padding_sites=1,
     eligible_mask=None,
+    rows=None,
 ):
     if not 0 <= hot_cell_ratio <= 1:
         raise ValueError("hot_cell_ratio must be in [0, 1]")
@@ -203,10 +221,23 @@ def allocate_padding_sites(
                 (float(node_x[node_id]), float(node_x[node_id]) + width)
             )
 
-    row_segments = [
-        _segments_from_blockages(intervals, xl, xh)
-        for intervals in fixed_intervals
-    ]
+    if rows is None:
+        row_segments = [
+            _segments_from_blockages(intervals, xl, xh)
+            for intervals in fixed_intervals
+        ]
+    else:
+        row_bounds = [[] for _ in range(num_rows)]
+        for row_xl, row_yl, row_xh, row_yh in _as_numpy(rows).reshape(-1, 4):
+            first = max(0, int(math.floor((row_yl - yl) / row_height)))
+            last = min(num_rows - 1, int(math.ceil((row_yh - yl) / row_height) - 1))
+            for row_id in range(first, last + 1):
+                row_bounds[row_id].append((row_xl, row_xh))
+        row_segments = [
+            [segment for lower, upper in _merge_intervals(bounds, xl, xh)
+             for segment in _segments_from_blockages(fixed_intervals[row_id], lower, upper)]
+            for row_id, bounds in enumerate(row_bounds)
+        ]
     segment_used_sites = {}
     node_segment_keys = [None] * num_movable_nodes
 

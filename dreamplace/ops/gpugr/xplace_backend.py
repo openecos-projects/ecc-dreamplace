@@ -276,7 +276,9 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         return self._flute_lut_paths
 
     @staticmethod
-    def _load_xplace_python_modules(xplace_root):
+    def _load_xplace_python_modules(
+        xplace_root, gpugr_module=None, use_cuda=None
+    ):
         """Load the xplace Python helpers without executing package __init__ files.
 
         ``src/__init__.py`` and ``utils/__init__.py`` pull in placement-only
@@ -290,6 +292,11 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         __path__ points at the real directories.
         """
         import importlib.util
+
+        if gpugr_module is None:
+            from cpp_to_py import gpugr as gpugr_module
+        if use_cuda is None:
+            use_cuda = _extension_cuda_enabled(gpugr_module)
 
         def load_file(qualname, path):
             spec = importlib.util.spec_from_file_location(qualname, path)
@@ -309,12 +316,14 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         io_parser_module = load_file(
             "_xplace_utils_io_parser", xplace_root / "utils" / "io_parser.py"
         )
-        from cpp_to_py import gpugr
-
         shell_package("utils", xplace_root / "utils")
         shell_package("_xplace_src", xplace_root / "src")
         shell_package("_xplace_src.core", xplace_root / "src" / "core")
-        if not _extension_cuda_enabled(gpugr):
+        # The native GPUGR extension can be built with CUDA support while the
+        # active Torch runtime is CPU-only.  RouteForce imports dct_cuda at
+        # module load time, so key this compatibility stub off the resolved
+        # backend instead of the extension's compile-time flag.
+        if not use_cuda:
             dct_module = types.ModuleType("_xplace_src.core.dct2_fft2")
 
             def cuda_only_dct(*_args, **_kwargs):
@@ -332,13 +341,13 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
 
         return (
             io_parser_module.IOParser,
-            gpugr,
+            gpugr_module,
             flute_module.Flute,
             route_force_module.calc_gr_wl_via,
             route_force_module.estimate_num_shorts,
         )
 
-    def _import_xplace_modules(self):
+    def _import_xplace_modules(self, resolved_backend=None):
         if self._xplace_modules is not None:
             return self._xplace_modules
         xplace_root = self._ensure_xplace_python_path()
@@ -351,7 +360,22 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         _install_optional_route_force_stubs()
         _preload_libpython()
         try:
-            self._xplace_modules = self._load_xplace_python_modules(xplace_root)
+            # Import only the native GPUGR extension first.  Resolving the
+            # requested backend must happen before loading route_force.py,
+            # whose import-time dct_cuda dependency is CUDA-only.
+            from cpp_to_py import gpugr as gpugr_module
+
+            if resolved_backend is None:
+                resolved_backend = resolve_gpugr_backend(
+                    "auto",
+                    cuda_available=torch.cuda.is_available(),
+                    extension_cuda_enabled=_extension_cuda_enabled(gpugr_module),
+                )
+            self._xplace_modules = self._load_xplace_python_modules(
+                xplace_root,
+                gpugr_module,
+                use_cuda=resolved_backend == "cuda",
+            )
         except Exception as exc:
             raise RuntimeError(
                 "Failed to import Xplace gpugr modules. "
@@ -863,13 +887,19 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
                     export_current_db = True
 
             with self._profile_phase(profile_enabled, f"{profile_prefix}.import_xplace_modules"):
-                IOParser, gpugr, Flute, calc_gr_wl_via, estimate_num_shorts = (
-                    self._import_xplace_modules()
-                )
+                # Resolve the backend before importing route_force.py.  In a
+                # CPU Torch environment an explicitly requested CPU backend
+                # must never pull in the CUDA DCT extension.
+                self._ensure_xplace_python_path()
+                from cpp_to_py import gpugr as gpugr_module
+
                 resolved_backend = resolve_gpugr_backend(
                     requested_backend,
                     cuda_available=torch.cuda.is_available(),
-                    extension_cuda_enabled=_extension_cuda_enabled(gpugr),
+                    extension_cuda_enabled=_extension_cuda_enabled(gpugr_module),
+                )
+                IOParser, gpugr, Flute, calc_gr_wl_via, estimate_num_shorts = (
+                    self._import_xplace_modules(resolved_backend=resolved_backend)
                 )
                 validate_gpugr_backend_request(resolved_backend, rrr_iters)
 
@@ -921,6 +951,15 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
                                 random_place=False,
                                 num_threads=threads,
                             )
+
+                    route_grid_edges_dbu = None
+                    if route_xsize > 0 and route_ysize > 0:
+                        _, die_xh, _, die_yh = gpdb.dieInfo()
+                        # GRDatabase uses integer DIEAREA pitches and a final edge at dieHX/HY.
+                        route_grid_edges_dbu = (
+                            np.append(np.arange(route_xsize) * (die_xh // route_xsize), die_xh),
+                            np.append(np.arange(route_ysize) * (die_yh // route_ysize), die_yh),
+                        )
 
                     parser_cache_active = False
                     if parser_cache_requested:
@@ -1321,6 +1360,7 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
                 "metrics": metrics,
                 "native_stats": native_stats,
                 "maps": maps,
+                "route_grid_edges_dbu": route_grid_edges_dbu,
                 "artifact_paths": artifact_paths,
                 "route_entries": route_entries,
                 "same_net_topology_cache": dict(topology_pack_result.get("cache", {})),

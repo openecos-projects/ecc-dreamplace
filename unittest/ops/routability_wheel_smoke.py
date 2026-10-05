@@ -23,6 +23,8 @@ TEST_FILES = (
     "gpugr_routing_layers_unittest",
     "cell_padding_geometry_unittest",
     "post_legalization_adaptive_padding_unittest",
+    "iterative_legalization_padding_unittest",
+    "m2_rail_legalization_padding_unittest",
     "gpugr_evidence_unittest",
     "params_l_shape_preset_unittest",
 )

@@ -57,7 +57,7 @@ class BackendContractTest(unittest.TestCase):
         self.assertEqual("ecc_idb", ecc_caps["coordinate_source"])
 
     def test_parasitic_state_audit_recommends_ieda_calibration_without_spef(self):
-        from docs.backend_governance.audit_backend_parasitic_state import (
+        from backend_parasitic_audit import (
             audit_backend_parasitic_state,
         )
 
@@ -89,7 +89,7 @@ class BackendContractTest(unittest.TestCase):
         )
 
     def test_parasitic_state_audit_prefers_same_spef_when_available(self):
-        from docs.backend_governance.audit_backend_parasitic_state import (
+        from backend_parasitic_audit import (
             audit_backend_parasitic_state,
         )
 

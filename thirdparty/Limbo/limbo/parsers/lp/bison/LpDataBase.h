@@ -137,6 +137,6 @@ class LpDataBase
         virtual void set_integer(string const& vname, bool binary) = 0; 
 };
 
-} // namespace DefParser
+} // namespace LpParser
 
 #endif

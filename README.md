@@ -23,9 +23,9 @@ AutoDMP adds simultaneous macro and standard cell placement enhancements.
 
 This repository is packaged as a Python wheel for the
 [ECOS Studio](https://github.com/openecos-projects/ecos-studio) silicon design
-platform. The original upstream DREAMPlace README is preserved in
-[docs/README_DREAMPlace.md](docs/README_DREAMPlace.md), and the inherited AutoDMP
-notes are preserved in [docs/README_AutoDMP.md](docs/README_AutoDMP.md).
+platform. Upstream documentation is available in the
+[DREAMPlace repository](https://github.com/limbo018/DREAMPlace) and
+[AutoDMP repository](https://github.com/NVlabs/AutoDMP).
 
 ## What Is New Compared with DREAMPlace?
 
@@ -150,12 +150,6 @@ dist/ecc_dreamplace-*
 ```
 
 The uv build runs the package build defined by `pyproject.toml`.
-
-# How to Build 
-
-You can build in two ways:
-- Build without Docker by following the instructions of the DREAMPlace build at [docs/README_DREAMPlace.md](docs/README_DREAMPlace.md).
-- Use the provided Dockerfile to build an image with the required library dependencies.
 
 # Physical Design Flow
 

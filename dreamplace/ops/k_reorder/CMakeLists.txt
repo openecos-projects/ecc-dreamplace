@@ -4,17 +4,13 @@ set(TARGET_NAME ${OP_NAME})
 
 set(INCLUDE_DIRS 
   ${CMAKE_CURRENT_SOURCE_DIR}/..
-  ${LIMBO_SOURCE_DIR}
   ${CUB_DIR}
   )
 
 set(LINK_LIBS 
   #draw_place_cxx
   utility_cxx
-  ${LIMBO_BINARY_DIR}/limbo/parsers/gdsii/stream/libgdsparser.a
-  ${LIMBO_BINARY_DIR}/limbo/thirdparty/gzstream/libgzstream.a
   OpenMP::OpenMP_CXX
-  ${ZLIB_LIBRARIES}
   )
 
 if(CAIRO_FOUND)

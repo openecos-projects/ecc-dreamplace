@@ -1,5 +1,5 @@
 ##
-# @file   nctugr_binary.py
+# @file   irt_egr.py
 # @author Yibo Lin
 # @date   Jan 2020
 #
@@ -13,8 +13,6 @@ from torch.autograd import Function
 from torch import nn
 import pdb
 import numpy as np
-
-import dreamplace.ops.place_io.place_io as place_io
 
 logger = logging.getLogger(__name__)
 

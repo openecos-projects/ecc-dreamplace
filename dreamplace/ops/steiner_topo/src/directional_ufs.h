@@ -2,7 +2,7 @@
 #ifndef DIRECTIONAL_UFS_H
 #define DIRECTIONAL_UFS_H
 
-#include "place_io/src/Point.h"
+#include "utility/src/Point.h"
 #include <algorithm>
 #include <cassert>
 #include <cmath>

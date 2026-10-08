@@ -4,7 +4,6 @@ set(TARGET_NAME ${OP_NAME})
 
 set(INCLUDE_DIRS 
   ${CMAKE_CURRENT_SOURCE_DIR}/..
-  ${LIMBO_SOURCE_DIR}
   ${MUNKRES_CPP_INCLUDE_DIRS}
   ${LEMON_INCLUDE_DIRS}
   ${CUB_DIR}
@@ -13,12 +12,9 @@ set(INCLUDE_DIRS
 set(LINK_LIBS 
   #draw_place_cxx
   utility_cxx
-  ${LIMBO_BINARY_DIR}/limbo/parsers/gdsii/stream/libgdsparser.a
-  ${LIMBO_BINARY_DIR}/limbo/thirdparty/gzstream/libgzstream.a
   munkres
   lemon
   OpenMP::OpenMP_CXX
-  ${ZLIB_LIBRARIES}
   )
 
 if(CAIRO_FOUND)

@@ -5,6 +5,7 @@ set(TARGET_NAME ${OP_NAME})
 set(INCLUDE_DIRS 
   ${CMAKE_CURRENT_SOURCE_DIR}/..
   ${FLUTE_INCLUDE_DIRS}
+  ${LIMBO_SOURCE_DIR}
 )
 
 set(LINK_LIBS 
@@ -15,6 +16,7 @@ set(LINK_LIBS
 
 add_pytorch_extension(${TARGET_NAME}_cpp 
   src/steiner_topo.cpp
+  src/l_direction_matcher.cpp
   EXTRA_INCLUDE_DIRS ${INCLUDE_DIRS}
   EXTRA_LINK_LIBRARIES ${LINK_LIBS}
 )

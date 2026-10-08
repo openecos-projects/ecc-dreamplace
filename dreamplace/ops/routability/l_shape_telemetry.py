@@ -1,6 +1,28 @@
 """Project L-shape objective diagnostics into placement metrics."""
 
+import math
+import numpy as np
+import torch
+
 from dreamplace.ops.routability.profile_timing import l_shape_log_verbose
+
+
+def reset_l_shape_gradient_telemetry(model):
+    """Clear measurements before evaluating the next route gradient."""
+    for field in (
+        "l_shape_last_cost", "l_shape_last_weighted_cost", "l_shape_last_weight",
+        "l_shape_last_target_weight", "l_shape_last_weight_candidate",
+        "l_shape_last_cap_active", "l_shape_last_base_grad_norm",
+        "l_shape_last_grad_raw_norm", "l_shape_last_grad_norm", "l_shape_last_grad_ratio",
+    ):
+        setattr(model, field, None)
+    model.l_shape_fast_mode = bool(getattr(model.params, "l_shape_fast_mode", 0))
+    model.l_shape_gradient_mode = getattr(model.params, "l_shape_gradient_mode", "translation")
+    model.l_shape_energy_valid = (
+        not model.l_shape_fast_mode or model.l_shape_gradient_mode == "full"
+    )
+    model.l_shape_capacity_al_last_summary = {}
+    model.soft_l_last_summary = {}
 
 
 def collect_l_shape_telemetry(model, metric):
@@ -14,6 +36,7 @@ def collect_l_shape_telemetry(model, metric):
         return
 
     field_map = {
+        "l_shape_gradient_mode": "l_shape_gradient_mode",
         "l_shape_fast_mode": "l_shape_fast_mode",
         "l_shape_energy_valid": "l_shape_energy_valid",
         "l_shape_cost": "l_shape_last_cost",
@@ -128,3 +151,142 @@ def collect_l_shape_telemetry(model, metric):
                 and summary_field in summary
             ):
                 setattr(metric, metric_field, value)
+
+def append_processed_metric_series(processed_metrics, metrics):
+    optional_metric_fields = [
+        "l_shape_gradient_mode",
+        "l_shape_fast_mode",
+        "l_shape_energy_valid",
+        "l_shape_cost",
+        "l_shape_weighted_cost",
+        "l_shape_weight",
+        "l_shape_target_weight",
+        "l_shape_weight_candidate",
+        "l_shape_base_grad_norm",
+        "l_shape_grad_raw_norm",
+        "l_shape_grad_norm",
+        "l_shape_grad_ratio",
+        "l_shape_target_ratio",
+        "l_shape_overflow",
+        "l_shape_overflow_ratio",
+        "l_shape_overflow_ema",
+        "l_shape_overflow_max_density",
+        "l_shape_capacity_al_enabled",
+        "l_shape_capacity_al_updated",
+        "l_shape_capacity_al_g_h_max",
+        "l_shape_capacity_al_g_v_max",
+        "l_shape_capacity_al_g_h_sum",
+        "l_shape_capacity_al_g_v_sum",
+        "l_shape_capacity_al_g_h_pos_ratio",
+        "l_shape_capacity_al_g_v_pos_ratio",
+        "l_shape_capacity_al_q_h_max",
+        "l_shape_capacity_al_q_v_max",
+        "l_shape_capacity_al_q_h_sum",
+        "l_shape_capacity_al_q_v_sum",
+        "l_shape_capacity_al_lambda_h_max",
+        "l_shape_capacity_al_lambda_v_max",
+        "l_shape_capacity_al_lambda_h_sum",
+        "l_shape_capacity_al_lambda_v_sum",
+        "l_shape_capacity_al_energy_h",
+        "l_shape_capacity_al_energy_v",
+        "l_shape_capacity_al_energy_total",
+        "l_shape_capacity_al_pq_h_min",
+        "l_shape_capacity_al_pq_h_max",
+        "l_shape_capacity_al_pq_h_sum",
+        "l_shape_capacity_al_pq_v_min",
+        "l_shape_capacity_al_pq_v_max",
+        "l_shape_capacity_al_pq_v_sum",
+        "l_shape_capacity_al_active_memory_bins_h",
+        "l_shape_capacity_al_active_memory_bins_v",
+        "l_shape_macro_exclusion_enabled",
+        "l_shape_macro_exclusion_macro_count",
+        "l_shape_macro_exclusion_body_bins",
+        "l_shape_macro_exclusion_halo_bins",
+        "l_shape_macro_exclusion_active_bins",
+        "l_shape_macro_exclusion_source_max",
+        "l_shape_macro_exclusion_source_sum",
+        "l_shape_macro_exclusion_body_source_max",
+        "l_shape_macro_exclusion_body_source_sum",
+        "l_shape_macro_exclusion_halo_source_max",
+        "l_shape_macro_exclusion_halo_source_sum",
+        "l_shape_macro_exclusion_usage_max",
+        "l_shape_macro_exclusion_usage_sum",
+        "l_shape_macro_exclusion_usage_bins",
+        "l_shape_macro_exclusion_dominates_bins",
+        "l_shape_macro_exclusion_routing_dominates_bins",
+        "soft_l_diag_count",
+        "soft_l_mean_cost_gap",
+        "soft_l_raw_cost_gap_p50",
+        "soft_l_biased_cost_gap_p50",
+        "soft_l_tau_source_gap",
+        "soft_l_mean_max_prob",
+        "soft_l_mean_entropy",
+        "soft_l_near_tie_ratio",
+        "soft_l_tau",
+        "soft_l_effective_hotspot_weight",
+        "soft_l_resolver_agreement_ratio",
+        "soft_l_same_net_topo_nets",
+        "soft_l_same_net_topo_segments_h",
+        "soft_l_same_net_topo_segments_v",
+        "soft_l_same_net_topo_diag_edges",
+        "soft_l_same_net_topo_edges_with_topology",
+        "soft_l_same_net_topo_edges_with_observed_intervals",
+        "soft_l_same_net_topo_mean_gap",
+        "soft_l_same_net_topo_tie_ratio",
+    ]
+
+    def scalarize_metric_value(value):
+        if value is None:
+            return None
+        if torch.is_tensor(value):
+            if value.numel() == 1:
+                return value.detach().cpu().item()
+            return value.detach().cpu().view(-1).tolist()
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+        return value
+
+    fixed_when_l_shape_fields = {
+        "l_shape_gradient_mode",
+        "l_shape_fast_mode",
+        "l_shape_energy_valid",
+    }
+    energy_derived_metric_fields = {
+        "l_shape_cost",
+        "l_shape_weighted_cost",
+        "l_shape_capacity_al_energy_h",
+        "l_shape_capacity_al_energy_v",
+        "l_shape_capacity_al_energy_total",
+        "l_shape_capacity_al_pq_h_min",
+        "l_shape_capacity_al_pq_h_max",
+        "l_shape_capacity_al_pq_h_sum",
+        "l_shape_capacity_al_pq_v_min",
+        "l_shape_capacity_al_pq_v_max",
+        "l_shape_capacity_al_pq_v_sum",
+    }
+    l_shape_seen = any(
+        getattr(metric, "l_shape_fast_mode", None) is not None
+        or getattr(metric, "l_shape_energy_valid", None) is not None
+        for metric in metrics
+    )
+    l_shape_energy_invalid_seen = any(
+        getattr(metric, "l_shape_energy_valid", None) is not None
+        and not bool(getattr(metric, "l_shape_energy_valid"))
+        for metric in metrics
+    )
+    for field_name in optional_metric_fields:
+        series = [
+            scalarize_metric_value(getattr(metric, field_name, None))
+            for metric in metrics
+        ]
+        if (
+            any(value is not None for value in series)
+            or (l_shape_seen and field_name in fixed_when_l_shape_fields)
+            or (
+                l_shape_energy_invalid_seen
+                and field_name in energy_derived_metric_fields
+            )
+        ):
+            processed_metrics[field_name] = series

@@ -1,0 +1,210 @@
+{
+  "artifact": "autodmp_tools_paper_release_profile",
+  "artifact_version": 1,
+  "profile_name": "tools_release_v1",
+  "suite": [
+    "NV_NVDLA_partition_m",
+    "NV_NVDLA_partition_p",
+    "aes_256",
+    "ariane136",
+    "hidden1",
+    "hidden2",
+    "hidden3",
+    "hidden4",
+    "hidden5",
+    "mempool_tile_wrap"
+  ],
+  "table_order": ["placement", "buffering", "sizing", "full_flow"],
+  "methods": {
+    "placement": [
+      "or_gpl_plain",
+      "or_tdp_reweight_only",
+      "autodmp_p_ctrl",
+      "autodmp_pin2pin"
+    ],
+    "buffering": [
+      "or_repair_design_buffer_only",
+      "autodmp_candidate_route_b",
+      "autodmp_equal_spaced_route_b"
+    ],
+    "sizing": ["or_pure_sizeup", "autodmp_diff_sizing"],
+    "full_flow": [
+      "or_native_full_flow",
+      "autodmp_staged_psb",
+      "autodmp_coordinated_psb"
+    ]
+  },
+  "method_specs": {
+    "or_gpl_plain": {
+      "input_domain": "R0",
+      "required_cuda": false,
+      "runner": "joint_place_sizing_buffering/run_random_init_validation.py"
+    },
+    "or_tdp_reweight_only": {
+      "input_domain": "R0",
+      "required_cuda": false,
+      "runner": "joint_place_sizing_buffering/run_random_init_validation.py"
+    },
+    "autodmp_p_ctrl": {
+      "input_domain": "R0",
+      "required_cuda": true,
+      "runner": "joint_place_sizing_buffering/run_random_init_validation.py"
+    },
+    "autodmp_pin2pin": {
+      "input_domain": "R0",
+      "required_cuda": true,
+      "runner": "joint_place_sizing_buffering/run_random_init_validation.py"
+    },
+    "or_repair_design_buffer_only": {
+      "input_domain": "D_post",
+      "required_cuda": false,
+      "runner": "equal_spaced_buffering/run.py"
+    },
+    "autodmp_candidate_route_b": {
+      "input_domain": "D_post",
+      "required_cuda": true,
+      "runner": "buffering_inner_loop/run.py"
+    },
+    "autodmp_equal_spaced_route_b": {
+      "input_domain": "D_post",
+      "required_cuda": true,
+      "runner": "equal_spaced_buffering/run.py"
+    },
+    "or_pure_sizeup": {
+      "input_domain": "D_post",
+      "required_cuda": false,
+      "runner": "diff_sizing/run.py"
+    },
+    "autodmp_diff_sizing": {
+      "input_domain": "D_post",
+      "required_cuda": true,
+      "runner": "diff_sizing/run.py"
+    },
+    "or_native_full_flow": {
+      "input_domain": "R0",
+      "required_cuda": false,
+      "runner": "joint_place_sizing_buffering/run_random_init_validation.py"
+    },
+    "autodmp_staged_psb": {
+      "input_domain": "R0",
+      "required_cuda": true,
+      "runner": "staged_joint/run.py"
+    },
+    "autodmp_coordinated_psb": {
+      "input_domain": "R0",
+      "required_cuda": true,
+      "runner": "joint_place_sizing_buffering/run_random_init_validation.py"
+    }
+  },
+  "input_domains": {
+    "R0": {
+      "seed": 3000,
+      "target_density": 0.8,
+      "num_bins_x": 256,
+      "num_bins_y": 256,
+      "auto_adjust_bins": false,
+      "enable_fillers": true
+    },
+    "D_post": {
+      "coordinates_fixed_before_track_a": true,
+      "use_packaged_iccad24_def": true
+    }
+  },
+  "placement": {
+    "optimizer": "nesterov",
+    "max_steps": 3000,
+    "stop_overflow": 0.1,
+    "pin2pin": {
+      "backend": "cuda",
+      "path_pair_backend": "cpp_openmp_transition_aware",
+      "weight": 0.0005,
+      "min_weight": 10.0,
+      "max_weight": 50.0,
+      "accumulate_weight": 0.2,
+      "path_limit": 0,
+      "state_domain": "setup_plus_recovery",
+      "activation_overflow": 0.3,
+      "update_interval": 15
+    }
+  },
+  "buffering": {
+    "rounds": 5,
+    "selection_fraction": 0.001,
+    "max_repeaters_per_segment": 3,
+    "fixed_bsu_index": 7,
+    "buffer_master": "BUFx4f_ASAP7_75t_R",
+    "candidate_count_per_segment": 3,
+    "capacity_controller_enabled": false,
+    "sizing_enabled": false,
+    "final_commit_count": 1,
+    "timing_backend": "cpp_cuda_segment_transfer_explicit_autograd",
+    "transfer_backend": "segment_transfer_native",
+    "candidate_backend": "cuda_explicit_autograd"
+  },
+  "sizing": {
+    "iterations": 50,
+    "ranking_mode": "real_size_taylor",
+    "up_percent": 30.0,
+    "down_percent": 0.0,
+    "restore_best": true,
+    "buffering_enabled": false
+  },
+  "coordinated_full_flow": {
+    "milestones": [0.3, 0.25, 0.2, 0.15, 0.1],
+    "sizing_top_percent_per_milestone": 10.0,
+    "sizing_up_steps": 1,
+    "sizing_down_enabled": false,
+    "vt_change_enabled": false,
+    "buffering_selection_fraction": 0.001,
+    "integer_virtual_buffers": true,
+    "virtual_buffer_density_in_placement": true,
+    "density_gradient_in_buffer_selection": false,
+    "final_combined_commit_count": 1
+  },
+  "track_a": {
+    "artifact": "canonical_def_only_track_a",
+    "artifact_version": 1,
+    "runner": "../../common/def_only_track_a.py",
+    "read_verilog": false,
+    "detailed_placement_count": 1,
+    "detailed_placement_search_window": "full_core",
+    "placement_validation_contract": "opendp_plus_exact_macro_keepout_v1",
+    "repair_enabled": false,
+    "power_input_activity": 0.1,
+    "power_input_duty": 0.5,
+    "tns_wns_tie_tolerance_ns": 0.001,
+    "pareto_relative_tolerance": 0.001
+  },
+  "external_references": {
+    "efficient_tdp": {
+      "primary_matrix": false,
+      "qualification_required": true
+    }
+  },
+  "execution_manifest_required_fields": [
+    "selected_cases",
+    "selected_tables",
+    "autodmp_revision",
+    "autodmp_tracked_diff_sha256",
+    "source_file_sha256",
+    "native_library_sha256",
+    "openroad_path",
+    "openroad_sha256",
+    "python_path",
+    "torch_version",
+    "cuda_runtime_version",
+    "cuda_visible_devices",
+    "logical_gpu_index",
+    "gpu_model",
+    "gpu_uuid",
+    "gpu_preflight_compute_processes",
+    "cpu_model",
+    "cpu_count",
+    "omp_num_threads",
+    "torch_num_threads",
+    "torch_num_interop_threads",
+    "openroad_num_threads",
+    "case_concurrency",
+    "measurement_policy"
+  ]
+}

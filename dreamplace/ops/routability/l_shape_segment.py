@@ -952,6 +952,7 @@ class LShapeSegmentOp:
         soft_min_weight=0.0,
         deterministic_backward=False,
         log_verbose=0,
+        differentiate_sizes=False,
     ):
         self.wire_width = wire_width
         self.wire_width_h = float(wire_width if wire_width_h is None else wire_width_h)
@@ -960,6 +961,7 @@ class LShapeSegmentOp:
         self.use_vectorized = use_vectorized
         self.soft_min_weight = float(soft_min_weight)
         self.deterministic_backward = bool(deterministic_backward)
+        self.differentiate_sizes = bool(differentiate_sizes)
         self.log_verbose = int(log_verbose)
         self.segment_compaction_reference = _env_any_flag_enabled(
             "DREAMPLACE_L_SHAPE_SEGMENT_COMPACTION_REFERENCE",
@@ -1290,11 +1292,6 @@ class LShapeSegmentOp:
         seg1_indices = torch.nonzero(seg1_final_valid, as_tuple=False).flatten()
         seg2_indices = torch.nonzero(seg2_final_valid, as_tuple=False).flatten()
 
-        seg1_size_x_forward = seg1_size_x.detach()
-        seg1_size_y_forward = seg1_size_y.detach()
-        seg2_size_x_forward = seg2_size_x.detach()
-        seg2_size_y_forward = seg2_size_y.detach()
-
         segment_llx, segment_lly = _compact_segment_positions(
             seg1_llx,
             seg1_lly,
@@ -1304,20 +1301,19 @@ class LShapeSegmentOp:
             seg2_indices,
         )
 
-        segment_size_x = torch.cat(
-            (
-                seg1_size_x_forward.index_select(0, seg1_indices),
-                seg2_size_x_forward.index_select(0, seg2_indices),
-            ),
-            dim=0,
-        )
-        segment_size_y = torch.cat(
-            (
-                seg1_size_y_forward.index_select(0, seg1_indices),
-                seg2_size_y_forward.index_select(0, seg2_indices),
-            ),
-            dim=0,
-        )
+        if self.differentiate_sizes:
+            segment_size_x, segment_size_y = _compact_segment_positions(
+                seg1_size_x, seg1_size_y, seg2_size_x, seg2_size_y, seg1_indices, seg2_indices,
+            )
+        else:
+            segment_size_x = torch.cat((
+                seg1_size_x.detach().index_select(0, seg1_indices),
+                seg2_size_x.detach().index_select(0, seg2_indices),
+            ))
+            segment_size_y = torch.cat((
+                seg1_size_y.detach().index_select(0, seg1_indices),
+                seg2_size_y.detach().index_select(0, seg2_indices),
+            ))
         segment_edge_idx = torch.cat(
             (
                 valid_edge_idx.index_select(0, seg1_indices),

@@ -4,3 +4,9 @@ file(GLOB INSTALL_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/*.py" "${CMAKE_CURRENT_SOURC
 install(
     FILES ${INSTALL_SRCS} DESTINATION dreamplace
     )
+
+install(
+    DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/flows
+    DESTINATION dreamplace
+    FILES_MATCHING PATTERN "*.py"
+    )

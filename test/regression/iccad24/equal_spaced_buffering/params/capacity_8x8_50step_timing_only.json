@@ -1,0 +1,39 @@
+{
+  "artifact_version": 1,
+  "profile_kind": "fixed_placement_segment_capacity_timing_only_control",
+  "paired_capacity_profile": "capacity_8x8_50step_ours.json",
+  "selection_basis": "uses the capacity profile's effective z initialization without enabling the capacity controller",
+  "suite": ["NV_NVDLA_partition_p"],
+  "methods": ["b0", "b1", "ours"],
+  "segment_mode": {
+    "max_repeaters_per_segment": 3,
+    "continuous_steps": 50,
+    "continuous_lr": 0.01,
+    "gpu_id": 1,
+    "z_init": 0.0026226835,
+    "fixed_bsu_index": 7,
+    "buffer_master": "BUFx4f_ASAP7_75t_R",
+    "timing_backend": "cpp_cuda_segment_transfer_explicit_autograd",
+    "transfer_backend": "segment_transfer_native",
+    "integer_projection_interval": 0,
+    "one_final_hard_commit": true
+  },
+  "matched_capacity_state": {
+    "grid_factor": 8,
+    "rho_buffer": 0.01,
+    "shared_alpha": 0.026226842026299303,
+    "raw_capacity_z_init": 0.1,
+    "strict_continuous_feasibility": 0.0001
+  },
+  "openroad_buffer_only": {
+    "max_buffer_percent": 3.0,
+    "sequence": "buffer",
+    "skip_last_gasp": true
+  },
+  "post_commit_protocol": [
+    "detailed_placement",
+    "estimate_parasitics -placement",
+    "update_timing",
+    "def_only_openroad_opensta_replay"
+  ]
+}

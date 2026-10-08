@@ -1,0 +1,195 @@
+{
+  "artifact": "autodmp_timing_physical_synthesis_profile",
+  "artifact_version": 2,
+  "profile_name": "timing_physical_synthesis_v2",
+  "suite": [
+    "NV_NVDLA_partition_m",
+    "NV_NVDLA_partition_p",
+    "aes_256",
+    "ariane136",
+    "hidden1",
+    "hidden2",
+    "hidden3",
+    "hidden4",
+    "hidden5",
+    "mempool_tile_wrap"
+  ],
+  "benchmark_source": {
+    "path": "references/benchmarks/iccad24_benchmark",
+    "resolve_symlinks_for_manifest": true,
+    "required_design_files": [
+      "design/{case}/{case}.def",
+      "design/{case}/{case}.v",
+      "design/{case}/{case}.sdc"
+    ],
+    "required_technology_files": [
+      "ASAP7/lef/asap7_tech_1x_201209.lef",
+      "ASAP7/lef/asap7sc7p5t_27_R_1x_201211.lef",
+      "ASAP7/lef/sram_asap7_16x256_1rw.lef",
+      "ASAP7/lef/sram_asap7_32x256_1rw.lef",
+      "ASAP7/lef/sram_asap7_64x256_1rw.lef",
+      "ASAP7/lef/sram_asap7_64x64_1rw.lef",
+      "ASAP7/lib/asap7sc7p5t_AO_RVT_FF_nldm_201020.lib",
+      "ASAP7/lib/asap7sc7p5t_INVBUF_RVT_FF_nldm_201020.lib",
+      "ASAP7/lib/asap7sc7p5t_OA_RVT_FF_nldm_201020.lib",
+      "ASAP7/lib/asap7sc7p5t_SEQ_RVT_FF_nldm_201020.lib",
+      "ASAP7/lib/asap7sc7p5t_SIMPLE_RVT_FF_nldm_201020.lib",
+      "ASAP7/lib/sram_asap7_16x256_1rw.lib",
+      "ASAP7/lib/sram_asap7_32x256_1rw.lib",
+      "ASAP7/lib/sram_asap7_64x256_1rw.lib",
+      "ASAP7/lib/sram_asap7_64x64_1rw.lib",
+      "ASAP7/setRC.tcl"
+    ]
+  },
+  "initial_state": {
+    "R0": {
+      "producer": "joint_place_sizing_buffering/random_init_snapshot.py",
+      "seed": 3000,
+      "target_density": 0.8,
+      "num_bins_x": 256,
+      "num_bins_y": 256,
+      "auto_adjust_bins": false,
+      "enable_fillers": false
+    },
+    "D_post": {
+      "producer": "packaged_iccad24_def_passthrough",
+      "source_relative_to_benchmark": "design/{case}/{case}.def",
+      "normalization": "none",
+      "coordinates_fixed": true
+    }
+  },
+  "evaluators": {
+    "fixed_state": {
+      "runner": "../../common/def_only_track_a.py",
+      "detailed_placement": false,
+      "estimate_parasitics": true,
+      "refresh_timing": true,
+      "read_verilog_for_state": false,
+      "coordinate_audit": "exact_instance_xy_orient_status"
+    },
+    "physical_finalize": {
+      "runner": "../../common/def_only_track_a.py",
+      "detailed_placement": true,
+      "estimate_parasitics": true,
+      "refresh_timing": true,
+      "read_verilog_for_state": false,
+      "coordinate_audit": "report_D_committed_to_D_evaluated_delta"
+    }
+  },
+  "placement": {
+    "optimizer": "nesterov",
+    "max_steps": 3000,
+    "stop_overflow": 0.1,
+    "pin2pin_backend": "cuda",
+    "pin2pin_weight": 0.0005,
+    "pin2pin_min_weight": 10.0,
+    "pin2pin_max_weight": 50.0,
+    "pin2pin_accumulate_weight": 0.2,
+    "pin2pin_path_limit": 0,
+    "pin2pin_activation_overflow": 0.3,
+    "pin2pin_update_interval": 15
+  },
+  "sizing": {
+    "iterations": 50,
+    "ranking_mode": "real_size_taylor",
+    "up_percent": 30.0,
+    "down_percent": 0.0,
+    "buffering_enabled": false,
+    "coordinates_fixed": true,
+    "topology_frozen": true
+  },
+  "buffering": {
+    "buffer_master": "BUFx4f_ASAP7_75t_R",
+    "max_repeaters_per_segment": 3,
+    "fixed_bsu_index": 7,
+    "selection_fraction": 0.001,
+    "rounds": 5,
+    "candidate_count_per_segment": 3,
+    "sizing_enabled": false,
+    "one_final_commit": true,
+    "timing_backend": "cpp_cuda_segment_transfer_explicit_autograd",
+    "transfer_backend": "segment_transfer_native",
+    "candidate_backend": "cuda_explicit_autograd"
+  },
+  "rq2": {
+    "sizing_enabled": false,
+    "arms": [
+      "P_to_B",
+      "P_alternating_B_no_density",
+      "P_alternating_B_full",
+      "P_alternating_B_frozen_geometry"
+    ],
+    "placement_carrier": "autodmp_pin2pin",
+    "virtual_density_in_full": true,
+    "virtual_density_in_no_density": false,
+    "live_geometry_in_full": true,
+    "live_geometry_in_no_density": true,
+    "live_geometry_in_frozen_geometry": false,
+    "endpoint_geometry_gradient_in_full": true,
+    "endpoint_geometry_gradient_in_no_density": true,
+    "endpoint_geometry_gradient_in_frozen_geometry": false,
+    "one_final_commit": true
+  },
+  "rq3": {
+    "staged_method": "autodmp_staged_one_commit",
+    "coordinated_method": "autodmp_coordinated_one_commit",
+    "one_final_commit": true,
+    "same_operator": true,
+    "same_budget": true
+  },
+  "mixed_terminal_refinement": {
+    "enabled": true,
+    "applies_to": ["autodmp_coordinated"],
+    "preserve_intermediate_milestone_actions": true,
+    "topology_rebuild": "fresh_placer_from_coordinated_committed_def",
+    "sizing_iterations": 100,
+    "sizing_up_percent": 30.0,
+    "sizing_down_percent": 0.0,
+    "buffering_strategy": "discrete_net_gradient",
+    "buffering_rounds": 5,
+    "terminal_selection_policy": "committed_opensta_tns_improvement",
+    "transaction_policy": "coordinated_core_commit_then_terminal_refinement_commit"
+  },
+  "openroad": {
+    "buffer_only": {
+      "sequence": "buffer",
+      "sizing_enabled": false,
+      "buffer_removal_enabled": false,
+      "gate_cloning_enabled": false,
+      "legalization_enabled": false
+    },
+    "native_full_flow": {
+      "flow_name": "OpenROAD native full flow",
+      "placement": true,
+      "repair_design": true,
+      "repair_timing_setup": true
+    }
+  },
+  "budget": {
+    "placement_objective_evaluations": 3000,
+    "timing_forward_backward_evaluations": 5,
+    "sizing_action_rounds": 100,
+    "buffer_action_rounds": 5,
+    "safety_timeout_sec": 21600,
+    "case_concurrency": 1
+  },
+  "metrics": {
+    "primary_timing": ["wns_ns", "tns_ns"],
+    "electrical": ["slew_violation_count", "slew_violation_total", "cap_violation_count", "cap_violation_total"],
+    "physical": ["raw_hpwl_dbu", "legalized_hpwl_dbu", "total_cell_area_um2", "power_total_w"],
+    "actions": ["resize_count", "inserted_buffer_count"],
+    "runtime": ["core_optimizer_runtime_sec", "physical_transaction_runtime_sec", "legalization_runtime_sec", "track_a_runtime_sec", "end_to_end_runtime_sec"]
+  },
+  "failure_statuses": [
+    "pass",
+    "execution_failed",
+    "artifact_contract_failed",
+    "physical_invalid",
+    "evaluation_failed",
+    "provenance_mismatch",
+    "cuda_unavailable",
+    "oom",
+    "unsupported",
+    "capability_skip"
+  ]
+}

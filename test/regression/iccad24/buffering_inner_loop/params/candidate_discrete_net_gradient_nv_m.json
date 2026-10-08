@@ -1,0 +1,32 @@
+{
+  "artifact_version": 1,
+  "profile_kind": "candidate_discrete_net_gradient_full_design",
+  "suite": [
+    "NV_NVDLA_partition_m"
+  ],
+  "flow_kind": "buffering",
+  "buffering_mode": "candidate",
+  "candidate_strategy": "discrete_net_gradient",
+  "rounds": 5,
+  "gpu_id": 1,
+  "candidate_generation": {
+    "policy": "segment_only",
+    "mode": "equal_count",
+    "max_candidates_per_segment": 3,
+    "include_tree_node_candidates": false,
+    "full_design": true
+  },
+  "fixed_bsu_index": 7,
+  "buffer_master": "BUFx4f_ASAP7_75t_R",
+  "candidate_net_subgraph_backend": "cuda_explicit_autograd",
+  "timing_surrogate_mode": "lut_only",
+  "selection_fraction": 0.001,
+  "affected_nets_per_action": 1000,
+  "one_final_coordinate_commit": true,
+  "post_commit_protocol": [
+    "detailed_placement",
+    "estimate_parasitics -placement",
+    "update_timing",
+    "fresh_def_only_opensta_replay"
+  ]
+}

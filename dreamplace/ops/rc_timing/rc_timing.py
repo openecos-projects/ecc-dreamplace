@@ -18,6 +18,10 @@ import dreamplace.configure as configure
 import time
 import logging
 
+from dreamplace.ops.net_subgraph_timing.segment_count_live_geometry import (
+    build_live_edge_geometry,
+)
+
 # ==========================
 # Load Operator
 # ==========================
@@ -314,6 +318,34 @@ flat_pin_from: 展开的from形式，最后会形如 [1,1,1,2,2,3,...]
 '''
 
 
+def evaluate_rc_tree(cap, resistance, parent, child_start, children, topo, topo_start):
+    """Evaluate one capacitance corner in the caller's RC-vertex domain.
+
+    ``cap`` is local node capacitance (pin + distributed wire C), in pF;
+    ``resistance`` is each node's incoming edge R, in ohms, with zero at roots.
+    ``parent``/child CSR and the per-net parent-before-child topological order
+    use that same vertex domain, independently of physical pin IDs.
+
+    Return ``load, delay, ldelay, beta, impulse`` in the same vertex domain:
+    subtree load in pF, Elmore delay in ps, ldelay in pF*ps, and beta/impulse
+    in ps^2. ``impulse = 2*beta - delay^2`` is not a slew or its square root.
+    Both FLUTE and GR wrappers use these native forward/backward kernels.
+
+    Their outer contract is six dictionaries, ordered as ``pin_caps, loads,
+    delays, ldelays, betas, impulses``, each keyed by generic/rise/fall.
+    ``pin_caps`` means local node C, not bare Liberty pin C. FLUTE retains
+    physical pins plus Steiner vertices; GR gathers back to physical pins.
+    Matching result semantics does not imply matching lengths or vertex IDs.
+    Sum wire C once in its vertex domain (RCTiming.net_cap or
+    GRParasiticsOp.wire_capacitance), not from subtree loads or pin gathers.
+    """
+    load = LoadOpFunction.apply(cap, child_start, children, topo, topo_start)
+    delay = DelayOpFunction.apply(resistance, load, parent, topo, topo_start)
+    ldelay = LDelayOpFunction.apply(cap, delay, child_start, children, topo, topo_start)
+    beta = BetaOpFunction.apply(resistance, ldelay, parent, topo, topo_start)
+    return load, delay, ldelay, beta, 2 * beta - delay ** 2
+
+
 class RCTiming(nn.Module):
     def __init__(self,
                  r_unit=1.0,
@@ -356,18 +388,33 @@ class RCTiming(nn.Module):
                 pin_caps_base, 
                 pin_rcaps_base, 
                 pin_fcaps_base):
+        """Return the six RC dictionaries described by ``evaluate_rc_tree``.
+
+        Vectors use the ``new_x/new_y`` domain: physical pins first, followed
+        by Steiner vertices. Cell pin C is zero-padded for added vertices;
+        wire C and R are recomputed from live edge geometry. Consumers using
+        physical pin IDs must not treat the extra entries as cell pins.
+        """
         start_time = time.time()
-        # # the length is um
-        length = (torch.abs(new_x[flat_pin_from] - new_x[flat_pin_to])
-                    + torch.abs(new_y[flat_pin_from] - new_y[flat_pin_to])) / self.scale_factor / self.dbu
+        geometry = build_live_edge_geometry(
+            new_x,
+            new_y,
+            flat_pin_from,
+            flat_pin_to,
+            r_unit=self.r_unit,
+            c_unit=self.c_unit,
+            scale_factor=self.scale_factor,
+            dbu=self.dbu,
+        )
+        length = geometry["length"]
         
         logging.info(f"RC timing length : {length.sum().item():.4f} um")
-        cap = length * self.c_unit
+        cap = geometry["edge_capacitance"]
         net_caps = torch.zeros_like(new_x, dtype=pin_caps_base.dtype)
         net_caps = torch.scatter_add(net_caps, 0, flat_pin_from.long(), cap / 2)
         net_caps = torch.scatter_add(net_caps, 0, flat_pin_to.long(),   cap / 2)
 
-        edge_resistance  = length * self.r_unit
+        edge_resistance = geometry["edge_resistance"]
         flat_pin_to_res = torch.zeros_like(new_x, dtype=edge_resistance.dtype)
         flat_pin_to_res = torch.scatter(flat_pin_to_res, 0, flat_pin_to.long(), edge_resistance)
 
@@ -395,25 +442,9 @@ class RCTiming(nn.Module):
 
             pin_caps[mode] = caps_padded + net_caps
 
-            # 后续所有计算都依赖于 autograd.Function 或标准的 torch 操作，它们是 autograd 友好的
-            loads[mode] = LoadOpFunction.apply(
-                pin_caps[mode], flat_pin_to_start, flat_pin_to,
+            loads[mode], delays[mode], ldelays[mode], betas[mode], inner_term = evaluate_rc_tree(
+                pin_caps[mode], flat_pin_to_res, pin_fa, flat_pin_to_start, flat_pin_to,
                 net_flat_topo_sort, net_flat_topo_sort_start)
-
-            delays[mode] = DelayOpFunction.apply(
-                flat_pin_to_res, loads[mode], pin_fa,
-                net_flat_topo_sort, net_flat_topo_sort_start)
-
-            ldelays[mode] = LDelayOpFunction.apply(
-                pin_caps[mode], delays[mode], flat_pin_to_start, flat_pin_to,
-                net_flat_topo_sort, net_flat_topo_sort_start)
-
-            betas[mode] = BetaOpFunction.apply(
-                flat_pin_to_res, ldelays[mode], pin_fa,
-                net_flat_topo_sort, net_flat_topo_sort_start)
-
-            # 计算 impulse
-            inner_term = 2 * betas[mode] - delays[mode] ** 2
             assert torch.all(inner_term >= 0), \
                 f"Negative inner term detected in {mode} mode: {inner_term[inner_term < 0]}"
             impulses[mode] = inner_term

@@ -1,0 +1,4 @@
+# Historical design snapshots belong in experiment storage, not source commits.
+/best_so_far_tdp_defs_20260902/
+*.def
+__pycache__/

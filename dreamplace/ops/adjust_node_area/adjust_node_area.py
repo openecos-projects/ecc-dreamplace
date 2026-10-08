@@ -99,7 +99,8 @@ class AdjustNodeArea(nn.Module):
         pin_area_adjust_stop_ratio=0.05,
         unit_pin_capacity=0.0,
         modularity_config=None,
-        params=None):
+        params=None,
+        virtual_cell_area=0.0):
         super(AdjustNodeArea, self).__init__()
         self.flat_node2pin_start_map = flat_node2pin_start_map
         self.flat_node2pin_map = flat_node2pin_map
@@ -156,6 +157,7 @@ class AdjustNodeArea(nn.Module):
 
         # placement area excluding fixed cells
         self.total_place_area = total_place_area
+        self.virtual_cell_area = float(virtual_cell_area)
         # placement area excluding movable and fixed cells
         self.total_whitespace_area = total_whitespace_area
         self.modularity_config = modularity_config or {}
@@ -621,6 +623,7 @@ class AdjustNodeArea(nn.Module):
             
             old_movable_area = node_size_x_movable * node_size_y_movable
             old_movable_area_sum = old_movable_area.sum()
+            old_combined_area_sum = old_movable_area_sum + self.virtual_cell_area
             # compute old areas of filler nodes
             if self.num_filler_nodes > 0:
                 node_size_x_filler = node_size_x[-self.num_filler_nodes:]
@@ -696,8 +699,8 @@ class AdjustNodeArea(nn.Module):
             area_increment_sum = area_increment.sum()
 
             # plot
-            # 将area_increment大于0的标准单元在图中打印出来，并根据数值给予亮度。 
-            
+            # 将area_increment大于0的标准单元在图中打印出来，并根据数值给予亮度。
+
             # try:
             #     import matplotlib.patches as patches
             #     # 找到面积增加的单元
@@ -732,7 +735,7 @@ class AdjustNodeArea(nn.Module):
             #                 facecolor=cmap(norm(inflated_values[i]))
             #             )
             #             ax.add_patch(rect)
-                    
+
             #         # 添加颜色条
             #         sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
             #         sm.set_array([])
@@ -746,7 +749,7 @@ class AdjustNodeArea(nn.Module):
             # except Exception as e:
             #     logger.error(f"Failed to plot inflated nodes: {e}")
             ### end plot
-            
+
             # check whether the total area is larger than the max area requirement
             # If yes, scale the extra area to meet the requirement
             # We assume the total base area is no greater than the max area requirement
@@ -765,7 +768,7 @@ class AdjustNodeArea(nn.Module):
             )
             # Inflation may consume up to the configured share of baseline
             # whitespace without exceeding the remaining physical place area.
-            remaining_area_budget = total_place_area_tensor - old_movable_area_sum
+            remaining_area_budget = total_place_area_tensor - old_combined_area_sum
             area_budget = torch.minimum(
                 whitespace_area_budget,
                 remaining_area_budget,
@@ -813,7 +816,7 @@ class AdjustNodeArea(nn.Module):
                 color_limits=route_color_limits,
             )
             new_movable_area_sum = old_movable_area_sum + area_increment_sum
-            area_increment_ratio = area_increment_sum / old_movable_area_sum
+            area_increment_ratio = area_increment_sum / old_combined_area_sum
             logger.info(
                 "area_increment = %E, area_increment / movable = %g, area_adjust_stop_ratio = %g"
                 % (area_increment_sum, area_increment_ratio,
@@ -829,12 +832,12 @@ class AdjustNodeArea(nn.Module):
             if adjust_route_area_flag:
                 route_area_increment_ratio = F.relu(
                     route_opt_area -
-                    old_movable_area).sum() / old_movable_area_sum
+                    old_movable_area).sum() / old_combined_area_sum
                 adjust_route_area_flag = route_area_increment_ratio.data.item(
                 ) > self.route_area_adjust_stop_ratio
-                
+
                 # route_opt_area
-                
+
                 logger.info(
                     "route_area_increment_ratio = %g, route_area_adjust_stop_ratio = %g"
                     % (route_area_increment_ratio,
@@ -842,7 +845,7 @@ class AdjustNodeArea(nn.Module):
             if adjust_pin_area_flag:
                 pin_area_increment_ratio = F.relu(
                     pin_opt_area -
-                    old_movable_area).sum() / old_movable_area_sum
+                    old_movable_area).sum() / old_combined_area_sum
                 adjust_pin_area_flag = pin_area_increment_ratio.data.item(
                 ) > self.pin_area_adjust_stop_ratio
                 logger.info(
@@ -864,7 +867,7 @@ class AdjustNodeArea(nn.Module):
             logger.info(
                 "inflation ratio for movable nodes: avg/max %g/%g" %
                 (movable_nodes_ratio.mean(), movable_nodes_ratio.max()))
-            
+
             movable_nodes_ratio.sqrt_()
             # convert positions to centers
             pos.data[:self.num_movable_nodes] += node_size_x_movable * 0.5
@@ -929,10 +932,10 @@ class AdjustNodeArea(nn.Module):
             elif (
                 self.num_filler_nodes > 0
                 and old_filler_area_sum > 0
-                and new_movable_area_sum + old_filler_area_sum > self.total_place_area
+                and new_movable_area_sum + self.virtual_cell_area + old_filler_area_sum > self.total_place_area
             ):
                 new_filler_area_sum = F.relu(self.total_place_area -
-                                             new_movable_area_sum)
+                                             new_movable_area_sum - self.virtual_cell_area)
                 filler_nodes_ratio = new_filler_area_sum / old_filler_area_sum
                 logger.info("inflation ratio for filler nodes: %g" %
                             (filler_nodes_ratio))
@@ -961,9 +964,12 @@ class AdjustNodeArea(nn.Module):
                 % (new_movable_area_sum, new_filler_area_sum,
                    new_movable_area_sum + new_filler_area_sum,
                    self.total_place_area))
-            target_density.copy_(
-                (new_movable_area_sum + new_filler_area_sum) /
-                self.total_place_area)
+            # Inflation must retain density headroom when no filler represents
+            # the configured budget; increase the target only if area needs it.
+            target_density.copy_(torch.maximum(
+                target_density,
+                (new_movable_area_sum + self.virtual_cell_area + new_filler_area_sum) /
+                self.total_place_area))
             logger.info("new target_density %g" % (target_density))
 
             if pos.is_cuda:

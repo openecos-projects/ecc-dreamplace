@@ -12,7 +12,6 @@ class GPUGR(object):
     def __init__(self, params, placedb):
         self.params = params
         self.placedb = placedb
-        self._gpugr_op = None
         self._call_index = 0
         self._session_tag = None
         self.last_result = None
@@ -23,11 +22,9 @@ class GPUGR(object):
         return self.forward(pos)
 
     def _get_gpugr_op(self):
-        if self._gpugr_op is None:
-            from dreamplace.ops.gpugr.backend_select import create_gpugr_backend
+        from dreamplace.ops.routability.gpugr_context import get_cached_gpugr_operator
 
-            self._gpugr_op = create_gpugr_backend(self.params, self.placedb)
-        return self._gpugr_op
+        return get_cached_gpugr_operator(self.params, self.placedb)
 
     def _resolve_call_output_dir(self, save_artifacts: bool):
         result_root = os.path.join(self.params.result_dir, "gpugr_area_adjust")
@@ -41,22 +38,9 @@ class GPUGR(object):
         return os.path.join(result_root, f"call_{self._call_index:03d}")
 
     def _write_back_pos_to_ieda(self, pos):
-        if pos.is_cuda:
-            pos_cpu = pos.detach().cpu().numpy().copy()
-        else:
-            pos_cpu = pos.detach().numpy().copy()
+        from dreamplace.ops.routability.gpugr_context import write_back_movable_lpos
 
-        node_x = pos_cpu[: self.placedb.num_movable_nodes]
-        node_y = pos_cpu[
-            self.placedb.num_nodes : self.placedb.num_nodes + self.placedb.num_movable_nodes
-        ]
-        if self.params.cell_padding_x >= 0:
-            node_x += self.params.cell_padding_x
-
-        unscale_factor = 1.0 / self.params.scale_factor
-        node_x = node_x * unscale_factor + self.params.shift_factor[0]
-        node_y = node_y * unscale_factor + self.params.shift_factor[1]
-        self.placedb.write_placement_back(node_x, node_y)
+        write_back_movable_lpos(pos, self.params, self.placedb)
 
     @staticmethod
     def _resample_xy_map(map_xy, target_x, target_y):

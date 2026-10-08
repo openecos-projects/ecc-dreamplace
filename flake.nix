@@ -14,6 +14,7 @@
       bison,
       flex,
       pkg-config,
+      spdlog,
     }: python3Packages.buildPythonPackage rec {
       name = "dreamplace";
       format = "pyproject";
@@ -51,7 +52,7 @@
         wheel
       ];
 
-      buildInputs = [ cairo flex ];
+      buildInputs = [ cairo flex spdlog ];
       nativeBuildInputs = [ bison flex cmake ninja pkg-config ];
 
       dontUseCmakeConfigure = true;

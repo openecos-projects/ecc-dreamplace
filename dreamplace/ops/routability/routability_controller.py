@@ -15,7 +15,7 @@ class RoutabilityController:
 
     ``event_sink`` is intentionally private-facing and optional.  Tests use it
     to capture the ordering contract while production callers leave it unset,
-    making every hook a no-op apart from the enabled-state check.
+    leaving policy state independent of event recording.
     """
 
     _EVENT_NAMES = (
@@ -36,6 +36,11 @@ class RoutabilityController:
         event_sink: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self.enabled = bool(getattr(params, "routability_opt_flag", False))
+        self.inflation_min_interval = int(getattr(params, "inflation_min_interval", 0))
+        if self.inflation_min_interval < 0:
+            raise ValueError("inflation_min_interval must be non-negative")
+        self._gp_steps = 0
+        self._last_inflation_step = None
         self._event_sink = event_sink
         self.inflation = None
         if self.enabled:
@@ -132,10 +137,14 @@ class RoutabilityController:
             )
         )
 
-    @staticmethod
     def inflation_triggers(
-        params, num_area_adjust, max_area_adjust_rounds, overflow
+        self, params, num_area_adjust, max_area_adjust_rounds, overflow
     ):
+        if (
+            self._last_inflation_step is not None
+            and self._gp_steps - self._last_inflation_step < self.inflation_min_interval
+        ):
+            return False, False
         from dreamplace.ops.routability import enhanced_inflation_controller
         from dreamplace.ops.routability import inflation_legalization
 
@@ -152,6 +161,14 @@ class RoutabilityController:
             trigger_enhanced_inflation=enhanced,
         )
         return bool(enhanced), bool(legacy)
+
+    def record_inflation(self) -> None:
+        """Start the interval only after an actual area change."""
+        self._last_inflation_step = self._gp_steps
+        logging.info(
+            "Inflation applied after GP step %d; next round requires at least %d more GP steps",
+            self._gp_steps, self.inflation_min_interval,
+        )
 
     @staticmethod
     def area_adjust_flags(params, *, use_enhanced, default_flags):
@@ -189,6 +206,8 @@ class RoutabilityController:
         iteration: int,
         metrics: Any,
     ) -> None:
+        if self.enabled:
+            self._gp_steps += 1
         self._emit(
             "after_iteration",
             model=model,

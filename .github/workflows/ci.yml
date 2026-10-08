@@ -59,4 +59,4 @@ jobs:
           repo_root="$PWD"
           cd /tmp
           "$repo_root/.venv/bin/python" \
-            "$repo_root/unittest/ops/routability_wheel_smoke.py" --cuda
+            "$repo_root/tests/ops/routability_wheel_smoke.py" --cuda

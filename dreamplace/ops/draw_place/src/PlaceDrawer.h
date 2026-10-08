@@ -30,6 +30,7 @@
 
 #if DRAWPLACE == 1
 #include <cairo-pdf.h>
+#include <cairo-ps.h>
 #include <cairo-svg.h>
 #include <cairo.h>
 #endif
@@ -50,9 +51,10 @@ public:
   typedef I index_type;
 
   enum FileFormat {
-    PDF = 0, // handle by cairo
-    SVG = 1, // handle by cairo
-    PNG = 2  // handle by cairo
+    EPS = 0, // handle by cairo
+    PDF = 1, // handle by cairo
+    SVG = 2, // handle by cairo
+    PNG = 3 // handle by cairo
   };
   enum DrawContent {
     NONE = 0,
@@ -101,6 +103,7 @@ public:
     }
 
     switch (ff) {
+    case EPS:
     case PDF:
     case SVG:
     case PNG:
@@ -314,6 +317,9 @@ protected:
       break;
     case PDF:
       cs = cairo_pdf_surface_create(fname, width, height);
+      break;
+    case EPS:
+      cs = cairo_ps_surface_create(fname, width, height);
       break;
     case SVG:
       cs = cairo_svg_surface_create(fname, width, height);

@@ -1,0 +1,52 @@
+{
+  "analysis": {
+    "ideal_clock": true,
+    "setup_only": true,
+    "split": "max"
+  },
+  "artifacts": {
+    "canonical_pin_map_sha256": "9cbbe5333df63f62dbc54b2afb3fa7ecce94c56ae4cc6fb5eb41dceaca2934aa",
+    "golden_pairs_sha256": "99bda7d084bcbdefc8231dd03792d802f5a2733e9fd4d881f29305f64d691868",
+    "golden_paths_sha256": "96fd41b7b3b5e71489d3b04753636bddeea4c504b7fdb8dfcf0afaf635ab2804"
+  },
+  "efficient_tdp": {
+    "dirty": true,
+    "dirty_diff_sha256": "d0b32fabd5f2432f34fe713b0407ef546bfe0461995fcadd32d6111046554883",
+    "head": "498dec9a9280f85260f4d312187e40d1ce21db73"
+  },
+  "fixture_inputs": {
+    "fixture.json": "747e08a4ac26bc6c84f24cebcc703497803083bacb03f6870046ab5e818d7b76",
+    "tiny.lib": "373575327ea24b83f1570d1c89444a75e4131a4d718c338a1c9da2cde3d0383f",
+    "tiny.sdc": "9477f5f7459ebd2e995e188245d1e6e8f46d6f588b1f47909c887e92b55e94a6",
+    "tiny.v": "61b256f75114b36e79767afb67498c7a000153a33efd8c8502c6f23331575149"
+  },
+  "opentimer_metadata": {
+    "effective_k": 4,
+    "endpoint_gba_wns_ps": -79.0,
+    "fep": 4,
+    "ideal_clock": true,
+    "num_threads": 1,
+    "pair_state_policy": "empty_frame_local",
+    "pair_weight_slack_field": "recovered_path_slack_ps",
+    "point_gba_aat_field": "point_gba_aat_ps",
+    "recovered_path_aat_field": "recovered_path_aat_ps",
+    "recovered_path_count": 4,
+    "requested_k": 0,
+    "schema_version": 3,
+    "selection_slack_field": "endpoint_gba_slack_ps",
+    "setup_only": true,
+    "split": "max",
+    "time_scale_ps": 1.0
+  },
+  "pair_profile": {
+    "accumulate_weight": 0.2,
+    "max_weight": 50.0,
+    "min_weight": 10.0,
+    "state_policy": "empty_frame_local"
+  },
+  "rc": {
+    "wire_capacitance_per_micron": 0.0,
+    "wire_resistance_per_micron": 0.0
+  },
+  "schema_version": 3
+}

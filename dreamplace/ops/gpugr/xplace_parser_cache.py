@@ -30,6 +30,7 @@ class XplaceParserCacheMixin:
             str(benchmark),
             str(design_name),
             tuple(str(Path(lef).expanduser().resolve()) for lef in lefs),
+            int(getattr(self.placedb, "topology_generation", 0)),
         )
 
     def _normalize_parser_cache_lpos(self, node_lpos, node_names):
@@ -71,6 +72,8 @@ class XplaceParserCacheMixin:
     def parser_cache_would_hit(
         self, benchmark: str = "", design_name: str = "", node_names=None, node_count=None
     ):
+        if getattr(self.params, "macro_only", False):
+            return False
         cache = self._parser_db_cache
         if not cache:
             return False
@@ -92,7 +95,11 @@ class XplaceParserCacheMixin:
         cache_key = cache.get("key")
         if not cache_key or len(cache_key) < 3:
             return False
-        return cache_key[1] == str(benchmark) and cache_key[2] == str(design_name)
+        return (
+            cache_key == self._build_parser_cache_key(
+                benchmark, design_name, self._resolve_lefs()
+            )
+        )
 
     def _gpdb_node_type_by_id(self, gpdb):
         node_type_by_id = {}
@@ -273,10 +280,6 @@ class XplaceParserCacheMixin:
             raise RuntimeError("gpugr parser cache node-name mapping is stale")
         if cache.get("mapped_node_names") != node_names:
             raise RuntimeError("gpugr parser cache mapped gpdb node names are stale")
-        if not hasattr(gpdb, "apply_node_lpos_like_ieda_writeback"):
-            raise RuntimeError(
-                "gpugr parser cache requires GPDatabase.apply_node_lpos_like_ieda_writeback"
-            )
         movable_node_ids = cache["movable_node_ids"]
         if int(movable_node_ids.numel()) != int(node_lpos.size(0)):
             raise RuntimeError("gpugr parser cache movable id mapping length is stale")
@@ -321,7 +324,10 @@ class XplaceParserCacheMixin:
                 (int(row_y), int(orient)) for row_y, orient in gpdb.row_y_orient_pairs()
             )
             cache["row_y_orient_pairs"] = row_y_orient_pairs
-        gpdb.apply_node_lpos_like_ieda_writeback(full_node_lpos, list(row_y_orient_pairs))
+        if self.params.place_io_engine == "openroad":
+            gpdb.apply_node_lpos_keep_orient(full_node_lpos)
+        else:
+            gpdb.apply_node_lpos_like_ieda_writeback(full_node_lpos, list(row_y_orient_pairs))
         gpdb.reset()
         gpdb.setup()
         if not bool(cache.get("dynamic_apply_validation_done", False)):

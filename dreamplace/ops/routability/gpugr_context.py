@@ -98,6 +98,13 @@ def extract_movable_lpos(pos, params, placedb):
     node_y = pos_cpu[
         placedb.num_nodes : placedb.num_nodes + placedb.num_movable_nodes
     ]
+    geometry = getattr(placedb, "cooptimization_geometry", None)
+    if geometry is not None:
+        count = placedb.num_movable_nodes
+        node_x += ((geometry.node_size_x[:count] - geometry.original_node_size_x[:count])
+                   * 0.5).detach().cpu().numpy()
+        node_y += ((geometry.node_size_y[:count] - geometry.original_node_size_y[:count])
+                   * 0.5).detach().cpu().numpy()
     if params.cell_padding_x >= 0:
         node_x += params.cell_padding_x
 
@@ -109,17 +116,26 @@ def extract_movable_lpos(pos, params, placedb):
 
 def write_back_movable_lpos(pos, params, placedb):
     node_x, node_y = extract_movable_lpos(pos, params, placedb)
-    placedb.write_placement_back(node_x, node_y)
+    placedb.write_placement_back(
+        node_x, node_y, refresh_parasitics=False, refresh_pydb=False
+    )
 
 
 def build_parser_cache_inputs(pos, params, placedb):
+    # The parser's dense coordinate API cannot preserve excluded macro-only
+    # instances. Reparse the selectively written native DEF instead.
+    if getattr(params, "macro_only", False):
+        return None, None
     node_x, node_y = extract_movable_lpos(pos, params, placedb)
 
     def std_round(values):
         values = np.asarray(values)
         return np.where(values >= 0.0, np.floor(values + 0.5), np.ceil(values - 0.5))
 
-    node_lpos = np.stack([std_round(node_x), std_round(node_y)], axis=1).astype(
+    # OpenDB truncates locations and preserves orientation; ECC rounds and
+    # normalizes orientation according to row power.
+    round_location = np.trunc if params.place_io_engine == "openroad" else std_round
+    node_lpos = np.stack([round_location(node_x), round_location(node_y)], axis=1).astype(
         np.float32, copy=False
     )
     return node_lpos, get_parser_cache_node_names(placedb)
@@ -160,6 +176,22 @@ def get_cached_gpugr_operator(params, placedb):
         gpugr_op = create_gpugr_backend(params, placedb)
         setattr(placedb, "_autodmp_gpugr_op", gpugr_op)
     return gpugr_op
+
+
+def invalidate_route_state(placedb):
+    """Discard native parser/topology state at the full-PyDB rebuild boundary."""
+    operator = getattr(placedb, "_autodmp_gpugr_op", None)
+    if operator is not None:
+        operator._parser_db_cache = None
+    for name in (
+        "_autodmp_gpugr_op",
+        "_gpugr_parser_cache_node_names_cache",
+        "_gpugr_topology_net_name_to_id_cache",
+        "_gpugr_topology_pin_name_to_id_cache",
+        "_gpugr_topology_flat_net2pin_map_int64_cache",
+        "_gpugr_topology_flat_net2pin_start_map_int64_cache",
+    ):
+        placedb.__dict__.pop(name, None)
 
 
 def build_topology_net_name_to_id(placedb):

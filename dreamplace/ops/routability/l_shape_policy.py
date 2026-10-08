@@ -124,7 +124,7 @@ class LShapePolicy:
         )
         reenable_count = int(getattr(model, "_l_shape_reenable_count", 0))
         next_threshold = current_threshold
-        if update_threshold:
+        if update_threshold and not bool(getattr(self.params, "timing_opt_enabled", False)):
             reenable_count += 1
             next_threshold = current_threshold * 0.7
             model._l_shape_reenable_count = reenable_count
@@ -135,7 +135,12 @@ class LShapePolicy:
         model._l_shape_ratio_last = None
         model._l_shape_ratio_rise_streak = 0
 
-        if reason == "inflation":
+        if reason == "inflation" and bool(getattr(self.params, "timing_opt_enabled", False)):
+            model._l_shape_reenable_threshold = base_threshold
+            model._l_shape_reenable_count = 0
+            logging.info("L-shape paused for inflation round %d; resumes below %.4f",
+                         inflation_round, base_threshold)
+        elif reason == "inflation":
             model._l_shape_inflation_guard_disabled = True
             logging.info(
                 "L-shape disabled due to inflation (round %d) and permanently disabled "

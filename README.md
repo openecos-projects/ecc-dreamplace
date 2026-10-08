@@ -6,11 +6,26 @@ GPU/CPU analytical placement foundation from DREAMPlace and extends it for the
 ECC physical-design data flow, differentiable timing analysis, timing-aware
 net weighting, and ECC early-global-routing driven routability optimization.
 
+Built upon the GPU-accelerated global placer [DREAMPlace](https://doi.org/10.1109/TCAD.2020.3003843) and detailed placer [ABCDPlace](https://doi.org/10.1109/TCAD.2020.2971531),
+AutoDMP adds simultaneous macro and standard cell placement enhancements.
+
+* Simultaneous Macro and Standard Cell Placement Animations
+
+| MemPool Group | Ariane |
+| -------- | ----------- |
+| ![MemPool Group](images/mempool.gif) | ![Ariane](images/ariane.gif) |
+
+# Publications
+
+* Anthony Agnesina, Puranjay Rajvanshi, Tian Yang, Geraldo Pradipta, Austin Jiao, Ben Keller, Brucek Khailany, and Haoxing Ren, 
+  "**AutoDMP: Automated DREAMPlace-based Macro Placement**", 
+  International Symposium on Physical Design (ISPD), Virtual Event, Mar 26-29, 2023 ([preprint](https://research.nvidia.com/publication/2023-03_autodmp-automated-dreamplace-based-macro-placement)) ([blog](https://developer.nvidia.com/blog/autodmp-optimizes-macro-placement-for-chip-design-with-ai-and-gpus/))
+
 This repository is packaged as a Python wheel for the
 [ECOS Studio](https://github.com/openecos-projects/ecos-studio) silicon design
-platform. The original upstream DREAMPlace README is preserved in
-[README_DREAMPlace.md](README_DREAMPlace.md), and the inherited AutoDMP notes
-are preserved in [README_AutoDMP.md](README_AutoDMP.md).
+platform. Upstream documentation is available in the
+[DREAMPlace repository](https://github.com/limbo018/DREAMPlace) and
+[AutoDMP repository](https://github.com/NVlabs/AutoDMP).
 
 ## What Is New Compared with DREAMPlace?
 
@@ -25,6 +40,12 @@ requiring a standalone DREAMPlace benchmark conversion path.
   data via `ecc_module.pydb(...)`.
 - Placement results can be written back through ECC with
   `ecc_module.write_placement_back(...)` / `ecc_module.def_save(...)`.
+
+Default CMake and Python package builds use the ECC backend and do not require
+OpenROAD. The OpenROAD submodule and its superbuild have been removed. The
+optional OpenROAD adapter can be built against an existing external installation
+with `-DDREAMPLACE_USE_EXTERNAL_OPENROAD=ON` and
+`-DOPENROAD_EXTERNAL_INSTALL_PREFIX=/path/to/openroad/install`.
 
 ### PyTorch-Based Differentiable STA
 
@@ -96,6 +117,8 @@ Relevant configuration knobs include:
 - Optional: Nix, for entering the repository development shell before sync
 - System packages:
   `cmake ninja-build build-essential pkg-config libcairo2-dev libgflags-dev libgoogle-glog-dev flex libfl-dev bison libeigen3-dev libgtest-dev`
+- GPU architecture compatibility 6.0 or later (Optional)
+    - Code has been tested on GPUs with compute compatibility 8.0 on DGX A100 machine. 
 
 ### Dev Setup
 
@@ -127,6 +150,10 @@ dist/ecc_dreamplace-*
 ```
 
 The uv build runs the package build defined by `pyproject.toml`.
+
+# Physical Design Flow
+
+The physical design flow requires RTL, Python, and Tcl files from the [TILOS-MacroPlacement](https://github.com/TILOS-AI-Institute/MacroPlacement) repository. Only the codes that we have added and modified are provided in [scripts](scripts). 
 
 ## Repository Pointers
 

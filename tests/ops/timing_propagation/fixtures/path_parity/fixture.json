@@ -1,0 +1,24 @@
+{
+  "analysis": {
+    "ideal_clock": true,
+    "setup_only": true,
+    "split": "max"
+  },
+  "coordinates": {
+    "a": [0.0, 0.0],
+    "b": [0.0, 10.0],
+    "u_buf0": [10.0, 0.0],
+    "u_inv0": [20.0, 0.0],
+    "u_xor0": [30.0, 5.0],
+    "u_buf1": [40.0, 0.0],
+    "u_inv1": [40.0, 10.0],
+    "y_buf": [50.0, 0.0],
+    "y_inv": [50.0, 10.0]
+  },
+  "expected_cells": ["BUF", "INV", "XOR2"],
+  "rc": {
+    "wire_capacitance_per_micron": 0.0,
+    "wire_resistance_per_micron": 0.0
+  },
+  "schema_version": 1
+}

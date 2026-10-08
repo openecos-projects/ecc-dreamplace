@@ -1,75 +1,159 @@
 {
-    "auto_adjust_bins": {
-        "description": "automatically derive num_bins_x and num_bins_y from the number of physical nodes",
-        "default": 0
+    "timing_placement_carrier": {
+        "description": "coordinate timing method; explicit direct_loss or pin2pin selects mutually exclusive GP controls; gradient_net_weight retains gradient projection",
+        "default": "direct_loss"
     },
-    "differentiable_timing_obj": {
-        "description": "compatibility flag for differentiable timing objective configuration",
+    "timing_topology_refresh_interval": {
+        "description": "GP steps between full timing topology refreshes",
+        "default": 15
+    },
+    "timing_topology_enable_overflow_threshold": {
+        "description": "density overflow below which timing topology updates activate",
+        "default": 0.35
+    },
+    "timing_objective_lane": {
+        "description": "timing objective terms, timing_only | timing_slew_cap",
+        "default": "timing_only"
+    },
+    "placement_sizing_mode": {
+        "description": "placement optimization lane, place_only | size_only | joint",
+        "default": "place_only"
+    },
+    "discrete_gradient_topk_shared_budget_percent": {
+        "description": "percentage of sizeable cells sharing one size/VT action budget",
         "default": 1
     },
-    "enable_net_weighting": {
-        "description": "enable timing-aware net weighting during global placement",
+    "buffering_mode": {
+        "description": "buffering representation, segment | candidate",
+        "default": "segment"
+    },
+    "buffering_segment_strategy": {
+        "description": "segment count optimization strategy, continuous | discrete_net_gradient",
+        "default": "continuous"
+    },
+    "buffering_segment_count_z_init": {
+        "description": "initial relaxed repeater count on each segment",
+        "default": 0.1
+    },
+    "buffering_fixed_bsu_index": {
+        "description": "optional fixed buffer index resolved from the legal buffer table",
+        "default": null
+    },
+    "buffering_max_repeaters_per_segment": {
+        "description": "maximum accepted repeaters on one segment",
+        "default": 3
+    },
+    "buffering_route_b_selection_fraction": {
+        "description": "fraction of segment candidates selected in one discrete buffering batch",
+        "default": 0.001
+    },
+    "buffering_segment_transfer_backend": {
+        "description": "native segment timing transfer implementation",
+        "default": "segment_transfer_native"
+    },
+    "buffering_segment_live_geometry": {
+        "description": "update buffered segment timing from current placement geometry",
         "default": 1
     },
-    "macro_place_flag": {
-        "description": "whether enable two-stage macro placement",
+    "buffering_segment_integer_projection_interval": {
+        "description": "GP steps between integer buffer projection calls; 0 disables periodic projection",
         "default": 0
     },
-    "max_net_weight": {
-        "description": "maximum net weight for timing optimization; negative values or \"inf\" mean no limit",
-        "default": "inf"
+    "buffering_segment_integer_projection_start_step": {
+        "description": "first GP step eligible for periodic buffer projection",
+        "default": 0
     },
-    "momentum_decay_factor": {
-        "description": "momentum decay factor used in timing-aware net-weight updates",
+    "buffering_segment_integer_projection_project_bsu": {
+        "description": "project buffer master indices together with integer repeater counts",
+        "default": 0
+    },
+    "buffering_discrete_count_proximal_lambda": {
+        "description": "proximal penalty coefficient for discrete repeater count changes",
+        "default": 0
+    },
+    "relaxed_buffer_timing_integration_mode": {
+        "description": "virtual buffer timing integration provider",
+        "default": "dynamic_net_provider"
+    },
+    "joint_segment_virtual_density_enabled": {
+        "description": "include persistent virtual buffer footprints in placement density",
+        "default": 0
+    },
+    "buffering_segment_projection_min_z_to_insert": {
+        "description": "minimum relaxed repeater count eligible for physical insertion",
         "default": 0.5
     },
-    "net_weighting_scheme": {
-        "description": "net-weighting scheme for timing-aware optimization, e.g. adam | lilith",
-        "default": "lilith"
+    "buffering_continuous_relaxed_optimization": {
+        "description": "enable continuous relaxed buffer optimization",
+        "default": false
     },
-    "pin2pin_accumulate_weight": {
-        "description": "increment added when accumulating an extra critical path",
-        "default": 0.2
+    "buffering_segment_count_tns_gradient": {
+        "description": "enable TNS gradients with respect to segment repeater counts",
+        "default": false
     },
-    "pin2pin_max_weight": {
-        "description": "maximum pin-to-pin timing weight",
-        "default": 50
+    "timing_obj_profile": {
+        "description": "enable timing objective performance counters",
+        "default": 0
     },
-    "pin2pin_min_weight": {
-        "description": "minimum pin-to-pin timing weight",
+    "timing_obj_profile_interval": {
+        "description": "steps between timing objective performance summaries",
+        "default": 100
+    },
+    "l_shape_grad_target_ratio_max": {
+        "description": "maximum adaptive routability gradient target ratio",
+        "default": 0.1
+    },
+    "buffering_continuous_steps": {
+        "description": "number of steps in the standalone buffering optimizer",
+        "default": 120
+    },
+    "buffering_fixed_buffer_master": {
+        "description": "physical buffer master used for Segment buffering",
+        "default": "BUFX1H7L"
+    },
+    "buffering_segment_count_timing_backend": {
+        "description": "timing implementation for Segment buffering",
+        "default": "cpp_cuda_segment_transfer_explicit_autograd"
+    },
+    "discrete_gradient_topk_up_percent": {
+        "description": "cell percentage eligible for discrete upsizing",
+        "default": 30
+    },
+    "discrete_gradient_topk_vt_percent": {
+        "description": "cell percentage eligible for discrete VT changes",
         "default": 10
     },
-    "pin2pin_net_weighting": {
-        "description": "enable pin-to-pin net weighting for timing optimization",
+    "early_stop_restore_best": {
+        "description": "restore the best continuous sizing state at the end of optimization",
+        "default": 1
+    },
+    "flow_kind": {
+        "description": "optimization profile executed inside the placement step",
+        "default": null
+    },
+    "joint_quality_profile": {
+        "description": "optional canonical profile for joint optimization",
+        "default": ""
+    },
+    "place_io_engine": {
+        "description": "physical database backend used by DREAMPlace",
+        "default": "ieda"
+    },
+    "placement_initial_learning_rate_max": {
+        "description": "optional cap for the estimated initial placement learning rate",
+        "default": null
+    },
+    "rc_tcl": {
+        "description": "OpenROAD RC setup Tcl, resolved relative to the PDK root when relative",
+        "default": ""
+    },
+    "timing_surrogate_mode": {
+        "description": "cell timing evaluation mode, auto | mixed | lut_only | surrogate_only",
+        "default": "auto"
+    },
+    "diff_timing_driven_placement": {
+        "description": "enable differentiable timing in the placement flow",
         "default": 0
-    },
-    "pin2pin_weight": {
-        "description": "base multiplier for pin-to-pin net weights",
-        "default": 2.5e-05
-    },
-    "start_iter": {
-        "description": "iteration to start pin-to-pin timing weighting",
-        "default": 500
-    },
-    "timing_eval_flag": {
-        "description": "enable timing evaluation reporting",
-        "default": 0
-    },
-    "timing_opt_flag": {
-        "description": "legacy timing-driven global placement flag; enabling it raises an error because OpenTimer integration has been removed",
-        "default": 0
-    },
-    "two_stage_density_scaler": {
-        "description": "scale density weight after the macro placement stage",
-        "default": 1000
-    },
-    "egr_stage": {
-        "description": "EGR stage: 2D or 3D",
-        "default": "2D"
-    },
-    "egr_resolve_congestion": {
-        "description": "EGR resolve congestion level",
-        "default": "off"
     },
     "aux_input": {
         "description": "input .aux file",
@@ -85,6 +169,14 @@
         "description": "input DEF file",
         "default": "",
         "required": "required for LEF/DEF"
+    },
+    "openroad_vt_suffixes": {
+        "description": "OpenROAD VT suffixes used to classify equivalent Liberty cells",
+        "default": [
+            "H7H",
+            "H7R",
+            "H7L"
+        ]
     },
     "verilog_input": {
         "description": "input VERILOG file, provide circuit netlist information if it is not included in DEF file",
@@ -119,7 +211,7 @@
                 "optimizer": "Nesterov",
                 "Llambda_density_weight_iteration": 1,
                 "Lsub_iteration": 1,
-                "learning_rate_decay": 1.0
+                "learning_rate_decay": 1
             }
         ],
         "required": "required"
@@ -130,10 +222,50 @@
     },
     "density_weight": {
         "description": "initial weight of density cost",
-        "default": 8e-5
+        "default": 8e-05
     },
-    "precond_pin_count_flag": {
-        "description": "add original DreamPlace per-node raw pin count to the shared gradient preconditioner before clamping; 0 keeps density-area-only preconditioning, 1 enables pin count (not net-weighted PWS)",
+    "timing_grad_balance_target_ratio": {
+        "description": "initial target ratio rho between weighted timing-gradient and wirelength-gradient L1 norms; 0 disables automatic timing-gradient balancing",
+        "default": 0.1
+    },
+    "sizing_parameterization": {
+        "description": "continuous sizing coordinate, logits | real_size",
+        "default": "logits"
+    },
+    "real_size_learning_rate": {
+        "description": "Adam learning rate in continuous Liberty/LUT size-coordinate units",
+        "default": 0.1
+    },
+    "real_size_execution_mode": {
+        "description": "real-size execution mode, continuous_only | warmup_to_discrete",
+        "default": "continuous_only"
+    },
+    "real_size_warmup_steps": {
+        "description": "number of real-size Adam steps before a warmup-to-discrete transition",
+        "default": 0
+    },
+    "real_size_transition_backend": {
+        "description": "real-size transition backend, reference | vectorized | native",
+        "default": "vectorized"
+    },
+    "real_size_transition_artifact_policy": {
+        "description": "transition projection artifact policy, summary_only | full",
+        "default": "summary_only"
+    },
+    "real_size_transition_profile": {
+        "description": "write a compact real-size transition profile",
+        "default": 0
+    },
+    "net_weighting_npaths": {
+        "description": "legacy net-selection percentage alias; 3.0 matches Efficient-TDP's 3 percent of nets, 0 keeps all violating max-timing states",
+        "default": 0
+    },
+    "use_bb": {
+        "description": "whether to use Barzilai-Borwein step-size updates in Nesterov optimization",
+        "default": 0
+    },
+    "net_weighting_nendpoints": {
+        "description": "maximum violating endpoint-transition states selected per pin2pin update; 0 keeps all violating states",
         "default": 0
     },
     "random_seed": {
@@ -146,7 +278,7 @@
     },
     "scale_factor": {
         "description": "scale factor to avoid numerical overflow; 0.0 means not set",
-        "default": 0.0
+        "default": 0
     },
     "ignore_net_weight": {
         "description": "ignore net weight larger than some value for weight_hpwl reporting",
@@ -155,8 +287,8 @@
     "shift_factor": {
         "description": "shift factor to avoid numerical issues when the lower-left origin of rows is not (0, 0);",
         "default": [
-            0.0,
-            0.0
+            0,
+            0
         ]
     },
     "ignore_net_degree": {
@@ -167,8 +299,8 @@
         "description": "noise to initial positions for global placement",
         "default": 0.025
     },
-    "enhanced_auto_adjust_bins": {
-        "description": "enable enhanced automatic placement bin adjustment; when enabled, it overrides auto_adjust_bins, keeps the configured bin preset unless num_bins_y exceeds the placement row count, and then caps num_bins_y to the largest power of two not exceeding the row count while preserving the configured num_bins_x/num_bins_y ratio",
+    "auto_adjust_bins": {
+        "description": "automatically derive num_bins_x and num_bins_y from the number of physical nodes",
         "default": 0
     },
     "enable_fillers": {
@@ -221,7 +353,7 @@
     },
     "gamma": {
         "description": "base coefficient for log-sum-exp and weighted-average wirelength, a relative value to bin size",
-        "default": 4.0
+        "default": 4
     },
     "RePlAce_skip_energy_flag": {
         "description": "whether skip density energy computation for fast mode, may not work with some solvers",
@@ -259,21 +391,281 @@
         "description": "whether enable routability optimization",
         "default": 0
     },
-    "l_shape_routability_flag": {
-        "description": "whether enable L-shape routability optimization",
+    "macro_place_flag": {
+        "description": "whether enable two-stage macro placement",
         "default": 0
     },
     "macro_only": {
         "description": "commit only frozen unplaced hard macro coordinates",
         "default": 0
     },
-    "use_bb": {
-        "description": "whether use the Barzilai-Borwein step size in Nesterov optimization",
+    "route_num_bins_x": {
+        "description": "number of routing grids/tiles",
+        "default": 512
+    },
+    "route_num_bins_y": {
+        "description": "number of routing grids/tiles",
+        "default": 512
+    },
+    "node_area_adjust_overflow": {
+        "description": "the overflow where to adjust node area",
+        "default": 0.15
+    },
+    "inflation_min_interval": {
+        "description": "minimum completed GP steps between applied inflation rounds; 0 disables the interval guard",
+        "default": 0
+    },
+    "timing_opt_enabled": {
+        "description": "run the electrical timing-optimization windows during placement",
+        "default": 0
+    },
+    "timing_opt_buffering_enabled": {
+        "description": "enable segment buffering in electrical timing-optimization windows",
+        "default": 1
+    },
+    "timing_opt_max_windows": {
+        "description": "maximum timing-optimization windows in one placement run, up to five",
+        "default": 5
+    },
+    "timing_opt_overflow_milestones": {
+        "description": "descending one-shot overflow thresholds for timing-optimization windows; empty uses inflation-triggered windows",
+        "default": []
+    },
+    "timing_opt_sizing_rounds": {
+        "description": "maximum discrete size/VT rounds in each timing-optimization window, up to ten",
+        "default": 5
+    },
+    "two_stage_density_scaler": {
+        "description": "scale density weight after the macro placement stage",
+        "default": 1000
+    },
+    "max_num_area_adjust": {
+        "description": "maximum times to adjust node area",
+        "default": 3
+    },
+    "adjust_nctugr_area_flag": {
+        "description": "legacy compatibility key; when enabled use the ECC/iRT EGR congestion map for area adjustment (NCTUgr is not invoked)",
+        "default": 0
+    },
+    "adjust_rudy_area_flag": {
+        "description": "whether use RUDY/RISA map to guide area adjustment",
+        "default": 1
+    },
+    "adjust_pin_area_flag": {
+        "description": "whether use pin utilization map to guide area adjustment",
+        "default": 1
+    },
+    "area_adjust_stop_ratio": {
+        "description": "area_adjust_stop_ratio",
+        "default": 0.01
+    },
+    "route_area_adjust_stop_ratio": {
+        "description": "route_area_adjust_stop_ratio",
+        "default": 0.01
+    },
+    "pin_area_adjust_stop_ratio": {
+        "description": "pin_area_adjust_stop_ratio",
+        "default": 0.05
+    },
+    "unit_horizontal_capacity": {
+        "description": "number of horizontal routing tracks per unit distance",
+        "default": 1.5625
+    },
+    "unit_vertical_capacity": {
+        "description": "number of vertical routing tracks per unit distance",
+        "default": 1.45
+    },
+    "unit_pin_capacity": {
+        "description": "number of pins per unit area",
+        "default": 0.058
+    },
+    "max_route_opt_adjust_rate": {
+        "description": "max_route_opt_adjust_rate",
+        "default": 2
+    },
+    "route_opt_adjust_exponent": {
+        "description": "exponent to adjust the routing utilization map",
+        "default": 2
+    },
+    "pin_stretch_ratio": {
+        "description": "pin_stretch_ratio",
+        "default": 1.414213562
+    },
+    "max_pin_opt_adjust_rate": {
+        "description": "max_pin_opt_adjust_rate",
+        "default": 1.5
+    },
+    "deterministic_flag": {
+        "description": "whether require run-to-run determinism, may have efficiency overhead",
+        "default": 0
+    },
+    "timing_opt_flag": {
+        "description": "legacy timing-driven global placement flag; enabling it raises an error because OpenTimer integration has been removed",
+        "default": 0
+    },
+    "net_weighting_scheme": {
+        "description": "net-weighting scheme for timing-aware optimization, e.g. adam | lilith",
+        "default": "lilith"
+    },
+    "momentum_decay_factor": {
+        "description": "momentum decay factor used in timing-aware net-weight updates",
+        "default": 0.5
+    },
+    "enable_net_weighting": {
+        "description": "enable timing-aware net weighting during global placement",
+        "default": 1
+    },
+    "max_net_weight": {
+        "description": "maximum net weight for timing optimization; negative values or \"inf\" mean no limit",
+        "default": "inf"
+    },
+    "pin2pin_net_weighting": {
+        "description": "enable pin-to-pin net weighting for timing optimization",
+        "default": 0
+    },
+    "timing_eval_flag": {
+        "description": "enable timing evaluation reporting",
+        "default": 0
+    },
+    "show_important_info": {
+        "description": "print condensed timing-related summary information",
+        "default": 0
+    },
+    "pin2pin_weight": {
+        "description": "base multiplier for pin-to-pin net weights",
+        "default": 2.5e-05
+    },
+    "start_iter": {
+        "description": "iteration to start pin-to-pin timing weighting",
+        "default": 500
+    },
+    "min_stop_iter": {
+        "description": "minimum iteration before convergence checking in timing-aware mode",
+        "default": 700
+    },
+    "pin2pin_max_weight": {
+        "description": "maximum pin-to-pin timing weight",
+        "default": 50
+    },
+    "pin2pin_min_weight": {
+        "description": "minimum pin-to-pin timing weight",
+        "default": 10
+    },
+    "pin2pin_accumulate_weight": {
+        "description": "increment added when accumulating an extra critical path",
+        "default": 0.2
+    },
+    "get_congestion_map": {
+        "description": "compute congestion map after placement complete",
+        "default": 0
+    },
+    "egr_padding_flag": {
+        "description": "run internal iRT EGR local padding before legalization",
+        "default": 0
+    },
+    "macro_halo_x": {
+        "description": "horizontal halo around movable macros",
+        "default": 1000
+    },
+    "macro_halo_y": {
+        "description": "vertical halo around movable macros",
+        "default": 1000
+    },
+    "macro_overlap_flag": {
+        "description": "whether enable MFP macro overlap",
+        "default": 0
+    },
+    "macro_overlap_weight": {
+        "description": "initial weight of macro overlap cost",
+        "default": 8e-06
+    },
+    "macro_overlap_mult_weight": {
+        "description": "weight multiplier for MFP macro overlap",
+        "default": 1
+    },
+    "cell_padding_x": {
+        "description": "horizontal padding around macros for MFP macro overlap",
+        "default": 0
+    },
+    "bndry_padding_x": {
+        "description": "horizontal padding around the edges of the floorplan",
+        "default": 0
+    },
+    "bndry_padding_y": {
+        "description": "vertical padding around the edges of the floorplan",
+        "default": 0
+    },
+    "pin_density": {
+        "description": "target pin density for cells inflation",
+        "default": -1
+    },
+    "route_info_input": {
+        "description": "route information file (w. total H/V routing length & macro routing length contribution)",
+        "default": ""
+    },
+    "evaluate_pl": {
+        "description": "evaluate .pl file without running anything (e.g., to get baseline PPA)",
+        "default": 0
+    },
+    "risa_weights": {
+        "description": "whether use weighted smooth HPWL with RISA net weights",
+        "default": 0
+    },
+    "macro_pin_halo_x": {
+        "description": "horizontal halo applied to macro pins for pin-aware macro shaping",
+        "default": 1000
+    },
+    "macro_pin_halo_y": {
+        "description": "vertical halo applied to macro pins for pin-aware macro shaping",
+        "default": 1000
+    },
+    "with_sta": {
+        "description": "enable integrated STA initialization and differentiable timing updates during placement",
+        "default": 1
+    },
+    "export_pin_violation_csv": {
+        "description": "export detailed per-pin slew/cap violation CSV files; disabled by default because it is expensive on large designs",
+        "default": 0
+    },
+    "differentiable_timing_obj": {
+        "description": "compatibility flag for differentiable timing objective configuration",
+        "default": 1
+    },
+    "joint_buffer_commit_period": {
+        "description": "optimizer step interval between joint physical commit requests",
+        "default": 100
+    },
+    "joint_buffer_outer_iterations": {
+        "description": "maximum joint optimizer windows separated by native refresh",
+        "default": 1
+    },
+    "base_design_name": {
+        "description": "base design name used when naming dumped solutions and reports",
+        "default": ""
+    },
+    "egr_stage": {
+        "description": "EGR stage: 2D or 3D",
+        "default": "2D"
+    },
+    "egr_resolve_congestion": {
+        "description": "EGR resolve congestion level",
+        "default": "off"
+    },
+    "precond_pin_count_flag": {
+        "description": "add original DreamPlace per-node raw pin count to the shared gradient preconditioner before clamping; 0 keeps density-area-only preconditioning, 1 enables pin count (not net-weighted PWS)",
+        "default": 0
+    },
+    "enhanced_auto_adjust_bins": {
+        "description": "enable enhanced automatic placement bin adjustment; when enabled, it overrides auto_adjust_bins, keeps the configured bin preset unless num_bins_y exceeds the placement row count, and then caps num_bins_y to the largest power of two not exceeding the row count while preserving the configured num_bins_x/num_bins_y ratio",
+        "default": 0
+    },
+    "l_shape_routability_flag": {
+        "description": "whether enable L-shape routability optimization",
         "default": 0
     },
     "iopin_density_weight": {
         "description": "extra I/O pin density weight added to the electric initial density map; 0 disables the extra I/O pin density increment, 3 matches Xplace's extra 3*Diopin term",
-        "default": 3.0
+        "default": 3
     },
     "ieda_m2_pg_rail_blockage_flag": {
         "description": "whether convert iEDA VDD/VSS special-net shapes on the second routing layer into synthetic placement blockages",
@@ -281,7 +673,7 @@
     },
     "m2_pg_rail_density_weight": {
         "description": "M2 PG rail soft density weight added to the electric initial density map when ieda_m2_pg_rail_blockage_flag is disabled; 0 disables the soft density path, 1 matches the old hard-node rail density contribution",
-        "default": 1.0
+        "default": 1
     },
     "m2_pg_rail_legalization_blockage_flag": {
         "description": "whether run the M2 rail-aware legalization mode selected by m2_pg_rail_legalization_mode",
@@ -315,22 +707,6 @@
         "description": "maximum summed displacement in site widths for one M2 PA-Refine move candidate",
         "default": 50
     },
-    "route_num_bins_x": {
-        "description": "number of routing grids/tiles",
-        "default": 512
-    },
-    "route_num_bins_y": {
-        "description": "number of routing grids/tiles",
-        "default": 512
-    },
-    "node_area_adjust_overflow": {
-        "description": "the overflow where to adjust node area",
-        "default": 0.15
-    },
-    "max_num_area_adjust": {
-        "description": "maximum times to adjust node area",
-        "default": 3
-    },
     "inflation_area_budget_ratio": {
         "description": "maximum fraction of the total whitespace area that routability inflation may add to movable nodes in one area-adjust round",
         "default": 0.1
@@ -362,6 +738,18 @@
     "gpugr_first_inflation_rrr_iters": {
         "description": "rrrIters passed to gpugr when gpugr_first_inflation_exit is enabled",
         "default": 0
+    },
+    "timing_rc_mode": {
+        "default": "placement",
+        "description": "timing parasitics, placement | gr; gr requires native ECC CPU sizing or STA"
+    },
+    "cell_model_schema": {
+        "default": "main_id_arc_offset_piecewise_linear",
+        "description": "cell timing model schema; null uses the existing flow default"
+    },
+    "piecewise_gradient_mode": {
+        "default": "native_piecewise",
+        "description": "piecewise cell gradient, linear6_ste | native_piecewise"
     },
     "gpugr_backend": {
         "description": "GGR backend selection: auto chooses cuda when available and cpu_pr_mt otherwise; cuda requires a CUDA-capable gpugr build; cpu_pr is explicit serial diagnostic pattern routing; cpu_pr_mt is deterministic parallel CPU pattern routing and uses num_threads as its requested worker count; all CPU pattern backends require rrrIters=0",
@@ -418,6 +806,10 @@
     "l_shape_capacity_al_enable": {
         "description": "whether use per-routing-bin AL multiplier memory as the hard-GGR L-shape capacity-pressure source",
         "default": 0
+    },
+    "l_shape_gradient_mode": {
+        "description": "routing gradient mode: translation preserves fixed-size field guidance; full differentiates the fixed-epoch electric energy through positions and segment dimensions (hard L, electric only)",
+        "default": "translation"
     },
     "l_shape_fast_mode": {
         "description": "whether L-shape electric potential skips scalar potential-energy computation while preserving current-iteration electric-field gradients; invalid energy telemetry is reported with l_shape_energy_valid=0",
@@ -545,11 +937,11 @@
     },
     "l_shape_filler_reverse_force": {
         "description": "strength of filler reverse force: push fillers TOWARD congested areas using the L-shape Poisson field, so fillers occupy congested bins and density gradient locks real cells away; 0 disables",
-        "default": 0.0
+        "default": 0
     },
     "l_shape_filler_pseudo_wire_ratio": {
         "description": "ratio of fillers to pull toward the most congested point using pseudo wire force; 0.05 means 5% of fillers are selected randomly and attracted to the max congestion bin",
-        "default": 0.0
+        "default": 0
     },
     "l_shape_keep_during_inflation": {
         "description": "keep L-shape routability enabled during inflation (normally disabled); enables filler pseudo wire force to work with inflation",
@@ -565,7 +957,7 @@
     },
     "l_shape_weight_max": {
         "description": "maximum allowed l_shape_routability_weight after adaptive update",
-        "default": 1.0
+        "default": 1
     },
     "l_shape_log_verbose": {
         "description": "verbosity for non-timing L-shape/Soft-L diagnostic logs: 0 keeps production logs quiet, 1 adds one-line refresh summaries, 2 enables detailed per-iteration and per-refresh diagnostics",
@@ -613,19 +1005,19 @@
     },
     "soft_l_adaptive_scale": {
         "description": "scale factor multiplied onto the median absolute H/V cost gap when soft_l_adaptive_tau is enabled",
-        "default": 1.0
+        "default": 1
     },
     "soft_l_same_net_diag_split_sigma": {
         "description": "distance-decay scale for per-net topology diagonal-split geometric scoring",
-        "default": 1.0
+        "default": 1
     },
     "soft_l_same_net_diag_split_min_support": {
         "description": "minimum accumulated per-net topology diagonal-split support required before converting support into topo cost",
-        "default": 1e-6
+        "default": 1e-06
     },
     "soft_l_same_net_diag_split_max_distance": {
         "description": "optional raw-distance cutoff for per-net topology diagonal-split scoring; use 0 to disable truncation and rely on soft decay only",
-        "default": 0.0
+        "default": 0
     },
     "l_shape_auto_disable_flag": {
         "description": "whether auto-disable soft L-shape when telemetry indicates late-stage overshoot in diff-style runs",
@@ -650,125 +1042,5 @@
     "l_shape_auto_disable_ov_ema_plateau_eps": {
         "description": "maximum L-shape overflow EMA improvement treated as a plateau for auto-disable",
         "default": 0.001
-    },
-    "adjust_nctugr_area_flag": {
-        "description": "legacy compatibility key; when enabled use the ECC/iRT EGR congestion map for area adjustment (NCTUgr is not invoked)",
-        "default": 0
-    },
-    "adjust_rudy_area_flag": {
-        "description": "whether use RUDY/RISA map to guide area adjustment",
-        "default": 1
-    },
-    "adjust_pin_area_flag": {
-        "description": "whether use pin utilization map to guide area adjustment",
-        "default": 1
-    },
-    "area_adjust_stop_ratio": {
-        "description": "area_adjust_stop_ratio",
-        "default": 0.01
-    },
-    "route_area_adjust_stop_ratio": {
-        "description": "route_area_adjust_stop_ratio",
-        "default": 0.01
-    },
-    "pin_area_adjust_stop_ratio": {
-        "description": "pin_area_adjust_stop_ratio",
-        "default": 0.05
-    },
-    "unit_horizontal_capacity": {
-        "description": "number of horizontal routing tracks per unit distance",
-        "default": 1.5625
-    },
-    "unit_vertical_capacity": {
-        "description": "number of vertical routing tracks per unit distance",
-        "default": 1.45
-    },
-    "unit_pin_capacity": {
-        "description": "number of pins per unit area",
-        "default": 0.058
-    },
-    "max_route_opt_adjust_rate": {
-        "description": "max_route_opt_adjust_rate",
-        "default": 2.0
-    },
-    "route_opt_adjust_exponent": {
-        "description": "exponent to adjust the routing utilization map",
-        "default": 2.0
-    },
-    "pin_stretch_ratio": {
-        "description": "pin_stretch_ratio",
-        "default": 1.414213562
-    },
-    "max_pin_opt_adjust_rate": {
-        "description": "max_pin_opt_adjust_rate",
-        "default": 1.5
-    },
-    "deterministic_flag": {
-        "description": "whether require run-to-run determinism, may have efficiency overhead",
-        "default": 0
-    },
-    "get_congestion_map": {
-        "description": "compute congestion map after placement complete",
-        "default": 0
-    },
-    "macro_halo_x": {
-        "description": "horizontal halo around movable macros",
-        "default": 1000
-    },
-    "macro_halo_y": {
-        "description": "vertical halo around movable macros",
-        "default": 1000
-    },
-    "macro_overlap_flag": {
-        "description": "whether enable MFP macro overlap",
-        "default": 0
-    },
-    "macro_overlap_weight": {
-        "description": "initial weight of macro overlap cost",
-        "default": 8e-6
-    },
-    "macro_overlap_mult_weight": {
-        "description": "weight multiplier for MFP macro overlap",
-        "default": 1
-    },
-    "cell_padding_x": {
-        "description": "horizontal padding around macros for MFP macro overlap",
-        "default": 0
-    },
-    "bndry_padding_x": {
-        "description": "horizontal padding around the edges of the floorplan",
-        "default": 0
-    },
-    "bndry_padding_y": {
-        "description": "vertical padding around the edges of the floorplan",
-        "default": 0
-    },
-    "pin_density": {
-        "description": "target pin density for cells inflation",
-        "default": -1
-    },
-    "route_info_input": {
-        "description": "route information file (w. total H/V routing length & macro routing length contribution)",
-        "default": ""
-    },
-    "evaluate_pl": {
-        "description": "evaluate .pl file without running anything (e.g., to get baseline PPA)",
-        "default": 0
-    },
-    "risa_weights": {
-        "description": "whether use weighted smooth HPWL with RISA net weights",
-        "default": 0
-    },
-    "macro_pin_halo_x": {
-        "description": "horizontal halo applied to macro pins for pin-aware macro shaping",
-        "default": 1000
-    },
-    "macro_pin_halo_y": {
-        "description": "vertical halo applied to macro pins for pin-aware macro shaping",
-        "default": 1000
-    },
-    "with_sta": {
-        "description": "enable integrated STA initialization and differentiable timing updates during placement",
-        "default": 1
     }
 }

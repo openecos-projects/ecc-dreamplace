@@ -1,4 +1,7 @@
 build
+build_codex
+build_openroad_schema_check
+/build-*
 lib
 obj
 *.o
@@ -6,6 +9,7 @@ obj
 *.pyc
 results
 log
+logs/
 dreamplace/version.py
 dreamplace/configure.py
 dreamplace/.install_manifest.txt
@@ -19,20 +23,25 @@ install
 .vscode/*
 bin
 include
-unittest
-!unittest/
-unittest/ops/*
-!unittest/ops/cell_padding_geometry_unittest.py
-!unittest/ops/iterative_legalization_padding_unittest.py
-!unittest/ops/m2_rail_legalization_padding_unittest.py
-!unittest/ops/egr_padding_flow_unittest.py
-!unittest/ops/routability_controller_unittest.py
-!unittest/ops/routability_l_shape_inputs_unittest.py
-!unittest/ops/nonlinear_place_plain_flow_unittest.py
-!unittest/ops/routability_wheel_smoke.py
 .cache
-*_unittest
+# Test sources live in tests/ (test/ holds design benchmarks). Locally built test
+# executables land next to their sources, e.g.
+# tests/ops/abacus_legalize_unittest/abacus_unittest; ignore only those binaries.
+/tests/ops/*_unittest/*_unittest
+glog_dump.log
+surrogate_cache/
 
+# Internal planning and experiment records are deliberately not versioned:
+# governance/design plans under docs/ and the per-campaign markdown reports
+# mixed into the regression tree. Keep the regression indexes.
+docs/flow_governance/*.md
+docs/buffering/*.md
+docs/backend_governance/*.md
+test/regression/**/*.md
+!test/regression/README.md
+!test/regression/iccad24/README.md
+# Per-campaign paper/QoR tables are personal experiment records, not test assets.
+test/regression/**/paper/
 *.png
 dreamplace/configure.py
 .codex*
@@ -44,6 +53,9 @@ result
 xplace-build-cpu/
 xplace_gpugr-prefix/
 thirdparty/xplace-build/
+
+# Local artifacts from the retired OpenROAD submodule.
+/thirdparty/OpenROAD/
 
 # CMake/Ninja metadata generated in the source checkout by local builds.
 CMakeFiles/

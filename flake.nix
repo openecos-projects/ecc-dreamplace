@@ -37,6 +37,17 @@
         python3Packages.scikit-build-core
       ];
 
+      # The torch>=2.11,<2.12 pin exists to select a PyPI CPU wheel in upstream
+      # CI (14577a56); the pinned nixpkgs ships torch 2.8.0 which dreamplace
+      # builds and runs against fine. Relax it for the nix build. The CMake
+      # gate guards the same wheel-ABI contract, so relax its lower bound too.
+      postPatch = ''
+        substituteInPlace pyproject.toml \
+          --replace-fail 'torch>=2.11,<2.12' 'torch'
+        substituteInPlace cmake/TorchExtension.cmake \
+          --replace-fail 'VERSION_LESS 2.11 OR' 'VERSION_LESS 2.8 OR'
+      '';
+
       dependencies = with python3Packages; [
         cairocffi
         distutils

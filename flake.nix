@@ -78,7 +78,12 @@
     };
   in flake-parts.lib.mkFlake { inherit inputs; } {
     systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
-    perSystem = { self', pkgs, system, ... }: {
+    perSystem = { self', pkgs, system, config, ... }: {
+      # Re-export packages and the devShell as checks so CI
+      # (`nix flake check`) builds them.
+      checks = config.packages // {
+        devShell = config.devShells.default;
+      };
       packages.default = pkgs.callPackage ecc-dreamplace {};
       devShells.default = pkgs.mkShell.override {} {
         buildInputs = self'.packages.default.rawBuildInputs;

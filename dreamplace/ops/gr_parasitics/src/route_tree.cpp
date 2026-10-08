@@ -80,6 +80,7 @@ py::dict prepareTree(const py::dict& route, const py::dict& pinNames, const py::
     checkOffsets(vstart, N, V);
     checkOffsets(estart, N, E);
     std::vector<std::vector<int>> netPins(N), adjacency;
+    std::vector<bool> routedVertex(V, false), localAccessConnected(V, false);
     for (int p = 0; p < static_cast<int>(pins.size()); ++p) {
         if (pinNet[p] < 0 || pinNet[p] >= N) throw std::runtime_error("GR pin net out of range");
         netPins[pinNet[p]].push_back(p);
@@ -89,6 +90,7 @@ py::dict prepareTree(const py::dict& route, const py::dict& pinNames, const py::
             from[e] == to[e] || rawNet[from[e]] != rawNet[to[e]]) {
             throw std::runtime_error("Invalid GR edge connectivity");
         }
+        routedVertex[from[e]] = routedVertex[to[e]] = true;
     }
     std::vector<int32_t> pinMap(P, -1), gridMap(P, -1), oldToNew(V, -1);
     std::vector<int32_t> vertexNet, vertexLayer, parent, topo, topoStart{0}, roots, netIds;
@@ -98,7 +100,7 @@ py::dict prepareTree(const py::dict& route, const py::dict& pinNames, const py::
     std::vector<Edge> graph;
     std::vector<bool> used;
     py::list loopEdges;
-    int attachmentCount = 0, attachmentVias = 0;
+    int attachmentCount = 0, attachmentVias = 0, gridAccessVias = 0;
     double attachmentLength = 0, attachmentResistance = 0, attachmentCap = 0;
     auto vertex = [&](int net, int metal, double px, double py) {
         if (parent.size() >= static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
@@ -128,6 +130,14 @@ py::dict prepareTree(const py::dict& route, const py::dict& pinNames, const py::
             continue;
         }
         auto fail = [&](const std::string& reason) { throw std::runtime_error("GR net '" + names[n] + "': " + reason); };
+        auto gridAccessEdge = [&](int a, int b) {
+            double resistance = 0;
+            for (int l = std::min(layer[a], layer[b]); l < std::max(layer[a], layer[b]); ++l) {
+                if (!std::isfinite(via[l]) || via[l] <= 0) fail("missing/ambiguous grid access via resistance");
+                resistance += via[l]; ++gridAccessVias;
+            }
+            edge(oldToNew[a], oldToNew[b], resistance, 0, -2);
+        };
         if (covered[target]++) fail("duplicate PyDB net mapping");
         if (status[n] >= 2) fail("failed or unrouted");
         if (vstart[n] == vstart[n + 1]) fail("missing route vertices");
@@ -137,6 +147,24 @@ py::dict prepareTree(const py::dict& route, const py::dict& pinNames, const py::
                 fail("vertex net/layer mismatch");
             }
             oldToNew[old] = vertex(target, layer[old], x[old] / dbu, y[old] / dbu);
+        }
+        // A net collapsed to one gcell has no inter-gcell route. Estimate its
+        // local via stack between the recorded access layers, as pin access RC.
+        if (status[n] == 1 && estart[n] == estart[n + 1]) {
+            std::vector<int> accessVertices;
+            for (int old = vstart[n]; old < vstart[n + 1]; ++old) {
+                if (x[old] != x[vstart[n]] || y[old] != y[vstart[n]]) {
+                    fail("coincident net spans multiple gcells");
+                }
+                accessVertices.push_back(old);
+            }
+            std::sort(accessVertices.begin(), accessVertices.end(),
+                      [&](int a, int b) { return layer[a] < layer[b]; });
+            for (size_t i = 1; i < accessVertices.size(); ++i) {
+                const int a = accessVertices[i - 1], b = accessVertices[i];
+                if (layer[a] == layer[b]) fail("duplicate coincident access vertex");
+                gridAccessEdge(a, b);
+            }
         }
         int root = -1, driverCount = 0;
         for (int p : netPins[n]) {
@@ -148,6 +176,21 @@ py::dict prepareTree(const py::dict& route, const py::dict& pinNames, const py::
             const int metal = pinLayer[p], physical = physicalLayer[p], grid = pinVertex[p];
             if (metal != layer[grid] || physical < 0 || physical >= static_cast<int>(r.size())) {
                 fail("invalid pin access layer");
+            }
+            // GR merges same-gcell pins into one access group. A pin's own
+            // layer can remain isolated from the routed group's chosen layer.
+            if (status[n] == 0 && !routedVertex[grid] && !localAccessConnected[grid]) {
+                int nearest = -1;
+                for (int v = vstart[n]; v < vstart[n + 1]; ++v) {
+                    if (routedVertex[v] && x[v] == x[grid] && y[v] == y[grid] &&
+                        (nearest < 0 || std::abs(layer[v] - metal) < std::abs(layer[nearest] - metal))) {
+                        nearest = v;
+                    }
+                }
+                if (nearest >= 0) {
+                    gridAccessEdge(grid, nearest);
+                    localAccessConnected[grid] = true;
+                }
             }
             if (!std::isfinite(r[metal]) || r[metal] <= 0 || !std::isfinite(c[metal]) || c[metal] < 0) {
                 fail("missing or invalid attachment layer RC");
@@ -270,6 +313,8 @@ py::dict prepareTree(const py::dict& route, const py::dict& pinNames, const py::
     model["attachment_resistance_ohm"] = attachmentResistance;
     model["attachment_capacitance_pf"] = attachmentCap;
     model["attachment_via_count"] = attachmentVias;
+    model["estimated_grid_access_via_count"] = gridAccessVias;
+    model["grid_access_model"] = "same_gcell_estimated_via_stack";
     model["electrical_reduction_model"] = "driver_rooted_dfs_tree_with_full_wire_cap";
     model["loop_count"] = loopEdges.size(); model["loop_edges"] = loopEdges;
     result["model_report"] = model;

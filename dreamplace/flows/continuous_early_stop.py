@@ -19,7 +19,7 @@ class EarlyStopContext:
     oscillation_state: object
     sizing_parameterization: Callable
     continuous_size_parameter: Callable
-    segment_direct_joint_enabled: Callable
+    discrete_actions_owned: bool
     sync_runtime_cells: Callable
     sizing_mode: Callable
     finite_scalar: Callable
@@ -161,7 +161,7 @@ def restore_continuous_early_stop_best_state(context, state, reason="continuous_
 
     restored_cell_updates = None
     sizing_runtime_sync = None
-    if context.segment_direct_joint_enabled():
+    if context.discrete_actions_owned:
         sizing_restore_summary = {
             "restored": False,
             "restore_reason": "milestone_owned_discrete_sizing_state",
@@ -242,7 +242,7 @@ def restore_continuous_early_stop_best_state(context, state, reason="continuous_
             best_state,
         )
 
-    if placedb is not None and not context.segment_direct_joint_enabled():
+    if placedb is not None and not context.discrete_actions_owned:
         for state_key, attr_name in (
             ("placedb_inst_cell_id", "inst_cell_id"),
             ("placedb_inst_libcell_offset", "inst_libcell_offset"),

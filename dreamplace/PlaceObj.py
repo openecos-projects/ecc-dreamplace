@@ -5176,7 +5176,7 @@ class PlaceObj(nn.Module):
         height = float(torch.as_tensor(height_table)[cell_id].detach().cpu().item())
         if not math.isfinite(width) or not math.isfinite(height) or width <= 0.0 or height <= 0.0:
             raise ValueError("virtual buffer cell dimensions must be finite and positive")
-        return width, height
+        return width + 2.0 * float(self.params.cell_padding_x), height
 
     def combined_density_overflow(self, pos):
         state = self._active_segment_count_state_for_virtual_density()
@@ -9713,7 +9713,7 @@ class PlaceObj(nn.Module):
                 x1 = torch.autograd.Variable(x - t * df(x), requires_grad=True)
                 while f(x1) > f(x) - alpha * t * df(x).norm(p=2):
                     t *= beta
-                    x1 = x - t * df(x)
+                    x1 = (x - t * df(x)).detach().requires_grad_(True)
                 return t, x1
 
             def f(x):
@@ -9722,10 +9722,8 @@ class PlaceObj(nn.Module):
             def df(x):
                 return self.obj_and_grad_fn(x)[1]
 
-            _, x_k_1 = backtrack_line_search(f, df, x_k, 0.3, 0.8)
-            _, g_k_1 = self.obj_and_grad_fn(x_k_1)
-
-            new_lr = (x_k - x_k_1).norm(p=2) / (g_k - g_k_1).norm(p=2)
+            step, _ = backtrack_line_search(f, df, x_k, 0.3, 0.8)
+            return x_k.new_tensor(step)
 
         return new_lr
 

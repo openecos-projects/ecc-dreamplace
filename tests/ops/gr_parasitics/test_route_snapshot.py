@@ -63,6 +63,68 @@ def test_prepare_rejects_missing_attachment_and_missing_via_rc(snapshot_inputs):
         prepare_snapshot(route, invalid, mapping, identity)
 
 
+@pytest.mark.parametrize("status", [0, 1])
+def test_coincident_access_layers_have_explicit_local_via_rc(snapshot_inputs, status):
+    route, rc, mapping, identity = snapshot_inputs
+    coincident = dict(route)
+    for field, values in {
+        "vertex_net": [0, 0], "vertex_layer": [1, 2],
+        "vertex_x_dbu": [1875, 1875], "vertex_y_dbu": [1875, 1875],
+        "edge_from": [], "edge_to": [], "edge_kind": [],
+        "net_vertex_start": [0, 2], "net_edge_start": [0, 0],
+        "net_status": [status],
+    }.items():
+        coincident[field] = np.asarray(values, dtype=np.int32)
+    coincident["pin_vertex"] = route["pin_is_driver"].copy()
+    coincident["pin_access_layer"] = coincident["vertex_layer"][coincident["pin_vertex"]]
+    coincident["pin_physical_layer"] = coincident["pin_access_layer"].copy()
+    if status == 0:
+        with pytest.raises(RuntimeError, match="disconnected routing"):
+            prepare_snapshot(coincident, rc, mapping, identity)
+        return
+
+    tree = prepare_snapshot(coincident, rc, mapping, identity, dtype=torch.float64)
+    assert (len(tree.parent), len(tree.edge_child)) == (5, 4)
+    assert tree.model_report["estimated_grid_access_via_count"] == 1
+    via_edges = tree.vertex_layer[tree.edge_parent] != tree.vertex_layer[tree.edge_child]
+    torch.testing.assert_close(tree.edge_resistance[via_edges], torch.tensor([2.5], dtype=torch.float64))
+    torch.testing.assert_close(tree.edge_capacitance[via_edges], torch.zeros(1, dtype=torch.float64))
+
+    invalid = replace(rc, via_resistance=np.array([2.5, np.nan]))
+    with pytest.raises(RuntimeError, match="missing/ambiguous grid access via resistance"):
+        prepare_snapshot(coincident, invalid, mapping, identity)
+
+
+@pytest.mark.parametrize("same_gcell", [False, True])
+def test_isolated_pin_access_connects_only_to_its_routed_gcell(snapshot_inputs, same_gcell):
+    route, rc, mapping, identity = snapshot_inputs
+    isolated = dict(route)
+    pin = 1
+    original_grid = int(route["pin_vertex"][pin])
+    added = len(route["vertex_net"])
+    for field, value in {
+        "vertex_net": 0,
+        "vertex_layer": 0,
+        "vertex_x_dbu": int(route["vertex_x_dbu"][original_grid]) + (0 if same_gcell else 1),
+        "vertex_y_dbu": int(route["vertex_y_dbu"][original_grid]),
+    }.items():
+        isolated[field] = np.append(route[field], value).astype(np.int32)
+    isolated["net_vertex_start"] = np.array([0, added + 1], dtype=np.int32)
+    for field, value in {"pin_vertex": added, "pin_access_layer": 0, "pin_physical_layer": 0}.items():
+        isolated[field] = route[field].copy()
+        isolated[field][pin] = value
+
+    if not same_gcell:
+        with pytest.raises(RuntimeError, match="disconnected routing"):
+            prepare_snapshot(isolated, rc, mapping, identity)
+        return
+    tree = prepare_snapshot(isolated, rc, mapping, identity, dtype=torch.float64)
+    assert tree.model_report["estimated_grid_access_via_count"] == 1
+    edge = (tree.edge_child == tree.pin_grid_vertex[0]).nonzero().item()
+    assert tree.edge_resistance[edge].item() == pytest.approx(2.5)
+    assert tree.edge_capacitance[edge].item() == 0
+
+
 def test_physical_driver_without_timing_arcs_and_mismatched_timed_driver(snapshot_inputs):
     route, rc, mapping, identity = snapshot_inputs
     physical = prepare_snapshot(

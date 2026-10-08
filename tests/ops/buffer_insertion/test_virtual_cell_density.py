@@ -11,6 +11,32 @@ from dreamplace.ops.buffer_insertion.virtual_cell_density import (
 )
 
 
+@pytest.mark.parametrize("padding", [0.0, 1.0])
+def test_virtual_buffer_footprint_matches_padded_native_cell(padding):
+    from dreamplace.PlaceObj import PlaceObj
+    from dreamplace.ops.routability.cooptimization_area import capture_area
+
+    model = SimpleNamespace(
+        params=SimpleNamespace(cell_padding_x=padding),
+        data_collections=SimpleNamespace(
+            buffer_segment_count_payload={"buffer_legal_table": {"legal_cell_ids": [0]}},
+            flat_libcell_width=torch.tensor([3.0]),
+            flat_libcell_height=torch.tensor([2.0]),
+        ),
+        _segment_count_state_for_virtual_density=lambda: SimpleNamespace(fixed_bsu_index=0),
+    )
+    width, height = PlaceObj._segment_virtual_buffer_size(model)
+    placedb = SimpleNamespace(num_movable_nodes=1, num_filler_nodes=0)
+    before = SimpleNamespace(node_size_x=torch.tensor([4.0]), node_size_y=torch.tensor([2.0]))
+    virtual = capture_area(before, placedb, width * height, capacity=100.0)
+    placedb.num_movable_nodes = 2
+    materialized = SimpleNamespace(
+        node_size_x=torch.tensor([4.0, 3.0 + 2.0 * padding]),
+        node_size_y=torch.tensor([2.0, 2.0]),
+    )
+    assert virtual == capture_area(materialized, placedb, capacity=100.0)
+
+
 def test_equal_spaced_positions_support_zero_through_three_buffers():
     parent_x = torch.tensor([0.0, 10.0, 20.0])
     parent_y = torch.zeros(3)

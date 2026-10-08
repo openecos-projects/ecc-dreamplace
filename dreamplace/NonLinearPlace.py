@@ -2506,14 +2506,18 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         return finite_timing_scalar(value)
 
     def _early_stop_context(self):
+        params = getattr(self, "params", None)
         return continuous_early_stop.EarlyStopContext(
             data_collections=getattr(self, "data_collections", None),
             placedb=getattr(self, "placedb", None),
-            params=getattr(self, "params", None),
+            params=params,
             oscillation_state=getattr(self, "_quad_oscillation_state", None),
             sizing_parameterization=self._sizing_parameterization,
             continuous_size_parameter=self._continuous_size_parameter,
-            segment_direct_joint_enabled=self._segment_direct_joint_enabled,
+            discrete_actions_owned=(
+                self._segment_direct_joint_enabled()
+                or bool(getattr(params, "timing_opt_enabled", False))
+            ),
             sync_runtime_cells=self._sync_discrete_gradient_topk_runtime_cells,
             sizing_mode=self._placement_sizing_mode,
             finite_scalar=self._finite_timing_scalar,

@@ -253,9 +253,11 @@ def test_best_master_restore_rebuilds_vt_and_leakage_state():
     )
 
 
-def test_best_restore_preserves_milestone_owned_cells_and_geometry():
+@pytest.mark.parametrize("owner", ["segment_joint", "timing_opt"])
+def test_best_restore_preserves_milestone_owned_cells_and_geometry(owner):
     placer = _placer()
-    placer._segment_direct_joint_enabled = lambda: True
+    placer.params = SimpleNamespace(timing_opt_enabled=owner == "timing_opt")
+    placer._segment_direct_joint_enabled = lambda: owner == "segment_joint"
     placer.data_collections = SimpleNamespace(inst_cell_id=torch.tensor([1]),
                                              node_size_x=torch.tensor([540.]))
     placer.placedb = SimpleNamespace(inst_cell_id=np.array([1]), node_size_x=np.array([540.]))

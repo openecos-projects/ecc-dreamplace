@@ -75,6 +75,12 @@ class NesterovAcceleratedGradientOptimizer(Optimizer):
                 dtype=self.param_groups[0]["params"][0].dtype,
                 device=self.param_groups[0]["params"][0].device,
             )
+        initial_step = torch.as_tensor(
+            self.param_groups[0]["lr"], dtype=step_size.dtype, device=step_size.device
+        )
+        step_size = torch.where(
+            torch.isfinite(step_size) & (step_size > 0), step_size, initial_step
+        )
         if self.max_step_size is not None:
             step_size = torch.clamp(step_size, min=0.0, max=float(self.max_step_size))
         return step_size

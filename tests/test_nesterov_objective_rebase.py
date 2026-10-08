@@ -18,6 +18,36 @@ def _quadratic(target):
 
 
 @pytest.mark.parametrize("use_bb", [False, True])
+@pytest.mark.parametrize("slope", [0.0, 0.05, 1.0])
+def test_zero_curvature_keeps_steps_finite(use_bb, slope):
+    position = torch.nn.Parameter(torch.tensor([2.0]))
+
+    def objective_and_gradient(probe):
+        objective = slope * probe.sum()
+        return objective, torch.autograd.grad(objective, probe)[0]
+
+    optimizer = NesterovAcceleratedGradientOptimizer(
+        [position],
+        lr=0.1,
+        obj_and_grad_fn=objective_and_gradient,
+        constraint_fn=lambda value: value,
+        use_bb=use_bb,
+    )
+    position.grad = torch.zeros_like(position)
+    initial = position.detach().clone()
+
+    for _ in range(3):
+        optimizer.step()
+        assert torch.isfinite(position).all()
+        assert torch.isfinite(optimizer.param_groups[0]["alpha_k"][0]).all()
+
+    if slope == 0:
+        torch.testing.assert_close(position.detach(), initial)
+    else:
+        assert position.item() < initial.item()
+
+
+@pytest.mark.parametrize("use_bb", [False, True])
 def test_rebase_objective_state_reanchors_nesterov_without_moving_position(use_bb):
     position = torch.nn.Parameter(torch.tensor([2.0, -1.0]))
     optimizer = NesterovAcceleratedGradientOptimizer(

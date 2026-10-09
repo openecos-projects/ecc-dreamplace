@@ -134,6 +134,18 @@ class GPUGRBackendSelectTest(unittest.TestCase):
             "cpu_pr_mt",
         )
 
+    def test_cpu_pr_maze_is_explicit_and_accepts_positive_rrr(self):
+        self.assertEqual(normalize_gpugr_backend("cpu_pr_maze"), "cpu_pr_maze")
+        self.assertEqual(
+            resolve_gpugr_backend("cpu_pr_maze", cuda_available=False, extension_cuda_enabled=False),
+            "cpu_pr_maze",
+        )
+        validate_gpugr_backend_request("cpu_pr_maze", 1)
+
+    def test_cpu_pr_maze_rejects_negative_rrr(self):
+        with self.assertRaisesRegex(RuntimeError, "rrr_iters"):
+            validate_gpugr_backend_request("cpu_pr_maze", -1)
+
     def test_cpu_pr_rejects_rrr_iters(self):
         validate_gpugr_backend_request("cpu_pr", 0)
         with self.assertRaises(RuntimeError):

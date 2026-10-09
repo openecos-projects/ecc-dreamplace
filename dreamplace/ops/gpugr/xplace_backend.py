@@ -44,7 +44,7 @@ from .xplace_parser_cache import XplaceParserCacheMixin
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_GPUGR_BACKENDS = ("cuda", "cpu_pr", "cpu_pr_mt", "auto")
+SUPPORTED_GPUGR_BACKENDS = ("cuda", "cpu_pr", "cpu_pr_mt", "cpu_pr_maze", "auto")
 
 
 def normalize_gpugr_backend(backend: str = "auto") -> str:
@@ -98,6 +98,8 @@ def resolve_gpugr_backend(
 
 def validate_gpugr_backend_request(backend: str, rrr_iters: int):
     normalized = normalize_gpugr_backend(backend)
+    if int(rrr_iters) < 0:
+        raise RuntimeError(f"gpugr backend={normalized} requires rrr_iters >= 0")
     if normalized in ("cpu_pr", "cpu_pr_mt") and int(rrr_iters) > 0:
         raise RuntimeError(
             f"gpugr backend={normalized} only supports one CPU routing pass with "
@@ -1092,7 +1094,7 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
                             torch.cuda.synchronize(f"cuda:{gpu}")
                     native_stats = (
                         dict(routeforce.run_stats())
-                        if resolved_backend in ("cpu_pr", "cpu_pr_mt")
+                        if resolved_backend in ("cpu_pr", "cpu_pr_mt", "cpu_pr_maze")
                         and hasattr(routeforce, "run_stats")
                         else {}
                     )

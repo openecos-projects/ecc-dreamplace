@@ -14,9 +14,14 @@ def configure_gr_sizing(params):
         raise ValueError("GR timing requires the native ECC backend and gpu=0")
     backend = normalize_gpugr_backend(getattr(params, "gpugr_backend", "auto"))
     if backend == "cuda":
-        raise ValueError("GR timing requires a CPU routing backend: cpu_pr or cpu_pr_mt")
+        raise ValueError("GR timing requires a CPU routing backend: cpu_pr, cpu_pr_mt, or cpu_pr_maze")
     # This production lane is CPU-qualified even when the host has CUDA.
     params.gpugr_backend = "cpu_pr_mt" if backend == "auto" else backend
+    rrr_iters = int(getattr(params, "gr_sizing_rrr_iters", 0))
+    if rrr_iters < 0:
+        raise ValueError("gr_sizing_rrr_iters must be non-negative")
+    if rrr_iters > 0 and params.gpugr_backend != "cpu_pr_maze":
+        raise ValueError("positive gr_sizing_rrr_iters requires gpugr_backend=cpu_pr_maze")
     if params.flow_kind not in {"sizing", "sta"}:
         raise ValueError("GR timing supports standalone sizing or read-only STA only")
     if getattr(params, "placement_sizing_mode", "place_only") == "joint":

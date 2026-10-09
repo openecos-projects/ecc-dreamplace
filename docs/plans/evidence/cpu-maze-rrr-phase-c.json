@@ -1,0 +1,405 @@
+{
+  "schema_version": 1,
+  "phase": "C",
+  "phase_name": "one CPU RRR iteration and opt-in backend integration",
+  "status": "incomplete",
+  "claim_level": "CPU maze rip-up/reroute state semantics and native opt-in backend plumbing",
+  "source_commits": {
+    "dreamplace": "ae757145",
+    "xplace": "0fede4d"
+  },
+  "effective_parameters": {
+    "torch": "2.11.0+cpu",
+    "xplace_cuda": false,
+    "backend": "cpu_pr_maze",
+    "requested_workers": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "rrr_iters": [
+      0,
+      1,
+      3
+    ],
+    "native_toy_grid": [
+      8,
+      8
+    ],
+    "native_toy_layers": [
+      "M1",
+      "M2"
+    ],
+    "worker_scaling_fixture": {
+      "grid": [
+        8,
+        8
+      ],
+      "layers": [
+        "M1",
+        "M2",
+        "M3"
+      ],
+      "repetitions": 2
+    },
+    "successful_fixture": {
+      "num_gr_nets": 6,
+      "routeable_net_count": 5,
+      "noroute_net_count": 1
+    },
+    "bm64_native": {
+      "grid": [
+        512,
+        512
+      ],
+      "layers": [
+        "MET1",
+        "RDL"
+      ],
+      "workers": 8,
+      "num_gr_nets": 16209,
+      "routeable_net_count": 16127,
+      "noroute_net_count": 82
+    }
+  },
+  "commands": [
+    {
+      "name": "cpu_maze_rrr_fixture",
+      "exit_code": 0,
+      "command": "/usr/bin/g++ -std=c++17 -O2 -Wall -Wextra -pthread -Icpp_to_py cpp_to_py/gpugr/gr/CpuMazeRouter.cpp cpp_to_py/gpugr/gr/CpuRouteTypes.cpp cpp_to_py/gpugr/gr/CpuRouteState.cpp cpp_to_py/gpugr/gr/CpuRouteWorkerPool.cpp cpp_to_py/gpugr/unittest_cpu_maze_rrr.cpp -o /tmp/ecc-cpu-maze-rrr-phase-a/unittest_cpu_maze_rrr && /tmp/ecc-cpu-maze-rrr-phase-a/unittest_cpu_maze_rrr"
+    },
+    {
+      "name": "cpu_only_native_build",
+      "exit_code": 0,
+      "command": "XPLACE_ENABLE_CUDA=OFF XPLACE_INSTALL=OFF XPLACE_BUILD_DIR=/tmp/ecc-cpu-maze-rrr-phase-a/xplace-build JOBS=6 bash thirdparty/build_xplace_gpugr.sh"
+    },
+    {
+      "name": "native_backend_smoke",
+      "exit_code": 0,
+      "command": "cpu_pr_maze with rrr_iters=0,1,3 on existing CPU toy fixture"
+    },
+    {
+      "name": "native_backend_real_routed_fixture_metadata",
+      "exit_code": 0,
+      "command": "/home/zhaoxueyan/code/ecc-ci-timing-routability-opt-20261008/ecc/.venv/bin/python /tmp/ecc-cpu-maze-rrr-phase-a/run_gr_fixture.py"
+    },
+    {
+      "name": "native_route_pack_rc_tree_and_gradient",
+      "exit_code": 0,
+      "command": "PYTHONPATH=. LD_LIBRARY_PATH=<torch>/lib /home/zhaoxueyan/code/ecc-ci-timing-routability-opt-20261008/ecc/.venv/bin/python /tmp/ecc-cpu-maze-rrr-phase-a/validate_gr_fixture_rc.py"
+    },
+    {
+      "name": "python_gr_sizing_rrr1_end_to_end",
+      "exit_code": 0,
+      "command": "ECC_XPLACE_ROOT=<ecc-dreamplace>/thirdparty/xplace LD_LIBRARY_PATH=<torch>/lib PYTHONPATH=<ecc>:<ecc-dreamplace> /home/zhaoxueyan/code/ecc-ci-timing-routability-opt-20261008/ecc/.venv/bin/python /tmp/ecc-cpu-maze-rrr-phase-a/native_gr_sizing_rrr.py --output /tmp/ecc-cpu-maze-rrr-phase-a/native-sizing-rrr1b --phase sizing"
+    },
+    {
+      "name": "worker_scaling_and_repeatability_fixture",
+      "exit_code": 0,
+      "command": "/home/zhaoxueyan/code/ecc-ci-timing-routability-opt-20261008/ecc/.venv/bin/python /tmp/ecc-cpu-maze-rrr-phase-a/worker_scaling.py"
+    },
+    {
+      "name": "bm64_native_cpu_maze_rrr0",
+      "exit_code": 0,
+      "command": "/home/zhaoxueyan/code/ecc-ci-timing-routability-opt-20261008/ecc/.venv/bin/python /tmp/ecc-cpu-maze-rrr-phase-a/probe_bm64_native_rrr.py 0 /tmp/ecc-cpu-maze-rrr-phase-a/bm64-native-rrr0.json"
+    },
+    {
+      "name": "bm64_native_cpu_maze_rrr1",
+      "exit_code": 0,
+      "command": "/home/zhaoxueyan/code/ecc-ci-timing-routability-opt-20261008/ecc/.venv/bin/python /tmp/ecc-cpu-maze-rrr-phase-a/probe_bm64_native_rrr.py 1 /tmp/ecc-cpu-maze-rrr-phase-a/bm64-native-rrr1.json"
+    },
+    {
+      "name": "bm64_native_cpu_maze_rrr3",
+      "exit_code": 0,
+      "command": "/home/zhaoxueyan/code/ecc-ci-timing-routability-opt-20261008/ecc/.venv/bin/python /tmp/ecc-cpu-maze-rrr-phase-a/probe_bm64_native_rrr.py 3 /tmp/ecc-cpu-maze-rrr-phase-a/bm64-native-rrr3.json"
+    },
+    {
+      "name": "bm64_ecc_gr_sizing_rrr0_route_pack_gate",
+      "exit_code": 1,
+      "command": "ECC native DreamPlace wrapper with BM64 input, cpu_pr_maze, gr_sizing_rrr_iters=0",
+      "failure": "native route pack rejected unrouted net A[0]$_SDFFE_PP0P_:Q; unsupported-route.json was emitted and sizing did not claim success"
+    }
+  ],
+  "observations": {
+    "rrr_fixture": "CPU_MAZE_RRR_TEST=passed",
+    "rrr_fixture_scope": [
+      "two nets initially commit the same capacity-one wire path",
+      "rip-up of one net exposes current usage to the maze cost",
+      "the rerouted net selects a three-layer detour",
+      "an impossible detour returns unreachable and checkpoint rollback restores the prior route"
+    ],
+    "native_backend": {
+      "accepted_backends": [
+        "cpu_pr_maze"
+      ],
+      "reason": "the existing parser toy fixture emits raw_route=[-1] for both nets, so no valid overflow net is eligible for RRR",
+      "real_routed_fixture": {
+        "num_gr_nets": 6,
+        "routeable_net_count": 5,
+        "noroute_net_count": 1,
+        "rrr_iters_0": {
+          "terminal_status": "completed",
+          "completed_rrr_iters": 0,
+          "route_hash64": 7669483446583947586,
+          "timing_route_pack": "success"
+        },
+        "rrr_iters_1": {
+          "terminal_status": "completed",
+          "completed_rrr_iters": 1,
+          "selected_net_count": 4,
+          "rerouted_net_count": 1,
+          "failed_net_count": 3,
+          "conflict_fallback_count": 3,
+          "maze_failure_reasons": {
+            "conflict": 3
+          },
+          "best_state": false,
+          "best_state_restored": true,
+          "final_route_hash64": 7669483446583947586,
+          "timing_route_pack": "success"
+        },
+        "rrr_iters_3": {
+          "terminal_status": "completed",
+          "completed_rrr_iters": 1,
+          "early_stop_after_no_improvement": true,
+          "best_state_restored": true,
+          "final_route_hash64": 7669483446583947586,
+          "timing_route_pack": "success"
+        },
+        "metadata_fix": "candidate footprint rejection is reported as conflict rather than none"
+      },
+      "route_pack_rc_tree": {
+        "rrr_iters": [
+          0,
+          1,
+          3
+        ],
+        "covered_pins": 10,
+        "eligible_nets": 5,
+        "filtered_nets": 1,
+        "vertices": 38,
+        "edges": 33,
+        "finite_delays": true,
+        "finite_gradients": true,
+        "grad_l1": 82.75,
+        "loop_count": 0,
+        "electrical_reduction_model": "driver_rooted_dfs_tree_with_full_wire_cap"
+      },
+      "python_gr_sizing": {
+        "backend": "cpu_pr_maze",
+        "gr_sizing_rrr_iters": 1,
+        "status": "ok",
+        "router_calls": 2,
+        "optimization_rc_calls": 60,
+        "initial_snapshot_backend": "cpu_pr_maze",
+        "terminal_snapshot_backend": "cpu_pr_maze",
+        "final_def": "/tmp/ecc-cpu-maze-rrr-phase-a/native-sizing-rrr1c/result/gr_parasitics/final.def",
+        "terminal_sta": "/tmp/ecc-cpu-maze-rrr-phase-a/native-sizing-rrr1c/result/native_sta/sta.log",
+        "native_route_stats_persisted": "snapshot.json includes requested/effective workers, requested/completed RRR iterations, hashes and failure metadata"
+      },
+      "worker_scaling": {
+        "1": {
+          "effective_workers": 1,
+          "worker_clamp_reason": "none",
+          "parallel_batch_count": 0,
+          "deterministic_routes": true,
+          "route_hash64": 7669483446583947586
+        },
+        "2": {
+          "effective_workers": 2,
+          "worker_clamp_reason": "none",
+          "parallel_batch_count": 2,
+          "deterministic_routes": true,
+          "route_hash64": 7669483446583947586
+        },
+        "4": {
+          "effective_workers": 4,
+          "worker_clamp_reason": "none",
+          "parallel_batch_count": 2,
+          "deterministic_routes": true,
+          "route_hash64": 7669483446583947586
+        },
+        "8": {
+          "effective_workers": 4,
+          "worker_clamp_reason": "max_batch_size",
+          "parallel_batch_count": 2,
+          "deterministic_routes": true,
+          "route_hash64": 7669483446583947586
+        },
+        "qualification": "preliminary scheduling and repeatability only; no speedup claim because fixture is too small and no overlap timestamps are recorded"
+      },
+      "toy_fixture": {
+        "rrr_iters_0": {
+          "terminal_status": "completed",
+          "completed_rrr_iters": 0
+        },
+        "rrr_iters_1": {
+          "terminal_status": "completed",
+          "completed_rrr_iters": 0
+        },
+        "rrr_iters_3": {
+          "terminal_status": "completed",
+          "completed_rrr_iters": 0
+        }
+      }
+    },
+    "bm64_native": {
+      "input_def": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_regression_20260920_BM64_experiments/pins_tdp_fillers_noise0025/BM64_pins_tdp_fillers_noise0025.def",
+      "input_sha256": "dd0231ba72f7cd8f9bb24f29f709aabf890e7327e35c67b28e47b50a06d205e1",
+      "rrr0": {
+        "elapsed_seconds": 5.009539638995193,
+        "routeable_net_count": 16127,
+        "noroute_net_count": 82,
+        "requested_workers": 8,
+        "effective_workers": 8,
+        "peak_memory_bytes": 1789820928,
+        "route_hash64": 12685151217692831578,
+        "completed_rrr_iters": 0
+      },
+      "rrr1": {
+        "elapsed_seconds": 30.00040299000102,
+        "selected_net_count": 272,
+        "rerouted_net_count": 185,
+        "failed_net_count": 87,
+        "conflict_fallback_count": 271,
+        "maze_failure_reasons": {
+          "conflict": 87
+        },
+        "overflow_net_count": 258,
+        "overflow_wire_excess": 4074.6821615695953,
+        "overflow_via_excess": 4043.0,
+        "completed_rrr_iters": 1,
+        "best_state_restored": true,
+        "final_route_hash64": 12685151217692831578,
+        "route_hash_matches_rrr0": true
+      },
+      "rrr3": {
+        "elapsed_seconds": 29.438665538997157,
+        "completed_rrr_iters": 1,
+        "best_state_restored": true,
+        "final_route_hash64": 12685151217692831578,
+        "route_hash_matches_rrr0": true,
+        "early_stop_after_first_nonimproving_iteration": true
+      },
+      "decision": "on this BM64 input CPU RRR did not improve the lexicographic overflow state; it restored the initial route. This is native GR evidence only because RC-tree qualification rejected an unrouted net.",
+      "grid1024_diagnostic": {
+        "grid": [
+          1024,
+          1024
+        ],
+        "workers": 4,
+        "elapsed_seconds": 20.089890641975217,
+        "routeable_net_count": 16194,
+        "noroute_net_count": 15,
+        "peak_memory_bytes": 3372171264,
+        "scratch_bytes_per_worker": 843042816,
+        "interpretation": "finer grid reduces noroute nets from 82 to 15 but increases GR runtime from about 5.0s to 20.1s and peak memory from about 1.79GB to 3.37GB; this is a pin-access/grid tradeoff diagnostic, not a default change"
+      }
+    },
+    "bm64_ecc_wrapper": {
+      "status": "unsupported_route_diagnostic",
+      "reason": "GR net A[0]$_SDFFE_PP0P_:Q failed or unrouted",
+      "missing_local_path_count": 52714,
+      "artifact": "/tmp/ecc-cpu-maze-rrr-phase-a/bm64-ecc-rrr0/step/gr_parasitics/unsupported-route.json"
+    }
+  },
+  "artifacts": {
+    "rrr_fixture_binary": {
+      "path": "/tmp/ecc-cpu-maze-rrr-phase-a/unittest_cpu_maze_rrr",
+      "sha256": "2d1da14c9128215f90372f68c23b701f757e23e325b75d91fa3980a6dec9b611"
+    },
+    "native_backend_output": {
+      "path": "/tmp/ecc-cpu-maze-rrr-phase-a/run_maze_backend.out",
+      "sha256": "3032d09ef6a072a99ad415441d5cfbea2fd77650a84dc2982a99e280126f0ea2"
+    },
+    "real_fixture_metadata_output": {
+      "path": "/tmp/ecc-cpu-maze-rrr-phase-a/run_gr_fixture_after_metadata2.out",
+      "sha256": "061f43c0a8d9f6f4e2bfc0fae349feffe29c5e7d6d9f7d468ee8141d2eea5e2b"
+    },
+    "route_pack_rc_validation_output": {
+      "path": "/tmp/ecc-cpu-maze-rrr-phase-a/validate_gr_fixture_rc_after_metadata2.out",
+      "sha256": "d314964af95ca2bea903385aea00e7b5e392229b9b411db8deeff39f172f40cd"
+    },
+    "worker_scaling_output": {
+      "path": "/tmp/ecc-cpu-maze-rrr-phase-a/worker_scaling_after_metadata.out",
+      "sha256": "430c047c76299a684be220f2427647fb3835f1924d54bd1d1d3fc1932dd342e7"
+    },
+    "python_gr_sizing_output": {
+      "path": "/tmp/ecc-cpu-maze-rrr-phase-a/native-sizing-rrr1c/report.json",
+      "sha256": "b53acdb9565bef2e4a38a37852269d251a55d0c13f307d97e6049d39593dafa2"
+    },
+    "python_gr_sizing_artifact": {
+      "path": "/tmp/ecc-cpu-maze-rrr-phase-a/native-sizing-rrr1c/result/gr_parasitics/sizing.json",
+      "sha256": "4d3b1425026653bdbffe1ca099d8a6f4c59bb64718ebac88b2552bf6c3d41701"
+    },
+    "python_gr_sizing_snapshot": {
+      "path": "/tmp/ecc-cpu-maze-rrr-phase-a/native-sizing-rrr1c/result/gr_parasitics/snapshot.json",
+      "sha256": "807096e7d784d78fbd85dd973a3d918d80af062cd3561997bca20500498d1414"
+    },
+    "bm64_native_rrr0": {
+      "path": "/tmp/ecc-cpu-maze-rrr-phase-a/bm64-native-rrr0.json",
+      "sha256": "bb0483de344308a27f5543db297af4197efafc09293c3c2f00bdf93a2b696c89"
+    },
+    "bm64_native_rrr1": {
+      "path": "/tmp/ecc-cpu-maze-rrr-phase-a/bm64-native-rrr1.json",
+      "sha256": "490662815c9068a32a099e8404a197a17c1de9f8ad976a3ee3ac86c5daf37a52"
+    },
+    "bm64_native_rrr3": {
+      "path": "/tmp/ecc-cpu-maze-rrr-phase-a/bm64-native-rrr3.json",
+      "sha256": "3f616756b32121ca6cd88d1f19d3cd8faeb85be8362a0785ba067b104b28a137"
+    },
+    "bm64_ecc_unsupported_route": {
+      "path": "/tmp/ecc-cpu-maze-rrr-phase-a/bm64-ecc-rrr0/step/gr_parasitics/unsupported-route.json",
+      "sha256": "442c1983ea5be19d556b339df87518b9e1df1ba9e64e8c14a9c169dc3a0f3cd3"
+    },
+    "bm64_native_grid1024_rrr0": {
+      "path": "/tmp/ecc-cpu-maze-rrr-phase-a/bm64-native-grid1024-rrr0.json",
+      "sha256": "a65ccd9aeb303bb75a7b515d331e213526dcd8aa41d913602aec19607d9da685"
+    }
+  },
+  "exit_condition": {
+    "result": "incomplete",
+    "passed": [
+      "deterministic rip-up, detour, and rollback semantics",
+      "explicit cpu_pr_maze backend parsing and native dispatch",
+      "structured per-iteration and failure metadata",
+      "rrr_iters=0 preserves the existing toy route hash",
+      "real routed GrNet fixture has five eligible nets and one filtered clock net",
+      "RRR=0/1/3 route-pack export succeeds and RRR=3 stops after the first non-improving iteration",
+      "native GR RC-tree preparation, finite delay evaluation, and finite capacitance gradients succeed for each requested RRR count",
+      "positive gr_sizing_rrr_iters=1 completes the Python sizing plus terminal GR+STA lifecycle",
+      "worker requests 1/2/4/8 preserve route hashes across two repetitions; requests 2/4/8 schedule parallel candidate batches",
+      "Python gr_sizing snapshot.json retains native CPU maze run_stats for the positive-RRR route",
+      "BM64 native cpu_pr_maze RRR=0/1/3 completed with deterministic hashes and per-iteration metadata",
+      "BM64 RRR=1 and RRR=3 both restored the initial best route after no lexicographic overflow improvement",
+      "ECC wrapper refused to promote BM64 RRR=0 to GR sizing after route-pack detected an unrouted net and emitted unsupported-route artifacts"
+    ],
+    "remaining": [
+      "choose and qualify a BM64 route-grid/pin-access policy that removes remaining noroute nets without an unacceptable GR memory/runtime increase",
+      "rerun BM64 through the ECC GR sizing lifecycle after the route-pack gate is satisfied",
+      "external GR+STA and QoR decision before any default-flow consideration",
+      "larger independent-candidate fixture and explicit overlap timestamps for worker speed qualification"
+    ]
+  },
+  "audit_correction_20261009": {
+    "classification": "historical diagnostics; superseded qualification conclusions",
+    "eligibility_is_not_routing_success": "grnet_summary routeable_net_count only counts noroute=false, not successful raw routes",
+    "bm64_met1_grid512_actual_route_counts": {
+      "failed": 15824,
+      "routed": 303,
+      "coincident": 81,
+      "excluded": 1
+    },
+    "bm64_met2_grid512_actual_route_counts": {
+      "failed": 0,
+      "routed": 16127,
+      "coincident": 81,
+      "excluded": 1
+    },
+    "layer_window_cause": "PatternRoute searches from max(1,bottom). Explicit MET2 pin access fixes the MET1 access/search mismatch. Grid1024 was not a solution to failed routes. No default routing-layer change was made.",
+    "false_conflict_failures": "A successful serial re-search observes current usage; legal shared resources must not be rejected again. False conflict failures in the historical fixture and BM64 records are superseded by the native integration regression.",
+    "current_implementation_xplace": "b93b5c06f599480448f992646679145e01abf413",
+    "current_worker_evidence": "cpu-maze-rrr-worker-scaling.json"
+  }
+}

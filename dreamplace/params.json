@@ -752,8 +752,12 @@
         "description": "piecewise cell gradient, linear6_ste | native_piecewise"
     },
     "gpugr_backend": {
-        "description": "GGR backend selection: auto chooses cuda when available and cpu_pr_mt otherwise; cuda requires a CUDA-capable gpugr build; cpu_pr is explicit serial diagnostic pattern routing; cpu_pr_mt is deterministic parallel CPU pattern routing and uses num_threads as its requested worker count; all CPU pattern backends require rrrIters=0",
+        "description": "GGR backend selection: auto chooses cuda when available and cpu_pr_mt otherwise; cuda requires a CUDA-capable gpugr build; cpu_pr is explicit serial diagnostic pattern routing; cpu_pr_mt is deterministic parallel CPU pattern routing; cpu_pr_maze is opt-in CPU pattern plus maze RRR; CPU pattern backends use num_threads as their requested worker count",
         "default": "auto"
+    },
+    "gr_sizing_rrr_iters": {
+        "description": "bounded CPU maze RRR iterations for standalone GR sizing; positive values require gpugr_backend=cpu_pr_maze and default is zero",
+        "default": 0
     },
     "gpugr_bottom_routing_layer": {
         "description": "inclusive bottom routing-layer name passed to GPUGR; empty uses the first LEF routing layer",

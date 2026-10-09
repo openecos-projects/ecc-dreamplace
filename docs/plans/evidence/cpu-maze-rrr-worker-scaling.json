@@ -1,0 +1,115 @@
+{
+  "status": "historical_superseded",
+  "scope": "BM64 native RRR=1 on fixed 128 grid, not 512 S50 runtime",
+  "warmup_runs": 1,
+  "timed_runs": 3,
+  "cpu_affinity": [
+    360,
+    361,
+    362,
+    363,
+    364,
+    365,
+    366,
+    367
+  ],
+  "extension_sha256": "045eb24f330c80c617199d9228a32d3cc2b7216ba3e6586f48b0900c0b433925",
+  "hashes": [
+    15970755015258901139,
+    13380022816680563995,
+    17328474496803844408
+  ],
+  "rows": [
+    {
+      "workers": 1,
+      "maze_search_median_s": 1.05097164,
+      "route_median_s": 31.398160217009718,
+      "fallback_median_s": 29.674746101000185,
+      "fallback_fraction": 0.9987205983663026,
+      "peak_process_rss_bytes": 486854656,
+      "effective_workers": 1,
+      "max_active_searches": [
+        1,
+        1,
+        1
+      ],
+      "search_speedup": 1.0,
+      "route_speedup": 1.0
+    },
+    {
+      "workers": 2,
+      "maze_search_median_s": 0.520715819,
+      "route_median_s": 30.676495872001396,
+      "fallback_median_s": 29.467820220000263,
+      "fallback_fraction": 0.9987205983663026,
+      "peak_process_rss_bytes": 535928832,
+      "effective_workers": 2,
+      "max_active_searches": [
+        2,
+        2,
+        2
+      ],
+      "search_speedup": 2.018320937547703,
+      "route_speedup": 1.0235249928159815
+    },
+    {
+      "workers": 4,
+      "maze_search_median_s": 0.339182437,
+      "route_median_s": 30.71457083200221,
+      "fallback_median_s": 29.797487624000045,
+      "fallback_fraction": 0.9987205983663026,
+      "peak_process_rss_bytes": 568446976,
+      "effective_workers": 4,
+      "max_active_searches": [
+        4,
+        4,
+        4
+      ],
+      "search_speedup": 3.0985438081512457,
+      "route_speedup": 1.0222561919795818
+    },
+    {
+      "workers": 8,
+      "maze_search_median_s": 0.166257526,
+      "route_median_s": 30.41273356799502,
+      "fallback_median_s": 29.646207393000072,
+      "fallback_fraction": 0.9987205983663026,
+      "peak_process_rss_bytes": 587083776,
+      "effective_workers": 8,
+      "max_active_searches": [
+        8,
+        8,
+        8
+      ],
+      "search_speedup": 6.321347762626998,
+      "route_speedup": 1.032401778248954
+    }
+  ],
+  "source_commit_xplace": "b93b5c06f599480448f992646679145e01abf413",
+  "limitations": [
+    "128 grid qualification does not measure 512 S50 total speed",
+    "99.872 percent of selected candidates require serial re-search",
+    "peak_memory_bytes in native stats estimates worker scratch; process RSS is measured separately",
+    "search speedup is 6.32x at 8 workers, total route speedup only 1.032x"
+  ],
+  "qualification_correction": {
+    "status": "superseded_for_intended_window",
+    "historical_internal_routing_layers": [
+      "MET2",
+      "RDL"
+    ],
+    "intended_internal_routing_layers": [
+      "MET2",
+      "MET5"
+    ],
+    "external_routing_layers": [
+      "MET2",
+      "MET5"
+    ],
+    "reason": "Independent qualification scripts selected RDL; ECC ICsprout55 defaults use MET5. Retain historical measurements without treating them as matched-window qualification.",
+    "replacement_status": "passed_with_limitations",
+    "replacement_artifact_root": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009",
+    "replacement_evidence": "cpu-maze-rrr-m2-m5.json"
+  },
+  "historical_status": "passed"
+}

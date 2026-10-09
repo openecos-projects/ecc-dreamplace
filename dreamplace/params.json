@@ -421,7 +421,7 @@
     },
     "timing_opt_buffering_enabled": {
         "description": "enable segment buffering in electrical timing-optimization windows",
-        "default": 1
+        "default": 0
     },
     "timing_opt_max_windows": {
         "description": "maximum timing-optimization windows in one placement run, up to five",
@@ -433,7 +433,7 @@
     },
     "timing_opt_sizing_rounds": {
         "description": "maximum discrete size/VT rounds in each timing-optimization window, up to ten",
-        "default": 5
+        "default": 10
     },
     "two_stage_density_scaler": {
         "description": "scale density weight after the macro placement stage",

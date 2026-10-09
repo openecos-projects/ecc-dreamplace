@@ -1,4 +1,4 @@
-"""Fixed-center S5 with an optional persistent virtual-buffer batch per window.
+"""Fixed-center sizing with an optional persistent virtual-buffer batch per window.
 
 This owner publishes one window's electrical, native master and area state.
 The caller keeps the original routing/inflation/GP schedule.
@@ -344,7 +344,7 @@ class InflationS5B1:
         preparation_ms = buffering_ms = 0.0
         buffering = {"status": "disabled", "scheduled": 0, "accepted": 0,
                      "cumulative_count": 0}
-        if bool(getattr(self.params, "timing_opt_buffering_enabled", True)):
+        if bool(getattr(self.params, "timing_opt_buffering_enabled", False)):
             self._prepare(model, pos)
             prepared = time.perf_counter()
             with self._electrical_window():

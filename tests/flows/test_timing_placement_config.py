@@ -150,7 +150,7 @@ def test_legacy_options_serialize_canonically_and_allow_internal_disable():
         key: value for key, value in resolved.items() if key.startswith("timing_opt_")
     } == {
         "timing_opt_enabled": 1,
-        "timing_opt_buffering_enabled": 1,
+        "timing_opt_buffering_enabled": 0,
         "timing_opt_max_windows": 5,
         "timing_opt_overflow_milestones": [],
         "timing_opt_sizing_rounds": 10,

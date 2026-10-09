@@ -12,10 +12,10 @@ TIMING_OPT_ALIASES = (
 
 _DEFAULTS = {
     "timing_opt_enabled": 0,
-    "timing_opt_buffering_enabled": 1,
+    "timing_opt_buffering_enabled": 0,
     "timing_opt_max_windows": 5,
     "timing_opt_overflow_milestones": [],
-    "timing_opt_sizing_rounds": 5,
+    "timing_opt_sizing_rounds": 10,
 }
 _LEGACY_NAMES = {legacy for _, legacy in TIMING_OPT_ALIASES}
 

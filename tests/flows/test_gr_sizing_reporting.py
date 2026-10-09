@@ -5,14 +5,14 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
-
 from dreamplace.flows import gr_sizing
 
 
 @pytest.mark.parametrize("net_ids, filtered", [([0], 0), ([], 1)])
 @pytest.mark.parametrize("auto_adjust, expected_grid", [(0, (8, 8)), (1, (32, 16))])
+@pytest.mark.parametrize("backend, rrr_iters", [("cpu_pr_mt", 0), ("cpu_pr_maze", 3)])
 def test_prepare_reports_snapshot_eligibility(
-    tmp_path, monkeypatch, net_ids, filtered, auto_adjust, expected_grid
+    tmp_path, monkeypatch, net_ids, filtered, auto_adjust, expected_grid, backend, rrr_iters
 ):
     definition = tmp_path / "input.def"
     definition.write_text("fixture")
@@ -25,7 +25,8 @@ def test_prepare_reports_snapshot_eligibility(
         route_num_bins_x=8,
         route_num_bins_y=8,
         auto_adjust_bins=auto_adjust,
-        gpugr_backend="cpu_pr_mt",
+        gpugr_backend=backend,
+        gr_sizing_rrr_iters=rrr_iters,
         dtype="float32",
     )
     placedb = SimpleNamespace(
@@ -67,7 +68,7 @@ def test_prepare_reports_snapshot_eligibility(
         (tmp_path / "gr_parasitics").mkdir()
         return {
             "timing_route_pack": {"pin_access_model": "fixture", "layer_names": ["M2"]},
-            "metrics": {"parser_cache_hit": False, "gpugr_backend": "cpu_pr_mt"},
+            "metrics": {"parser_cache_hit": False, "gpugr_backend": backend},
         }
 
     monkeypatch.setattr(gr_sizing, "clock_net_ids", lambda db: set())
@@ -91,8 +92,8 @@ def test_prepare_reports_snapshot_eligibility(
             "threads": 1,
             "route_xsize": expected_grid[0],
             "route_ysize": expected_grid[1],
-            "rrr_iters": 0,
-            "backend": "cpu_pr_mt",
+            "rrr_iters": rrr_iters,
+            "backend": backend,
             "keep_temp_def": True,
             "include_timing_route_pack": True,
             "profile_enabled": True,

@@ -1,7 +1,18 @@
 # CPU maze routing and rip-up/reroute plan
 
-Status: CPU opt-in implementation and matched MET2-MET5 standalone qualification complete. Coarse-guided search now substantially reduces BM64 routing time; external RC/STA alignment remains a qualification limit. The earlier MET2-RDL qualification is superseded for the intended window. Keep CPU RRR experimental and default RRR=0; see the [matched-window evidence](evidence/cpu-maze-rrr-m2-m5.json) and [coarse-routing checkpoint](cpu-maze-coarse-routing.md).
+Status: CPU implementation and matched MET2-MET5 standalone qualification complete. ECC's diff_sizing stage now defaults to cpu_pr_maze with RRR=3 by user request; generic routing and GR parameter metadata retain RRR=0. Coarse-guided search substantially reduces BM64 routing time; external RC/STA alignment remains a qualification limit. The earlier MET2-RDL qualification is superseded for the intended window. See the [matched-window evidence](evidence/cpu-maze-rrr-m2-m5.json), [coarse-routing checkpoint](cpu-maze-coarse-routing.md), and [diff_sizing default evidence](evidence/diff-sizing-rrr3-default.json).
 Plan version: v1, 2026-10-08.
+
+Diff_sizing default checkpoint (2026-10-09): the ECC stage profile selects
+cpu_pr_maze and gr_sizing_rrr_iters=3 for its independent 50-step sizing
+flow. Padding is zero and legalization is enabled. The installed native
+clocked fixture completed all 50 optimizer steps, real master/pin geometry
+updates, and terminal STA. Both initial and final GR requested and completed
+three passes, returned the final pass, and reported no maze failures. The
+combined timing-loss best-state restoration remains active. Focused tests
+cover stage configuration, native route/RC behavior, and RRR handoff. This
+user-authorized stage default is separate from the initial implementation's
+no-default-change scope and does not claim a new BM64 or multi-case QoR run.
 
 Phase A implementation commits:
 

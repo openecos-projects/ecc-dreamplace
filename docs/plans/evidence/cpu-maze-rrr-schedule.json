@@ -1,0 +1,154 @@
+{
+  "status": "fixed_committed_built_migrated_and_validated",
+  "base_xplace_commit": "2b6cae363ebd425a3973892386663901451be06b",
+  "uncommitted": false,
+  "bug": "A non-improving intermediate pass stopped a changing congestion/via schedule; RC evaluation then restored an intermediate overflow minimum instead of returning the completed final route, unlike CUDA.",
+  "fix": "Continue scheduled passes while overflow remains; return the final completed route; retain per-net failure restoration and diagnostic best-so-far metrics.",
+  "cost_schedule_rrr3": [
+    {
+      "iteration": 1,
+      "logistic_slope": 2,
+      "via_multiplier": 100,
+      "short_discount": 0.4
+    },
+    {
+      "iteration": 2,
+      "logistic_slope": 4,
+      "via_multiplier": 20,
+      "short_discount": 0.7
+    },
+    {
+      "iteration": 3,
+      "logistic_slope": 8,
+      "via_multiplier": 4,
+      "short_discount": 1
+    }
+  ],
+  "rows": {
+    "old_cpu_rrr3": {
+      "executed_rounds": 2,
+      "accepted_round": 1,
+      "mean_seconds": 15.802411130677987,
+      "metrics": {
+        "wns_ns": -2.385395,
+        "tns_ns": -737.840576
+      },
+      "gap_percent": 31.078013347068946
+    },
+    "complete_schedule_with_old_best_selection": {
+      "executed_rounds": 3,
+      "accepted_round": 1,
+      "seconds": 27.079521223000484,
+      "same_returned_pack_as_old": true,
+      "metrics": {
+        "wns_ns": -2.385395,
+        "tns_ns": -737.840576
+      }
+    },
+    "fixed_cpu_rrr3": {
+      "executed_rounds": 3,
+      "accepted_round": 3,
+      "seconds": 27.580356646998553,
+      "metrics": {
+        "wns_ns": -2.594371,
+        "tns_ns": -899.165955
+      },
+      "gap_percent": 16.00854444025588
+    },
+    "cuda_rrr3_reference": {
+      "executed_rounds": 3,
+      "accepted_round": 3,
+      "mean_seconds": 14.069797645002836,
+      "metrics": {
+        "wns_ns": -2.66065,
+        "tns_ns": -838.85614
+      },
+      "gap_percent": 21.642108654093242
+    },
+    "external_openroad_gr50": {
+      "wns_ns": -2.999287,
+      "tns_ns": -1070.544556,
+      "skipped_clock_net_count": 1,
+      "skipped_fanout_net_count": 0,
+      "routed_signal_net_count": 16208,
+      "slew_violation_count": 858,
+      "cap_violation_count": 175,
+      "worst_slew_slack_ns": -1.256865382194519,
+      "worst_cap_slack_pf": -0.08220967650413513,
+      "instance_count": 16692,
+      "net_count": 16211
+    }
+  },
+  "runtime": {
+    "path": "/home/zhaoxueyan/code/ipd-timing-opt-ecc/ecc/.venv/lib/python3.11/site-packages/thirdparty/xplace/cpp_to_py/cpybin/gpugr.cpython-311-x86_64-linux-gnu.so",
+    "sha256": "7544bb5cafdb64e0588439c578c6f1d69b581802ed99a746056dd56b8fbacaf2",
+    "source_file": "/home/zhaoxueyan/code/ipd-timing-opt-ecc/ecc/chipcompiler/thirdparty/ecc-dreamplace/thirdparty/xplace/cpp_to_py/gpugr/gr/CpuMazeRrr.cpp",
+    "source_sha256": "25d8fffa9abdf8b002bb1b4db66036ccb0b76bb6cdf7005c8fd292c96354405e"
+  },
+  "validation": {
+    "before_regression_reproduced": true,
+    "installed_native_tests": 14,
+    "bm64_final_route_and_accepted_stats_equal_last_iteration": true,
+    "bm64_final_pack_equals_terminal_diagnostic": true,
+    "bm64_rc_eligible_nets": 16208,
+    "bm64_rc_covered_pins": 56299,
+    "bm64_readonly_sta_passed": true,
+    "installed_s50_steps": 50,
+    "s50_gr_calls": 2,
+    "s50_timing_best_restoration_retained": true
+  },
+  "artifacts": {
+    "old_comparison": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_cuda_rrr_compare_20261009.ENTkQfLV/comparison.json",
+      "sha256": "57a1d9259aedd0108ca126a517b48b3a6f647170cf5b1712860986600d8a3b4d"
+    },
+    "before_failure": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_rrr3_schedule_debug_20261009.HGQ4yxZb/regression-before.log",
+      "sha256": "2e6753d07718cf7ff412f978db56d58b24b863daf248fedca25b22cd5cd29093"
+    },
+    "installed_native_tests": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_rrr3_schedule_debug_20261009.HGQ4yxZb/native-tests-installed.log",
+      "sha256": "d54d1bf7d293d857be447b98d612d0cbcc84fdbb345976c44f93191d80c0f8d9"
+    },
+    "installed_s50": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_rrr3_schedule_debug_20261009.HGQ4yxZb/s50-installed/report.json",
+      "sha256": "4c852935bfd05bd4be4abe903685137c6c1471c50d026ec32f59fadd3c7eef88"
+    },
+    "best_only_diagnostic": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_rrr3_schedule_debug_20261009.HGQ4yxZb/full-schedule-best/report.json",
+      "sha256": "1b51909ee5e83035fb8877c62e1c848603ae9be0440415765c3857b15ad692b6"
+    },
+    "final_diagnostic": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_rrr3_schedule_debug_20261009.HGQ4yxZb/full-schedule-terminal/report.json",
+      "sha256": "1420b52bfdd81583fab28be5724fd20f6eb48c57521042741b361127eb664d67"
+    },
+    "fixed_report": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_rrr3_schedule_debug_20261009.HGQ4yxZb/fixed-final/report.json",
+      "sha256": "af5cd35d3aa6321a68e0b83cf2d71b4c1a06910bf42fef13044c9e50b8056a57"
+    },
+    "installed_report": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_rrr3_schedule_debug_20261009.HGQ4yxZb/installed-final/report.json",
+      "sha256": "7e625bc7d702c3f67709e6fb9bb2c3be989b70cc8d8897f58aad6734390dc86a"
+    },
+    "final_rc": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_rrr3_schedule_debug_20261009.HGQ4yxZb/full-schedule-terminal/route-pack.rc.json",
+      "sha256": "13526895aab95a963bb71f5d1c732bfec55926cd93722b3a89a74009a51eded0"
+    },
+    "final_sta": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_rrr3_schedule_debug_20261009.HGQ4yxZb/full-schedule-terminal/route-pack.sta/report.json",
+      "sha256": "d6b54f1ab19f9283f111cad6e16e501815173409c0235c499af8a25207da2174"
+    },
+    "runtime_migration": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_rrr3_schedule_debug_20261009.HGQ4yxZb/runtime-migration.json",
+      "sha256": "22f0356f93071a86e47c05b2303fe24b902bf802db3acbe48fa58d96dfe75b92"
+    }
+  },
+  "limitations": [
+    "Fixed CPU full-RRR3 timing is one fresh run plus the matching candidate run, not a new three-repeat scaling study.",
+    "CUDA and external GR50 reference measurements are reused from the previous fixed-input comparison.",
+    "CPU still differs algorithmically from CUDA and remains an explicit positive-RRR backend.",
+    "The returned final route may have more congestion than an intermediate state; the policy now targets final-schedule RC evaluation rather than minimum intermediate overflow.",
+    "External absolute-TNS gap is improved to approximately 16.01 percent but is not closed."
+  ],
+  "implementation_xplace_commit": "777d1eae03e6a21a4b24801c1f7a06e4d70790aa"
+}

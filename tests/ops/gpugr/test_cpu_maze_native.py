@@ -89,6 +89,20 @@ def test_zero_rrr_preserves_parallel_pattern_route(maze_fixture):
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+def test_non_improving_pass_does_not_skip_remaining_cost_schedule(maze_fixture):
+    route, _, _ = maze_fixture
+    router = route("cpu_pr_maze", 3, 2)
+    stats = router.run_stats()
+    iterations = stats["rrr_iterations"]
+    # This congested fixture rejects the first candidate state. The next
+    # passes still need to run because their via and congestion costs change.
+    assert not iterations[0]["best_state"]
+    assert iterations[0]["overflow_net_count"] > 0
+    assert [row["iteration"] for row in iterations] == [1, 2, 3]
+    assert stats["completed_rrr_iters"] == stats["requested_rrr_iters"] == 3
+    assert hashes(stats) == hashes(iterations[-1]) == hashes(stats["accepted_route_qor"])
+
+
 @pytest.mark.parametrize("workers", [1, 2, 4, 8])
 @pytest.mark.parametrize("iters", [1, 3])
 def test_conflicting_batch_researches_and_preserves_rc_connectivity(maze_fixture, workers, iters):
@@ -108,11 +122,10 @@ def test_conflicting_batch_researches_and_preserves_rc_connectivity(maze_fixture
     for row in stats["rrr_iterations"]:
         assert row["rerouted_net_count"] == row["selected_net_count"] > 0
         assert row["failed_net_count"] == 0
-    # This fixture ties the wire overflow but adds vias, so the earlier
-    # complete route must win and be rebuilt exactly from its checkpoint.
-    assert stats["best_state_restored"]
-    baseline = route("cpu_pr_mt", 0, 1)
-    assert hashes(stats) == hashes(baseline.run_stats())
+    # The exported RC uses the final completed cost pass. An intermediate
+    # overflow minimum is diagnostic, rather than the returned route state.
+    assert hashes(stats) == hashes(stats["rrr_iterations"][-1])
+    assert hashes(stats) == hashes(stats["accepted_route_qor"])
     pack = actual.timing_route_pack()
     rc = RCParameters.from_lefs([lef], pack["layer_names"])
     op = GRParasiticsOp.prepare(

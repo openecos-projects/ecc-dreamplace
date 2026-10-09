@@ -1,5 +1,13 @@
 # CPU coarse-guided maze routing
 
+Current correction: CPU RRR completes the changing cost schedule and returns
+the final route for RC evaluation. The measurements below record the earlier
+`2b6cae3` policy, which stopped after a non-improving pass and restored an
+intermediate overflow minimum. They are retained as historical evidence.
+Corrected RRR3 executes/returns round 3, takes 27.58 s in the installed probe,
+and has a 16.01% external TNS gap. See
+[schedule-fix evidence](evidence/cpu-maze-rrr-schedule.json).
+
 Implemented on 2026-10-09 against Xplace `59991041`. The implementation is
 available in the primary checkout and rebuilt CPU native runtime. Qualification
 artifacts are under

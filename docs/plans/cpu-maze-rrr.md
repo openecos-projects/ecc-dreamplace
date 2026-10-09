@@ -34,6 +34,20 @@ Coarse-routing checkpoint (2026-10-09): CPU maze routing now uses the existing c
 
 ## Review verdict
 
+Schedule correction (2026-10-09): the intermediate no-improvement stop and
+global overflow-best restoration were inappropriate for the changing RRR
+cost schedule used to evaluate RC. CPU now completes the requested schedule
+while overflow nets remain and returns the final completed route, matching
+CUDA's result policy. Per-net failure restoration remains; the S50 timing-loss
+best-state mechanism is independent. BM64 requests RRR3, executes and returns
+round 3, and reports native-RC/OpenROAD STA WNS/TNS of -2.594371/-899.165955 ns.
+The absolute-TNS gap to the same external GR50 reference is 16.01%, versus
+31.08% for the earlier two-round/first-state result. The full CPU GR call now
+takes 27.58 s in the installed-runtime probe, so the earlier 15.80 s comparison
+does not represent complete RRR3 work. A regression fails on the old runtime
+and the corrected installed runtime passes 14 native tests and the full
+50-step fixture. See [schedule-fix evidence](evidence/cpu-maze-rrr-schedule.json).
+
 The original draft was 7.5/10 for implementation readiness. The direction was right and the CUDA/CPU boundary was grounded in the source, but four decisions were still implicit: the immutable data passed to parallel searches, the multi-pin connection contract, the exact route-state checkpoint/rollback model, and the native/Python test boundary. This revision makes those decisions explicit. It is ready to drive an implementation split into route-state, maze search, RRR orchestration, and flow-integration changes; it is not an authorization to enable CPU RRR by default.
 
 The acceptance bar is now separated into three independent claims:
@@ -130,7 +144,7 @@ CpuMazeSearchView
 
 The view should expose shared const storage for the capacity, fixed usage, committed usage, and cost maps; it must not copy full-chip maps per candidate. Each worker owns only its distance/predecessor frontier and candidate buffer.
 
-`RouteCheckpoint` stores the route table needed to reconstruct a complete state, not a second copy of every derived map. Restoring a checkpoint rebuilds usage and costs from the route table and fixed-obstacle maps. Keep at most the current and best checkpoint live unless a measured memory budget permits more.
+`RouteCheckpoint` stores the route table needed to reconstruct a complete state, not a second copy of every derived map. Restoring a checkpoint rebuilds usage and costs from the route table and fixed-obstacle maps. The RRR schedule does not retain a global best checkpoint; it saves only the selected nets' prior routes for per-net failure restoration.
 
 `OverflowReport` must carry both the selected net IDs and resource-level quantities: overflowing wire resource count, overflowing via resource count, summed positive wire excess, summed positive via excess, and the number of affected nets. The lexicographic best-state rule must name whether it uses excess first or resource count first; do not derive a floating “overflow amount” later from a boolean-only report.
 
@@ -160,7 +174,7 @@ Extend `RouteForce::run_ggr()` with a `cpu_pr_maze` branch:
 5. Rebuild cost maps and reroute selected nets with the batch-parallel `CpuMazeRouter`.
 6. Commit successful candidates; restore the old route for a failed candidate unless the old route was already invalid.
 7. Record per-iteration route hash, wire/via usage hash, overflow-net count, overflow-wire/via count, total overflow amount, wirelength, via count, routed/unrouted counts, and elapsed time.
-8. Retain the best complete route state according to lexicographic `(overflow amount, overflow resource count, wirelength, via count)`. On an exact metric tie, keep the earlier state (or use the lower route hash as a documented deterministic tie-break). Stop when there is no improvement, no overflow remains, or `rrr_iters` is exhausted.
+8. Complete the scheduled congestion/via cost passes while overflow nets remain, up to `rrr_iters`, and return the final completed route for parasitic evaluation, matching CUDA. Record the lexicographic `(overflow amount, overflow resource count, wirelength, via count)` minimum as a diagnostic; an intermediate non-improvement must not stop later cost passes or replace the final RC route. Restore the prior route of an individual net when its search fails.
 
 Parallelism is required inside each RRR iteration. The RRR iterations themselves remain sequential because each iteration consumes the usage map produced by the previous iteration. Within an iteration:
 
@@ -204,7 +218,7 @@ The native metadata and Python result JSON must include:
 - requested and resolved backend;
 - requested RRR iterations and completed iterations;
 - per-iteration overflow and route hashes;
-- whether the best state was restored;
+- the diagnostic best-so-far flag for each iteration, the accepted final route, and the retained `best_state_restored` field, which is false for CPU RRR;
 - CPU maze route failures and their reason categories.
 - requested/effective workers, parallel batch count, conflict fallback count, peak memory, and time spent in search, cost rebuild, validation/commit, and rollback.
 
@@ -238,11 +252,11 @@ Exit condition: every successful route connects all required pin groups and cont
 - Validate rollback when a detour is impossible and validate that non-overflow nets are not ripped up.
 - Validate that candidates generated from one immutable snapshot are either all accepted in a conflict-free batch or selectively re-searched after the first deterministic conflict; no candidate is committed from a stale snapshot.
 
-Exit condition: the fixture's overflow decreases or remains unchanged without resource-accounting errors; no improvement never makes the accepted result worse than the initial complete route.
+Exit condition: the known-detour fixture reduces overflow without resource-accounting errors. Failed searches restore the affected net's prior route; successful searches form the returned completed iteration, whose overflow may exceed the initial route's overflow in other fixtures.
 
 ### Phase D — bounded RRR and Python integration
 
-- Add `rrr_iters` iteration control, early stopping, best-state restoration, native metadata, and `gr_sizing_rrr_iters`.
+- Add `rrr_iters` iteration control, stopping when no overflow remains, final-route selection, diagnostic best-so-far metrics, native metadata, and `gr_sizing_rrr_iters`. An intermediate non-improvement must not skip later cost passes.
 - Run CPU-only native build and the full focused GPUGR test set.
 - Run the standalone S50 sizing flow with `RRR=0`, `RRR=1`, and `RRR=3` on BM64.
 - Run the new backend with `gr_sizing_rrr_iters=0` and prove its initial route hash matches `cpu_pr_mt`; only then run positive RRR values.
@@ -278,7 +292,7 @@ The following are explicit non-goals for this implementation: changing CUDA maze
 
 ## Risks and decisions to resolve during implementation
 
-- A CPU maze search may improve overflow but produce longer routes or different pin-access topology. The lexicographic best-state policy and external STA check must prevent promoting a congestion-only regression.
+- A CPU maze search may improve overflow but produce longer routes or different pin-access topology. The final scheduled route can also have more overflow than an intermediate state. Record intermediate congestion minima as diagnostics and use external STA to assess RC alignment; congestion improvement alone does not establish timing improvement.
 - The CUDA implementation uses coarse-grid maze routing and a GPU route buffer. CPU route encoding and buffer growth must be validated independently; CUDA route hashes are not an expected byte-for-byte oracle.
 - Multi-pin net connection order affects determinism and QoR. Use the existing prepared tree order initially and record it in route metadata.
 - A serial CPU maze router may be too slow for the 42-case regression. Treat serial mode as the correctness oracle, but qualify the worker-pool candidate path in the same implementation. Profile search, batch scheduling, conflict fallback, rip-up, cost rebuild, and route export separately.

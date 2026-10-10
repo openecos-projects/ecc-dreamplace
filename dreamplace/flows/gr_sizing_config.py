@@ -69,7 +69,7 @@ def configure_gr_sizing(params):
     # The fixed S50 profile needs clock-to-Q size/VT gradients. "mixed"
     # evaluates those FF arcs with the exact current-master LUT instead.
     params.timing_surrogate_mode = "surrogate_only"
-    continuous_steps = getattr(params, "diff_sizing_continuous_steps", 1)
+    continuous_steps = getattr(params, "diff_sizing_continuous_steps", 0)
     if (
         isinstance(continuous_steps, bool)
         or not isinstance(continuous_steps, int)

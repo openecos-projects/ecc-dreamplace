@@ -12,6 +12,7 @@
       ninja,
       cairo,
       bison,
+      boost,
       flex,
       pkg-config,
       spdlog,
@@ -63,7 +64,7 @@
         wheel
       ];
 
-      buildInputs = [ cairo flex spdlog ];
+      buildInputs = [ boost cairo flex spdlog ];
       nativeBuildInputs = [ bison flex cmake ninja pkg-config ];
 
       dontUseCmakeConfigure = true;

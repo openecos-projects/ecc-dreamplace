@@ -791,7 +791,7 @@ def test_diff_timing_driven_placement_cli_applies_profile_defaults(tmp_path):
 def test_timing_grad_balance_ratio_schema_default_is_loaded():
     params = placer_cli._load_params_json(None)
 
-    assert params.timing_grad_balance_target_ratio == 0.1
+    assert params.timing_grad_balance_target_ratio == 0.2
 
 
 def test_sizing_flow_disables_position_timing_gradient_balance_by_default(tmp_path):

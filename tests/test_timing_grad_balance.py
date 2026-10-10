@@ -88,6 +88,26 @@ def test_timing_outer_weight_scales_composite_wns_tns_term():
     ] == pytest.approx(0.22)
 
 
+def test_terminal_coefficients_follow_live_model_after_balance_initialization():
+    model = _model()
+    state = {
+        "initialized": True,
+        "weight_applied": 7.0,
+        "timing_wns_coeff": model.timing_wns_coeff,
+        "timing_tns_coeff": model.timing_tns_coeff,
+    }
+    model.apply_timing_grad_balance_state(state)
+    model.timing_wns_coeff = 2.5
+    model.timing_tns_coeff = 0.025
+    loss = model._timing_loss(torch.tensor(-10.0), torch.tensor(-100.0), None, None)
+
+    assert loss.item() == pytest.approx(192.5)
+    assert model.last_timing_objective_terms["coefficients"] == {
+        "wns": 2.5, "tns": 0.025,
+    }
+    assert model.last_timing_objective_terms["grad_balance"] == state
+
+
 def test_timing_grad_balance_initializes_from_real_autograd_gradients():
     model = _model()
     model.timing_wns_coeff = 1.0

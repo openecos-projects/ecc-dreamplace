@@ -15,6 +15,14 @@
         "description": "timing objective terms, timing_only | timing_slew_cap",
         "default": "timing_only"
     },
+    "timing_aggregation_mode": {
+        "description": "AAT/RAT aggregation: hard max/min or smooth LSE; endpoint WNS/TNS retain hard reductions",
+        "default": "hard"
+    },
+    "timing_aggregation_tau_ps": {
+        "description": "positive LSE temperature in ps for smooth AAT/RAT aggregation; smaller values approach hard max/min",
+        "default": 2.0
+    },
     "placement_sizing_mode": {
         "description": "placement optimization lane, place_only | size_only | joint",
         "default": "place_only"
@@ -155,6 +163,10 @@
         "description": "enable differentiable timing in the placement flow",
         "default": 0
     },
+    "overflow_reference_mode": {
+        "description": "overflow normalization mode, initial freezes GP-entry area; ordinary preserves existing area publication behavior, using published native-plus-virtual movable area when available, otherwise PlaceDB movable area; excludes fillers",
+        "default": "initial"
+    },
     "aux_input": {
         "description": "input .aux file",
         "default": "",
@@ -226,7 +238,11 @@
     },
     "timing_grad_balance_target_ratio": {
         "description": "initial target ratio rho between weighted timing-gradient and wirelength-gradient L1 norms; 0 disables automatic timing-gradient balancing",
-        "default": 0.1
+        "default": 0.2
+    },
+    "timing_coeff_growth_factor": {
+        "description": "positive finite multiplier applied to WNS/TNS coefficients at each GP density-weight update; 1 disables growth; size_only skips this schedule",
+        "default": 1.01
     },
     "sizing_parameterization": {
         "description": "continuous sizing coordinate, logits | real_size",
@@ -434,6 +450,10 @@
     "timing_opt_sizing_rounds": {
         "description": "maximum discrete size/VT rounds in each timing-optimization window, up to ten",
         "default": 10
+    },
+    "timing_opt_coefficients": {
+        "description": "GP sizing-window coefficient policy: mode=inherit uses live placement values; mode=fixed requires wns, tns, slew and cap during S rounds only, with outer timing weight 1; placement weights are restored on exit",
+        "default": {"mode": "inherit"}
     },
     "two_stage_density_scaler": {
         "description": "scale density weight after the macro placement stage",

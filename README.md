@@ -85,6 +85,57 @@ It is intentionally marked as unsupported because the old OpenTimer integration
 has been removed. Use the ECC-integrated STA path controlled by `with_sta`,
 `differentiable_timing_obj`, and the net-weighting parameters above.
 
+The sizing rounds inside placement timing-optimization windows have one
+coefficient policy parameter, `timing_opt_coefficients`. The default
+`{"mode": "inherit"}` uses the live placement WNS/TNS coefficients and slew/cap
+weights at each window. To keep those four values fixed during S rounds, use:
+
+```json
+"timing_opt_coefficients": {
+  "mode": "fixed", "wns": 500, "tns": 5, "slew": 1, "cap": 1
+}
+```
+
+Fixed mode requires all four finite, nonnegative values and uses outer
+`timing_grad_balance_weight` 1.0, making those values the effective weights.
+Inherit mode retains placement's live coefficients and outer weight. The
+original placement coefficients and outer weight are restored when sizing
+exits, including on failure. This policy
+applies to GP sizing windows; standalone `diff_sizing` uses its own configuration.
+Each window's `sizing.coefficients` report records the mode and effective values.
+The fixed preset may remain in the object when switching `mode` to `inherit`;
+inherit mode always uses the live placement values.
+
+`timing_coeff_growth_factor` controls the WNS/TNS coefficient multiplier at
+each GP density-weight update. The default `1.01` retains the existing schedule;
+`1.0` freezes the coefficients, and values between zero and one decay them.
+The multiplier must be positive and finite. Slew/cap weights and the outer norm
+weight retain their own settings. Inherit-mode sizing windows read the resulting
+live coefficients; fixed-mode windows use their configured values. Standalone
+`size_only` sizing, including `diff_sizing` S50, skips this growth schedule.
+
+`timing_grad_balance_target_ratio` defaults to 0.2 for direct-loss placement.
+At the first active timing step, the timing and wirelength gradient L1 norms
+determine the outer timing weight, which is then reused. Set the ratio to 0.0
+to disable balancing and retain weight 1.0. It is a gradient-ratio target,
+not a multiplier on WNS/TNS coefficients. Standalone `size_only` sizing does
+not initialize coordinate gradient balancing. ECC exposes the ratio through
+`place.timing_grad_balance_target_ratio`; explicit values override the default.
+
+`timing_aggregation_mode` selects AAT/RAT propagation aggregation: `hard`
+(default) uses max/min, while `smooth` uses LSE with the positive temperature
+`timing_aggregation_tau_ps` (default 2.0 ps). Smaller temperatures approach
+hard max/min. ECC exposes both through `place.*` parameters. Endpoint WNS
+still uses hard min, and TNS still sums negative slacks.
+
+`overflow_reference_mode` selects the area used to normalize overflow. The
+default `initial` freezes the GP-entry movable area. `ordinary` preserves the
+existing PR behavior: use the published native-plus-virtual movable area when
+available, otherwise use `placedb.total_movable_node_area`. Both exclude fillers.
+`ordinary` follows the existing publication points; it does not recompute all
+area state on every iteration. The normalized overflow also feeds gamma and
+overflow-based scheduling.
+
 ### ECC EGR-Based Routability Inflation
 
 `ecc-dreamplace` supports routability-driven cell inflation using ECC/iRT early

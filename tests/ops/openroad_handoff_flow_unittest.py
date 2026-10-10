@@ -10,6 +10,7 @@ from unittest import mock
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from dreamplace.ops.openroad_handoff import OpenRoadHandoffController
 from dreamplace.ops.openroad_handoff import PlacementHandoffSession
+from dreamplace.ops.routability.cooptimization_area import initialize_overflow_reference
 sys.path.pop()
 
 _tests_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -48,6 +49,13 @@ def _restore_modules(previous):
             sys.modules.pop(name, None)
         else:
             sys.modules[name] = module
+        parent_name, _, child = name.rpartition(".")
+        parent = sys.modules.get(parent_name)
+        if parent is not None:
+            if module is None:
+                parent.__dict__.pop(child, None)
+            else:
+                setattr(parent, child, module)
     _OPS_STUBS.__exit__(None, None, None)
 
 
@@ -332,8 +340,10 @@ def _load_place_io_module_with_cpp_stub():
 
 
 def _assert_openroad_cpp_source_exports_snapshot_node_metadata(test_case):
-    source = _strip_cpp_comments(_read_openroad_place_io_cpp())
-    struct_match = re.search(r"struct\s+PyPlaceDB\s*\{(?P<body>.*?)\n\};", source, re.DOTALL)
+    header_source = _strip_cpp_comments(_read_openroad_pyplacedb_export_h())
+    impl_source = _strip_cpp_comments(_read_openroad_pyplacedb_export_impl_cpp())
+    binding_source = _strip_cpp_comments(_read_openroad_place_io_cpp())
+    struct_match = re.search(r"struct\s+PyPlaceDB\s*\{(?P<body>.*?)\n\};", header_source, re.DOTALL)
     test_case.assertIsNotNone(struct_match)
     struct_body = struct_match.group("body")
     test_case.assertRegex(struct_body, r"py::list\s+node_names\s*;")
@@ -347,12 +357,12 @@ def _assert_openroad_cpp_source_exports_snapshot_node_metadata(test_case):
 
     for field_name in ("node_master_names", "node_is_buffer"):
         test_case.assertRegex(
-            source,
+            binding_source,
             r"\.def_readwrite\s*\(\s*\"%s\"\s*,\s*&PyPlaceDB::%s\s*\)"
             % (field_name, field_name),
         )
-        test_case.assertRegex(source, r"pydb\.%s\.append\s*\(" % field_name)
-        test_case.assertRegex(source, r"assert\s*\(\s*py::len\s*\(\s*pydb\.%s\s*\)" % field_name)
+        test_case.assertRegex(impl_source, r"pydb\.%s\.append\s*\(" % field_name)
+        test_case.assertRegex(impl_source, r"assert\s*\(\s*py::len\s*\(\s*pydb\.%s\s*\)" % field_name)
 
 
 def _assert_openroad_cpp_source_exports_libcell_names(test_case):
@@ -2132,6 +2142,7 @@ class BasicPlaceContinuationSeedTest(unittest.TestCase):
 
     def _make_placedb(self):
         return types.SimpleNamespace(
+            total_movable_node_area=2.0,
             num_nodes=5,
             num_physical_nodes=3,
             num_movable_nodes=2,
@@ -2152,6 +2163,8 @@ class BasicPlaceContinuationSeedTest(unittest.TestCase):
 
     def _make_init_only_basic_place_class(self):
         BasicPlaceModule = _load_basicplace_module()
+        # Keep area initialization real while native operators are stubbed.
+        BasicPlaceModule.initialize_overflow_reference = initialize_overflow_reference
 
         class InitOnlyBasicPlace(BasicPlaceModule.BasicPlace):
             def build_pin_pos(self, *args):
@@ -2203,6 +2216,7 @@ class BasicPlaceContinuationSeedTest(unittest.TestCase):
         ) = self._make_init_only_basic_place_class()
         placedb = self._make_placedb()
         placedb.pending_continuation_seed = {
+            "overflow_reference_area": 1.5,
             "movable_x": [11.0, 12.0],
             "movable_y": [21.0, 22.0],
             "movable_node_names": ["u0", "u1"],
@@ -2238,6 +2252,7 @@ class BasicPlaceContinuationSeedTest(unittest.TestCase):
         normal_mock.assert_not_called()
         uniform_mock.assert_not_called()
         self.assertIsNone(placedb.pending_continuation_seed)
+        self.assertEqual(placedb.overflow_reference_area, 1.5)
         np.testing.assert_allclose(place.init_pos[:2], [11.0, 12.0])
         np.testing.assert_allclose(place.init_pos[2:3], [3.0])
         np.testing.assert_allclose(place.init_pos[3:5], [31.0, 32.0])

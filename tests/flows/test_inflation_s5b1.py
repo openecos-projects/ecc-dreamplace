@@ -158,6 +158,153 @@ def polynomial_window_inputs():
     return params, db, data
 
 
+@pytest.fixture
+def timing_window_model(polynomial_window_inputs):
+    from dreamplace.PlaceObj import PlaceObj
+
+    params, _, data = polynomial_window_inputs
+    model = PlaceObj.__new__(PlaceObj)
+    model.params = params
+    model.timing_wns_coeff, model.timing_tns_coeff = 2., .03
+    model.timing_slew_weight, model.timing_cap_weight = 2., 3.
+    model.timing_grad_balance_weight = 7.
+    model.timing_leakage_weight = 0.
+    model._timing_geometry_cache = None
+    timing = SimpleNamespace()
+    model.op_collections = SimpleNamespace(timing_propagation_op=timing)
+
+    def timing_obj(pos, **kwargs):
+        error = (data.real_size - 2.4).square().sum() + data.vt_logits.sum() * 0.
+        penalty = (data.real_size - 1.).square().sum()
+        timing.last_total_slew_violation_tensor = penalty * 100.
+        timing.last_total_cap_violation_tensor = penalty * 10.
+        return -error, -100. * error, error * 0., error * 0.
+
+    model.timing_obj = timing_obj
+    return model
+
+
+def window_weight_state(model):
+    from dreamplace.flows.timing_opt_config import TIMING_OPT_COEFFICIENT_FIELDS
+
+    return {
+        **{name: getattr(model, field) for name, field in TIMING_OPT_COEFFICIENT_FIELDS.items()},
+        "timing_grad_balance_weight": model.timing_grad_balance_weight,
+    }
+
+
+@pytest.mark.parametrize("policy,gp_weight,expected_loss,expected_gradient", [
+    ({"mode": "inherit"}, 7., 235.6, 432.),
+    ({"mode": "inherit", "wns": 500., "tns": 5., "slew": 1., "cap": 1.}, 7., 235.6, 432.),
+    ({"mode": "fixed", "wns": 500., "tns": 5., "slew": 1., "cap": 1.}, 7., 270., -580.),
+    ({"mode": "fixed", "wns": 500., "tns": 5., "slew": 1., "cap": 1.}, .04, 270., -580.),
+])
+def test_window_coefficients_control_real_loss_and_gradient_and_restore_gp(
+    policy, gp_weight, expected_loss, expected_gradient, polynomial_window_inputs,
+    timing_window_model,
+):
+    params, db, data = polynomial_window_inputs
+    params.timing_opt_coefficients = policy
+    model = timing_window_model
+    model.timing_grad_balance_weight = gp_weight
+    owner = PolynomialWindow(params, db, data, None, None)
+    before = window_weight_state(model)
+    with torch.no_grad():
+        data.real_size.fill_(2.)
+    with owner._electrical_window(), owner._sizing_coefficients(model) as effective:
+        loss = InflationS5B1._loss(owner, model, torch.tensor([10., 20.]))
+        gradient = torch.autograd.grad(loss, data.real_size)[0]
+        assert (float(loss.detach()), float(gradient.detach())) == pytest.approx(
+            (expected_loss, expected_gradient)
+        )
+        expected = before if policy["mode"] == "inherit" else {
+            **{name: value for name, value in policy.items() if name != "mode"},
+            "timing_grad_balance_weight": 1.,
+        }
+        assert effective == {"mode": policy["mode"], **expected}
+    assert window_weight_state(model) == before
+    assert (params.placement_sizing_mode, params.timing_objective_lane,
+            params.differentiable_timing_obj) == ("place_only", "timing_only", 0)
+
+
+@pytest.mark.parametrize("policy,best_round,expected_size", [
+    ({"mode": "inherit"}, 0, 1.),
+    ({"mode": "fixed", "wns": 500., "tns": 5., "slew": 1., "cap": 1.}, 1, 2.),
+])
+def test_coefficient_policy_reaches_discrete_selection_and_best_state(
+    policy, best_round, expected_size, polynomial_window_inputs, timing_window_model,
+    monkeypatch,
+):
+    params, db, data = polynomial_window_inputs
+    params.timing_opt_coefficients = policy
+    model = timing_window_model
+    owner = PolynomialWindow(params, db, data, None, lambda pos: None)
+    monkeypatch.setattr(owner, "_loss", InflationS5B1._loss.__get__(owner))
+    before = window_weight_state(model)
+    summary = owner.run(model, torch.tensor([10., 20.]), iteration=10)
+    assert (summary["sizing"]["best_round"], float(data.real_size.detach())) == (
+        best_round, expected_size,
+    )
+    assert summary["sizing"]["coefficients"]["mode"] == policy["mode"]
+    assert window_weight_state(model) == before
+
+
+def test_inherit_reads_current_coefficients_at_each_window(
+    polynomial_window_inputs, timing_window_model,
+):
+    params, db, data = polynomial_window_inputs
+    owner = PolynomialWindow(params, db, data, None, None)
+    model = timing_window_model
+    with owner._sizing_coefficients(model) as first:
+        assert first == {"mode": "inherit", **window_weight_state(model)}
+    model.timing_wns_coeff, model.timing_tns_coeff = 4., .06
+    before = window_weight_state(model)
+    with owner._sizing_coefficients(model) as second:
+        assert second == {"mode": "inherit", **before}
+    assert first != second
+    assert window_weight_state(model) == before
+
+
+def test_fixed_coefficients_restore_on_sizing_failure(
+    polynomial_window_inputs, timing_window_model, monkeypatch,
+):
+    params, db, data = polynomial_window_inputs
+    params.timing_opt_coefficients = {
+        "mode": "fixed", "wns": 500., "tns": 5., "slew": 1., "cap": 1.,
+    }
+    model = timing_window_model
+    before = window_weight_state(model)
+    owner = PolynomialWindow(params, db, data, None, lambda pos: None)
+
+    def fail(*args):
+        assert window_weight_state(model) == {
+            "wns": 500., "tns": 5., "slew": 1., "cap": 1.,
+            "timing_grad_balance_weight": 1.,
+        }
+        raise RuntimeError("sizing probe failure")
+
+    monkeypatch.setattr(owner, "_sizing", fail)
+    with pytest.raises(RuntimeError, match="sizing probe failure"):
+        owner.run(model, torch.tensor([10., 20.]), iteration=10)
+    assert window_weight_state(model) == before
+    assert (params.placement_sizing_mode, params.timing_objective_lane,
+            params.differentiable_timing_obj) == ("place_only", "timing_only", 0)
+
+
+@pytest.mark.parametrize("policy", [
+    "fixed", {"mode": "unknown"}, {"mode": "inherit", "wnz": 1.},
+    {"mode": "fixed", "wns": 1., "tns": 1., "slew": 1.},
+    *[{"mode": "fixed", "wns": invalid, "tns": 1., "slew": 1., "cap": 1.}
+      for invalid in (-1., float("nan"), float("inf"), True, "1")],
+])
+def test_invalid_coefficient_policy_fails_before_flow_execution(policy, inflation_window_params):
+    from dreamplace.flows.flow_config import apply_flow_defaults
+
+    inflation_window_params.timing_opt_coefficients = policy
+    with pytest.raises(ValueError, match="timing_opt_coefficients"):
+        apply_flow_defaults(inflation_window_params)
+
+
 @pytest.mark.parametrize('capacity,expected_size,best_round', [(4., 2., 1), (1.5, 1., 0)])
 def test_restore_best_master_parameter_center_and_oscillation(
     capacity, expected_size, best_round, polynomial_window_inputs,
@@ -178,7 +325,9 @@ def test_restore_best_master_parameter_center_and_oscillation(
     assert owner.oscillation.history == ({0: [0, 1]} if best_round else {})
 
 
-def test_sizing_only_windows_refresh_each_live_position(polynomial_window_inputs, monkeypatch):
+def test_sizing_only_windows_refresh_each_live_position(
+    polynomial_window_inputs, monkeypatch, timing_window_model,
+):
     params, db, data = polynomial_window_inputs
     refreshed = []
     owner = PolynomialWindow(params, db, data, None,
@@ -190,7 +339,7 @@ def test_sizing_only_windows_refresh_each_live_position(polynomial_window_inputs
     monkeypatch.setattr(owner, "_loss", electrical_loss)
     for method in ("_prepare", "_buffering", "_retain_buffered_nets"):
         monkeypatch.setattr(owner, method, lambda *args: pytest.fail("S5-only entered buffering"))
-    model = SimpleNamespace(_timing_geometry_cache=None)
+    model = timing_window_model
     pos = torch.tensor([10., 20.])
     first_pos = pos.clone()
     first = owner.run(model, pos, iteration=10)

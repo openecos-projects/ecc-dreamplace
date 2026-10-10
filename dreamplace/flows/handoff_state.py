@@ -177,6 +177,8 @@ def build_continuation_seed(
         seed["movable_node_names"] = list(source_counts["movable_node_names"])[
             :num_movable_nodes
         ]
+    if hasattr(placedb, "overflow_reference_area"):
+        seed["overflow_reference_area"] = placedb.overflow_reference_area
     return seed
 
 

@@ -924,7 +924,7 @@ class PlaceObj(nn.Module):
         self.timing_wns_coeff = float(getattr(params, "timing_wns_coeff", 0.01))
         self.timing_tns_coeff = float(getattr(params, "timing_tns_coeff", 0.0001))
         self.timing_grad_balance_target_ratio = float(
-            getattr(params, "timing_grad_balance_target_ratio", 0.0)
+            getattr(params, "timing_grad_balance_target_ratio", 0.2)
         )
         if self.timing_grad_balance_target_ratio < 0.0:
             raise ValueError("timing_grad_balance_target_ratio must be nonnegative")
@@ -942,6 +942,14 @@ class PlaceObj(nn.Module):
             "norm": "l1",
             "weight_applied": 1.0,
         }
+        inherited_timing_weight = getattr(params, "timing_grad_balance_weight", None)
+        if inherited_timing_weight is not None:
+            self.apply_timing_grad_balance_state({
+                **self.timing_grad_balance_summary,
+                "status": "inherited",
+                "initialized": True,
+                "weight_applied": float(inherited_timing_weight),
+            })
         self.timing_slew_weight = float(getattr(params, "timing_slew_weight", 1.0))
         self.timing_cap_weight = float(getattr(params, "timing_cap_weight", 1.0))
         self.timing_leakage_weight = float(getattr(params, "timing_leakage_weight", 0.0))
@@ -1570,6 +1578,10 @@ class PlaceObj(nn.Module):
 
         self.last_timing_objective_terms = {
             "lane": self._timing_objective_lane(),
+            "coefficients": {
+                "wns": float(self.timing_wns_coeff),
+                "tns": float(self.timing_tns_coeff),
+            },
             "enabled_terms": list(enabled_terms),
             "units": {
                 "timing": "loss_proxy",
@@ -9909,7 +9921,7 @@ class PlaceObj(nn.Module):
                 params, "timing_aggregation_mode", "hard"
             ),
             timing_aggregation_tau_ps=getattr(
-                params, "timing_aggregation_tau_ps", 1.0
+                params, "timing_aggregation_tau_ps", 2.0
             ),
             production_fast_loop=getattr(params, "production_fast_loop", False),
             timing_lut_2d_native_op=getattr(
@@ -10412,6 +10424,11 @@ class PlaceObj(nn.Module):
         ref_hpwl = params.RePlAce_ref_hpwl / params.scale_factor
         LOWER_PCOF = params.RePlAce_LOWER_PCOF
         UPPER_PCOF = params.RePlAce_UPPER_PCOF
+        timing_coeff_growth_factor = float(
+            getattr(params, "timing_coeff_growth_factor", 1.01)
+        )
+        if not math.isfinite(timing_coeff_growth_factor) or timing_coeff_growth_factor <= 0:
+            raise ValueError("timing_coeff_growth_factor must be a positive finite float")
 
         joint_density_weight_max = None
         if (
@@ -10445,6 +10462,9 @@ class PlaceObj(nn.Module):
                 self.density_weight *= mu
                 if joint_density_weight_max is not None:
                     self.density_weight.clamp_(max=joint_density_weight_max)
+                if not self._is_size_only_mode():
+                    self.timing_tns_coeff *= timing_coeff_growth_factor
+                    self.timing_wns_coeff *= timing_coeff_growth_factor
 
         def update_density_weight_op_overflow(cur_metric, prev_metric, iteration):
             assert (
@@ -10494,6 +10514,9 @@ class PlaceObj(nn.Module):
                     + self.density_weight_step_size_inc_low
                 )
                 self.density_weight_step_size *= rate
+                if not self._is_size_only_mode():
+                    self.timing_tns_coeff *= timing_coeff_growth_factor
+                    self.timing_wns_coeff *= timing_coeff_growth_factor
 
         if not self.quad_penalty and algo == "overflow":
             logging.warn(

@@ -64,6 +64,7 @@ from dreamplace.ops.gate_projection.gate_projection import (
 )
 from dreamplace.ops.timing_propagation.crash_stage_marker import write_crash_stage_marker
 from dreamplace.ops.timing_propagation.timing_propagation import ARCS_INFO, LUTS_INFO
+from dreamplace.ops.routability.cooptimization_area import initialize_overflow_reference
 import pdb
 
 DEFAULT_SIZE_INIT_NORM_LOWER_CLIP = 1e-4
@@ -1608,6 +1609,16 @@ class BasicPlace(nn.Module):
         self.init_pos = np.zeros(placedb.num_nodes * 2, dtype=placedb.dtype)
 
         continuation_seed = getattr(placedb, "pending_continuation_seed", None)
+        initialize_overflow_reference(
+            placedb,
+            continuation_seed,
+            mode=getattr(params, "overflow_reference_mode", "initial"),
+        )
+        logging.info(
+            "Overflow normalization mode=%s GP-entry area = %.6E",
+            placedb.overflow_reference_mode,
+            placedb.overflow_reference_area,
+        )
         if continuation_seed is not None:
             self._initialize_init_pos_from_continuation_seed(
                 placedb,

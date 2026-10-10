@@ -14,6 +14,7 @@ from pathlib import Path
 
 import torch
 
+from dreamplace.flows.timing_opt_config import TIMING_OPT_COEFFICIENT_FIELDS
 from dreamplace.ops.buffer_insertion.buffering_config import build_buffering_config_from_params
 from dreamplace.ops.buffer_insertion.buffering_lane import BufferingOptimizationLane
 from dreamplace.ops.buffer_insertion.discrete_virtual_scheduler import (
@@ -94,6 +95,31 @@ class InflationS5B1:
             size.requires_grad_(requires_grad[0])
             vt.requires_grad_(requires_grad[1])
             size.grad = vt.grad = None
+
+    @contextmanager
+    def _sizing_coefficients(self, model):
+        policy = getattr(self.params, "timing_opt_coefficients", {"mode": "inherit"})
+        original = {
+            name: float(getattr(model, field))
+            for name, field in TIMING_OPT_COEFFICIENT_FIELDS.items()
+        }
+        original_weight = float(model.timing_grad_balance_weight)
+        coefficients = original if policy["mode"] == "inherit" else policy
+        try:
+            for name, field in TIMING_OPT_COEFFICIENT_FIELDS.items():
+                setattr(model, field, coefficients[name])
+            model.timing_grad_balance_weight = (
+                1.0 if policy["mode"] == "fixed" else original_weight
+            )
+            yield {
+                "mode": policy["mode"],
+                **{name: coefficients[name] for name in TIMING_OPT_COEFFICIENT_FIELDS},
+                "timing_grad_balance_weight": float(model.timing_grad_balance_weight),
+            }
+        finally:
+            for name, field in TIMING_OPT_COEFFICIENT_FIELDS.items():
+                setattr(model, field, original[name])
+            model.timing_grad_balance_weight = original_weight
 
     def _capture(self):
         return SizingState(
@@ -338,8 +364,9 @@ class InflationS5B1:
         entry = capture_area(self.data, self.placedb, self.virtual_area(model))
         if not entry.fits():
             raise RuntimeError("S5B1 entry exceeds placement capacity")
-        with self._electrical_window():
+        with self._electrical_window(), self._sizing_coefficients(model) as coefficients:
             sizing = self._sizing(model, pos, geometry, entry.capacity)
+            sizing["coefficients"] = coefficients
         sizing_done = time.perf_counter()
         preparation_ms = buffering_ms = 0.0
         buffering = {"status": "disabled", "scheduled": 0, "accepted": 0,

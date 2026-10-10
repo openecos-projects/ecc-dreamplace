@@ -115,6 +115,9 @@ def capture_inflation_snapshot(data_collections, placedb) -> InflationGeometrySn
             1e-12,
         )
         total_place_area = (movable_area + filler_area) / target_density
+        combined = getattr(data_collections, "cooptimization_area", None)
+        if combined is not None:
+            movable_area, filler_area, total_place_area = combined.movable, combined.filler, combined.capacity
         whitespace_area = total_place_area - movable_area
         return InflationGeometrySnapshot(
             target_density=target_density,
@@ -166,6 +169,7 @@ def capture_inflation_geometry_backup(
             if state is None or state.target_area is None
             else float(state.target_area)
         ),
+        "cooptimization_area": getattr(data_collections, "cooptimization_area", None),
     }
 
 
@@ -353,6 +357,13 @@ def restore_current_round_geometry(
 
     if state is not None:
         state.target_area = backup.get("target_area")
+        combined = backup.get("cooptimization_area")
+        if combined is not None:
+            data_collections.cooptimization_area = combined
+            placedb.total_movable_node_area = float(
+                data_collections.node_areas[:placedb.num_movable_nodes].double().sum()
+            )
+            placedb.total_filler_node_area = combined.filler
         state.current_snapshot = capture_inflation_snapshot(data_collections, placedb)
     return True
 

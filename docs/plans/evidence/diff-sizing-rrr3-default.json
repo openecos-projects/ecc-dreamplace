@@ -1,0 +1,66 @@
+{
+  "status": "default_profile_validated_with_installed_native_runtime",
+  "policy": {
+    "stage": "diff_sizing",
+    "gpugr_backend": "cpu_pr_maze",
+    "gr_sizing_rrr_iters": 3,
+    "steps": 50,
+    "cell_padding_x": 0,
+    "legalize_flag": 1
+  },
+  "scope": "ECC diff_sizing stage only; generic GR parameter default remains zero",
+  "xplace_commit": "777d1eae03e6a21a4b24801c1f7a06e4d70790aa",
+  "builder_source_sha256": "753b20f48ad0e307b31f0147ab42e05c27b2700fce441917c54bff201d50a8f0",
+  "native_runtime_sha256": "7544bb5cafdb64e0588439c578c6f1d69b581802ed99a746056dd56b8fbacaf2",
+  "focused_tests_passed": 66,
+  "s50_fixture": {
+    "status": "ok",
+    "optimizer_steps": 50,
+    "router_calls": 2,
+    "route_calls": [
+      {
+        "requested_rrr_iters": 3,
+        "completed_rrr_iters": 3,
+        "best_state_restored": false,
+        "maze_route_failure_count": 0,
+        "route_hash64": 1074015207116023514,
+        "wire_map_hash64": 3435007818503574199,
+        "via_map_hash64": 8634912905093893111
+      },
+      {
+        "requested_rrr_iters": 3,
+        "completed_rrr_iters": 3,
+        "best_state_restored": false,
+        "maze_route_failure_count": 0,
+        "route_hash64": 383309343188356895,
+        "wire_map_hash64": 2720392572376070839,
+        "via_map_hash64": 12952885571255593975
+      }
+    ],
+    "timing_flute_calls": {
+      "forward": 0,
+      "rebuild": 0
+    },
+    "timing_best_state_restored": true,
+    "real_clock_gradient_verified": true,
+    "master_pin_geometry_changes_verified": true
+  },
+  "artifacts": {
+    "focused_tests": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_diff_sizing_rrr3_default_20261009.so6c9_tr/focused-tests.log",
+      "sha256": "11072f67b9b2fa91ee63d31a460cc8ba2cd27a0af79a01f5cb36075ae8f15dc8"
+    },
+    "native_s50": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_diff_sizing_rrr3_default_20261009.so6c9_tr/native-s50/report.json",
+      "sha256": "fdb8a6b726df8e2c2b21dfc2d36320bd646f8ac726402e61bf95ee6d7d4610a5"
+    },
+    "native_route_calls": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_diff_sizing_rrr3_default_20261009.so6c9_tr/native-route-calls.json",
+      "sha256": "835c62b87da709aaedb85b8e5a0c2b6dcc13f7f2aa57598fee8db1c96a044a52"
+    }
+  },
+  "limitations": [
+    "Synthetic clocked fixture; no new BM64 or multi-case QoR result.",
+    "Installed native runtime is reused at its qualified hash; a fresh exact-head wheel CI result is separate."
+  ]
+}

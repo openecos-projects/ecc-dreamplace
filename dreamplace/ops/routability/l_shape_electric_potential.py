@@ -23,11 +23,12 @@ import dreamplace.configure as configure
 if configure.compile_configurations["CUDA_FOUND"] == "TRUE":
     import dreamplace.ops.electric_potential.electric_potential_cuda as electric_potential_cuda
 
-from .l_shape_electric_overflow import SegmentDensityMapFunction
+import torch.nn.functional as F
+
+from .l_shape_electric_overflow import SegmentDensityMapFunction, segment_domain_mask
+from .l_shape_energy_gradient import demand_adjoint, full_segment_backward, solve_poisson_maps
 from .plot_map import plot_density_map, plot_potential_map
 from .profile_timing import l_shape_log_verbose, profile_end, profile_scope, profile_start
-
-import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 _PLOT_ITER = 0
@@ -638,6 +639,14 @@ class SegmentElectricPotentialFunction(Function):
         profile_enabled = bool(getattr(SegmentElectricPotentialFunction, "profile_enabled", False))
         ctx.profile_enabled = profile_enabled
         profile_timer = profile_start(profile_enabled, tensor=segment_pos)
+        ctx.full_gradient = (
+            capacity_al_owner is not None and capacity_al_owner.gradient_mode == "full"
+        )
+        fast_mode = bool(fast_mode) and not ctx.full_gradient
+        need_fields = not ctx.full_gradient or capacity_al_owner.require_field_maps
+        if not need_fields:
+            SegmentElectricPotentialFunction.last_field_map_x = None
+            SegmentElectricPotentialFunction.last_field_map_y = None
         SegmentElectricPotentialFunction.last_density_map = None
         SegmentElectricPotentialFunction.last_density_map_h = None
         SegmentElectricPotentialFunction.last_density_map_v = None
@@ -679,6 +688,10 @@ class SegmentElectricPotentialFunction(Function):
             seg_ratio = seg_area / seg_clamped_area.clamp(min=1e-10)
             if isinstance(seg_sw, torch.Tensor):
                 seg_ratio = seg_ratio * seg_sw
+            seg_ratio = seg_ratio.masked_fill(~segment_domain_mask(
+                seg_llx + seg_off_x, seg_lly + seg_off_y,
+                seg_sx_clamped, seg_sy_clamped, xl, yl, xh, yh,
+            ), 0)
             sqrt2_bin_x = sqrt2 * bin_size_x
             sqrt2_bin_y = sqrt2 * bin_size_y
             seg_num_impacted_bins_x = 0
@@ -775,28 +788,10 @@ class SegmentElectricPotentialFunction(Function):
             )
 
         def _compute_field_and_energy(rho_map_local):
-            rho_map_normalized_local = rho_map_local.clone()
-            rho_map_normalized_local.mul_(1.0 / bin_area)
-            auv_local = dct2.forward(rho_map_normalized_local)
-            field_map_x_local = idxst_idct.forward(
-                auv_local.mul(wu_by_wu2_plus_wv2_half)
-            )
-            field_map_y_local = idct_idxst.forward(
-                auv_local.mul(wv_by_wu2_plus_wv2_half)
-            )
-            if fast_mode:
-                energy_local = torch.zeros((), dtype=segment_pos.dtype, device=segment_pos.device)
-                potential_map_local = torch.zeros_like(rho_map_local)
-            else:
-                potential_map_local = idct2.forward(auv_local.mul(inv_wu2_plus_wv2))
-                potential_map_local.mul_(bin_area)
-                energy_local = potential_map_local.mul(rho_map_normalized_local).sum()
-            return (
-                rho_map_normalized_local,
-                field_map_x_local,
-                field_map_y_local,
-                potential_map_local,
-                energy_local,
+            return solve_poisson_maps(
+                rho_map_local, bin_area, dct2, idct2, idxst_idct, idct_idxst,
+                inv_wu2_plus_wv2, wu_by_wu2_plus_wv2_half, wv_by_wu2_plus_wv2_half,
+                fast_mode, need_fields,
             )
 
         target_density_h = None
@@ -894,11 +889,22 @@ class SegmentElectricPotentialFunction(Function):
         
         # Save for backward
         ctx.segment_pos = segment_pos
+        ctx.segment_size_x = segment_size_x
+        ctx.segment_size_y = segment_size_y
+        ctx.segment_weight = segment_weight
+        ctx.segment_is_horizontal = (
+            segment_is_horizontal.to(torch.bool) if isinstance(segment_is_horizontal, torch.Tensor)
+            else None
+        )
         ctx.segment_size_x_clamped = segment_size_x_clamped
         ctx.segment_size_y_clamped = segment_size_y_clamped
         ctx.offset_x = offset_x
         ctx.offset_y = offset_y
-        ctx.ratio = ratio
+        ctx.ratio = ratio.masked_fill(~segment_domain_mask(
+            segment_pos[:num_segments] + offset_x,
+            segment_pos[num_segments:] + offset_y,
+            segment_size_x_clamped, segment_size_y_clamped, xl, yl, xh, yh,
+        ), 0)
         ctx.bin_center_x = bin_center_x
         ctx.bin_center_y = bin_center_y
         ctx.target_density = target_density
@@ -1070,6 +1076,19 @@ class SegmentElectricPotentialFunction(Function):
             ctx.field_map_x = None
             ctx.field_map_y = None
 
+            if ctx.full_gradient:
+                beta = (
+                    capacity_al_owner._capacity_al_rho
+                    if capacity_al_owner.capacity_al_enable else 1.0
+                )
+                ctx.energy_gradient_h = demand_adjoint(
+                    potential_map_h, rho_map_h, capacity_tracks_h,
+                    bin_area, beta, padding, padding_mask,
+                )
+                ctx.energy_gradient_v = demand_adjoint(
+                    potential_map_v, rho_map_v, capacity_tracks_v,
+                    bin_area, beta, padding, padding_mask,
+                )
             energy = energy_h + energy_v
             rho_map = rho_map_h + rho_map_v
             overflow_map = overflow_map_h + overflow_map_v
@@ -1230,6 +1249,10 @@ class SegmentElectricPotentialFunction(Function):
                 rho_map_normalized, field_map_x, field_map_y, potential_map, energy = _compute_field_and_energy(rho_map)
             ctx.field_map_x = field_map_x
             ctx.field_map_y = field_map_y
+            if ctx.full_gradient:
+                ctx.energy_gradient = demand_adjoint(
+                    potential_map, rho_map, capacity_tracks, bin_area, 1.0, padding, padding_mask,
+                )
             SegmentElectricPotentialFunction.last_rho_map = rho_map.detach()
             SegmentElectricPotentialFunction.last_energy = energy.detach()
             if capacity_al_owner is not None:
@@ -1384,9 +1407,10 @@ class SegmentElectricPotentialFunction(Function):
                 SegmentElectricPotentialFunction.last_overflow_map = overflow_map_h.detach()
             elif 'overflow_map_v' in locals():
                 SegmentElectricPotentialFunction.last_overflow_map = overflow_map_v.detach()
-        elif ctx.field_map_x is not None:
-            SegmentElectricPotentialFunction.last_field_map_x = ctx.field_map_x.detach()
-            SegmentElectricPotentialFunction.last_field_map_y = ctx.field_map_y.detach()
+        else:
+            if ctx.field_map_x is not None:
+                SegmentElectricPotentialFunction.last_field_map_x = ctx.field_map_x.detach()
+                SegmentElectricPotentialFunction.last_field_map_y = ctx.field_map_y.detach()
             # Save overflow map for pseudo wire force (planar)
             if 'overflow_map' in locals():
                 SegmentElectricPotentialFunction.last_overflow_map = overflow_map.detach()
@@ -1408,6 +1432,8 @@ class SegmentElectricPotentialFunction(Function):
         """
         Compute gradients using electric force.
         """
+        if ctx.full_gradient:
+            return full_segment_backward(ctx, grad_output)
         tt = time.time()
         profile_enabled = bool(getattr(ctx, "profile_enabled", False))
         profile_timer = profile_start(profile_enabled, tensor=grad_output)
@@ -1580,6 +1606,8 @@ class LShapeElectricPotential(nn.Module):
         boundary_source_enable=False,
         boundary_source_width_bins=0,
         boundary_source_strength=0.0,
+        gradient_mode="translation",
+        require_field_maps=False,
     ):
         """
         Initialize L-shape electric potential module.
@@ -1608,7 +1636,11 @@ class LShapeElectricPotential(nn.Module):
         self.deterministic_flag = deterministic_flag
         self.last_demand_supply_ratio = None
         self.fast_mode = bool(fast_mode)
-        self.energy_valid = not self.fast_mode
+        if gradient_mode not in ("translation", "full"):
+            raise ValueError(f"Unknown L-shape gradient mode: {gradient_mode}")
+        self.gradient_mode = gradient_mode
+        self.require_field_maps = bool(require_field_maps)
+        self.energy_valid = not self.fast_mode or self.gradient_mode == "full"
         self.profile_enabled = bool(profile_enabled)
         self.log_verbose = l_shape_log_verbose(log_verbose)
         self.blockage_initial_density = True
@@ -2572,7 +2604,7 @@ class LShapeElectricPotential(nn.Module):
         
         # DCT operators
         self.dct2 = dct.DCT2(self.exact_expkM, self.exact_expkN)
-        if not self.fast_mode:
+        if not self.fast_mode or self.gradient_mode == "full":
             self.idct2 = dct.IDCT2(self.exact_expkM, self.exact_expkN)
         self.idct_idxst = dct.IDCT_IDXST(self.exact_expkM, self.exact_expkN)
         self.idxst_idct = dct.IDXST_IDCT(self.exact_expkM, self.exact_expkN)
@@ -2699,6 +2731,19 @@ class LShapeElectricPotential(nn.Module):
             )
         
         if num_segments == 0:
+            if self.gradient_mode == "full":
+                self.energy_valid = True
+                for field in (
+                    "last_field_map_x", "last_field_map_y", "last_density_map",
+                    "last_density_map_h", "last_density_map_v", "last_rho_map",
+                    "last_rho_map_h", "last_rho_map_v", "last_energy_h", "last_energy_v",
+                    "last_overflow_map",
+                ):
+                    setattr(SegmentElectricPotentialFunction, field, None)
+                SegmentElectricPotentialFunction.last_energy_valid = True
+                energy = (segment_pos.sum() + segment_size_x.sum() + segment_size_y.sum()) * 0
+                SegmentElectricPotentialFunction.last_energy = energy.detach()
+                return energy
             return torch.zeros(1, dtype=_ROUTING_FLOAT_DTYPE, device=segment_pos.device, requires_grad=True)
         
         # Initialize on first call
@@ -2994,6 +3039,8 @@ def create_l_shape_electric_potential(
     boundary_source_enable=False,
     boundary_source_width_bins=0,
     boundary_source_strength=0.0,
+    gradient_mode="translation",
+    require_field_maps=False,
 ):
     """
     Factory function to create LShapeElectricPotential.
@@ -3047,4 +3094,6 @@ def create_l_shape_electric_potential(
         boundary_source_width_bins=boundary_source_width_bins,
         boundary_source_strength=boundary_source_strength,
         placedb=placedb,
+        gradient_mode=gradient_mode,
+        require_field_maps=require_field_maps,
     )

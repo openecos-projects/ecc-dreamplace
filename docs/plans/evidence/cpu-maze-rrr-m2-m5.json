@@ -1,0 +1,365 @@
+{
+  "schema_version": 1,
+  "phase": "D/E matched-window requalification",
+  "status": "passed_with_limitations",
+  "scope": "standalone CPU GR S50 with ECC native bootstrap on recorded BM64 and y_huff inputs",
+  "correction": {
+    "supersedes": "cpu-maze-rrr-phase-d.json and cpu-maze-rrr-phase-e.json for the intended routing window",
+    "historical_internal_routing_layers": [
+      "MET2",
+      "RDL"
+    ],
+    "internal_routing_layers": [
+      "MET2",
+      "MET5"
+    ],
+    "external_routing_layers": [
+      "MET2",
+      "MET5"
+    ],
+    "production_defaults": "ECC ICsprout55 bottom_layer=MET2 and top_layer=MET5 already propagate to native GGR; only independent qualification runners were wrong"
+  },
+  "source_identities": {
+    "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/source-identities.json",
+    "sha256": "2eee05279ed751c30c177685f8185ef50204dc5be63d9240b05c240f8007cb77"
+  },
+  "baseline": {
+    "bm64_input_def_sha256": "dd0231ba72f7cd8f9bb24f29f709aabf890e7327e35c67b28e47b50a06d205e1",
+    "routing_grid": [
+      512,
+      512
+    ],
+    "workers": 8,
+    "padding": 0,
+    "legalization": true,
+    "optimizer_steps": 50,
+    "sizing_mode": "size_only",
+    "clock": "ideal",
+    "liberty_corner": "TT",
+    "effective_controls": "explicit gpugr_bottom_routing_layer=MET2 and gpugr_top_routing_layer=MET5 in each runner; external evaluator signal_layers=MET2-MET5",
+    "input_manifest": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/input-manifest.json",
+      "sha256": "a926f99e8f714bd5fff725d4231902ed8c75eb00aa412cb1a5dfec3d2461c403"
+    }
+  },
+  "validation": {
+    "cpu_focused": "12 passed, 1 CUDA-build test skipped in CPU Torch environment",
+    "ecc_parameter_flow": "9 passed",
+    "native_cpu_rrr_zero_compatibility": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/rrr-zero-route-compatibility.json",
+      "sha256": "ce6c0bab681073854ae9dc08932271eca1dacca62c74e0c7ba087bc57911a72a"
+    },
+    "full_s50_compatibility": "cpu_pr_mt and cpu_pr_maze RRR=0 produce byte-identical DEF/Verilog, identical initial/terminal route-usage hashes and terminal WNS/TNS",
+    "route_rc_gate": "every initial/terminal actual route pack has no failed or unrouted eligible net and uses only MET2/MET3/MET4/MET5; native RC-tree preparation and eligible pin coverage passed",
+    "readonly_sta": "native original-DEF SPEFs pass real Liberty/SDC STA with Clk as the only unannotated driver and no partially unannotated driver",
+    "final_audit": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/FINAL_AUDIT.json",
+      "sha256": "fcd79143564ffa51d5decb47f178ea55a08475bea38b7f2f47f691fa2132616c"
+    },
+    "commands": "exact invocations are in archived run_matrix.py, run_workers.py, run_cuda_references.py and run_cpu_initial_sta.py; every run has exit marker zero"
+  },
+  "s50_runs": [
+    {
+      "arm": "bm64-maze0",
+      "internal_gr_terminal_ns": {
+        "wns": -1.230506591796875,
+        "tns": -296.15075
+      },
+      "external_gr50_ns": {
+        "wns": -2.16037,
+        "tns": -727.767639
+      },
+      "external_tns_magnitude_improvement_percent": 0.0,
+      "external_slew_violation_count": 763,
+      "external_cap_violation_count": 145,
+      "stage_wall_seconds": 118.95083355903625,
+      "process_wall_seconds": 123.7323112487793,
+      "initial_route_seconds": 6.837087727006292,
+      "terminal_route_seconds": 6.8390356010058895,
+      "initial_rrr_attempts": 0,
+      "terminal_rrr_attempts": 0,
+      "initial_accepted_iteration": 0,
+      "terminal_accepted_iteration": 0,
+      "maze_search_failure_count": 0,
+      "initial_covered_pins": 56299,
+      "terminal_covered_pins": 56299,
+      "sizing_report": {
+        "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/bm64-maze0/step/gr_parasitics/sizing.json",
+        "sha256": "9d214883d316c0de7b1be85aa71abb7772f44fd23ec45ad82d5e2f580ce56580"
+      },
+      "external_report": {
+        "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/bm64-maze0/external-gr50/report.json",
+        "sha256": "2cabc503796f0eb6ce081e9165751ec240f79b739d3adb14bcffcb1614f2eb45"
+      }
+    },
+    {
+      "arm": "bm64-maze1",
+      "internal_gr_terminal_ns": {
+        "wns": -2.069140625,
+        "tns": -608.781375
+      },
+      "external_gr50_ns": {
+        "wns": -2.105191,
+        "tns": -697.447449
+      },
+      "external_tns_magnitude_improvement_percent": 4.166191016910553,
+      "external_slew_violation_count": 395,
+      "external_cap_violation_count": 88,
+      "stage_wall_seconds": 830.371809720993,
+      "process_wall_seconds": 835.7682883739471,
+      "initial_route_seconds": 362.9649846740067,
+      "terminal_route_seconds": 360.4344390130136,
+      "initial_rrr_attempts": 1,
+      "terminal_rrr_attempts": 1,
+      "initial_accepted_iteration": 1,
+      "terminal_accepted_iteration": 1,
+      "maze_search_failure_count": 0,
+      "initial_covered_pins": 56299,
+      "terminal_covered_pins": 56299,
+      "sizing_report": {
+        "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/bm64-maze1/step/gr_parasitics/sizing.json",
+        "sha256": "05990734cbcdd0a1adff6c6c2b929532dd6a25aa8acd3b84829d743d205cdd23"
+      },
+      "external_report": {
+        "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/bm64-maze1/external-gr50/report.json",
+        "sha256": "bdaeb78fb87cbd0c56610b4ff14745457dcc9e503b5720d862d457c462c77564"
+      }
+    },
+    {
+      "arm": "bm64-maze3",
+      "internal_gr_terminal_ns": {
+        "wns": -1.7520416259765625,
+        "tns": -569.245
+      },
+      "external_gr50_ns": {
+        "wns": -1.954897,
+        "tns": -656.493713
+      },
+      "external_tns_magnitude_improvement_percent": 9.79350031253589,
+      "external_slew_violation_count": 478,
+      "external_cap_violation_count": 97,
+      "stage_wall_seconds": 1336.4027693271637,
+      "process_wall_seconds": 1342.058795452118,
+      "initial_route_seconds": 616.7292877270083,
+      "terminal_route_seconds": 610.9386142129952,
+      "initial_rrr_attempts": 2,
+      "terminal_rrr_attempts": 2,
+      "initial_accepted_iteration": 1,
+      "terminal_accepted_iteration": 1,
+      "maze_search_failure_count": 0,
+      "initial_covered_pins": 56299,
+      "terminal_covered_pins": 56299,
+      "sizing_report": {
+        "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/bm64-maze3/step/gr_parasitics/sizing.json",
+        "sha256": "e82a774a27aa77158a4ea1f5452a7c7e5115f3adab7b0a95bb9117148e2dd2ef"
+      },
+      "external_report": {
+        "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/bm64-maze3/external-gr50/report.json",
+        "sha256": "8db591fa2273bf0b305e5879c3e241254353365c6621f67b6470cbae7021138f"
+      }
+    },
+    {
+      "arm": "y_huff-maze0",
+      "internal_gr_terminal_ns": {
+        "wns": -0.1343404541015625,
+        "tns": -7.8422080078125
+      },
+      "external_gr50_ns": {
+        "wns": -0.467156,
+        "tns": -133.684662
+      },
+      "external_tns_magnitude_improvement_percent": 0.0,
+      "external_slew_violation_count": 339,
+      "external_cap_violation_count": 57,
+      "stage_wall_seconds": 108.79893326759338,
+      "process_wall_seconds": 113.52652406692505,
+      "initial_route_seconds": 9.347253896994516,
+      "terminal_route_seconds": 9.335083462996408,
+      "initial_rrr_attempts": 0,
+      "terminal_rrr_attempts": 0,
+      "initial_accepted_iteration": 0,
+      "terminal_accepted_iteration": 0,
+      "maze_search_failure_count": 0,
+      "initial_covered_pins": 44196,
+      "terminal_covered_pins": 44196,
+      "sizing_report": {
+        "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/y_huff-maze0/step/gr_parasitics/sizing.json",
+        "sha256": "5f94bd7dba9f3af20a7195ea666d648e8e6552a0c82463a5ff872c0153bfb735"
+      },
+      "external_report": {
+        "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/y_huff-maze0/external-gr50/report.json",
+        "sha256": "1ee8d61cde92454bb136f261e46dcf90dbafe93c7a36efa5ccd87d49170052a2"
+      }
+    },
+    {
+      "arm": "y_huff-maze1",
+      "internal_gr_terminal_ns": {
+        "wns": -0.39499102783203127,
+        "tns": -63.057296875
+      },
+      "external_gr50_ns": {
+        "wns": -0.606081,
+        "tns": -50.090328
+      },
+      "external_tns_magnitude_improvement_percent": 62.53098354693824,
+      "external_slew_violation_count": 56,
+      "external_cap_violation_count": 25,
+      "stage_wall_seconds": 454.8795340061188,
+      "process_wall_seconds": 460.32320499420166,
+      "initial_route_seconds": 181.1735009420081,
+      "terminal_route_seconds": 181.97767009600648,
+      "initial_rrr_attempts": 1,
+      "terminal_rrr_attempts": 1,
+      "initial_accepted_iteration": 1,
+      "terminal_accepted_iteration": 1,
+      "maze_search_failure_count": 0,
+      "initial_covered_pins": 44196,
+      "terminal_covered_pins": 44196,
+      "sizing_report": {
+        "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/y_huff-maze1/step/gr_parasitics/sizing.json",
+        "sha256": "2e93b3b083cee86acb305c882548332f1fdfad2a20f4d7821cc64cbad4fac8cc"
+      },
+      "external_report": {
+        "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/y_huff-maze1/external-gr50/report.json",
+        "sha256": "9b453ceca6b5c2312d0bc8e3a670ce72ba151a478055d0470871184eaf21b18f"
+      }
+    }
+  ],
+  "worker_scaling": {
+    "routing_grid": [
+      128,
+      128
+    ],
+    "rrr_iters": 1,
+    "warmup_runs": 1,
+    "timed_runs": 3,
+    "workers": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "route_usage_hashes_equal": true,
+    "max_active_searches": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "maze_search_speedup_8_workers": 6.435518632396829,
+    "total_route_speedup_8_workers": 1.0394110717964535,
+    "conflict_fallback_fraction": 0.9988023952095808,
+    "report": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/worker-scaling-summary.json",
+      "sha256": "7369e9520fd8c5294350b3ad6219e2166704d69fec27d0bd306494034127d047"
+    }
+  },
+  "cuda_references": [
+    {
+      "rrr_iters": 0,
+      "route_seconds": 0.6008282129769213,
+      "native_rc_and_sta": "passed",
+      "original_def_readonly_sta_ns": {
+        "wns_ns": -1.812601,
+        "tns_ns": -586.356689
+      },
+      "route_report": {
+        "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/bm64-cuda0.json",
+        "sha256": "dc57667170d39753b792954473457ae60f53f0ddca6261a36deddda4f9275c0e"
+      },
+      "native_rc_report": {
+        "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/bm64-cuda0.pack.rc.json",
+        "sha256": "18e2187d262688efe202e9847ebd6b7f86cb462796809e38930a12c75e48b276"
+      },
+      "readonly_sta_report": {
+        "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/bm64-cuda0.pack.sta/report.json",
+        "sha256": "ea8e8e826a4b20898c329963bc90a6810e538ae77ead82fb9f2be97d04bf8606"
+      }
+    },
+    {
+      "rrr_iters": 1,
+      "route_seconds": 5.179296267015161,
+      "native_rc_and_sta": "passed",
+      "original_def_readonly_sta_ns": {
+        "wns_ns": -2.37554,
+        "tns_ns": -764.811523
+      },
+      "route_report": {
+        "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/bm64-cuda1.json",
+        "sha256": "7bd9320dd33a80b05d862178628d641420b854ed82585f4a6ff669a96b06af81"
+      },
+      "native_rc_report": {
+        "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/bm64-cuda1.pack.rc.json",
+        "sha256": "a5d2ff369711f7aaac8dd849dad8a1c9240e54aafd1514ef040deeb2417f31a8"
+      },
+      "readonly_sta_report": {
+        "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/bm64-cuda1.pack.sta/report.json",
+        "sha256": "1ed0dad50f94b6ab4a2852756cfd36662910a023573d8904940fd8e187787bdd"
+      }
+    },
+    {
+      "rrr_iters": 3,
+      "route_seconds": 14.287156259000767,
+      "native_rc_and_sta": "passed",
+      "original_def_readonly_sta_ns": {
+        "wns_ns": -2.66065,
+        "tns_ns": -838.85614
+      },
+      "route_report": {
+        "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/bm64-cuda3.json",
+        "sha256": "cd3b2056fc7ead245143345f6c3b19f8bf568e51a43f165397c983988ac2ed78"
+      },
+      "native_rc_report": {
+        "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/bm64-cuda3.pack.rc.json",
+        "sha256": "e08278d81f6415bea154114518ff467c2ad1e27fd18d6bf46bcb17165f3a2383"
+      },
+      "readonly_sta_report": {
+        "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/bm64-cuda3.pack.sta/report.json",
+        "sha256": "307757ccf5ccc7b278d942c415a8ce543f4d244562cc3191abb6132c10c80ef6"
+      }
+    }
+  ],
+  "original_def_cpu_readonly_sta": [
+    {
+      "rrr_iters": 1,
+      "metrics_ns": {
+        "wns_ns": -3.210261,
+        "tns_ns": -1019.613708
+      },
+      "report": {
+        "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/bm64-maze1/route-pack-1.sta/report.json",
+        "sha256": "0c80b9c005e0a6151b3383ebda53244cf410c8a6f4793b36621c3d734a3f2d79"
+      }
+    },
+    {
+      "rrr_iters": 3,
+      "metrics_ns": {
+        "wns_ns": -2.80303,
+        "tns_ns": -852.581421
+      },
+      "report": {
+        "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/bm64-maze3/route-pack-1.sta/report.json",
+        "sha256": "b838b91bed12e24ab6b7c8bae63c3361af4689a3eac61ec83a280ebfe4f058aa"
+      }
+    }
+  ],
+  "decision": {
+    "optional_backend": "retain cpu_pr_maze for explicit standalone experiments on the qualified inputs",
+    "default": "retain existing CPU backend and gr_sizing_rrr_iters=0; no production default or routing algorithm changes",
+    "qor": "assess TNS, WNS and electrical violations separately; congestion best-state policy does not optimize STA",
+    "performance": "parallel candidate search scales but serial current-state conflict re-search dominates; do not promote as a fast CPU RRR backend"
+  },
+  "limitations": [
+    "Two recorded cases only; no 42-case or macro-heavy qualification.",
+    "128-grid worker scaling is separate from 512-grid S50 wall time.",
+    "S50 arms ran concurrently on disjoint CPU affinity; stage wall uses initial config to final Verilog timestamps and excludes imports and cleanup.",
+    "CUDA references use original unsized DEF and native RC-tree SPEF; they are not CUDA S50 or external OpenROAD rerouting comparisons.",
+    "Internal GR-terminal STA, native-SPEF original-DEF STA and external OpenROAD GR50 are separate evaluators.",
+    "Native extension identities are recorded by SHA256; CPU Torch 2.11 and CUDA Torch 2.7 reference builds are separate."
+  ],
+  "artifact_root": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009",
+  "complete_results": {
+    "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009/m2-m5-results.json",
+    "sha256": "ff0dbb547b471abc148d00343e29e93e265226cb7816b532248c33c5b004a016"
+  }
+}

@@ -3,6 +3,12 @@ cmake_minimum_required(VERSION 3.24)
 project(DREAMPlace LANGUAGES CXX)
 set(CMAKE_VERBOSE_MAKEFILE ON)
 
+option(DREAMPLACE_USE_EXTERNAL_OPENROAD
+  "Build the optional placeio_openroad backend against an externally built OpenROAD"
+  OFF)
+
+# set(PYTHON_EXECUTABLE "/home/zhaoxueyan/anaconda3/envs/PlaceOPT/bin/python")
+
 if (CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     set (CMAKE_INSTALL_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/install" CACHE PATH "Prefix prepended to install directories" FORCE )
 endif()
@@ -57,6 +63,10 @@ set_property(GLOBAL PROPERTY POSITION_INDEPENDENT_CODE TRUE)
 
 find_package(OpenMP REQUIRED)
 #find_program(PYTHON "python" REQUIRED)
+find_package(ZLIB REQUIRED)
+set(Boost_NO_BOOST_CMAKE TRUE)
+find_package(Boost 1.55.0 REQUIRED)
+message(STATUS "Boost_INCLUDE_DIRS = ${Boost_INCLUDE_DIRS}")
 
 #find_package(CUDA 9.0)
 find_package(Cairo)
@@ -79,6 +89,8 @@ include_directories(${FLUTE_INCLUDE_DIRS})
 # Minimal Limbo solver subset used by macro legalization.
 set(LIMBO_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/Limbo)
 message(STATUS "LIMBO_SOURCE_DIR ${LIMBO_SOURCE_DIR}")
+set(LIMBO_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/thirdparty/Limbo)
+message(STATUS "LIMBO_BINARY_DIR ${LIMBO_BINARY_DIR}")
 if(CUDA_FOUND)
   if (${CUDA_VERSION_MAJOR} VERSION_GREATER_EQUAL "11")
     set(CUB_DIR ${CUDA_INCLUDE_DIRS})
@@ -101,7 +113,9 @@ find_path(LEMON_SOURCE_DIR lemon PATHS ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/Li
 set(LEMON_INCLUDE_DIRS "${LEMON_SOURCE_DIR}")
 string(REPLACE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR} LEMON_BINARY_DIR ${LEMON_SOURCE_DIR})
 list(APPEND LEMON_INCLUDE_DIRS "${LEMON_BINARY_DIR}")
+set(LEMON_LINK_DIRS ${LEMON_BINARY_DIR}/lemon)
 message(STATUS "LEMON_INCLUDE_DIRS ${LEMON_INCLUDE_DIRS}")
+message(STATUS "LEMON_LINK_DIRS ${LEMON_LINK_DIRS}")
 
 if (CUDA_FOUND)
   if (NOT CMAKE_CUDA_ARCHITECTURES)
@@ -118,7 +132,6 @@ if (CUDA_FOUND)
       set(CMAKE_CUDA_ARCHITECTURES ${DREAMPLACE_CUDA_ARCHITECTURES})
     endif()
   endif(NOT CMAKE_CUDA_ARCHITECTURES)
-  message(STATUS "DreamPlace CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 
   # for cuda_add_library
   cuda_select_nvcc_arch_flags(CUDA_ARCH_FLAGS ${CMAKE_CUDA_ARCHITECTURES})
@@ -130,12 +143,12 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/dreamplace/configure.py.in ${CMAKE_CU
 
 add_subdirectory(thirdparty)
 add_subdirectory(dreamplace)
-# unittest/ and test/ are disabled: their install rules copy upstream test
-# scripts into the wheel platlib as top-level `unittest`/`test` namespace
-# packages, which shadow the Python stdlib modules of the same names under
-# scikit-build-core's editable install finder (breaks pytest and any
-# `import unittest` in the environment).
-#add_subdirectory(unittest)
+# tests/ and test/ are disabled by default: tests/ installs its scripts under the
+# top-level `tests` namespace (the old `unittest/...` destinations were renamed so
+# the wheel no longer ships a top-level `unittest` package that shadowed the
+# stdlib module under scikit-build-core's editable install finder), and test/ only
+# carries benchmark data. Uncomment when building the C++ test targets as well.
+#add_subdirectory(tests)
 add_subdirectory(benchmarks)
 #add_subdirectory(test)
 

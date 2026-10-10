@@ -10,21 +10,32 @@ set(INCLUDE_DIRS
   )
 
 set(LINK_LIBS 
+  #draw_place_cxx
   utility_cxx
   munkres
   lemon
   OpenMP::OpenMP_CXX
   )
 
+if(CAIRO_FOUND)
+  set(INCLUDE_DIRS ${INCLUDE_DIRS} ${CAIRO_INCLUDE_DIRS})
+  set(LINK_LIBS ${LINK_LIBS} ${CAIRO_LIBRARIES})
+  set(DRAWPLACE 1)
+else()
+  set(DRAWPLACE 0)
+endif()
+
 add_pytorch_extension(${TARGET_NAME}_cpp 
   src/independent_set_matching.cpp
   EXTRA_INCLUDE_DIRS ${INCLUDE_DIRS}
-  EXTRA_LINK_LIBRARIES ${LINK_LIBS})
+  EXTRA_LINK_LIBRARIES ${LINK_LIBS}
+  EXTRA_DEFINITIONS DRAWPLACE=${DRAWPLACE})
 
 add_pytorch_extension(${TARGET_NAME}_sequential_cpp
   src/independent_set_matching_sequential.cpp
   EXTRA_INCLUDE_DIRS ${INCLUDE_DIRS}
-  EXTRA_LINK_LIBRARIES ${LINK_LIBS})
+  EXTRA_LINK_LIBRARIES ${LINK_LIBS}
+  EXTRA_DEFINITIONS DRAWPLACE=${DRAWPLACE})
 
 install(TARGETS 
   ${TARGET_NAME}_cpp ${TARGET_NAME}_sequential_cpp 
@@ -36,7 +47,8 @@ add_pytorch_extension(${TARGET_NAME}_cuda
   src/independent_set_matching_cuda.cpp
   src/independent_set_matching_cuda_kernel.cu
   EXTRA_INCLUDE_DIRS ${INCLUDE_DIRS}
-  EXTRA_LINK_LIBRARIES ${LINK_LIBS} ${CUDA_curand_LIBRARY})
+  EXTRA_LINK_LIBRARIES ${LINK_LIBS} ${CUDA_curand_LIBRARY}
+  EXTRA_DEFINITIONS DRAWPLACE=${DRAWPLACE})
 install(TARGETS 
   ${TARGET_NAME}_cuda 
   DESTINATION dreamplace/ops/${OP_NAME})

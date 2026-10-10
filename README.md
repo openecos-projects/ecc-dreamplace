@@ -6,11 +6,26 @@ GPU/CPU analytical placement foundation from DREAMPlace and extends it for the
 ECC physical-design data flow, differentiable timing analysis, timing-aware
 net weighting, and ECC early-global-routing driven routability optimization.
 
+Built upon the GPU-accelerated global placer [DREAMPlace](https://doi.org/10.1109/TCAD.2020.3003843) and detailed placer [ABCDPlace](https://doi.org/10.1109/TCAD.2020.2971531),
+AutoDMP adds simultaneous macro and standard cell placement enhancements.
+
+* Simultaneous Macro and Standard Cell Placement Animations
+
+| MemPool Group | Ariane |
+| -------- | ----------- |
+| ![MemPool Group](images/mempool.gif) | ![Ariane](images/ariane.gif) |
+
+# Publications
+
+* Anthony Agnesina, Puranjay Rajvanshi, Tian Yang, Geraldo Pradipta, Austin Jiao, Ben Keller, Brucek Khailany, and Haoxing Ren, 
+  "**AutoDMP: Automated DREAMPlace-based Macro Placement**", 
+  International Symposium on Physical Design (ISPD), Virtual Event, Mar 26-29, 2023 ([preprint](https://research.nvidia.com/publication/2023-03_autodmp-automated-dreamplace-based-macro-placement)) ([blog](https://developer.nvidia.com/blog/autodmp-optimizes-macro-placement-for-chip-design-with-ai-and-gpus/))
+
 This repository is packaged as a Python wheel for the
 [ECOS Studio](https://github.com/openecos-projects/ecos-studio) silicon design
-platform. The original upstream DREAMPlace README is preserved in
-[README_DREAMPlace.md](README_DREAMPlace.md), and the inherited AutoDMP notes
-are preserved in [README_AutoDMP.md](README_AutoDMP.md).
+platform. Upstream documentation is available in the
+[DREAMPlace repository](https://github.com/limbo018/DREAMPlace) and
+[AutoDMP repository](https://github.com/NVlabs/AutoDMP).
 
 ## What Is New Compared with DREAMPlace?
 
@@ -25,6 +40,12 @@ requiring a standalone DREAMPlace benchmark conversion path.
   data via `ecc_module.pydb(...)`.
 - Placement results can be written back through ECC with
   `ecc_module.write_placement_back(...)` / `ecc_module.def_save(...)`.
+
+Default CMake and Python package builds use the ECC backend and do not require
+OpenROAD. The OpenROAD submodule and its superbuild have been removed. The
+optional OpenROAD adapter can be built against an existing external installation
+with `-DDREAMPLACE_USE_EXTERNAL_OPENROAD=ON` and
+`-DOPENROAD_EXTERNAL_INSTALL_PREFIX=/path/to/openroad/install`.
 
 ### PyTorch-Based Differentiable STA
 
@@ -64,6 +85,65 @@ It is intentionally marked as unsupported because the old OpenTimer integration
 has been removed. Use the ECC-integrated STA path controlled by `with_sta`,
 `differentiable_timing_obj`, and the net-weighting parameters above.
 
+ECC timing now requires the schema-v2 native snapshot from the matching
+`ecc-tools` revision. Rebuild/reinstall both packages together. The consumer
+validates per-edge qualification for endpoints and setup/recovery checks at
+initial import and after sizing/buffer refresh; unconstrained endpoints retain
+physical slew/cap coverage but do not contribute WNS/TNS. Unsupported max path
+exceptions and clock groups fail explicitly. This placement model does not
+implement full latch borrowing, hold or CPPR.
+
+The sizing rounds inside placement timing-optimization windows have one
+coefficient policy parameter, `timing_opt_coefficients`. The default fixes
+WNS/TNS/cap/slew at 500/5/1/1 with outer timing weight 1. The following
+configuration matches the defaults:
+
+```json
+"timing_opt_coefficients": {
+  "mode": "fixed", "wns": 500, "tns": 5, "slew": 1, "cap": 1
+}
+```
+
+Fixed mode requires all four finite, nonnegative values and uses outer
+`timing_grad_balance_weight` 1.0, making those values the effective weights.
+Inherit mode retains placement's live coefficients and outer weight. The
+original placement coefficients and outer weight are restored when sizing
+exits, including on failure. This policy
+applies to GP sizing windows; standalone `diff_sizing` uses its own configuration.
+Each window's `sizing.coefficients` report records the mode and effective values.
+The fixed preset may remain in the object when switching `mode` to `inherit`;
+inherit mode always uses the live placement values.
+
+`timing_coeff_growth_factor` controls the WNS/TNS coefficient multiplier at
+each GP density-weight update. The default `1.0` freezes the coefficients;
+`1.01` grows them, and values between zero and one decay them.
+The multiplier must be positive and finite. Slew/cap weights and the outer norm
+weight retain their own settings. Inherit-mode sizing windows read the resulting
+live coefficients; fixed-mode windows use their configured values. Standalone
+`size_only` sizing, including `diff_sizing` S50, skips this growth schedule.
+
+`timing_grad_balance_target_ratio` defaults to 0.2 for direct-loss placement.
+At the first active timing step, the timing and wirelength gradient L1 norms
+determine the outer timing weight, which is then reused. Set the ratio to 0.0
+to disable balancing and retain weight 1.0. It is a gradient-ratio target,
+not a multiplier on WNS/TNS coefficients. Standalone `size_only` sizing does
+not initialize coordinate gradient balancing. ECC exposes the ratio through
+`place.timing_grad_balance_target_ratio`; explicit values override the default.
+
+`timing_aggregation_mode` selects AAT/RAT propagation aggregation: `smooth`
+(default) uses LSE, while `hard` uses max/min. LSE uses the positive temperature
+`timing_aggregation_tau_ps` (default 2.0 ps). Smaller temperatures approach
+hard max/min. ECC exposes both through `place.*` parameters. Endpoint WNS
+still uses hard min, and TNS still sums negative slacks.
+
+`overflow_reference_mode` selects the area used to normalize overflow. The
+default `initial` freezes the GP-entry movable area. `ordinary` preserves the
+existing PR behavior: use the published native-plus-virtual movable area when
+available, otherwise use `placedb.total_movable_node_area`. Both exclude
+fillers. `ordinary` follows the existing publication points; it does not
+recompute all area state on every iteration. The normalized overflow also
+feeds gamma and overflow-based scheduling.
+
 ### ECC EGR-Based Routability Inflation
 
 `ecc-dreamplace` supports routability-driven cell inflation using ECC/iRT early
@@ -96,6 +176,8 @@ Relevant configuration knobs include:
 - Optional: Nix, for entering the repository development shell before sync
 - System packages:
   `cmake ninja-build build-essential pkg-config libcairo2-dev libgflags-dev libgoogle-glog-dev flex libfl-dev bison libeigen3-dev libgtest-dev`
+- GPU architecture compatibility 6.0 or later (Optional)
+    - Code has been tested on GPUs with compute compatibility 8.0 on DGX A100 machine. 
 
 ### Dev Setup
 
@@ -127,6 +209,10 @@ dist/ecc_dreamplace-*
 ```
 
 The uv build runs the package build defined by `pyproject.toml`.
+
+# Physical Design Flow
+
+The physical design flow requires RTL, Python, and Tcl files from the [TILOS-MacroPlacement](https://github.com/TILOS-AI-Institute/MacroPlacement) repository. Only the codes that we have added and modified are provided in [scripts](scripts). 
 
 ## Repository Pointers
 

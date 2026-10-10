@@ -15,6 +15,7 @@ set(LINK_LIBS
 
 add_pytorch_extension(${TARGET_NAME}_cpp 
   src/steiner_topo.cpp
+  src/l_direction_matcher.cpp
   EXTRA_INCLUDE_DIRS ${INCLUDE_DIRS}
   EXTRA_LINK_LIBRARIES ${LINK_LIBS}
 )

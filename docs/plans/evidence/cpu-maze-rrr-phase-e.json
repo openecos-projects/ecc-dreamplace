@@ -1,0 +1,315 @@
+{
+  "schema_version": 1,
+  "phase": "E",
+  "status": "historical_superseded",
+  "decision": {
+    "optional_backend": "accepted for explicit standalone CPU experiments; connected routes and final artifacts qualified",
+    "default_change": "rejected; retain RRR=0 and existing backend defaults",
+    "speed": "parallel maze search scales, whole route and S50 remain dominated by serial conflict re-search",
+    "production_scope": "qualified only on the recorded BM64 and y_huff inputs; not a 42-case or macro-heavy production qualification"
+  },
+  "external_s50_qor": [
+    {
+      "arm": "bm64-qualified-maze0",
+      "external_wns_ns": -2.192889,
+      "external_tns_ns": -752.628723,
+      "tns_magnitude_improvement_percent": 0.0,
+      "stage_wall_seconds": 127.81082224845886
+    },
+    {
+      "arm": "bm64-final-maze1",
+      "external_wns_ns": -1.93582,
+      "external_tns_ns": -630.337036,
+      "tns_magnitude_improvement_percent": 16.24860748239076,
+      "stage_wall_seconds": 1218.8845300674438
+    },
+    {
+      "arm": "bm64-final-maze3",
+      "external_wns_ns": -1.90688,
+      "external_tns_ns": -613.446777,
+      "tns_magnitude_improvement_percent": 18.492776284861513,
+      "stage_wall_seconds": 1870.7619297504425
+    },
+    {
+      "arm": "y_huff-final-maze0",
+      "external_wns_ns": -0.450397,
+      "external_tns_ns": -151.666199,
+      "tns_magnitude_improvement_percent": 0.0,
+      "stage_wall_seconds": 115.20294880867004
+    },
+    {
+      "arm": "y_huff-final-maze1",
+      "external_wns_ns": -0.369907,
+      "external_tns_ns": -47.777493,
+      "tns_magnitude_improvement_percent": 68.49825912759904,
+      "stage_wall_seconds": 536.4949324131012
+    }
+  ],
+  "worker_scaling": {
+    "status": "passed",
+    "scope": "BM64 native RRR=1 on fixed 128 grid, not 512 S50 runtime",
+    "warmup_runs": 1,
+    "timed_runs": 3,
+    "cpu_affinity": [
+      360,
+      361,
+      362,
+      363,
+      364,
+      365,
+      366,
+      367
+    ],
+    "extension_sha256": "045eb24f330c80c617199d9228a32d3cc2b7216ba3e6586f48b0900c0b433925",
+    "hashes": [
+      15970755015258901139,
+      13380022816680563995,
+      17328474496803844408
+    ],
+    "rows": [
+      {
+        "workers": 1,
+        "maze_search_median_s": 1.05097164,
+        "route_median_s": 31.398160217009718,
+        "fallback_median_s": 29.674746101000185,
+        "fallback_fraction": 0.9987205983663026,
+        "peak_process_rss_bytes": 486854656,
+        "effective_workers": 1,
+        "max_active_searches": [
+          1,
+          1,
+          1
+        ],
+        "search_speedup": 1.0,
+        "route_speedup": 1.0
+      },
+      {
+        "workers": 2,
+        "maze_search_median_s": 0.520715819,
+        "route_median_s": 30.676495872001396,
+        "fallback_median_s": 29.467820220000263,
+        "fallback_fraction": 0.9987205983663026,
+        "peak_process_rss_bytes": 535928832,
+        "effective_workers": 2,
+        "max_active_searches": [
+          2,
+          2,
+          2
+        ],
+        "search_speedup": 2.018320937547703,
+        "route_speedup": 1.0235249928159815
+      },
+      {
+        "workers": 4,
+        "maze_search_median_s": 0.339182437,
+        "route_median_s": 30.71457083200221,
+        "fallback_median_s": 29.797487624000045,
+        "fallback_fraction": 0.9987205983663026,
+        "peak_process_rss_bytes": 568446976,
+        "effective_workers": 4,
+        "max_active_searches": [
+          4,
+          4,
+          4
+        ],
+        "search_speedup": 3.0985438081512457,
+        "route_speedup": 1.0222561919795818
+      },
+      {
+        "workers": 8,
+        "maze_search_median_s": 0.166257526,
+        "route_median_s": 30.41273356799502,
+        "fallback_median_s": 29.646207393000072,
+        "fallback_fraction": 0.9987205983663026,
+        "peak_process_rss_bytes": 587083776,
+        "effective_workers": 8,
+        "max_active_searches": [
+          8,
+          8,
+          8
+        ],
+        "search_speedup": 6.321347762626998,
+        "route_speedup": 1.032401778248954
+      }
+    ]
+  },
+  "cuda_reference": {
+    "0": {
+      "route_seconds": 0.6103351920028217,
+      "readonly_sta_ns": {
+        "wns_ns": -1.760545,
+        "tns_ns": -571.525696
+      },
+      "artifacts": {
+        "route": {
+          "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_20261009/bm64-cuda-reference0.json",
+          "original_path": "/tmp/ecc-cpu-maze-rrr-phase-a/bm64-cuda-reference0.json",
+          "sha256": "94dd66b0de78d3c7ef343ef4f29bbd8bb3ecd8f309129b5c8d1861badf075fb8"
+        },
+        "native_rc_tree": {
+          "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_20261009/bm64-cuda-reference0.pack.rc.json",
+          "original_path": "/tmp/ecc-cpu-maze-rrr-phase-a/bm64-cuda-reference0.pack.rc.json",
+          "sha256": "a4194fb9db23d494d2fd054bcaed470369db7daca1ad0a261c6f8b2028300b90"
+        },
+        "readonly_sta": {
+          "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_20261009/bm64-cuda-reference0.pack-quoted.sta/report.json",
+          "original_path": "/tmp/ecc-cpu-maze-rrr-phase-a/bm64-cuda-reference0.pack-quoted.sta/report.json",
+          "sha256": "15425812a5d5aabcb86b00bfd6e3e0d18966567be038f525250bfeea5f6637cd"
+        }
+      }
+    },
+    "1": {
+      "route_seconds": 5.489544785988983,
+      "readonly_sta_ns": {
+        "wns_ns": -2.289441,
+        "tns_ns": -745.618774
+      },
+      "artifacts": {
+        "route": {
+          "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_20261009/bm64-cuda-reference1.json",
+          "original_path": "/tmp/ecc-cpu-maze-rrr-phase-a/bm64-cuda-reference1.json",
+          "sha256": "221164758ddd7f59fc739e0c71df0ac881ba73f97c4df31f5eddd59cf5288541"
+        },
+        "native_rc_tree": {
+          "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_20261009/bm64-cuda-reference1.pack.rc.json",
+          "original_path": "/tmp/ecc-cpu-maze-rrr-phase-a/bm64-cuda-reference1.pack.rc.json",
+          "sha256": "74b4761f0bfd4cead3c1da847f1b82af447e780f47e62d111e676c0ec4214278"
+        },
+        "readonly_sta": {
+          "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_20261009/bm64-cuda-reference1.pack-quoted.sta/report.json",
+          "original_path": "/tmp/ecc-cpu-maze-rrr-phase-a/bm64-cuda-reference1.pack-quoted.sta/report.json",
+          "sha256": "460603e03176131061052d017d2676100fd4333c003e3eaf36f05d9ff8b1e612"
+        }
+      }
+    },
+    "3": {
+      "route_seconds": 15.24057706000167,
+      "readonly_sta_ns": {
+        "wns_ns": -2.521954,
+        "tns_ns": -827.506653
+      },
+      "artifacts": {
+        "route": {
+          "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_20261009/bm64-cuda-reference3.json",
+          "original_path": "/tmp/ecc-cpu-maze-rrr-phase-a/bm64-cuda-reference3.json",
+          "sha256": "8fd0d100a74a16ee02118dd3a5889f6f3e998b23b0df5c742febf163f602650a"
+        },
+        "native_rc_tree": {
+          "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_20261009/bm64-cuda-reference3.pack.rc.json",
+          "original_path": "/tmp/ecc-cpu-maze-rrr-phase-a/bm64-cuda-reference3.pack.rc.json",
+          "sha256": "77ad9d9f9c3b544889c328469698022a756fa471ae3d90abe0a315465736dd89"
+        },
+        "readonly_sta": {
+          "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_20261009/bm64-cuda-reference3.pack.sta/report.json",
+          "original_path": "/tmp/ecc-cpu-maze-rrr-phase-a/bm64-cuda-reference3.pack.sta/report.json",
+          "sha256": "5b9e41650c5b12efdb36a43606714f6403a478f8d0ccbe67699b9e4b62d31815"
+        }
+      }
+    }
+  },
+  "fixed_input_native_route_quality": {
+    "cpu_rrr0": {
+      "wire_length_um": 316883.258,
+      "via_count": 116849,
+      "scope": "unique global routing graph before estimated local pin access and RC tree reduction",
+      "status_counts": {
+        "0": 16127,
+        "1": 81,
+        "2": 0,
+        "3": 0,
+        "4": 1
+      }
+    },
+    "cpu_rrr3": {
+      "wire_length_um": 404776.77,
+      "via_count": 148925,
+      "scope": "unique global routing graph before estimated local pin access and RC tree reduction",
+      "status_counts": {
+        "0": 16127,
+        "1": 81,
+        "2": 0,
+        "3": 0,
+        "4": 1
+      }
+    },
+    "cuda_rrr0": {
+      "wire_length_um": 316883.258,
+      "via_count": 118578,
+      "scope": "unique global routing graph before estimated local pin access and RC tree reduction",
+      "status_counts": {
+        "0": 16127,
+        "1": 81,
+        "2": 0,
+        "3": 0,
+        "4": 1
+      }
+    },
+    "cuda_rrr1": {
+      "wire_length_um": 377933.496,
+      "via_count": 171901,
+      "scope": "unique global routing graph before estimated local pin access and RC tree reduction",
+      "status_counts": {
+        "0": 16127,
+        "1": 81,
+        "2": 0,
+        "3": 0,
+        "4": 1
+      }
+    },
+    "cuda_rrr3": {
+      "wire_length_um": 407388.252,
+      "via_count": 274808,
+      "scope": "unique global routing graph before estimated local pin access and RC tree reduction",
+      "status_counts": {
+        "0": 16127,
+        "1": 81,
+        "2": 0,
+        "3": 0,
+        "4": 1
+      }
+    }
+  },
+  "original_def_cpu_readonly_sta": {
+    "rrr0": {
+      "wns_ns": -1.63306,
+      "tns_ns": -550.520386
+    },
+    "rrr3": {
+      "wns_ns": -2.617649,
+      "tns_ns": -852.940735
+    }
+  },
+  "artifact_root": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_20261009",
+  "limitations": [
+    "99.872 percent conflict re-search on the fixed 128-grid scaling input; 8-worker core search speedup 6.321x but total route speedup 1.032x.",
+    "512 S50 route times are separate measurements and do not inherit the 128-grid speedup claim.",
+    "Native peak_memory_bytes estimates worker scratch; process RSS is independently measured in scaling runs, not a hard process-memory cap.",
+    "CUDA reference uses original unsized DEF and native GR RC-tree SPEF with real Liberty/SDC. It is not a CUDA S50 comparison.",
+    "Native tree STA and external rerouting STA are distinct evaluators; internal TNS magnitudes must not be treated as cross-route timing improvement.",
+    "CPU maze and CUDA use different search algorithms and separate Torch 2.11 CPU / Torch 2.7 CUDA builds; no byte-equivalence or OpenROAD equivalence claim."
+  ],
+  "input_manifest": {
+    "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_20261009/input-manifest.json",
+    "sha256": "3b07ab8fdfa2fc3826dbbc10a9203d2ed6501fcd0c3dab3f5ddc7c068e0ab786"
+  },
+  "qualification_correction": {
+    "status": "superseded_for_intended_window",
+    "historical_internal_routing_layers": [
+      "MET2",
+      "RDL"
+    ],
+    "intended_internal_routing_layers": [
+      "MET2",
+      "MET5"
+    ],
+    "external_routing_layers": [
+      "MET2",
+      "MET5"
+    ],
+    "reason": "Independent qualification scripts selected RDL; ECC ICsprout55 defaults use MET5. Retain historical measurements without treating them as matched-window qualification.",
+    "replacement_status": "passed_with_limitations",
+    "replacement_artifact_root": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_m2_m5_20261009",
+    "replacement_evidence": "cpu-maze-rrr-m2-m5.json"
+  },
+  "historical_status": "passed_with_limitations"
+}

@@ -44,7 +44,7 @@ from .xplace_parser_cache import XplaceParserCacheMixin
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_GPUGR_BACKENDS = ("cuda", "cpu_pr", "cpu_pr_mt", "auto")
+SUPPORTED_GPUGR_BACKENDS = ("cuda", "cpu_pr", "cpu_pr_mt", "cpu_pr_maze", "auto")
 
 
 def normalize_gpugr_backend(backend: str = "auto") -> str:
@@ -98,6 +98,8 @@ def resolve_gpugr_backend(
 
 def validate_gpugr_backend_request(backend: str, rrr_iters: int):
     normalized = normalize_gpugr_backend(backend)
+    if int(rrr_iters) < 0:
+        raise RuntimeError(f"gpugr backend={normalized} requires rrr_iters >= 0")
     if normalized in ("cpu_pr", "cpu_pr_mt") and int(rrr_iters) > 0:
         raise RuntimeError(
             f"gpugr backend={normalized} only supports one CPU routing pass with "
@@ -139,26 +141,33 @@ def gpugr_run_metadata(
     return metadata
 
 
-def _install_optional_route_force_stubs():
-    """Stub seaborn/torchvision when absent so src.core.route_force imports.
+@contextmanager
+def _route_force_import_dependencies():
+    """Scope absent plotting/filler dependencies to the pinned helper import.
 
-    route_force.py imports both at module level but only uses them in the
-    plotting helper and the placement-only filler pseudo force — neither is
-    reachable from the GPUGR backend path (calc_gr_wl_via /
-    estimate_num_shorts are pure torch). Stubbing keeps the ECC venv free of
-    two heavy unused dependencies. Never overwrites a real installation.
+    GPUGR uses only its pure torch metrics. The returned helper module keeps
+    its own import references; other flows must see the real import failure.
     """
+    import importlib
+
+    replacements = {}
     try:
-        import seaborn  # noqa: F401
-    except ImportError:
-        sys.modules.setdefault("seaborn", types.ModuleType("seaborn"))
-    try:
-        import torchvision.transforms  # noqa: F401
-    except ImportError:
-        torchvision = sys.modules.setdefault("torchvision", types.ModuleType("torchvision"))
-        transforms = types.ModuleType("torchvision.transforms")
-        torchvision.transforms = transforms
-        sys.modules.setdefault("torchvision.transforms", transforms)
+        for package in ("seaborn", "torchvision.transforms"):
+            try:
+                importlib.import_module(package)
+            except ImportError:
+                for name in ("torchvision", package) if "." in package else (package,):
+                    replacements[name] = sys.modules.get(name)
+                    sys.modules[name] = types.ModuleType(name)
+                if package == "torchvision.transforms":
+                    sys.modules["torchvision"].transforms = sys.modules[package]
+        yield
+    finally:
+        for name, previous in replacements.items():
+            if previous is None:
+                del sys.modules[name]
+            else:
+                sys.modules[name] = previous
 
 
 def _preload_libpython():
@@ -200,16 +209,6 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         self._flute_register_cache = set()
         self._last_routing_layer_range = None
         self._last_routing_layer_names = None
-
-    @property
-    def _ecc_module(self):
-        module = self.placedb.data_manager
-        if not hasattr(module, "def_save"):
-            raise RuntimeError(
-                "Xplace GPUGR backend requires the ECC runtime module (with def_save); "
-                "placedb.data_manager does not provide one"
-            )
-        return module
 
     @staticmethod
     def _xplace_root_candidates():
@@ -357,7 +356,6 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
                 f"Xplace gpugr extensions are not built (missing gpugr*.so under {cpybin}); "
                 "build them with thirdparty/build_xplace_gpugr.sh against the ECC venv torch"
             )
-        _install_optional_route_force_stubs()
         _preload_libpython()
         try:
             # Import only the native GPUGR extension first.  Resolving the
@@ -371,11 +369,12 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
                     cuda_available=torch.cuda.is_available(),
                     extension_cuda_enabled=_extension_cuda_enabled(gpugr_module),
                 )
-            self._xplace_modules = self._load_xplace_python_modules(
-                xplace_root,
-                gpugr_module,
-                use_cuda=resolved_backend == "cuda",
-            )
+            with _route_force_import_dependencies():
+                self._xplace_modules = self._load_xplace_python_modules(
+                    xplace_root,
+                    gpugr_module,
+                    use_cuda=resolved_backend == "cuda",
+                )
         except Exception as exc:
             raise RuntimeError(
                 "Failed to import Xplace gpugr modules. "
@@ -454,10 +453,12 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         return str(dst_path), str(def_file)
 
     def _export_current_def(self, work_dir: Path, design_name: str):
+        from dreamplace.ops.placeio_common.physical_mutation import write_native_def
+
         export_path = work_dir / f"{design_name}_gpugr.def"
-        self._ecc_module.def_save(str(export_path))
+        write_native_def(self.placedb, export_path)
         if not export_path.exists() or export_path.stat().st_size == 0:
-            raise RuntimeError(f"Failed to export DEF from current ECC DB: {export_path}")
+            raise RuntimeError(f"Failed to export DEF from current native DB: {export_path}")
         return str(export_path)
 
     def _build_params(self, benchmark: str, design_name: str, def_path: str, lefs):
@@ -805,6 +806,8 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         backend: str = "auto",
         bottom_routing_layer: str = None,
         top_routing_layer: str = None,
+        *,
+        include_timing_route_pack: bool = False,
     ):
         """Run gpugr and return maps plus metrics.
 
@@ -834,7 +837,7 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
         parser_cache_lpos = None
         parser_cache_names = None
         parser_cache_requested = False
-        if parser_cache_enable and not input_def:
+        if parser_cache_enable and not input_def and not getattr(self.params, "macro_only", False):
             parser_cache_lpos, parser_cache_names = self._normalize_parser_cache_lpos(
                 parser_cache_node_lpos,
                 parser_cache_node_names,
@@ -1043,6 +1046,8 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
                         f"{profile_prefix}.load_gr_params",
                         **native_profile_kwargs,
                     ):
+                        from dreamplace.ops.buffer_insertion.net_eligibility import clock_net_ids
+
                         gpugr.load_gr_params(
                             {
                                 "device_id": gpu,
@@ -1054,6 +1059,10 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
                                 "backend": resolved_backend,
                                 "bottom_routing_layer": bottom_routing_layer,
                                 "top_routing_layer": top_routing_layer,
+                                "clock_net_names": [
+                                    self._normalize_name(self.placedb.net_names[index])
+                                    for index in sorted(clock_net_ids(self.placedb))
+                                ],
                             }
                         )
                     with self._profile_phase(
@@ -1085,13 +1094,14 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
                             torch.cuda.synchronize(f"cuda:{gpu}")
                     native_stats = (
                         dict(routeforce.run_stats())
-                        if resolved_backend in ("cpu_pr", "cpu_pr_mt")
+                        if resolved_backend in ("cpu_pr", "cpu_pr_mt", "cpu_pr_maze")
                         and hasattr(routeforce, "run_stats")
                         else {}
                     )
                     elapsed = time.time() - start_time
                     topology_pack_result = {}
                     l_shape_topology_pack_result = {}
+                    timing_route_pack_result = {}
                     fallback_route_entries_required = False
                     with self._profile_phase(
                         profile_enabled,
@@ -1149,6 +1159,11 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
                                 float(topology_bin_size_x),
                                 float(topology_bin_size_y),
                             )
+                    if include_timing_route_pack:
+                        with self._profile_phase(
+                            profile_enabled, f"{profile_prefix}.timing_route_pack"
+                        ):
+                            timing_route_pack_result = routeforce.timing_route_pack()
                     with self._profile_phase(
                         profile_enabled,
                         f"{profile_prefix}.route_entries",
@@ -1366,6 +1381,7 @@ class XplaceGPUGR(XplaceParserCacheMixin, XplaceNativeOutputMixin):
                 "same_net_topology_cache": dict(topology_pack_result.get("cache", {})),
                 "same_net_topology_stats": dict(topology_pack_result.get("stats", {})),
                 "l_shape_topology_pack": dict(l_shape_topology_pack_result),
+                "timing_route_pack": timing_route_pack_result,
             }
         finally:
             # Preserve the complete native workspace when routing raises.  It

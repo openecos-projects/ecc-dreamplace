@@ -27,6 +27,11 @@ import logging
 from collections import OrderedDict
 import pdb
 
+from dreamplace.flows.timing_opt_config import (
+    is_legacy_timing_opt_name,
+    normalize_timing_opt_params,
+)
+
 
 class Params:
     """
@@ -118,9 +123,14 @@ class Params:
         """
         @brief convert to json
         """
+        normalize_timing_opt_params(self)
         data = {}
         for key, value in self.__dict__.items():
-            if key != "params_dict":
+            if (
+                key != "params_dict"
+                and not key.startswith("_")
+                and not is_legacy_timing_opt_name(key)
+            ):
                 data[key] = value
         return data
 
@@ -141,7 +151,9 @@ class Params:
         defaults = {
             "l_direction_use_gpugr": 1,
             "l_shape_use_ggr_topology": 1,
-            "l_shape_capacity_al_enable": 1,
+            "l_shape_capacity_al_enable": int(self._is_enabled(
+                getattr(self, "l_shape_use_ggr_topology", 1)
+            )),
             "soft_l_assignment": 0,
             "l_shape_grad_target_ratio": 0.1,
             "l_shape_grad_target_ratio_max": 0.1,

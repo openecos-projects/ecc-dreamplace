@@ -1,0 +1,89 @@
+{
+  "artifacts": {
+    "maze_unit_binary": {
+      "path": "/tmp/ecc-cpu-maze-rrr-phase-a/unittest_cpu_maze_router",
+      "sha256": "9995d6f536a25a39cfbb1d7d155710bdcfaa1aa81aa5c6129b33ecb62515f839"
+    },
+    "maze_unit_output": {
+      "path": "/tmp/ecc-cpu-maze-rrr-phase-a/maze_router_test.out",
+      "sha256": "7d11b9e2f596e6e1fa21f2bb8265d697eace48707a11dcc85d1d3a1302241fdb"
+    }
+  },
+  "claim_level": "standalone deterministic CPU maze candidate generation",
+  "commands": [
+    {
+      "command": "/usr/bin/g++ -std=c++17 -O2 -Wall -Wextra -pthread -Icpp_to_py cpp_to_py/gpugr/gr/CpuMazeRouter.cpp cpp_to_py/gpugr/gr/CpuRouteTypes.cpp cpp_to_py/gpugr/gr/CpuRouteWorkerPool.cpp cpp_to_py/gpugr/unittest_cpu_maze_router.cpp -o /tmp/ecc-cpu-maze-rrr-phase-a/unittest_cpu_maze_router && /tmp/ecc-cpu-maze-rrr-phase-a/unittest_cpu_maze_router",
+      "exit_code": 0,
+      "name": "maze_router_unit"
+    },
+    {
+      "command": "XPLACE_ENABLE_CUDA=OFF XPLACE_INSTALL=OFF XPLACE_BUILD_DIR=/tmp/ecc-cpu-maze-rrr-phase-a/xplace-build JOBS=6 bash thirdparty/build_xplace_gpugr.sh",
+      "exit_code": 0,
+      "name": "cpu_only_native_build"
+    },
+    {
+      "command": "XPLACE_CPU_RUNTIME_ROOT=/tmp/ecc-cpu-maze-rrr-phase-a/runtime /home/zhaoxueyan/code/ipd-timing-opt-ecc/ecc/.venv/bin/python cpp_to_py/gpugr/unittest_cpu_pattern_route.py",
+      "exit_code": 0,
+      "name": "existing_cpu_pattern_fixture"
+    }
+  ],
+  "effective_parameters": {
+    "batch_workers_requested": [
+      1,
+      2
+    ],
+    "build_type": "Release",
+    "grid": {
+      "direction": 0,
+      "layers": 3,
+      "x": 5,
+      "y": 5
+    },
+    "routing_layers": [
+      0,
+      1,
+      2
+    ],
+    "torch": "2.11.0+cpu",
+    "torch_cuda": false,
+    "xplace_cuda": false
+  },
+  "exit_condition": {
+    "passed": [
+      "standalone serial search and deterministic batch candidate generation",
+      "wire/via raw-route coalescing and typed unreachable failure fixture",
+      "1/2/4/8-requested-worker candidate parity (subject to effective-worker clamping)"
+    ],
+    "remaining": [
+      "route-pack and RC-tree/readonly-STA validation",
+      "effective worker 4/8 qualification where memory permits",
+      "measured overlapping-search/concurrency evidence",
+      "production multi-pin connectivity contract beyond the synthetic access-group fixture"
+    ],
+    "result": "incomplete"
+  },
+  "observations": {
+    "batch_parity": "routeBatch results for requested workers 1 and 2 matched raw routes, wire deltas, via deltas, and failure reasons in deterministic net order",
+    "existing_flow": "cpu_pr and cpu_pr_mt fixture remained 3/3 passing",
+    "maze_unit": [
+      "direct preferred-direction wire and coalesced raw route",
+      "required via transition",
+      "same-cell multi-layer pin access via promotion",
+      "direction-transposed and rectangular wire encoding",
+      "blocked direct edge with a 3-layer detour",
+      "deterministic repeated run",
+      "typed unreachable result for a disconnected fixture"
+    ],
+    "native_target": "CpuMazeRouter.cpp compiled through the existing ggr CMake glob and linked into gpugr"
+  },
+  "phase": "B",
+  "phase_name": "standalone CPU maze search",
+  "schema_version": 1,
+  "source_commits": {
+    "dreamplace": "4742989317a4a8f8f22a80528c555306e19415f1",
+    "phase_a_dreamplace": "b05c17e2",
+    "phase_a_xplace": "b132020dd00fa165718a40b11bf2b5bad0750c7f",
+    "xplace": "0dc5ec1586bb6b4b743ea58fdcc39db7e02033fa"
+  },
+  "status": "incomplete"
+}

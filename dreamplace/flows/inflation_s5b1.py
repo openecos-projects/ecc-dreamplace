@@ -14,7 +14,9 @@ from pathlib import Path
 
 import torch
 
-from dreamplace.flows.timing_opt_config import TIMING_OPT_COEFFICIENT_FIELDS
+from dreamplace.flows.timing_opt_config import (
+    DEFAULT_TIMING_OPT_COEFFICIENTS, TIMING_OPT_COEFFICIENT_FIELDS,
+)
 from dreamplace.ops.buffer_insertion.buffering_config import build_buffering_config_from_params
 from dreamplace.ops.buffer_insertion.buffering_lane import BufferingOptimizationLane
 from dreamplace.ops.buffer_insertion.discrete_virtual_scheduler import (
@@ -98,7 +100,7 @@ class InflationS5B1:
 
     @contextmanager
     def _sizing_coefficients(self, model):
-        policy = getattr(self.params, "timing_opt_coefficients", {"mode": "inherit"})
+        policy = getattr(self.params, "timing_opt_coefficients", DEFAULT_TIMING_OPT_COEFFICIENTS)
         original = {
             name: float(getattr(model, field))
             for name, field in TIMING_OPT_COEFFICIENT_FIELDS.items()

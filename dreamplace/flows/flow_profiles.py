@@ -44,7 +44,7 @@ PLACEMENT_RECIPE_DEFAULTS = (
     ("num_bins_x", 256),
     ("num_bins_y", 256),
     ("auto_adjust_bins", True),
-    ("target_density", 0.8),
+    ("target_density", 0.4),
     ("density_weight", 8.0e-5),
     ("stop_overflow", 0.1),
     ("random_seed", 3000),

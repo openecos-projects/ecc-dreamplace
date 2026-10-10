@@ -73,7 +73,7 @@ def test_native_inflation_uses_initial_area_with_updated_density_map():
         total_movable_node_area=2., num_movable_nodes=2, num_filler_nodes=0,
         node_size_x=width.numpy(), node_size_y=height.numpy(),
     )
-    initialize_overflow_reference(db)
+    initialize_overflow_reference(db, mode="initial")
     overflow = ElectricOverflow(
         width, height, torch.tensor([2.5, 7.5], dtype=torch.float64),
         torch.tensor([.5, 1.5], dtype=torch.float64), density,

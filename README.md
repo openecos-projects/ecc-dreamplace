@@ -94,9 +94,9 @@ exceptions and clock groups fail explicitly. This placement model does not
 implement full latch borrowing, hold or CPPR.
 
 The sizing rounds inside placement timing-optimization windows have one
-coefficient policy parameter, `timing_opt_coefficients`. The default
-`{"mode": "inherit"}` uses the live placement WNS/TNS coefficients and slew/cap
-weights at each window. To keep those four values fixed during S rounds, use:
+coefficient policy parameter, `timing_opt_coefficients`. The default fixes
+WNS/TNS/cap/slew at 500/5/1/1 with outer timing weight 1. The following
+configuration matches the defaults:
 
 ```json
 "timing_opt_coefficients": {
@@ -115,8 +115,8 @@ The fixed preset may remain in the object when switching `mode` to `inherit`;
 inherit mode always uses the live placement values.
 
 `timing_coeff_growth_factor` controls the WNS/TNS coefficient multiplier at
-each GP density-weight update. The default `1.01` retains the existing schedule;
-`1.0` freezes the coefficients, and values between zero and one decay them.
+each GP density-weight update. The default `1.0` freezes the coefficients;
+`1.01` grows them, and values between zero and one decay them.
 The multiplier must be positive and finite. Slew/cap weights and the outer norm
 weight retain their own settings. Inherit-mode sizing windows read the resulting
 live coefficients; fixed-mode windows use their configured values. Standalone
@@ -130,19 +130,19 @@ not a multiplier on WNS/TNS coefficients. Standalone `size_only` sizing does
 not initialize coordinate gradient balancing. ECC exposes the ratio through
 `place.timing_grad_balance_target_ratio`; explicit values override the default.
 
-`timing_aggregation_mode` selects AAT/RAT propagation aggregation: `hard`
-(default) uses max/min, while `smooth` uses LSE with the positive temperature
+`timing_aggregation_mode` selects AAT/RAT propagation aggregation: `smooth`
+(default) uses LSE, while `hard` uses max/min. LSE uses the positive temperature
 `timing_aggregation_tau_ps` (default 2.0 ps). Smaller temperatures approach
 hard max/min. ECC exposes both through `place.*` parameters. Endpoint WNS
 still uses hard min, and TNS still sums negative slacks.
 
 `overflow_reference_mode` selects the area used to normalize overflow. The
-default `initial` freezes the GP-entry movable area. `ordinary` preserves the
-existing PR behavior: use the published native-plus-virtual movable area when
-available, otherwise use `placedb.total_movable_node_area`. Both exclude fillers.
+default `ordinary` preserves the existing PR behavior: use the published
+native-plus-virtual movable area when available, otherwise use
+`placedb.total_movable_node_area`. Both exclude fillers.
 `ordinary` follows the existing publication points; it does not recompute all
-area state on every iteration. The normalized overflow also feeds gamma and
-overflow-based scheduling.
+area state on every iteration. Select `initial` to freeze the GP-entry movable
+area. The normalized overflow also feeds gamma and overflow-based scheduling.
 
 ### ECC EGR-Based Routability Inflation
 

@@ -10,6 +10,10 @@ TIMING_OPT_COEFFICIENT_FIELDS = {
     "cap": "timing_cap_weight",
 }
 
+DEFAULT_TIMING_OPT_COEFFICIENTS = {
+    "mode": "fixed", "wns": 500.0, "tns": 5.0, "cap": 1.0, "slew": 1.0,
+}
+
 TIMING_OPT_ALIASES = (
     ("timing_opt_enabled", "inflation_s5b1_enabled"),
     ("timing_opt_buffering_enabled", "inflation_s5b1_buffering_enabled"),
@@ -114,7 +118,7 @@ def normalize_timing_opt_params(params):
         if hasattr(params, f"_{legacy}_explicit"):
             delattr(params, f"_{legacy}_explicit")
     params.timing_opt_coefficients = normalize_timing_opt_coefficients(
-        getattr(params, "timing_opt_coefficients", {"mode": "inherit"})
+        getattr(params, "timing_opt_coefficients", DEFAULT_TIMING_OPT_COEFFICIENTS)
     )
     return params
 

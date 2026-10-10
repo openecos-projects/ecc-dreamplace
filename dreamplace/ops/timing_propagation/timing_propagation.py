@@ -633,7 +633,7 @@ class TimingPropagation(nn.Module):
                  timing_propagation_parity_check=False,
                  timing_propagation_parity_atol_ps=1e-3,
                  timing_propagation_parity_rtol=1e-5,
-                 timing_aggregation_mode="hard",
+                 timing_aggregation_mode="smooth",
                  timing_aggregation_tau_ps=2.0,
                  production_fast_loop=False,
                  timing_lut_2d_native_op="auto",
@@ -738,7 +738,7 @@ class TimingPropagation(nn.Module):
         self.timing_propagation_parity_check = bool(timing_propagation_parity_check)
         self.timing_propagation_parity_atol_ps = float(timing_propagation_parity_atol_ps)
         self.timing_propagation_parity_rtol = float(timing_propagation_parity_rtol)
-        self.timing_aggregation_mode = str(timing_aggregation_mode or "hard")
+        self.timing_aggregation_mode = str(timing_aggregation_mode or "smooth")
         if self.timing_aggregation_mode not in ("hard", "smooth"):
             raise ValueError("timing_aggregation_mode must be one of: hard, smooth")
         self.timing_aggregation_tau_ps = float(timing_aggregation_tau_ps)

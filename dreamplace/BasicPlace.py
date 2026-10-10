@@ -1617,7 +1617,7 @@ class BasicPlace(nn.Module):
         initialize_overflow_reference(
             placedb,
             continuation_seed,
-            mode=getattr(params, "overflow_reference_mode", "initial"),
+            mode=getattr(params, "overflow_reference_mode", "ordinary"),
         )
         logging.info(
             "Overflow normalization mode=%s GP-entry area = %.6E",

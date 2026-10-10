@@ -253,6 +253,7 @@ def test_inherit_reads_current_coefficients_at_each_window(
     polynomial_window_inputs, timing_window_model,
 ):
     params, db, data = polynomial_window_inputs
+    params.timing_opt_coefficients = {"mode": "inherit"}
     owner = PolynomialWindow(params, db, data, None, None)
     model = timing_window_model
     with owner._sizing_coefficients(model) as first:

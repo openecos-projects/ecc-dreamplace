@@ -14,7 +14,9 @@ def configure_gr_sizing(params):
         raise ValueError("GR timing requires the native ECC backend and gpu=0")
     backend = normalize_gpugr_backend(getattr(params, "gpugr_backend", "auto"))
     if backend == "cuda":
-        raise ValueError("GR timing requires a CPU routing backend: cpu_pr, cpu_pr_mt, or cpu_pr_maze")
+        raise ValueError(
+            "GR timing requires a CPU routing backend: cpu_pr, cpu_pr_mt, or cpu_pr_maze"
+        )
     # This production lane is CPU-qualified even when the host has CUDA.
     params.gpugr_backend = "cpu_pr_mt" if backend == "auto" else backend
     rrr_iters = int(getattr(params, "gr_sizing_rrr_iters", 0))
@@ -67,10 +69,24 @@ def configure_gr_sizing(params):
     # The fixed S50 profile needs clock-to-Q size/VT gradients. "mixed"
     # evaluates those FF arcs with the exact current-master LUT instead.
     params.timing_surrogate_mode = "surrogate_only"
-    params.sizing_parameterization = "real_size"
-    params.real_size_execution_mode = "warmup_to_discrete"
-    params.real_size_warmup_steps = 1
-    params.continuous_size_dynamics_mode = "none"
+    continuous_steps = getattr(params, "diff_sizing_continuous_steps", 1)
+    if (
+        isinstance(continuous_steps, bool)
+        or not isinstance(continuous_steps, int)
+        or not 0 <= continuous_steps <= 1000
+    ):
+        raise ValueError("diff_sizing_continuous_steps must be an integer in [0, 1000]")
+    params.diff_sizing_continuous_steps = continuous_steps
+    if continuous_steps == 0:
+        params.sizing_parameterization = "logits"
+        params.real_size_execution_mode = "continuous_only"
+        params.real_size_warmup_steps = 0
+        params.continuous_size_dynamics_mode = "discrete_gradient_topk"
+    else:
+        params.sizing_parameterization = "real_size"
+        params.real_size_execution_mode = "warmup_to_discrete"
+        params.real_size_warmup_steps = continuous_steps
+        params.continuous_size_dynamics_mode = "none"
     params.discrete_gradient_topk_shared_budget = 1
     params.discrete_gradient_topk_shared_budget_percent = 1.0
     params.discrete_gradient_topk_up_percent = 1.0

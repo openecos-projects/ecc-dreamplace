@@ -23,6 +23,10 @@
         "description": "positive LSE temperature in ps for smooth AAT/RAT aggregation; smaller values approach hard max/min",
         "default": 2.0
     },
+    "timing_metric_scope": {
+        "description": "max timing checks used by placement WNS/TNS: setup_only or setup_plus_recovery",
+        "default": "setup_plus_recovery"
+    },
     "placement_sizing_mode": {
         "description": "placement optimization lane, place_only | size_only | joint",
         "default": "place_only"

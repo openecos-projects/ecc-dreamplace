@@ -74,6 +74,7 @@ TIMING_OBJECTIVE_DEFAULTS = (
     ("timing_tns_coeff", 0.0001),
     ("timing_slew_weight", 1.0),
     ("timing_cap_weight", 1.0),
+    ("timing_metric_scope", "setup_plus_recovery"),
     ("timing_placement_carrier", "direct_loss"),
     ("timing_gradient_net_weight_scale", 0.4),
     ("timing_gradient_net_weight_max", 2.0),

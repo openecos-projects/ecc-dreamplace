@@ -719,7 +719,22 @@ class PlaceDataCollection(object):
                 r_trans_dim = torch.from_numpy(placedb.r_trans_flat_luts_dim).to(device)
                 r_trans_luts = LUTS_INFO(r_trans_values, r_trans_trans, r_trans_cap, r_trans_dim)
 
-                self.arcs_info = ARCS_INFO(f_delay_luts, r_delay_luts, f_trans_luts, r_trans_luts)
+                f_check_values = torch.from_numpy(placedb.f_check_flat_luts_values).to(device)
+                f_check_trans = torch.from_numpy(placedb.f_check_flat_luts_trans_table).to(device)
+                f_check_cap = torch.from_numpy(placedb.f_check_flat_luts_cap_table).to(device)
+                f_check_dim = torch.from_numpy(placedb.f_check_flat_luts_dim).to(device)
+                f_check_luts = LUTS_INFO(f_check_values, f_check_trans, f_check_cap, f_check_dim)
+
+                r_check_values = torch.from_numpy(placedb.r_check_flat_luts_values).to(device)
+                r_check_trans = torch.from_numpy(placedb.r_check_flat_luts_trans_table).to(device)
+                r_check_cap = torch.from_numpy(placedb.r_check_flat_luts_cap_table).to(device)
+                r_check_dim = torch.from_numpy(placedb.r_check_flat_luts_dim).to(device)
+                r_check_luts = LUTS_INFO(r_check_values, r_check_trans, r_check_cap, r_check_dim)
+
+                self.arcs_info = ARCS_INFO(
+                    f_delay_luts, r_delay_luts, f_trans_luts, r_trans_luts,
+                    f_check_luts, r_check_luts,
+                )
 
                 self.main_id_2_cell_id_start = torch.from_numpy(
                     placedb.main_id_2_cell_id_start).to(device)

@@ -196,6 +196,35 @@ def test_recovery_endpoint_is_kept_in_separate_max_check_domain():
     assert torch.isinf(snapshot["recovery_endpoint_fall_slack"]).all()
 
 
+def test_timing_metric_scope_defaults_to_setup_plus_recovery_and_supports_setup_only():
+    timing = _shell()
+    timing.end_points = torch.tensor([1, 2, 3], dtype=torch.int32)
+    timing.endpoints_timing_check_arcs = torch.tensor(
+        [
+            [0, 1, 0, 0, 1, 0, 3, 0],  # recovery-only endpoint
+            [0, 2, 0, 0, 1, 0, 1, 0],  # setup endpoint
+        ],
+        dtype=torch.int32,
+    )
+    timing.endpoints_constraint_arcs = torch.tensor(
+        [[0, 2, 0, 0, 1, 0, 1, 0]], dtype=torch.int32
+    )
+
+    timing.timing_metric_scope = "setup_plus_recovery"
+    assert timing._timing_metric_endpoint_mask(timing.end_points.device).tolist() == [
+        True,
+        True,
+        True,
+    ]
+
+    timing.timing_metric_scope = "setup_only"
+    assert timing._timing_metric_endpoint_mask(timing.end_points.device).tolist() == [
+        False,
+        True,
+        True,
+    ]
+
+
 def test_pin2pin_extraction_combines_setup_and_worst_recovery_transition():
     setup_timing = _capture_setup_and_recovery_snapshot()
     setup_batch = setup_timing.extract_setup_critical_paths(global_k=0)

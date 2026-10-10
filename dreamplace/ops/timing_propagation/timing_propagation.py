@@ -31,6 +31,12 @@ from dreamplace.ops.timing_propagation.critical_endpoint_pruning import (
 from dreamplace.ops.timing_propagation.endpoint_qualification import (
     endpoint_metrics, qualify_check_candidates, qualify_pin_slacks,
 )
+from dreamplace.ops.timing_propagation.recovery_checks import (
+    TIMING_CHECK_CLASS_RECOVERY,
+    TIMING_CHECK_CLASS_SETUP,
+    calculate_recovery_rat as calculate_recovery_rat_checks,
+    timing_metric_endpoint_mask,
+)
 
 try:
     from dreamplace.ops.timing_propagation import lut_entry_2d_op
@@ -59,7 +65,6 @@ timing_propagation_cpp = _tp_cpp
 # Larger alpha -> closer to hard max; smaller alpha -> smoother
 SMOOTH_MAX_ALPHA = 20.0
 SMOOTH_MAX_ENABLED = True
-TIMING_CHECK_CLASS_RECOVERY = 3
 # Slew propagation updates a transition by sqrt(tran^2 + impulse).  Pins whose
 # transition is still exactly zero (no lib default, no driver yet) make the
 # radicand zero, and sqrt's backward pass is 0.5/sqrt(x) = inf, which poisons
@@ -517,6 +522,8 @@ class ARCS_INFO:
     r_delay_luts: LUTS_INFO = field(default_factory=LUTS_INFO)
     f_trans_luts: LUTS_INFO = field(default_factory=LUTS_INFO)
     r_trans_luts: LUTS_INFO = field(default_factory=LUTS_INFO)
+    f_check_luts: LUTS_INFO = field(default_factory=LUTS_INFO)
+    r_check_luts: LUTS_INFO = field(default_factory=LUTS_INFO)
 
 
 '''
@@ -635,11 +642,14 @@ class TimingPropagation(nn.Module):
                  timing_propagation_parity_rtol=1e-5,
                  timing_aggregation_mode="smooth",
                  timing_aggregation_tau_ps=2.0,
+                 timing_metric_scope="setup_plus_recovery",
                  production_fast_loop=False,
                  timing_lut_2d_native_op="auto",
                  endpoints_max_valid=None,
                  endpoints_constraint_max_valid=None,
                  endpoints_timing_check_max_valid=None,
+                 backend_endpoint_rSlew=None,
+                 backend_endpoint_fSlew=None,
                  ):
         super(TimingPropagation, self).__init__()
         write_crash_stage_marker(
@@ -679,6 +689,8 @@ class TimingPropagation(nn.Module):
         self.endpoints_max_valid = endpoints_max_valid
         self.endpoints_constraint_max_valid = endpoints_constraint_max_valid
         self.endpoints_timing_check_max_valid = endpoints_timing_check_max_valid
+        self.backend_endpoint_rSlew = backend_endpoint_rSlew
+        self.backend_endpoint_fSlew = backend_endpoint_fSlew
         self.endpoint_max_valid_by_pin = None
         if endpoints_max_valid is not None:
             self.endpoint_max_valid_by_pin = torch.zeros((self.num_pins, 2), dtype=torch.bool, device=end_points.device)
@@ -744,6 +756,13 @@ class TimingPropagation(nn.Module):
         self.timing_aggregation_tau_ps = float(timing_aggregation_tau_ps)
         if self.timing_aggregation_tau_ps <= 0.0:
             raise ValueError("timing_aggregation_tau_ps must be positive")
+        self.timing_metric_scope = str(
+            timing_metric_scope or "setup_plus_recovery"
+        ).strip().lower()
+        if self.timing_metric_scope not in ("setup_only", "setup_plus_recovery"):
+            raise ValueError(
+                "timing_metric_scope must be one of: setup_only, setup_plus_recovery"
+            )
         self.production_fast_loop = bool(production_fast_loop)
         self.timing_lut_2d_native_op = self._resolve_timing_lut_2d_native_op_mode(
             timing_lut_2d_native_op
@@ -757,6 +776,7 @@ class TimingPropagation(nn.Module):
         logging.info("TIMING_AGGREGATION_EFFECTIVE %s", json.dumps({
             "mode": self.timing_aggregation_mode,
             "tau_ps": self.timing_aggregation_tau_ps,
+            "metric_scope": self.timing_metric_scope,
             "device": str(self.device),
         }))
         write_crash_stage_marker(
@@ -1494,6 +1514,8 @@ class TimingPropagation(nn.Module):
             "endpoints_max_valid",
             "endpoints_constraint_max_valid",
             "endpoints_timing_check_max_valid",
+            "backend_endpoint_rSlew",
+            "backend_endpoint_fSlew",
             "endpoint_max_valid_by_pin",
             "flat_inst_arcs_by_level",
             "flat_inst_arcs_by_level_start",
@@ -1550,6 +1572,8 @@ class TimingPropagation(nn.Module):
                 "r_delay_luts",
                 "f_trans_luts",
                 "r_trans_luts",
+                "f_check_luts",
+                "r_check_luts",
             ):
                 self._move_luts_info_to_device(
                     getattr(self.arcs_info, attr_name, None),
@@ -1834,6 +1858,7 @@ class TimingPropagation(nn.Module):
                 "aat_rat_only": True,
                 "transition_aggregation_mode": "hard",
             },
+            "timing_metric_scope": self.timing_metric_scope,
             "cuda_available": bool(torch.cuda.is_available()),
             "device_contract": device_contract,
             "post_timing_boundary": post_timing_boundary
@@ -2599,6 +2624,9 @@ class TimingPropagation(nn.Module):
             dtype=self.end_points.dtype,
         )
         return torch.isin(self.end_points.to(device), setup_endpoint_pin_ids)
+
+    def _timing_metric_endpoint_mask(self, device):
+        return timing_metric_endpoint_mask(self, device)
 
     def build_critical_endpoint_pruning_artifact(self, iteration):
         if not self._critical_endpoint_pruning_enabled():
@@ -4878,6 +4906,16 @@ class TimingPropagation(nn.Module):
 
         return pin_rRAT, pin_fRAT
 
+    def calculate_recovery_rat(self, pin_rRAT, pin_fRAT, pin_rtran, pin_ftran):
+        return calculate_recovery_rat_checks(
+            self,
+            pin_rRAT,
+            pin_fRAT,
+            pin_rtran,
+            pin_ftran,
+            scatter_timing_min,
+        )
+
     def forward(
         self,
         pin_net_delays,
@@ -5213,6 +5251,9 @@ class TimingPropagation(nn.Module):
             logging.info("TimingPropagation stage: setup_rat")
         pin_rRAT, pin_fRAT = self.calculate_setup_rat(
             pin_rRAT, pin_fRAT, self.clk_pin_rtran, self.clk_pin_ftran, pin_rtran, pin_ftran)
+        pin_rRAT, pin_fRAT = self.calculate_recovery_rat(
+            pin_rRAT, pin_fRAT, pin_rtran, pin_ftran
+        )
         stage_started_at = record_stage("setup_rat", stage_started_at)
 
         if getattr(self, "log_stage_progress", True):
@@ -5265,13 +5306,19 @@ class TimingPropagation(nn.Module):
             slack = torch.min(rslack, fslack)
             endpoint_rslack = rslack[self.end_points]
             endpoint_fslack = fslack[self.end_points]
-        endpoint_rslack, endpoint_fslack = qualify_pin_slacks(self, self.end_points, endpoint_rslack, endpoint_fslack)
+        endpoint_mask = self._timing_metric_endpoint_mask(self.end_points.device)
+        metric_endpoint_ids = self.end_points[endpoint_mask]
+        endpoint_rslack = endpoint_rslack[endpoint_mask]
+        endpoint_fslack = endpoint_fslack[endpoint_mask]
+        endpoint_rslack, endpoint_fslack = qualify_pin_slacks(
+            self, metric_endpoint_ids, endpoint_rslack, endpoint_fslack
+        )
         endpoints_slack = torch.min(endpoint_rslack, endpoint_fslack)
         RAT_THRESHOLD = 8e7 
         # valid_mask = (pin_rRAT < RAT_THRESHOLD) & (pin_fRAT < RAT_THRESHOLD)
         # all_valid_slacks = slack[valid_mask]
         self.last_endpoint_slack_tensor = endpoints_slack
-        self.last_endpoint_ids_tensor = self.end_points.detach().clone()
+        self.last_endpoint_ids_tensor = metric_endpoint_ids.detach().clone()
         self.update_critical_endpoint_pruning_state(iteration=self.timing_forward_count)
         self._refresh_traversal_pruning_state(iteration=self.timing_forward_count)
         self.timing_forward_count += 1

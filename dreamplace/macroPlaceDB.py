@@ -444,6 +444,8 @@ class MacroPlaceDB(object):
         self.backend_endpoint_fAAT = None
         self.backend_endpoint_rRAT = None
         self.backend_endpoint_fRAT = None
+        self.backend_endpoint_rSlew = None
+        self.backend_endpoint_fSlew = None
         self.backend_endpoint_min_rAAT = None
         self.backend_endpoint_min_fAAT = None
         self.backend_endpoint_min_rRAT = None
@@ -509,6 +511,15 @@ class MacroPlaceDB(object):
         self.r_trans_flat_luts_trans_table = None
         self.r_trans_flat_luts_cap_table = None
         self.r_trans_flat_luts_dim = None
+
+        self.f_check_flat_luts_values = None
+        self.f_check_flat_luts_trans_table = None
+        self.f_check_flat_luts_cap_table = None
+        self.f_check_flat_luts_dim = None
+        self.r_check_flat_luts_values = None
+        self.r_check_flat_luts_trans_table = None
+        self.r_check_flat_luts_cap_table = None
+        self.r_check_flat_luts_dim = None
         self._topology_refresh_param_baseline = None
         self.handoff_session = None
         self.pending_continuation_seed = None
@@ -4732,6 +4743,10 @@ class MacroPlaceDB(object):
                 getattr(pydb, "backend_endpoint_rRAT", []), dtype=self.dtype)
             self.backend_endpoint_fRAT = np.array(
                 getattr(pydb, "backend_endpoint_fRAT", []), dtype=self.dtype)
+            self.backend_endpoint_rSlew = np.array(
+                getattr(pydb, "backend_endpoint_rSlew", []), dtype=self.dtype)
+            self.backend_endpoint_fSlew = np.array(
+                getattr(pydb, "backend_endpoint_fSlew", []), dtype=self.dtype)
             self.backend_endpoint_min_rAAT = np.array(
                 getattr(pydb, "backend_endpoint_min_rAAT", []), dtype=self.dtype)
             self.backend_endpoint_min_fAAT = np.array(
@@ -4909,6 +4924,24 @@ class MacroPlaceDB(object):
             pydb.r_trans_flat_luts_cap_table, dtype=self.dtype, pad_value=np.inf)
         self.r_trans_flat_luts_dim = np.array(
             pydb.r_trans_flat_luts_dim, dtype=np.int32)
+
+        self.f_check_flat_luts_values = self.pad_sequences(
+            pydb.f_check_flat_luts_values, dtype=self.dtype)
+        self.f_check_flat_luts_trans_table = self.pad_sequences(
+            pydb.f_check_flat_luts_trans_table, dtype=self.dtype, pad_value=np.inf)
+        self.f_check_flat_luts_cap_table = self.pad_sequences(
+            pydb.f_check_flat_luts_cap_table, dtype=self.dtype, pad_value=np.inf)
+        self.f_check_flat_luts_dim = np.array(
+            pydb.f_check_flat_luts_dim, dtype=np.int32)
+
+        self.r_check_flat_luts_values = self.pad_sequences(
+            pydb.r_check_flat_luts_values, dtype=self.dtype)
+        self.r_check_flat_luts_trans_table = self.pad_sequences(
+            pydb.r_check_flat_luts_trans_table, dtype=self.dtype, pad_value=np.inf)
+        self.r_check_flat_luts_cap_table = self.pad_sequences(
+            pydb.r_check_flat_luts_cap_table, dtype=self.dtype, pad_value=np.inf)
+        self.r_check_flat_luts_dim = np.array(
+            pydb.r_check_flat_luts_dim, dtype=np.int32)
 
         self.cell_id_2_libpin_id_start = np.array(
             pydb.cell_id_2_libpin_id_start, dtype=np.int32)

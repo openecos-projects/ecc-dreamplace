@@ -9868,6 +9868,16 @@ class PlaceObj(nn.Module):
             endpoints_max_valid=getattr(data_collections, "endpoints_max_valid", None),
             endpoints_constraint_max_valid=getattr(data_collections, "endpoints_constraint_max_valid", None),
             endpoints_timing_check_max_valid=getattr(data_collections, "endpoints_timing_check_max_valid", None),
+            backend_endpoint_rSlew=(
+                torch.from_numpy(placedb.backend_endpoint_rSlew).to(data_collections.end_points.device)
+                if getattr(placedb, "backend_endpoint_rSlew", None) is not None
+                and len(placedb.backend_endpoint_rSlew) > 0 else None
+            ),
+            backend_endpoint_fSlew=(
+                torch.from_numpy(placedb.backend_endpoint_fSlew).to(data_collections.end_points.device)
+                if getattr(placedb, "backend_endpoint_fSlew", None) is not None
+                and len(placedb.backend_endpoint_fSlew) > 0 else None
+            ),
             pin_pair_arc_keys=data_collections.pin_pair_arc_keys,
             flat_pin_pair_arc_start=data_collections.flat_pin_pair_arc_start,
             flat_pin_pair_arc_indices=data_collections.flat_pin_pair_arc_indices,
@@ -9938,6 +9948,9 @@ class PlaceObj(nn.Module):
             ),
             timing_aggregation_tau_ps=getattr(
                 params, "timing_aggregation_tau_ps", 2.0
+            ),
+            timing_metric_scope=getattr(
+                params, "timing_metric_scope", "setup_plus_recovery"
             ),
             production_fast_loop=getattr(params, "production_fast_loop", False),
             timing_lut_2d_native_op=getattr(

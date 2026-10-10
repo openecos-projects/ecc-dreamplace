@@ -24,7 +24,7 @@
         fileset = unions [
           ./thirdparty
           ./dreamplace
-          ./unittest
+          ./tests
           ./benchmarks
           ./test
           ./cmake

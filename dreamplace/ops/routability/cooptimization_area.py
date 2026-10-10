@@ -24,9 +24,9 @@ class AreaState:
         return self.movable <= self.capacity
 
 
-def initialize_overflow_reference(placedb, continuation_seed=None, mode="ordinary"):
+def initialize_overflow_reference(placedb, continuation_seed=None, mode="initial"):
     """Initialize overflow normalization, carrying initial-area state forward."""
-    mode = str(mode or "ordinary").strip().lower()
+    mode = str(mode or "initial").strip().lower()
     if mode not in {"initial", "ordinary"}:
         raise ValueError("overflow_reference_mode must be 'initial' or 'ordinary'")
     placedb.overflow_reference_mode = mode
@@ -38,7 +38,7 @@ def initialize_overflow_reference(placedb, continuation_seed=None, mode="ordinar
 
 def movable_area_for_metrics(data, placedb):
     """Freeze the GP-entry scale or preserve ordinary area publication behavior."""
-    if getattr(placedb, "overflow_reference_mode", "ordinary") == "initial":
+    if getattr(placedb, "overflow_reference_mode", "initial") == "initial":
         return getattr(placedb, "overflow_reference_area", placedb.total_movable_node_area)
     state = getattr(data, "cooptimization_area", None)
     return placedb.total_movable_node_area if state is None else state.movable

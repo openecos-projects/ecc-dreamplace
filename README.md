@@ -137,12 +137,12 @@ hard max/min. ECC exposes both through `place.*` parameters. Endpoint WNS
 still uses hard min, and TNS still sums negative slacks.
 
 `overflow_reference_mode` selects the area used to normalize overflow. The
-default `ordinary` preserves the existing PR behavior: use the published
-native-plus-virtual movable area when available, otherwise use
-`placedb.total_movable_node_area`. Both exclude fillers.
-`ordinary` follows the existing publication points; it does not recompute all
-area state on every iteration. Select `initial` to freeze the GP-entry movable
-area. The normalized overflow also feeds gamma and overflow-based scheduling.
+default `initial` freezes the GP-entry movable area. `ordinary` preserves the
+existing PR behavior: use the published native-plus-virtual movable area when
+available, otherwise use `placedb.total_movable_node_area`. Both exclude
+fillers. `ordinary` follows the existing publication points; it does not
+recompute all area state on every iteration. The normalized overflow also
+feeds gamma and overflow-based scheduling.
 
 ### ECC EGR-Based Routability Inflation
 

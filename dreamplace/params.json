@@ -165,7 +165,7 @@
     },
     "overflow_reference_mode": {
         "description": "overflow normalization mode, initial freezes GP-entry area; ordinary preserves existing area publication behavior, using published native-plus-virtual movable area when available, otherwise PlaceDB movable area; excludes fillers",
-        "default": "ordinary"
+        "default": "initial"
     },
     "aux_input": {
         "description": "input .aux file",

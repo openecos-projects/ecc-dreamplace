@@ -1,5 +1,5 @@
+import pytest
 import torch
-
 from dreamplace.ops.timing_propagation.timing_propagation import (
     smooth_max,
     smooth_scatter_max,
@@ -110,3 +110,39 @@ def test_pairwise_smooth_max_can_be_forced_to_hard_max_by_env(monkeypatch):
     actual = smooth_max(a, b, alpha=1.0)
 
     torch.testing.assert_close(actual, torch.maximum(a, b))
+
+
+@pytest.mark.parametrize("sign", [1.0, -1.0])
+def test_scatter_without_self_replaces_only_indexed_destinations(sign):
+    dest = torch.tensor([7.0, 99.0, 42.0], dtype=torch.float64, requires_grad=True)
+    src = torch.tensor([2.0, 3.0], dtype=torch.float64, requires_grad=True)
+    reduce = smooth_scatter_max_tau if sign == 1.0 else smooth_scatter_min_tau
+    actual = reduce(dest, torch.tensor([1, 1]), src, include_self=False, tau=2.0)
+    grouped = sign * 2.0 * torch.logsumexp(sign * src / 2.0, dim=0)
+    expected = torch.stack([dest[0], grouped, dest[2]])
+    torch.testing.assert_close(actual, expected)
+    expected_grads = torch.autograd.grad(expected.sum(), (dest, src), retain_graph=True)
+    actual_grads = torch.autograd.grad(actual.sum(), (dest, src))
+    for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+        torch.testing.assert_close(actual_grad, expected_grad)
+
+
+@pytest.mark.parametrize("sign", [1.0, -1.0])
+def test_scatter_distinguishes_unindexed_and_unreachable_groups(sign):
+    dest = torch.tensor([7.0, 99.0, 42.0], dtype=torch.float64)
+    src = torch.tensor([-sign * torch.inf], dtype=torch.float64)
+    reduce = smooth_scatter_max_tau if sign == 1.0 else smooth_scatter_min_tau
+    actual = reduce(dest, torch.tensor([1]), src, include_self=False, tau=2.0)
+    torch.testing.assert_close(
+        actual, torch.tensor([7.0, -sign * torch.inf, 42.0], dtype=dest.dtype)
+    )
+
+
+@pytest.mark.parametrize("reduce", [smooth_scatter_max_tau, smooth_scatter_min_tau])
+def test_scatter_with_empty_index_preserves_dest_and_gradient(reduce):
+    dest = torch.tensor([7.0, 42.0], dtype=torch.float64, requires_grad=True)
+    actual = reduce(
+        dest, torch.empty(0, dtype=torch.long), torch.empty(0, dtype=dest.dtype), include_self=False
+    )
+    torch.testing.assert_close(actual, dest)
+    torch.testing.assert_close(torch.autograd.grad(actual.sum(), dest)[0], torch.ones_like(dest))

@@ -3,6 +3,7 @@
 from dataclasses import asdict
 
 from .place_io import PlaceIOFunction
+from .timing_schema import validate_timing_schema
 
 
 class RefreshController:
@@ -30,8 +31,7 @@ class RefreshController:
             with_sta=True,
             **asdict(raw_db.export_options),
         )
-        if int(getattr(new_pydb, "timing_schema_version", 0) or 0) != 1:
-            raise RuntimeError("ECC timing refresh produced an invalid timing PyPlaceDB")
+        validate_timing_schema(new_pydb)
 
         raw_db.dm_inst = dm_inst
         raw_db.pydb = new_pydb

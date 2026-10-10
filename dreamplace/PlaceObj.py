@@ -196,6 +196,10 @@ _PYTHON_ENDPOINT_SLACK_FIELDNAMES = (
     "py_r_slack_ps",
     "py_f_slack_ps",
     "py_min_slack_ps",
+    "max_rise_constrained",
+    "max_fall_constrained",
+    "max_rise_reason",
+    "max_fall_reason",
     "python_arrival_sentinel",
     "python_required_sentinel",
     "python_nonfinite",
@@ -6382,18 +6386,23 @@ class PlaceObj(nn.Module):
             return "" if not np.isfinite(value) else value
 
         rows = []
-        for pin_id_value in end_points.tolist():
+        qualification = getattr(data_collections, "endpoints_max_valid", None)
+        reasons = getattr(data_collections, "endpoints_max_reason", None)
+        qualification = None if qualification is None else qualification.detach().cpu().numpy()
+        reasons = None if reasons is None else reasons.detach().cpu().numpy()
+        for endpoint_index, pin_id_value in enumerate(end_points.tolist()):
             pin_id = int(pin_id_value)
             pin_name = pin_names[pin_id] if 0 <= pin_id < len(pin_names) else ""
             py_r_aat_v = _array_value(py_r_aat, pin_id)
             py_f_aat_v = _array_value(py_f_aat, pin_id)
             py_r_rat_v = _array_value(py_r_rat, pin_id)
             py_f_rat_v = _array_value(py_f_rat, pin_id)
-            if py_r_aat_v == "" or py_r_rat_v == "":
+            rise_valid, fall_valid = (True, True) if qualification is None else qualification[endpoint_index]
+            if not rise_valid or py_r_aat_v == "" or py_r_rat_v == "":
                 py_r_slack = ""
             else:
                 py_r_slack = py_r_rat_v - py_r_aat_v
-            if py_f_aat_v == "" or py_f_rat_v == "":
+            if not fall_valid or py_f_aat_v == "" or py_f_rat_v == "":
                 py_f_slack = ""
             else:
                 py_f_slack = py_f_rat_v - py_f_aat_v
@@ -6406,7 +6415,7 @@ class PlaceObj(nn.Module):
             required_values = [value for value in (py_r_rat_v, py_f_rat_v) if value != ""]
             python_arrival_sentinel = any(value <= -sentinel_threshold for value in arrival_values)
             python_required_sentinel = any(value >= sentinel_threshold for value in required_values)
-            python_nonfinite = not finite_slacks
+            python_nonfinite = bool((rise_valid or fall_valid) and not finite_slacks)
             python_negative_slack = bool(py_min_slack != "" and py_min_slack < 0.0)
             rows.append(
                 {
@@ -6420,6 +6429,10 @@ class PlaceObj(nn.Module):
                     "py_r_slack_ps": py_r_slack,
                     "py_f_slack_ps": py_f_slack,
                     "py_min_slack_ps": py_min_slack,
+                    "max_rise_constrained": int(rise_valid),
+                    "max_fall_constrained": int(fall_valid),
+                    "max_rise_reason": "" if reasons is None else int(reasons[endpoint_index, 0]),
+                    "max_fall_reason": "" if reasons is None else int(reasons[endpoint_index, 1]),
                     "python_arrival_sentinel": int(python_arrival_sentinel),
                     "python_required_sentinel": int(python_required_sentinel),
                     "python_nonfinite": int(python_nonfinite),
@@ -9852,6 +9865,9 @@ class PlaceObj(nn.Module):
             data_collections.flat_pin_to_graph_reverse,
             data_collections.flat_pin_to_graph_start_reverse,
             endpoints_timing_check_arcs=getattr(data_collections, "endpoints_timing_check_arcs", None),
+            endpoints_max_valid=getattr(data_collections, "endpoints_max_valid", None),
+            endpoints_constraint_max_valid=getattr(data_collections, "endpoints_constraint_max_valid", None),
+            endpoints_timing_check_max_valid=getattr(data_collections, "endpoints_timing_check_max_valid", None),
             pin_pair_arc_keys=data_collections.pin_pair_arc_keys,
             flat_pin_pair_arc_start=data_collections.flat_pin_pair_arc_start,
             flat_pin_pair_arc_indices=data_collections.flat_pin_pair_arc_indices,

@@ -666,6 +666,11 @@ class PlaceDataCollection(object):
                 self.start_points = torch.from_numpy(
                     placedb.start_points).to(device)
                 self.end_points = torch.from_numpy(placedb.end_points).to(device)
+                from dreamplace.ops.placeio_ecc.timing_schema import QUALIFICATION_FIELDS
+                for name in QUALIFICATION_FIELDS:
+                    values = getattr(placedb, name, None)
+                    if values is not None:
+                        setattr(self, name, torch.from_numpy(values).to(device))
                 self.clock_pins = torch.from_numpy(placedb.clock_pins).to(device)
                 self.FF_ids = torch.from_numpy(placedb.FF_ids).to(device)
                 self.clk_pin_r_aat = torch.from_numpy(placedb.clk_pin_r_aat).to(device)

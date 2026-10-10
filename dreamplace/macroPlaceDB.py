@@ -4622,6 +4622,9 @@ class MacroPlaceDB(object):
         if params.with_sta:
             self.start_points = np.array(pydb.start_points, dtype=np.int32)
             self.end_points = np.array(pydb.end_points, dtype=np.int32)
+            from dreamplace.ops.placeio_ecc.timing_schema import read_qualification_arrays
+            for name, values in read_qualification_arrays(pydb).items():
+                setattr(self, name, values)
             self.clock_pins = np.array(pydb.clock_pins, dtype=np.int32)
             self.FF_ids = np.array(pydb.FF_ids, dtype=np.int32)
             self.clk_pin_r_aat = np.array(pydb.clk_pin_r_aat, dtype=self.dtype)

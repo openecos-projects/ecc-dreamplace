@@ -325,6 +325,7 @@ def test_timing_obj_passes_relaxed_buffer_dynamic_inputs_to_timing_op(monkeypatc
     fake_timing_op = FakeTimingOp()
     place_obj = PlaceObj.__new__(PlaceObj)
     nn.Module.__init__(place_obj)
+    place_obj.placedb = SimpleNamespace(gr_sizing=None)
     place_obj.params = SimpleNamespace(enable_relaxed_buffer_timing=True)
     place_obj.invoke_timing_count = 0
     place_obj.data_collections = SimpleNamespace(
@@ -507,6 +508,7 @@ def test_timing_obj_can_install_relaxed_buffer_dynamic_net_provider(monkeypatch)
     fake_timing_op = FakeTimingOp()
     place_obj = PlaceObj.__new__(PlaceObj)
     nn.Module.__init__(place_obj)
+    place_obj.placedb = SimpleNamespace(gr_sizing=None)
     place_obj.params = SimpleNamespace(
         enable_relaxed_buffer_timing=True,
         relaxed_buffer_timing_integration_mode="dynamic_net_provider",
@@ -825,6 +827,7 @@ def test_timing_obj_can_install_segment_count_dynamic_net_provider(monkeypatch):
     fake_timing_op = FakeTimingOp()
     place_obj = PlaceObj.__new__(PlaceObj)
     nn.Module.__init__(place_obj)
+    place_obj.placedb = SimpleNamespace(gr_sizing=None)
     place_obj.params = SimpleNamespace(
         enable_relaxed_buffer_timing=True,
         relaxed_buffer_timing_integration_mode="dynamic_net_provider",

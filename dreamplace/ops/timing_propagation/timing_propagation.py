@@ -12,6 +12,7 @@
 import csv
 import copy
 import sys
+import json
 import os
 import time
 import torch
@@ -26,6 +27,9 @@ from typing import Optional
 from dreamplace.ops.timing_propagation.crash_stage_marker import write_crash_stage_marker
 from dreamplace.ops.timing_propagation.critical_endpoint_pruning import (
     DynamicCriticalEndpointSelector,
+)
+from dreamplace.ops.timing_propagation.endpoint_qualification import (
+    endpoint_metrics, qualify_check_candidates, qualify_pin_slacks,
 )
 
 try:
@@ -269,7 +273,11 @@ def smooth_scatter_max_tau(
     exp_scaled = torch.exp(scaled)
     sum_exp = torch.zeros_like(max_per_index).scatter_add_(0, idx, exp_scaled)
     lse = safe_group_max + tau_value * torch.log(sum_exp.clamp(min=eps))
-    return torch.where(finite_group, lse, max_per_index)
+    reduced = torch.where(finite_group, lse, max_per_index)
+    if include_self:
+        return reduced
+    touched = torch.zeros_like(dest, dtype=torch.bool).scatter_(0, idx, True)
+    return torch.where(touched, reduced, dest)
 
 
 def smooth_scatter_min_tau(
@@ -626,9 +634,12 @@ class TimingPropagation(nn.Module):
                  timing_propagation_parity_atol_ps=1e-3,
                  timing_propagation_parity_rtol=1e-5,
                  timing_aggregation_mode="hard",
-                 timing_aggregation_tau_ps=1.0,
+                 timing_aggregation_tau_ps=2.0,
                  production_fast_loop=False,
                  timing_lut_2d_native_op="auto",
+                 endpoints_max_valid=None,
+                 endpoints_constraint_max_valid=None,
+                 endpoints_timing_check_max_valid=None,
                  ):
         super(TimingPropagation, self).__init__()
         write_crash_stage_marker(
@@ -665,6 +676,13 @@ class TimingPropagation(nn.Module):
         self.inst_flat_arcs = inst_flat_arcs
         self.endpoints_constraint_arcs = endpoints_constraint_arcs
         self.endpoints_timing_check_arcs = endpoints_timing_check_arcs
+        self.endpoints_max_valid = endpoints_max_valid
+        self.endpoints_constraint_max_valid = endpoints_constraint_max_valid
+        self.endpoints_timing_check_max_valid = endpoints_timing_check_max_valid
+        self.endpoint_max_valid_by_pin = None
+        if endpoints_max_valid is not None:
+            self.endpoint_max_valid_by_pin = torch.zeros((self.num_pins, 2), dtype=torch.bool, device=end_points.device)
+            self.endpoint_max_valid_by_pin[end_points.long()] = endpoints_max_valid
         self.flat_inst_arcs_by_level = flat_inst_arcs_by_level
         self.flat_inst_arcs_by_level_start = flat_inst_arcs_by_level_start
         self.arcs_info = arcs_info
@@ -736,6 +754,11 @@ class TimingPropagation(nn.Module):
         )
         self.resolved_timing_propagation_device = self._resolve_timing_device()
         self.device = self.resolved_timing_propagation_device
+        logging.info("TIMING_AGGREGATION_EFFECTIVE %s", json.dumps({
+            "mode": self.timing_aggregation_mode,
+            "tau_ps": self.timing_aggregation_tau_ps,
+            "device": str(self.device),
+        }))
         write_crash_stage_marker(
             "timing_propagation_materialize_device_tensors",
             "start",
@@ -892,6 +915,9 @@ class TimingPropagation(nn.Module):
             raise RuntimeError("critical path snapshot requires cell arc delay tensors")
 
         endpoint_ids = self.end_points.long()
+        qualification = getattr(self, "endpoints_max_valid", None)
+        if qualification is not None:
+            endpoint_ids = endpoint_ids[qualification.any(dim=1)]
         constraint_state = getattr(self, "_critical_path_constraint_state", None)
         if constraint_state is None:
             endpoint_test_pins = endpoint_ids
@@ -934,6 +960,10 @@ class TimingPropagation(nn.Module):
                 )
             )
 
+        endpoint_rise_slack, endpoint_fall_slack = qualify_pin_slacks(
+            self, endpoint_test_pins, endpoint_rise_slack, endpoint_fall_slack,
+        )
+
         # Recovery is a separate max-check production lane. It is never folded
         # into the setup-only fidelity state arrays above.
         recovery_endpoint_pins = torch.empty(
@@ -952,6 +982,9 @@ class TimingPropagation(nn.Module):
             recovery_mask = (
                 timing_check_arcs[:, 6] == TIMING_CHECK_CLASS_RECOVERY
             )
+            check_valid = getattr(self, "endpoints_timing_check_max_valid", None)
+            if check_valid is not None:
+                recovery_mask = recovery_mask & check_valid.any(dim=1)
             recovery_endpoint_pins = torch.unique(
                 timing_check_arcs[recovery_mask, 1].to(endpoint_ids.dtype)
             )
@@ -966,6 +999,9 @@ class TimingPropagation(nn.Module):
         recovery_fall_slack = (
             pin_fRAT[recovery_endpoint_pins]
             - pin_fAAT[recovery_endpoint_pins]
+        )
+        recovery_rise_slack, recovery_fall_slack = qualify_pin_slacks(
+            self, recovery_endpoint_pins, recovery_rise_slack, recovery_fall_slack,
         )
         if recovery_endpoint_pins.numel() > 0:
             rise_is_worse = recovery_rise_slack <= recovery_fall_slack
@@ -1455,6 +1491,10 @@ class TimingPropagation(nn.Module):
             "inst_flat_arcs",
             "endpoints_constraint_arcs",
             "endpoints_timing_check_arcs",
+            "endpoints_max_valid",
+            "endpoints_constraint_max_valid",
+            "endpoints_timing_check_max_valid",
+            "endpoint_max_valid_by_pin",
             "flat_inst_arcs_by_level",
             "flat_inst_arcs_by_level_start",
             "flat_pin_to_graph",
@@ -4108,7 +4148,7 @@ class TimingPropagation(nn.Module):
             pin_rAAT,
             arc_out_pins,
             r_aat_updates,
-            include_self=True,
+            include_self=False,
             mode=self.timing_aggregation_mode,
             tau_ps=self.timing_aggregation_tau_ps,
         )
@@ -4116,12 +4156,12 @@ class TimingPropagation(nn.Module):
             pin_fAAT,
             arc_out_pins,
             f_aat_updates,
-            include_self=True,
+            include_self=False,
             mode=self.timing_aggregation_mode,
             tau_ps=self.timing_aggregation_tau_ps,
         )
-        pin_rtran = torch.scatter_reduce(pin_rtran, 0, arc_out_pins.long(), r_trans, reduce="amax", include_self=True)
-        pin_ftran = torch.scatter_reduce(pin_ftran, 0, arc_out_pins.long(), f_trans, reduce="amax", include_self=True)
+        pin_rtran = torch.scatter_reduce(pin_rtran, 0, arc_out_pins.long(), r_trans, reduce="amax", include_self=False)
+        pin_ftran = torch.scatter_reduce(pin_ftran, 0, arc_out_pins.long(), f_trans, reduce="amax", include_self=False)
 
         net_in_pins = torch.unique(self.pin_net[arc_out_pins])
         return (net_in_pins, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran)
@@ -4798,16 +4838,22 @@ class TimingPropagation(nn.Module):
 
         rise_rat_candidates = pin_rRAT[arc_out_pins] - r_setup_time
         fall_rat_candidates = pin_fRAT[arc_out_pins] - f_setup_time
+        rise_rat_candidates, fall_rat_candidates = qualify_check_candidates(
+            rise_rat_candidates, fall_rat_candidates,
+            getattr(self, "endpoints_constraint_max_valid", None),
+        )
         if getattr(self, "_critical_path_snapshot_requested", False):
+            qualified_rows = getattr(self, "endpoints_constraint_max_valid", None)
+            qualified_rows = torch.ones_like(arc_out_pins, dtype=torch.bool) if qualified_rows is None else qualified_rows.any(dim=1)
             self._critical_path_constraint_state = {
-                "endpoint_pins": arc_out_pins.detach(),
+                "endpoint_pins": arc_out_pins[qualified_rows].detach(),
                 "test_ids": torch.arange(
                     arc_out_pins.numel(),
                     dtype=torch.int64,
                     device=arc_out_pins.device,
-                ),
-                "rise_rat": rise_rat_candidates.detach(),
-                "fall_rat": fall_rat_candidates.detach(),
+                )[qualified_rows],
+                "rise_rat": rise_rat_candidates[qualified_rows].detach(),
+                "fall_rat": fall_rat_candidates[qualified_rows].detach(),
             }
 
         # assert pin_rRAT[arc_out_pins].min(
@@ -5212,13 +5258,15 @@ class TimingPropagation(nn.Module):
         if skip_full_rat:
             endpoint_rslack = pin_rRAT[self.end_points] - pin_rAAT[self.end_points]
             endpoint_fslack = pin_fRAT[self.end_points] - pin_fAAT[self.end_points]
-            endpoints_slack = torch.min(endpoint_rslack, endpoint_fslack)
             rslack = fslack = slack = None
         else:
             rslack = pin_rRAT - pin_rAAT
             fslack = pin_fRAT - pin_fAAT
             slack = torch.min(rslack, fslack)
-            endpoints_slack = slack[self.end_points]
+            endpoint_rslack = rslack[self.end_points]
+            endpoint_fslack = fslack[self.end_points]
+        endpoint_rslack, endpoint_fslack = qualify_pin_slacks(self, self.end_points, endpoint_rslack, endpoint_fslack)
+        endpoints_slack = torch.min(endpoint_rslack, endpoint_fslack)
         RAT_THRESHOLD = 8e7 
         # valid_mask = (pin_rRAT < RAT_THRESHOLD) & (pin_fRAT < RAT_THRESHOLD)
         # all_valid_slacks = slack[valid_mask]
@@ -5228,11 +5276,8 @@ class TimingPropagation(nn.Module):
         self._refresh_traversal_pruning_state(iteration=self.timing_forward_count)
         self.timing_forward_count += 1
         # neg_slack = torch.clamp(all_valid_slacks, max=0)
-        neg_endpoint_slack = torch.clamp(endpoints_slack, max=0)
-        ws = torch.min(endpoints_slack)
         ts = 0
-        wns = torch.min(neg_endpoint_slack)
-        tns = torch.sum(neg_endpoint_slack)
+        wns, tns, ws = endpoint_metrics(endpoints_slack, pin_net_cap_rise.sum() * 0)
         stage_started_at = record_stage("slack_finalize", stage_started_at)
 
         critical_path_pin_net_delay_rise = None

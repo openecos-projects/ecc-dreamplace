@@ -85,6 +85,14 @@ It is intentionally marked as unsupported because the old OpenTimer integration
 has been removed. Use the ECC-integrated STA path controlled by `with_sta`,
 `differentiable_timing_obj`, and the net-weighting parameters above.
 
+ECC timing now requires the schema-v2 native snapshot from the matching
+`ecc-tools` revision. Rebuild/reinstall both packages together. The consumer
+validates per-edge qualification for endpoints and setup/recovery checks at
+initial import and after sizing/buffer refresh; unconstrained endpoints retain
+physical slew/cap coverage but do not contribute WNS/TNS. Unsupported max path
+exceptions and clock groups fail explicitly. This placement model does not
+implement full latch borrowing, hold or CPPR.
+
 The sizing rounds inside placement timing-optimization windows have one
 coefficient policy parameter, `timing_opt_coefficients`. The default
 `{"mode": "inherit"}` uses the live placement WNS/TNS coefficients and slew/cap

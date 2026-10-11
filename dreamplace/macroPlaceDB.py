@@ -37,11 +37,6 @@ from dreamplace.ops.placeio_ecc.export_options import (
 datatypes = {'float32': np.float32, 'float64': np.float64}
 
 MAX_MOVABLE_UTILIZATION = 0.99
-TARGET_MOVABLE_COVERAGE = 0.95
-
-
-def minimum_target_density_for_coverage(utilization):
-    return min(utilization / TARGET_MOVABLE_COVERAGE, 1.0)
 
 
 SUPPORTED_PLACEDB_REBUILD_MODES = ("topo", "all")
@@ -5295,16 +5290,15 @@ row height = %g, site width = %g
             # )
 
         utilization = self.total_movable_node_area / self.total_space_area
-        target_density = minimum_target_density_for_coverage(utilization)
+        target_density = min(utilization, 1.0)
         if target_density > params.target_density:
             logging.warn(
-                "target_density %g is smaller than %g required for %g movable coverage, ignored"
-                % (params.target_density, target_density, TARGET_MOVABLE_COVERAGE)
+                "target_density %g is smaller than utilization %g, ignored"
+                % (params.target_density, target_density)
             )
             params.target_density = target_density
-        utilization = self.total_movable_node_area / self.total_space_area
         content += "utilization = %g, target_density = %g\n" % (
-            self.total_movable_node_area / self.total_space_area,
+            utilization,
             params.target_density,
         )
 

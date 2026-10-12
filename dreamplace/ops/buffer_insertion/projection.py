@@ -2,6 +2,8 @@ from dataclasses import dataclass, field
 import math
 import time
 
+import torch
+
 
 @dataclass(frozen=True)
 class BufferingProjectionResult:
@@ -206,13 +208,19 @@ def project_candidate_buffer_state(
     from .optimization_state import (
         project_buffer_optimization_state,
         project_discrete_candidate_state,
+        project_typed_discrete_candidate_state,
     )
 
     is_discrete = hasattr(state, "activation_param")
+    is_typed_discrete = bool(getattr(state, "is_typed_candidate", False))
     if is_discrete:
         if top_k is not None or threshold is not None:
             raise ValueError("discrete candidate projection does not allow filtering")
-        virtual_state = project_discrete_candidate_state(state)
+        virtual_state = (
+            project_typed_discrete_candidate_state(state)
+            if is_typed_discrete
+            else project_discrete_candidate_state(state)
+        )
     else:
         virtual_state = project_buffer_optimization_state(
             state,
@@ -230,31 +238,72 @@ def project_candidate_buffer_state(
         int(action.get("candidate_id", action.get("action_id", -1)))
         for action in actions
     )
-    active_candidate_ids = (
-        tuple(
+    if is_typed_discrete:
+        active_rows = torch.nonzero(
+            state.activation_param.detach().sum(dim=1) == 1.0,
+            as_tuple=False,
+        ).flatten()
+        selected_types = state.selected_drive_type().detach()
+        active_action_keys = tuple(
             sorted(
-                int(value)
-                for value in state.candidate_ids[
-                    state.activation_param.detach() == 1.0
-                ].detach().cpu().tolist()
+                (
+                    int(state.candidate_ids[row].detach().cpu().item()),
+                    int(selected_types[row].detach().cpu().item()),
+                )
+                for row in active_rows.detach().cpu().tolist()
             )
         )
-        if is_discrete
-        else None
-    )
+        projected_action_keys = tuple(
+            sorted(
+                (
+                    int(action.get("candidate_id", action.get("action_id", -1))),
+                    int(action.get("drive_type_id", -1)),
+                )
+                for action in actions
+            )
+        )
+        active_candidate_ids = None
+    else:
+        active_candidate_ids = (
+            tuple(
+                sorted(
+                    int(value)
+                    for value in state.candidate_ids[
+                        state.activation_param.detach() == 1.0
+                    ].detach().cpu().tolist()
+                )
+            )
+            if is_discrete
+            else None
+        )
+        projected_action_keys = None
     validation = {"status": "ok"}
     if is_discrete:
-        validation.update(
-            {
-                "active_candidate_ids": active_candidate_ids,
-                "projected_candidate_ids": projected_candidate_ids,
-                "exact_active_candidate_match": (
-                    projected_candidate_ids == active_candidate_ids
-                ),
-            }
-        )
-        if projected_candidate_ids != active_candidate_ids:
-            raise ValueError("discrete candidate projection identity mismatch")
+        if is_typed_discrete:
+            validation.update(
+                {
+                    "active_action_keys": active_action_keys,
+                    "projected_action_keys": projected_action_keys,
+                    "exact_active_action_match": (
+                        projected_action_keys == active_action_keys
+                    ),
+                    "drive_type_count": int(state.drive_type_count),
+                }
+            )
+            if projected_action_keys != active_action_keys:
+                raise ValueError("typed candidate projection identity mismatch")
+        else:
+            validation.update(
+                {
+                    "active_candidate_ids": active_candidate_ids,
+                    "projected_candidate_ids": projected_candidate_ids,
+                    "exact_active_candidate_match": (
+                        projected_candidate_ids == active_candidate_ids
+                    ),
+                }
+            )
+            if projected_candidate_ids != active_candidate_ids:
+                raise ValueError("discrete candidate projection identity mismatch")
     return BufferingProjectionResult(
         mode=str(mode),
         selected_actions=actions,
@@ -263,7 +312,9 @@ def project_candidate_buffer_state(
         validation=validation,
         metadata={
             "projection_source": (
-                "discrete_candidate_state"
+                "typed_discrete_candidate_state"
+                if is_typed_discrete
+                else "discrete_candidate_state"
                 if is_discrete
                 else "candidate_buffer_optimization_state"
             ),

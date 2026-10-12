@@ -2,6 +2,11 @@ from types import SimpleNamespace
 
 import torch
 
+from dreamplace.ops.buffer_insertion.drive_type_table import (
+    EXPECTED_DRIVE_TYPE_MASTERS,
+    write_case_drive_type_table,
+)
+
 
 def _fixture():
     nets = [
@@ -212,6 +217,60 @@ def test_state_builder_candidate_discrete_strategy_builds_exact_zero_state():
     assert not hasattr(state, "bu_logits")
     assert state.activation_param.tolist() == [0.0]
     assert state.bsu_index().tolist() == [1.0]
+
+
+def test_state_builder_four_strength_table_builds_typed_one_hot_state(tmp_path):
+    from dreamplace.ops.buffer_insertion.buffering_state_builder import (
+        build_buffering_state_for_model,
+    )
+
+    nets, candidates, _ = _fixture()
+    buffer_library = {
+        index: {
+            "master_name": name,
+            "cell_id": 100 + index,
+            "input_cap": 0.4 + index,
+            "delay": 2.0 + index,
+            "output_slew": 0.3 + index,
+        }
+        for index, name in enumerate(EXPECTED_DRIVE_TYPE_MASTERS)
+    }
+    table_path = tmp_path / "drive_strength.json"
+    write_case_drive_type_table(table_path, buffer_library=buffer_library)
+    model = SimpleNamespace(
+        data_collections=SimpleNamespace(
+            buffering_nets=nets,
+            buffering_candidate_rows=candidates,
+            buffering_buffer_library=buffer_library,
+            pos=[torch.nn.Parameter(torch.tensor([0.0]))],
+        )
+    )
+    config = SimpleNamespace(
+        mode="candidate",
+        candidate_strategy="discrete_net_gradient",
+        candidate_drive_type_mode="four_strength_table",
+        candidate_drive_strength_table=str(table_path),
+    )
+
+    result = build_buffering_state_for_model(
+        model,
+        SimpleNamespace(
+            buffering_mode="candidate",
+            buffering_candidate_drive_type_mode="four_strength_table",
+            buffering_candidate_drive_strength_table=str(table_path),
+        ),
+        config,
+    )
+
+    assert result.status == "ok"
+    state = result.buffer_optimization_state
+    assert state.is_typed_candidate
+    assert state.activation_param.shape == (1, 4)
+    assert result.metadata["candidate_drive_type_count"] == 4
+    assert result.metadata["candidate_drive_type_table"]["sha256"]
+    assert result.buffer_relaxed_timing_payload["metadata"][
+        "candidate_drive_type_mode"
+    ] == "four_strength_table"
 
 
 def test_state_builder_resolves_auto_x4_to_legal_buffer_master():

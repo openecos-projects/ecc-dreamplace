@@ -128,6 +128,24 @@ def test_candidate_discrete_net_gradient_config_accepts_fixed_bsu_state():
     assert config.continuous_steps == 5
 
 
+def test_candidate_discrete_net_gradient_config_accepts_four_strength_table(tmp_path):
+    table_path = tmp_path / "drive_strength.json"
+    config = build_buffering_config_from_params(
+        SimpleNamespace(
+            buffering_mode="candidate",
+            buffering_candidate_strategy="discrete_net_gradient",
+            buffering_candidate_drive_type_mode="four_strength_table",
+            buffering_candidate_drive_strength_table=str(table_path),
+            buffering_continuous_steps=5,
+        ),
+        flow_kind="buffering",
+    )
+
+    assert config.candidate_drive_type_mode == "four_strength_table"
+    assert config.candidate_drive_strength_table == str(table_path)
+    assert config.fixed_bsu_index is None
+
+
 @pytest.mark.parametrize(
     "overrides, message",
     (

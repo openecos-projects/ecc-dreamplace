@@ -5316,7 +5316,7 @@ class PlaceObj(nn.Module):
             return None
         bind = getattr(provider, "bind_live_geometry", None)
         if not callable(bind):
-            raise RuntimeError("live buffer geometry requires a compatible provider")
+            return None
         rc_timing = self.op_collections.elmore_delay_op
         topology_epoch = int(
             getattr(

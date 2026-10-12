@@ -294,7 +294,8 @@ def _joint_quality_profile(params):
 
 
 def _mode_buffering_defaults(params):
-    if _buffering_mode(params) == "candidate":
+    if _buffering_mode(params) == "candidate"
+                and str(getattr(params, "buffering_candidate_strategy", "continuous") or "continuous") == "discrete_net_gradient":
         return CANDIDATE_BUFFERING_DEFAULTS
     return SEGMENT_BUFFERING_DEFAULTS
 
@@ -423,7 +424,8 @@ def _apply_discrete_net_gradient_defaults(params, flow_kind):
                 "buffering_mode=candidate"
             )
         strategy = segment_strategy
-    elif mode == "candidate":
+    elif mode == "candidate"
+                and str(getattr(params, "buffering_candidate_strategy", "continuous") or "continuous") == "discrete_net_gradient":
         if segment_strategy != "continuous":
             raise ValueError("discrete_net_gradient requires buffering_mode=segment")
         strategy = candidate_strategy
@@ -440,8 +442,21 @@ def _apply_discrete_net_gradient_defaults(params, flow_kind):
     )
     if flow_kind != FlowKind.BUFFERING and not canonical_joint and not inflation_placement:
         raise ValueError("discrete_net_gradient requires standalone flow_kind=buffering")
+    candidate_drive_type_mode = str(
+        getattr(params, "buffering_candidate_drive_type_mode", "single_fixed")
+        or "single_fixed"
+    ).strip()
+    candidate_drive_strength_table = str(
+        getattr(params, "buffering_candidate_drive_strength_table", "") or ""
+    ).strip()
+    if candidate_drive_type_mode not in {"single_fixed", "four_strength_table"}:
+        raise ValueError(
+            "unsupported buffering candidate drive type mode: "
+            f"{candidate_drive_type_mode}"
+        )
     if (
-        getattr(params, "buffering_fixed_bsu_index", None) is None
+        candidate_drive_type_mode == "single_fixed"
+        and getattr(params, "buffering_fixed_bsu_index", None) is None
         and not str(
             getattr(params, "buffering_fixed_buffer_master", "") or ""
         ).strip()
@@ -450,6 +465,17 @@ def _apply_discrete_net_gradient_defaults(params, flow_kind):
             "discrete_net_gradient requires buffering_fixed_buffer_master "
             "or buffering_fixed_bsu_index"
         )
+    if candidate_drive_type_mode == "four_strength_table":
+        if mode != "candidate":
+            raise ValueError("four_strength_table requires buffering_mode=candidate")
+        if not candidate_drive_strength_table:
+            raise ValueError(
+                "four_strength_table requires buffering_candidate_drive_strength_table"
+            )
+        if getattr(params, "buffering_fixed_bsu_index", None) is not None:
+            raise ValueError(
+                "four_strength_table cannot use buffering_fixed_bsu_index"
+            )
     if bool(getattr(params, "buffering_segment_capacity_enabled", False)):
         raise ValueError("discrete_net_gradient does not allow segment capacity control")
     if getattr(params, "buffering_max_selected_actions", None) is not None:
@@ -458,7 +484,8 @@ def _apply_discrete_net_gradient_defaults(params, flow_kind):
         getattr(params, "buffering_segment_projection_require_setup_criticality", False)
     ):
         raise ValueError("discrete_net_gradient does not allow criticality filtering")
-    if mode == "candidate":
+    if mode == "candidate"
+                and str(getattr(params, "buffering_candidate_strategy", "continuous") or "continuous") == "discrete_net_gradient":
         if bool(getattr(params, "_buffering_continuous_lr_explicit", False)):
             raise ValueError(
                 "candidate discrete_net_gradient does not use buffering_continuous_lr"
@@ -733,6 +760,15 @@ def apply_flow_defaults(params):
             candidate_buffering_mode = (
                 str(getattr(params, "buffering_mode", "segment") or "segment")
                 == "candidate"
+                and str(getattr(params, "buffering_candidate_strategy", "continuous") or "continuous") == "discrete_net_gradient"
+<<<<<<< HEAD
+=======
+                and str(
+                    getattr(params, "buffering_candidate_strategy", "continuous")
+                    or "continuous"
+                )
+                == "discrete_net_gradient"
+>>>>>>> 5cf15142 (feat(buffering): add typed discrete candidate drive flow)
             )
             if candidate_buffering_mode and name in {
                 "buffering_mode",

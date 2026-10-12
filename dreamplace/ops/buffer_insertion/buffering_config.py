@@ -44,6 +44,8 @@ class BufferingConfig:
     max_repeaters_per_segment: int
     fixed_buffer_master: str = ""
     fixed_bsu_index: int | None = None
+    candidate_drive_type_mode: str = "single_fixed"
+    candidate_drive_strength_table: str = ""
     discrete_count_proximal_lambda: float = 0.0
     route_b_selection_fraction: float = 0.001
     segment_integer_projection_interval: int = 0
@@ -156,6 +158,22 @@ def build_buffering_config_from_params(params, flow_kind=None):
     fixed_buffer_master = _as_nonempty_string(
         _get_param(params, "buffering_fixed_buffer_master", "")
     )
+    candidate_drive_type_mode = str(
+        _get_param(params, "buffering_candidate_drive_type_mode", "single_fixed")
+        or "single_fixed"
+    ).strip()
+    if candidate_drive_type_mode not in {"single_fixed", "four_strength_table"}:
+        raise ValueError(
+            "buffering_candidate_drive_type_mode must be single_fixed or "
+            "four_strength_table"
+        )
+    candidate_drive_strength_table = _as_nonempty_string(
+        _get_param(params, "buffering_candidate_drive_strength_table", "")
+    )
+    if candidate_drive_type_mode == "four_strength_table" and candidate_strategy != "discrete_net_gradient":
+        raise ValueError(
+            "four_strength_table requires buffering_candidate_strategy=discrete_net_gradient"
+        )
     discrete_count_proximal_lambda = _resolve_float(
         params,
         "buffering_discrete_count_proximal_lambda",
@@ -272,10 +290,22 @@ def build_buffering_config_from_params(params, flow_kind=None):
             raise ValueError(
                 "discrete_net_gradient requires standalone flow_kind=buffering"
             )
-        if fixed_bsu_index is None and not fixed_buffer_master:
+        if (
+            candidate_drive_type_mode == "single_fixed"
+            and fixed_bsu_index is None
+            and not fixed_buffer_master
+        ):
             raise ValueError(
                 "discrete_net_gradient requires buffering_fixed_buffer_master "
                 "or buffering_fixed_bsu_index"
+            )
+        if candidate_drive_type_mode == "four_strength_table" and mode != "candidate":
+            raise ValueError(
+                "four_strength_table requires buffering_mode=candidate"
+            )
+        if candidate_drive_type_mode == "four_strength_table" and not candidate_drive_strength_table:
+            raise ValueError(
+                "four_strength_table requires buffering_candidate_drive_strength_table"
             )
         if segment_capacity_enabled:
             raise ValueError(
@@ -335,6 +365,8 @@ def build_buffering_config_from_params(params, flow_kind=None):
         max_repeaters_per_segment=max_repeaters_per_segment,
         fixed_buffer_master=fixed_buffer_master,
         fixed_bsu_index=fixed_bsu_index,
+        candidate_drive_type_mode=candidate_drive_type_mode,
+        candidate_drive_strength_table=candidate_drive_strength_table,
         discrete_count_proximal_lambda=discrete_count_proximal_lambda,
         route_b_selection_fraction=route_b_selection_fraction,
         segment_integer_projection_interval=segment_integer_projection_interval,

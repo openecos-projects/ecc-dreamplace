@@ -16,9 +16,11 @@ from .buffer_selection import resolve_fixed_buffer_selection
 from .net_eligibility import clock_net_ids
 from .candidates import sample_buffer_candidates
 from .contract import BufferFamilyContract
+from .drive_type_table import load_drive_type_table
 from .optimization_state import (
     build_buffer_optimization_state,
     build_discrete_candidate_state,
+    build_typed_discrete_candidate_state,
 )
 from .segment_count_state import (
     build_packed_segment_count_state,
@@ -907,6 +909,15 @@ def _buffer_legal_table(buffer_library, legal_bsu):
             float(buffer_library[int(bsu)].get("legal_size_value", int(bsu)))
             for bsu in legal_bsu
         ],
+        "buffer_main_type_indices": [
+            int(
+                buffer_library[int(bsu)].get(
+                    "buffer_main_type_index",
+                    buffer_library[int(bsu)].get("main_type_index", -1),
+                )
+            )
+            for bsu in legal_bsu
+        ],
     }
 
 
@@ -1426,30 +1437,65 @@ def _build_candidate_buffering_state_for_model(
     candidate_strategy = str(
         getattr(config, "candidate_strategy", "continuous") or "continuous"
     )
+    candidate_drive_type_mode = str(
+        getattr(config, "candidate_drive_type_mode", "single_fixed")
+        or "single_fixed"
+    ).strip()
     per_size = _per_size_tensors(
         selected_candidates,
         buffer_library,
         dtype=dtype,
         shared_rows=True,
     )
-    fixed_bsu_index, fixed_buffer_master, fixed_buffer_source = (
-        resolve_fixed_buffer_selection(params, config, buffer_library)
-    )
+    drive_type_table = None
+    if candidate_drive_type_mode == "four_strength_table":
+        table_path = str(
+            getattr(config, "candidate_drive_strength_table", "")
+            or getattr(params, "buffering_candidate_drive_strength_table", "")
+            or ""
+        ).strip()
+        if not table_path:
+            raise ValueError(
+                "four_strength_table requires buffering_candidate_drive_strength_table"
+            )
+        drive_type_table = load_drive_type_table(
+            table_path,
+            buffer_library=buffer_library,
+        )
+        fixed_bsu_index, fixed_buffer_master, fixed_buffer_source = None, "", "typed_table"
+    else:
+        fixed_bsu_index, fixed_buffer_master, fixed_buffer_source = (
+            resolve_fixed_buffer_selection(params, config, buffer_library)
+        )
     state_device = _buffer_timing_device(model, data_collections)
     if candidate_strategy == "discrete_net_gradient":
-        if fixed_bsu_index is None:
-            raise ValueError(
-                "candidate discrete_net_gradient requires a fixed buffer"
+        if candidate_drive_type_mode == "four_strength_table":
+            state = build_typed_discrete_candidate_state(
+                selected_candidates,
+                buffer_main_type_index=buffer_main_type_index,
+                legal_buffer_count=len(per_size["legal_bsu"]),
+                drive_type_table=drive_type_table,
+                dtype=dtype,
+                device=state_device,
             )
-        state = build_discrete_candidate_state(
-            selected_candidates,
-            buffer_main_type_index=buffer_main_type_index,
-            legal_buffer_count=len(per_size["legal_bsu"]),
-            fixed_bsu_index=fixed_bsu_index,
-            dtype=dtype,
-            device=state_device,
+        else:
+            if fixed_bsu_index is None:
+                raise ValueError(
+                    "candidate discrete_net_gradient requires a fixed buffer"
+                )
+            state = build_discrete_candidate_state(
+                selected_candidates,
+                buffer_main_type_index=buffer_main_type_index,
+                legal_buffer_count=len(per_size["legal_bsu"]),
+                fixed_bsu_index=fixed_bsu_index,
+                dtype=dtype,
+                device=state_device,
+            )
+    elif candidate_drive_type_mode != "single_fixed":
+        raise ValueError(
+            "four_strength_table requires candidate discrete_net_gradient"
         )
-    else:
+    elif candidate_strategy == "continuous":
         state = build_buffer_optimization_state(
             selected_candidates,
             buffer_main_type_index=buffer_main_type_index,
@@ -1548,6 +1594,17 @@ def _build_candidate_buffering_state_for_model(
             "candidate_net_filter": candidate_net_filter,
             "legal_size_count": int(len(per_size["legal_bsu"])),
             "candidate_strategy": candidate_strategy,
+            "candidate_drive_type_mode": candidate_drive_type_mode,
+            "candidate_drive_type_count": (
+                int(drive_type_table.count)
+                if drive_type_table is not None
+                else 0
+            ),
+            "candidate_drive_type_table": (
+                drive_type_table.to_metadata()
+                if drive_type_table is not None
+                else None
+            ),
             "candidate_topology_builder_backend_requested": "native_auto",
             "candidate_topology_builder_backend_used": (
                 "native_cpp" if native_packing is not None else "python"
@@ -1556,11 +1613,13 @@ def _build_candidate_buffering_state_for_model(
             "fixed_bsu_index": (
                 fixed_bsu_index
                 if candidate_strategy == "discrete_net_gradient"
+                and candidate_drive_type_mode == "single_fixed"
                 else None
             ),
             "fixed_buffer_master": (
                 fixed_buffer_master
                 if candidate_strategy == "discrete_net_gradient"
+                and candidate_drive_type_mode == "single_fixed"
                 else ""
             ),
             "fixed_buffer_selection_source": (

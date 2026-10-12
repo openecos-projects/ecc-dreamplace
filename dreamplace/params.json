@@ -55,6 +55,14 @@
         "description": "optional fixed buffer index resolved from the legal buffer table",
         "default": null
     },
+    "buffering_candidate_drive_type_mode": {
+        "description": "candidate discrete buffer type selection, single_fixed | four_strength_table",
+        "default": "single_fixed"
+    },
+    "buffering_candidate_drive_strength_table": {
+        "description": "external four-buffer drive-strength table used by typed discrete candidate buffering",
+        "default": ""
+    },
     "buffering_max_repeaters_per_segment": {
         "description": "maximum accepted repeaters on one segment",
         "default": 3

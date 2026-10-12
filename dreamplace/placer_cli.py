@@ -100,6 +100,11 @@ def _add_buffering_public_args(parser):
         ),
     )
     parser.add_argument("--buffering-fixed-bsu-index", type=_nonnegative_int)
+    parser.add_argument(
+        "--buffering-candidate-drive-type-mode",
+        choices=("single_fixed", "four_strength_table"),
+    )
+    parser.add_argument("--buffering-candidate-drive-strength-table")
     parser.add_argument("--buffering-discrete-count-proximal-lambda", type=float)
     parser.add_argument(
         "--buffering-route-b-selection-fraction",
@@ -409,6 +414,8 @@ def _load_params_json(path):
             "buffering_mode",
             "buffering_fixed_buffer_master",
             "buffering_fixed_bsu_index",
+            "buffering_candidate_drive_type_mode",
+            "buffering_candidate_drive_strength_table",
             "continuous_size_dynamics_mode",
             "sizing_parameterization",
             "real_size_learning_rate",
@@ -679,6 +686,8 @@ _BUFFERING_STRING_OVERRIDES = (
     ("buffering_mode", str),
     ("buffering_output_dir", str),
     ("buffering_fixed_buffer_master", str),
+    ("buffering_candidate_drive_type_mode", str),
+    ("buffering_candidate_drive_strength_table", str),
     ("buffering_segment_strategy", str),
     ("buffering_candidate_strategy", str),
     ("buffering_segment_driver_cap_mode", str),

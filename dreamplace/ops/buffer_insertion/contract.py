@@ -1,5 +1,5 @@
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -77,6 +77,7 @@ class BufferFamilyLegalTable:
     legal_cell_ids: list
     legal_master_names: list
     legal_size_values: list
+    legal_main_type_indices: list = field(default_factory=list)
 
     @classmethod
     def from_metadata(cls, metadata, main_id, preferred_master_name=""):
@@ -121,14 +122,24 @@ class BufferFamilyLegalTable:
             legal_cell_ids=cell_ids,
             legal_master_names=legal_names,
             legal_size_values=sizes,
+            legal_main_type_indices=[int(main_id)] * len(cell_ids),
         ), []
 
 
 class BufferFamilyContract:
-    def __init__(self, metadata, backend="unknown", preferred_master_name=""):
+    def __init__(
+        self,
+        metadata,
+        backend="unknown",
+        preferred_master_name="",
+        candidate_drive_type_mode="single_fixed",
+    ):
         self.metadata = metadata
         self.backend = backend
         self.preferred_master_name = str(preferred_master_name or "").strip()
+        self.candidate_drive_type_mode = str(
+            candidate_drive_type_mode or "single_fixed"
+        ).strip()
 
     @classmethod
     def from_buffering_params(cls, metadata, params, backend="unknown"):
@@ -140,7 +151,72 @@ class BufferFamilyContract:
                 "buffering_fixed_buffer_master",
                 "",
             ),
+            candidate_drive_type_mode=getattr(
+                params,
+                "buffering_candidate_drive_type_mode",
+                "single_fixed",
+            ),
         )
+
+    def _typed_legal_table(self):
+        """Build a four-master table even when OpenSTA exposes separate families.
+
+        The legacy contract intentionally requires one equivalent-cell family.
+        Typed candidate buffering is different: each table row names its own
+        legal cell and the timing provider uses that cell's LUT directly.  The
+        table therefore carries the native main-family id per row while keeping
+        the first family id as the compatibility value used by candidate
+        geometry records.
+        """
+        from .drive_type_table import EXPECTED_DRIVE_TYPE_MASTERS
+
+        names = _as_list(getattr(self.metadata, "flat_libcell_names", []))
+        rows = _as_rows(getattr(self.metadata, "flat_libcell_info", []))
+        candidate_main_ids = {
+            int(value)
+            for value in _as_list(
+                getattr(self.metadata, "buffer_main_type_candidate_indices", [])
+            )
+        }
+        by_name = {
+            str(name): (cell_id, rows[cell_id])
+            for cell_id, name in enumerate(names)
+            if cell_id < len(rows)
+        }
+        cell_ids = []
+        master_names = []
+        size_values = []
+        main_ids = []
+        missing = []
+        for master_name in EXPECTED_DRIVE_TYPE_MASTERS:
+            match = by_name.get(master_name)
+            if match is None:
+                missing.append(master_name)
+                continue
+            cell_id, row = match
+            if len(row) < 3:
+                missing.append(master_name + ":missing_cell_info")
+                continue
+            main_id = int(round(float(row[1])))
+            if candidate_main_ids and main_id not in candidate_main_ids:
+                missing.append(master_name + ":not_buffer_family")
+                continue
+            cell_ids.append(int(cell_id))
+            master_names.append(str(master_name))
+            size_values.append(float(row[2]))
+            main_ids.append(main_id)
+        if missing:
+            return None, missing
+        if not cell_ids:
+            return None, ["empty_typed_buffer_table"]
+        return BufferFamilyLegalTable(
+            main_id=int(main_ids[0]),
+            vt=0,
+            legal_cell_ids=cell_ids,
+            legal_master_names=master_names,
+            legal_size_values=size_values,
+            legal_main_type_indices=main_ids,
+        ), []
 
     def _basic_reasons(self, legal_table):
         reasons = []
@@ -209,6 +285,39 @@ class BufferFamilyContract:
         return sorted(set(reasons))
 
     def build_artifact(self):
+        typed_table = self.candidate_drive_type_mode == "four_strength_table"
+        if typed_table:
+            legal_table, typed_reasons = self._typed_legal_table()
+            unsupported_reasons = list(typed_reasons)
+            if legal_table is not None:
+                unsupported_reasons.extend(self._basic_reasons(legal_table))
+            status = (
+                "ok" if not unsupported_reasons and legal_table is not None else "unsupported"
+            )
+            legal_cell_ids = legal_table.legal_cell_ids if legal_table is not None else []
+            return {
+                "artifact": "buffering_buffer_family_contract",
+                "artifact_version": 1,
+                "status": status,
+                "backend": self.backend,
+                "buffer_main_type_index": (
+                    legal_table.main_id if legal_table is not None else -1
+                ),
+                "buffer_main_type_indices": (
+                    legal_table.legal_main_type_indices if legal_table is not None else []
+                ),
+                "buffer_main_type_status": "typed_table",
+                "buffer_vt": None,
+                "bsu_semantics": "typed_table_index",
+                "legal_cell_ids": legal_cell_ids,
+                "legal_master_names": (
+                    legal_table.legal_master_names if legal_table is not None else []
+                ),
+                "legal_size_values": (
+                    legal_table.legal_size_values if legal_table is not None else []
+                ),
+                "unsupported_reasons": sorted(set(reason for reason in unsupported_reasons if reason)),
+            }
         main_id = int(getattr(self.metadata, "buffer_main_type_index", -1))
         export_status = str(getattr(self.metadata, "buffer_main_type_status", "unknown"))
         if main_id < 0 and self.preferred_master_name:
@@ -250,6 +359,9 @@ class BufferFamilyContract:
             "legal_cell_ids": legal_cell_ids,
             "legal_master_names": legal_table.legal_master_names if legal_table is not None else [],
             "legal_size_values": legal_table.legal_size_values if legal_table is not None else [],
+            "buffer_main_type_indices": (
+                legal_table.legal_main_type_indices if legal_table is not None else []
+            ),
             "bsu_to_cell_id": {
                 str(index): int(cell_id)
                 for index, cell_id in enumerate(legal_cell_ids)

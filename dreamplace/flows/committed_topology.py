@@ -69,6 +69,11 @@ def finalize_discrete_window(
         accepted = int(commit.get("accepted_action_count", 0))
         if accepted != len(request.actions) or commit.get("status") not in {"accepted", "skipped"}:
             raise RuntimeError(f"S5B1 final buffer transaction failed: {commit}")
+        # The virtual entries have now been materialized in the native design.
+        # Preserve the pre-commit count for diagnostics while reporting the
+        # terminal state consumed by regression checks.
+        summary["virtual_count_before_commit"] = int(summary.get("virtual_count", 0) or 0)
+        summary["virtual_count"] = 0
 
         # This is the terminal physical stage. Filler is no longer needed and
         # must not be regenerated from the pre-window target density on rebuild.

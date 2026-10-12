@@ -166,7 +166,13 @@ class InflationS5B1:
         if state is None:
             return 0.0
         width, height = model._segment_virtual_buffer_size()
-        return float(state.z_param.detach().sum()) * width * height
+        if hasattr(state, "z_param"):
+            count = state.z_param.detach().sum()
+        elif hasattr(state, "activation_param"):
+            count = state.activation_param.detach().sum()
+        else:
+            return 0.0
+        return float(count) * width * height
 
     def _fits(self, model, capacity):
         return capture_area(
@@ -175,6 +181,8 @@ class InflationS5B1:
 
     @staticmethod
     def _counts(state):
+        if not hasattr(state, "z_param"):
+            return {}
         rows = state.positive_segment_indices()
         return {
             (int(net), int(parent), int(child)): float(count)
@@ -188,7 +196,7 @@ class InflationS5B1:
 
     @staticmethod
     def _transfer_counts(state, counts):
-        if not counts:
+        if not counts or not hasattr(state, "z_param"):
             return
         candidate_keys = torch.stack(
             (state.segment_net_id, state.parent_node_id, state.child_node_id), dim=1,
@@ -225,8 +233,9 @@ class InflationS5B1:
         if state is None:
             raise RuntimeError(f"S5B1 state construction failed: {lane.summarize()}")
         self._transfer_counts(state, counts)
-        state.z_param.requires_grad_(requires_grad=False)
-        state.bsu_index_param.requires_grad_(requires_grad=False)
+        if hasattr(state, "z_param"):
+            state.z_param.requires_grad_(requires_grad=False)
+            state.bsu_index_param.requires_grad_(requires_grad=False)
         lane.attach_state(self.data)
         self.lane = lane
         model._virtual_cell_density_view = None
@@ -280,6 +289,34 @@ class InflationS5B1:
 
     def _buffering(self, model, pos, capacity):
         state = self.lane._current_state()
+        if hasattr(state, "activation_param"):
+            from dreamplace.ops.buffer_insertion.discrete_candidate_buffer_runner import (
+                run_discrete_candidate_buffer_scheduler,
+            )
+
+            try:
+                loop_summary = run_discrete_candidate_buffer_scheduler(
+                    lane=self.lane,
+                    model=model,
+                    rounds=int(getattr(self.lane.config, "continuous_steps", 0)),
+                )
+            finally:
+                # Candidate timing is a window-local probe.  Leaving its
+                # large expanded provider enabled during ordinary GP makes
+                # every subsequent placement step pay for all candidate rows.
+                self.params.enable_relaxed_buffer_timing = False
+            count = int(state.activation_param.detach().sum().cpu().item())
+            terminal = dict(loop_summary.terminal_metrics or {})
+            return {
+                "initial_loss": float(terminal.get("loss", 0.0)),
+                "final_loss": float(terminal.get("loss", 0.0)),
+                "scheduled": int(loop_summary.iterations),
+                "accepted": count,
+                "gradient_norm": None,
+                "cumulative_count": count,
+                "trace_path": loop_summary.trace_path,
+                "strategy": "discrete_net_gradient",
+            }
         before = state.z_param.detach().clone()
         state.z_param.requires_grad_(requires_grad=True)
         try:
@@ -319,6 +356,8 @@ class InflationS5B1:
     def _retain_buffered_nets(self, model):
         """Ordinary GP carries only buffered trees; B gets fresh full candidates."""
         state = self.lane._current_state()
+        if not hasattr(state, "z_param"):
+            return
         counts = self._counts(state)
         nets_with_buffers = {key[0] for key in counts}
         if not nets_with_buffers:
@@ -418,13 +457,26 @@ class InflationS5B1:
             raise RuntimeError("S5B1 final materialization was already prepared")
         if not bool(torch.isfinite(pos).all()):
             raise RuntimeError("S5B1 final placement coordinates are non-finite")
-        cumulative_count = 0 if self.lane is None else int(self.lane._current_state().z_param.sum())
+        state = None if self.lane is None else self.lane._current_state()
+        candidate_mode = state is not None and hasattr(state, "activation_param")
+        cumulative_count = 0
+        if state is not None:
+            count_tensor = (
+                state.activation_param
+                if candidate_mode
+                else state.z_param
+            )
+            cumulative_count = int(count_tensor.detach().sum().cpu().item())
         if self.lane is None:
             self.lane = BufferingOptimizationLane(
                 build_buffering_config_from_params(self.params, flow_kind="placement"),
                 placedb=self.placedb,
             )
             projection = None
+        elif candidate_mode:
+            projection = self.lane.last_projection_result
+            if projection is None:
+                projection = self.lane.project(iteration=iteration, final=True)
         else:
             # Rebuild the ordinary nets and repack current retained references.
             # Frozen buffered nets retain their identity; no new S or B occurs.
@@ -457,17 +509,27 @@ class InflationS5B1:
             commit_enabled=True, refresh_mode="full_rebuild", rebuild_mode="full_rebuild",
         )
         model._timing_geometry_cache = None
-        with self._electrical_window(), torch.no_grad():
-            outputs = model.timing_obj(pos)
-            loss = model._timing_loss(*outputs)
-            if not bool(torch.isfinite(loss)):
-                raise RuntimeError("S5B1 final virtual timing loss is non-finite")
-            gp_timing = dict(zip(("wns", "tns", "ws", "ts"),
-                                 (float(value) for value in outputs), strict=True))
-            timing = self.ops.timing_propagation_op
-            gp_timing["slew_violation_ns"] = timing.last_total_slew_violation
-            gp_timing["cap_violation_ff"] = timing.last_total_cap_violation
-            gp_timing["objective_terms"] = dict(model.last_timing_objective_terms)
+        candidate_provider_was_enabled = bool(
+            getattr(self.params, "enable_relaxed_buffer_timing", False)
+        )
+        if candidate_mode:
+            # The regular GP loop keeps the expanded candidate provider off,
+            # but terminal reporting must include any accepted typed actions.
+            self.params.enable_relaxed_buffer_timing = True
+        try:
+            with self._electrical_window(), torch.no_grad():
+                outputs = model.timing_obj(pos)
+                loss = model._timing_loss(*outputs)
+                if not bool(torch.isfinite(loss)):
+                    raise RuntimeError("S5B1 final virtual timing loss is non-finite")
+                gp_timing = dict(zip(("wns", "tns", "ws", "ts"),
+                                     (float(value) for value in outputs), strict=True))
+                timing = self.ops.timing_propagation_op
+                gp_timing["slew_violation_ns"] = timing.last_total_slew_violation
+                gp_timing["cap_violation_ff"] = timing.last_total_cap_violation
+                gp_timing["objective_terms"] = dict(model.last_timing_objective_terms)
+        finally:
+            self.params.enable_relaxed_buffer_timing = candidate_provider_was_enabled
         model._timing_geometry_cache = None
         self.terminal_summary = {
             "virtual_count": cumulative_count,

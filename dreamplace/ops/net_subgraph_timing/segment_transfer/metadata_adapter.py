@@ -1,7 +1,8 @@
 import torch
 
 from dreamplace.ops.buffer_insertion.buffer_library import (
-    lookup_lut_value_with_status_mode,
+    _axis_bracket_with_status,
+    _finite_numeric_list,
 )
 
 from .schema import BufferDeviceLut
@@ -67,11 +68,8 @@ def _output_limit(metadata, cell_id, field):
     return value if value > 0.0 and torch.isfinite(torch.tensor(value)) else None
 
 
-def _arc_lut(metadata, prefix, table_kind, arc_id):
-    values = _as_list(getattr(metadata, f"{prefix}_{table_kind}_flat_luts_values", []))
-    trans = _as_list(getattr(metadata, f"{prefix}_{table_kind}_flat_luts_trans_table", []))
-    cap = _as_list(getattr(metadata, f"{prefix}_{table_kind}_flat_luts_cap_table", []))
-    dims = _as_list(getattr(metadata, f"{prefix}_{table_kind}_flat_luts_dim", []))
+def _arc_lut(lut_tables, prefix, table_kind, arc_id):
+    values, trans, cap, dims = lut_tables[prefix, table_kind]
     arc_id = int(arc_id)
     if arc_id < 0 or arc_id >= len(values):
         raise ValueError(f"missing {prefix} {table_kind} LUT for arc_id={arc_id}")
@@ -93,14 +91,14 @@ def _same_axis(left, right):
     return len(left) == len(right) and all(abs(float(a) - float(b)) <= 1e-12 for a, b in zip(left, right))
 
 
-def _cell_average_lut(metadata, cell_id, table_kind, timing_sense=None):
+def _cell_average_lut(metadata, cell_id, table_kind, lut_tables, timing_sense=None):
     arc_ids = _arc_ids_for_cell(metadata, cell_id)
     axis_slew = None
     axis_cap = None
     tables = []
     for arc_id in arc_ids:
         for prefix in ({"rise": ("r",), "fall": ("f",)}.get(timing_sense, ("f", "r"))):
-            slew_axis, cap_axis, values, dim = _arc_lut(metadata, prefix, table_kind, arc_id)
+            slew_axis, cap_axis, values, dim = _arc_lut(lut_tables, prefix, table_kind, arc_id)
             if axis_slew is None:
                 axis_slew = slew_axis
                 axis_cap = cap_axis
@@ -114,18 +112,18 @@ def _cell_average_lut(metadata, cell_id, table_kind, timing_sense=None):
     return axis_slew, axis_cap, torch.stack(tables).mean(dim=0)
 
 
-def _cell_arc_luts(metadata, cell_id):
+def _cell_arc_luts(metadata, cell_id, lut_tables):
     rows = []
     for arc_id in _arc_ids_for_cell(metadata, cell_id):
         for prefix in ("f", "r"):
             delay_slew_axis, delay_cap_axis, delay_values, delay_dim = _arc_lut(
-                metadata,
+                lut_tables,
                 prefix,
                 "delay",
                 arc_id,
             )
             trans_slew_axis, trans_cap_axis, trans_values, trans_dim = _arc_lut(
-                metadata,
+                lut_tables,
                 prefix,
                 "trans",
                 arc_id,
@@ -171,28 +169,31 @@ def _merge_axis(axes):
 
 
 def _resample_lut(lut, source_slew_axis, source_cap_axis, target_slew_axis, target_cap_axis):
-    flat = [float(value) for value in lut.reshape(-1).tolist()]
-    dim = [len(source_slew_axis), len(source_cap_axis)]
+    flat = _finite_numeric_list(lut)
+    cap_count = len(source_cap_axis)
+    if len(flat) < len(source_slew_axis) * cap_count:
+        raise ValueError("2-D LUT values shorter than dimensions")
+    slew_brackets = [_axis_bracket_with_status(
+        source_slew_axis, point, boundary_mode="extrapolate"
+    )[:3] for point in target_slew_axis]
+    cap_brackets = [_axis_bracket_with_status(
+        source_cap_axis, point, boundary_mode="extrapolate"
+    )[:3] for point in target_cap_axis]
     rows = []
-    for slew in target_slew_axis:
+    for tr0, tr1, tr_alpha in slew_brackets:
         row = []
-        for cap in target_cap_axis:
-            value, _status = lookup_lut_value_with_status_mode(
-                values=flat,
-                trans_axis=source_slew_axis,
-                cap_axis=source_cap_axis,
-                dim=dim,
-                input_slew=float(slew),
-                output_cap=float(cap),
-                boundary_mode="extrapolate",
-            )
-            row.append(value)
+        for cap0, cap1, cap_alpha in cap_brackets:
+            v0 = (flat[tr0 * cap_count + cap0] * (1.0 - cap_alpha)
+                  + flat[tr0 * cap_count + cap1] * cap_alpha)
+            v1 = (flat[tr1 * cap_count + cap0] * (1.0 - cap_alpha)
+                  + flat[tr1 * cap_count + cap1] * cap_alpha)
+            row.append(v0 * (1.0 - tr_alpha) + v1 * tr_alpha)
         rows.append(row)
     return torch.tensor(rows, dtype=torch.float64)
 
 
 def build_buffer_device_lut_from_metadata(
-    metadata, contract_artifact, *, dtype=torch.float64, timing_sense=None
+    metadata, contract_artifact, *, dtype=torch.float64, timing_sense=None, _lut_tables=None
 ):
     if timing_sense not in (None, "rise", "fall"):
         raise ValueError("buffer timing sense must be rise or fall")
@@ -201,6 +202,16 @@ def build_buffer_device_lut_from_metadata(
     legal_cell_ids = [int(value) for value in contract_artifact.get("legal_cell_ids", [])]
     if not legal_cell_ids:
         raise ValueError("buffer legal cell table is empty")
+    if _lut_tables is None:
+        # Materialize each Liberty array once for this build and its phase views.
+        # Cell sizing changes the instance map, not these library tables.
+        _lut_tables = {
+            (prefix, kind): tuple(
+                _as_list(getattr(metadata, f"{prefix}_{kind}_flat_luts_{field}", []))
+                for field in ("values", "trans_table", "cap_table", "dim")
+            )
+            for prefix in ("r", "f") for kind in ("delay", "trans")
+        }
 
     input_caps = []
     raw_delay_tables = []
@@ -212,19 +223,21 @@ def build_buffer_device_lut_from_metadata(
     cap_axes = []
     for cell_id in legal_cell_ids:
         input_caps.append(_positive_input_cap(metadata, cell_id, timing_sense))
-        arc_luts_by_size.append(_cell_arc_luts(metadata, cell_id))
+        arc_luts_by_size.append(_cell_arc_luts(metadata, cell_id, _lut_tables))
         slew_limits.append(_output_limit(metadata, cell_id, "flat_lib_pin_slew_limit"))
         cap_limits.append(_output_limit(metadata, cell_id, "flat_lib_pin_cap_limit"))
         delay_slew_axis, delay_cap_axis, delay_lut = _cell_average_lut(
             metadata,
             cell_id,
             "delay",
+            _lut_tables,
             timing_sense,
         )
         trans_slew_axis, trans_cap_axis, trans_lut = _cell_average_lut(
             metadata,
             cell_id,
             "trans",
+            _lut_tables,
             timing_sense,
         )
         if not _same_axis(delay_slew_axis, trans_slew_axis) or not _same_axis(delay_cap_axis, trans_cap_axis):
@@ -248,7 +261,7 @@ def build_buffer_device_lut_from_metadata(
     phase_luts = (
         None if timing_sense is not None else {
             sense: build_buffer_device_lut_from_metadata(
-                metadata, contract_artifact, dtype=dtype, timing_sense=sense
+                metadata, contract_artifact, dtype=dtype, timing_sense=sense, _lut_tables=_lut_tables
             ) for sense in ("rise", "fall")
         }
     )

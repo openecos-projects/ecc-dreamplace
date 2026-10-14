@@ -351,6 +351,9 @@ def build_relaxed_buffer_dynamic_net_arc_inputs(
         "net_sink_start",
         "edge_start",
         "candidate_net_id",
+        "net_candidate_start",
+        "flat_candidate_by_net",
+        "candidate_segment_columns",
     ):
         net_subgraph_kwargs.pop(name, None)
     candidate_node_id = net_subgraph_kwargs.pop("candidate_node_id", None)
@@ -512,6 +515,9 @@ def build_relaxed_buffer_timing_payload(
         "net_sink_start",
         "edge_start",
         "candidate_net_id",
+        "net_candidate_start",
+        "flat_candidate_by_net",
+        "candidate_segment_columns",
     ):
         if name in inputs:
             payload[name] = inputs[name]

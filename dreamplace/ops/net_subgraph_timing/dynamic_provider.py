@@ -151,7 +151,13 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
         self._per_size_cache = {}
         self._buffer_device_lut_cache = {}
         self._candidate_node_id_cache = None
+        from .frozen_candidate_views import FrozenCandidateViews
+
+        self._frozen_candidate_views = FrozenCandidateViews()
         self._sink_pin_id_cache = None
+        self._live_geometry = None
+        self._candidate_geometry = None
+        self._live_geometry_forward_id = None
         self.call_count = 0
         self.affected_call_count = 0
         (
@@ -205,6 +211,38 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
     def has_dynamic_nets(self, net_ids, *, level_id=None, level_view_epoch=None):
         return bool(_as_net_id_set(net_ids) & self.affected_net_ids)
 
+    def bind_live_geometry(
+        self, *, new_x, new_y, r_unit, c_unit, scale_factor, dbu,
+        topology_epoch, forward_id, require_axis_aligned=False,
+        pin_capacitance_by_sense=None,
+    ):
+        from .candidate_live_geometry import CandidateLiveGeometry
+
+        if self._live_geometry is not None:
+            raise RuntimeError("live candidate geometry is already bound")
+        if self._candidate_geometry is None:
+            self._candidate_geometry = CandidateLiveGeometry(self.static_payload, self.buffer_state)
+        geometry = self._candidate_geometry
+        geometry.bind(
+            new_x=new_x, new_y=new_y, r_unit=r_unit, c_unit=c_unit,
+            scale_factor=scale_factor, dbu=dbu,
+            require_axis_aligned=require_axis_aligned,
+            pin_capacitance_by_sense=pin_capacitance_by_sense,
+        )
+        self._live_geometry = geometry
+        self._live_geometry_forward_id = forward_id
+        self.metadata["live_geometry_bound"] = True
+        self.metadata["live_geometry_used"] = True
+        self.metadata["live_geometry_topology_epoch"] = int(topology_epoch)
+
+    def release_live_geometry(self, *, forward_id):
+        if forward_id != self._live_geometry_forward_id:
+            raise ValueError("candidate geometry forward ID does not match")
+        self._live_geometry.release()
+        self._live_geometry = None
+        self._live_geometry_forward_id = None
+        self.metadata["live_geometry_bound"] = False
+
     def reset_runtime_metadata(self):
         self.call_count = 0
         self.affected_call_count = 0
@@ -226,8 +264,15 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
             self.metadata[key] = 0
         return self
 
-    def update_buffer_state(self, buffer_state):
+    def update_buffer_state(self, buffer_state, *, affected_net_ids=None):
+        if self.buffer_state is not buffer_state:
+            self._candidate_geometry = None
         self.buffer_state = buffer_state
+        self.affected_net_ids = (
+            set(self._candidate_net_ids)
+            if affected_net_ids is None else set(affected_net_ids)
+        )
+        self.metadata["affected_net_count"] = len(self.affected_net_ids)
         return self
 
     def _buffer_coordinate_callback(self, **kwargs):
@@ -244,6 +289,10 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
                 self.buffer_device_lut,
                 input_slew=kwargs["candidate_input_slew"],
                 output_load=kwargs["candidate_output_cap"],
+                tables=self._buffer_device_lut_tensors(
+                    dtype=kwargs["candidate_input_slew"].dtype,
+                    device=kwargs["candidate_input_slew"].device,
+                ),
             )
             values["coordinate_source"] = "liberty_lut_candidate_slew_load"
         else:
@@ -296,7 +345,10 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
 
     def _active_key(self, active_net_ids):
         active = {int(net_id) for net_id in active_net_ids}
-        return tuple(int(net_id) for net_id in self.net_ids if int(net_id) in active)
+        return tuple(sorted(
+            (net_id for net_id in active if net_id in self._net_index_by_id),
+            key=self._net_index_by_id.__getitem__,
+        ))
 
     def _native_active_view_supported(self):
         metadata = dict(self.static_payload.get("metadata", {}) or {})
@@ -422,6 +474,7 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
         node_index = torch.as_tensor(local_to_old, dtype=torch.long)
         view = {
             "cache_key": cache_key,
+            "node_indices_cpu": node_index,
             "net_indices_cpu": torch.as_tensor(net_indices, dtype=torch.long),
             "candidate_indices_cpu": torch.as_tensor(candidate_indices, dtype=torch.long),
             "sink_indices_cpu": torch.as_tensor(sink_indices, dtype=torch.long),
@@ -486,10 +539,11 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
         self.metadata["active_view_selector_fallback_reason"] = fallback_reason
         return view
 
-    def _driver_values(self, pin_values, active_net_ids=None):
+    def _driver_values(self, pin_values, active_net_ids=None, *, active_view=None):
         if not self.net_ids:
             return torch.empty(0, dtype=pin_values.dtype, device=pin_values.device)
-        active_view = self._active_view(active_net_ids) if active_net_ids is not None else None
+        if active_view is None and active_net_ids is not None:
+            active_view = self._active_view(active_net_ids)
         if active_view is None:
             net_indices_cpu = None
             cache_key = ("all", pin_values.device)
@@ -686,32 +740,33 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
         driver_arrival,
         driver_slew,
         active_net_ids=None,
+        active_view=None,
         use_buffer_device=True,
+        sense="base",
     ):
         state_device = (
             torch.device("cpu")
             if self.forward_backend.startswith("native")
             else self.buffer_state.candidate_node_id.device
         )
-        active_view = (
-            self._active_view(active_net_ids)
-            if active_net_ids is not None
-            else None
-        )
+        if active_view is None and active_net_ids is not None:
+            active_view = self._active_view(active_net_ids)
         if active_view is None:
             candidate_indices = torch.arange(
                 int(self.buffer_state.candidate_ids.numel()),
                 dtype=torch.long,
             )
-            candidate_node_id = self._candidate_node_id()
         else:
             candidate_indices = active_view["candidate_indices_cpu"]
-            candidate_node_id = self._candidate_node_id(active_view)
-        state = self.buffer_state.slice_candidates(
-            candidate_indices,
-            candidate_node_id=candidate_node_id,
-            device=state_device,
+        state = self._frozen_candidate_views.get(
+            self.buffer_state, indices=candidate_indices,
+            nodes=(active_view["candidate_node_id_cpu"] if active_view is not None
+                   else self.static_payload["candidate_node_id"]), device=state_device,
         )
+        if state is None:
+            state = self.buffer_state.slice_candidates(
+                candidate_indices, candidate_node_id=self._candidate_node_id(active_view), device=state_device,
+            )
         per_size = self._per_size_tensors(
             driver_arrival=driver_arrival,
             active_view=active_view,
@@ -728,6 +783,18 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
                 driver_slew=driver_slew,
             )
         )
+        if self._live_geometry is not None:
+            forward_kwargs = dict(forward_kwargs)
+            forward_kwargs.update(self._live_geometry.forward_overrides(
+                active_view=active_view,
+                device=forward_kwargs["edge_resistance"].device,
+                dtype=forward_kwargs["edge_resistance"].dtype,
+                sense=sense,
+            ))
+        use_fused_device = (
+            self._fixed_bsu_fused_supported and use_buffer_device
+            and self._live_geometry is None
+        )
         result = net_subgraph_forward_relaxed(
             buffer_state=state,
             per_size_input_cap=per_size["per_size_input_cap"],
@@ -740,12 +807,12 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
                     dtype=driver_arrival.dtype,
                     device=driver_arrival.device,
                 )
-                if self._fixed_bsu_fused_supported and use_buffer_device
+                if use_fused_device
                 else None
             ),
             fixed_bsu_index=(
                 int(self.buffer_state.fixed_bsu_index)
-                if self._fixed_bsu_fused_supported and use_buffer_device
+                if use_fused_device
                 else None
             ),
             buffer_coordinate_callback=(
@@ -755,7 +822,7 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
             ),
             **forward_kwargs,
         )
-        if self._fixed_bsu_fused_supported and use_buffer_device:
+        if use_fused_device:
             self.metadata["fixed_bsu_fused_forward_count"] += 1
         if active_view is not None:
             result["sink_net_index"] = active_view["sink_net_id_cpu"].to(
@@ -764,7 +831,7 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
             )
         return result
 
-    def _run_cap_only(self, active_net_ids):
+    def _run_cap_only(self, active_net_ids, *, sense="base"):
         active_view = self._active_view(active_net_ids)
         active_net_count = len(active_view["cache_key"])
         candidate_bu = self.buffer_state.candidate_bu()
@@ -782,7 +849,9 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
             driver_arrival=zeros,
             driver_slew=zeros,
             active_net_ids=active_net_ids,
+            active_view=active_view,
             use_buffer_device=False,
+            sense=sense,
         )
         topo = active_view["static"]["net_flat_topo_sort"].to(dtype=torch.long)
         topo_start = active_view["static"]["net_flat_topo_sort_start"].to(
@@ -831,19 +900,24 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
     ):
         if not self.affected_net_ids:
             return pin_net_cap_rise, pin_net_cap_fall
-        cap_result = self._run_cap_only(self.affected_net_ids)
+        cap_result = self._run_cap_only(self.affected_net_ids, sense="rise")
+        fall_cap_result = (
+            self._run_cap_only(self.affected_net_ids, sense="fall")
+            if self._live_geometry is not None else cap_result
+        )
         pin_net_cap_rise = self._scatter_driver_cap(pin_net_cap_rise, cap_result)
-        pin_net_cap_fall = self._scatter_driver_cap(pin_net_cap_fall, cap_result)
+        pin_net_cap_fall = self._scatter_driver_cap(pin_net_cap_fall, fall_cap_result)
         self.metadata["driver_cap_overlay_count"] = int(
             self.metadata.get("driver_cap_overlay_count", 0)
         ) + 1
         self.metadata["driver_cap_overlay_path"] = "candidate_native_load_only"
         return pin_net_cap_rise, pin_net_cap_fall
 
-    def _sink_pin_id(self, *, pin_aat, active_net_ids=None):
-        if active_net_ids is not None:
-            view = self._active_view(active_net_ids)
-            return view["sink_pin_id_cpu"].to(
+    def _sink_pin_id(self, *, pin_aat, active_net_ids=None, active_view=None):
+        if active_view is None and active_net_ids is not None:
+            active_view = self._active_view(active_net_ids)
+        if active_view is not None:
+            return active_view["sink_pin_id_cpu"].to(
                 device=pin_aat.device,
                 dtype=torch.long,
             )
@@ -861,8 +935,10 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
             self.metadata["static_payload_cache_hit_count"] += 1
         return cached
 
-    def _scatter_lane(self, pin_aat, pin_tran, result, active_net_ids):
-        sink_pin_id = self._sink_pin_id(pin_aat=pin_aat, active_net_ids=active_net_ids)
+    def _scatter_lane(self, pin_aat, pin_tran, result, active_net_ids, *, active_view=None):
+        sink_pin_id = self._sink_pin_id(
+            pin_aat=pin_aat, active_net_ids=active_net_ids, active_view=active_view,
+        )
         if int(sink_pin_id.numel()) == int(result["sink_arrival"].numel()):
             active_pins = sink_pin_id.to(device=pin_aat.device, dtype=torch.long)
             pin_aat = pin_aat.clone()
@@ -954,10 +1030,11 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
             base_pin_net_impulse_fall,
         )
         gather_started_at = time.perf_counter()
-        rise_driver_arrival = self._driver_values(pin_rAAT, active_net_ids)
-        rise_driver_slew = self._driver_values(pin_rtran, active_net_ids)
-        fall_driver_arrival = self._driver_values(pin_fAAT, active_net_ids)
-        fall_driver_slew = self._driver_values(pin_ftran, active_net_ids)
+        active_view = self._active_view(active_net_ids)
+        rise_driver_arrival = self._driver_values(pin_rAAT, active_view=active_view)
+        rise_driver_slew = self._driver_values(pin_rtran, active_view=active_view)
+        fall_driver_arrival = self._driver_values(pin_fAAT, active_view=active_view)
+        fall_driver_slew = self._driver_values(pin_ftran, active_view=active_view)
         self.metadata["driver_timing_gather_ms"] += (
             time.perf_counter() - gather_started_at
         ) * 1000.0
@@ -967,11 +1044,15 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
             driver_arrival=rise_driver_arrival,
             driver_slew=rise_driver_slew,
             active_net_ids=active_net_ids,
+            active_view=active_view,
+            sense="rise",
         )
         fall_result = self._run_lane(
             driver_arrival=fall_driver_arrival,
             driver_slew=fall_driver_slew,
             active_net_ids=active_net_ids,
+            active_view=active_view,
+            sense="fall",
         )
         self.metadata["net_subgraph_forward_relaxed_ms"] += (
             time.perf_counter() - forward_started_at
@@ -983,12 +1064,14 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
             pin_rtran,
             rise_result,
             active_net_ids,
+            active_view=active_view,
         )
         pin_fAAT, pin_ftran = self._scatter_lane(
             pin_fAAT,
             pin_ftran,
             fall_result,
             active_net_ids,
+            active_view=active_view,
         )
         self.metadata["sink_scatter_ms"] += (
             time.perf_counter() - scatter_started_at

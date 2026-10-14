@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from dreamplace.ops.net_subgraph_timing.candidate_native_packer import (
@@ -7,6 +8,7 @@ from dreamplace.ops.net_subgraph_timing.candidate_native_packer import (
 from dreamplace.ops.net_subgraph_timing.dynamic_provider import (
     RelaxedBufferDynamicNetProvider,
 )
+from dreamplace.ops.net_subgraph_timing.candidate_live_geometry import CandidateLiveGeometry
 from dreamplace.ops.net_subgraph_timing.tensor_builder import (
     build_net_subgraph_timing_inputs,
 )
@@ -227,6 +229,11 @@ def test_candidate_native_active_view_matches_python_reference():
         torch.testing.assert_close(native_view[name], reference_view[name])
     for name, expected in reference_view["static"].items():
         torch.testing.assert_close(native_view["static"][name], expected)
+    rc_fields = ("edge_resistance", "edge_capacitance", "node_capacitance")
+    torch.testing.assert_close(
+        {name: payload[name][native_view["node_indices_cpu"]] for name in rc_fields},
+        {name: native_view["static"][name] for name in rc_fields},
+    )
     assert native_provider.metadata["active_view_selector_used"] == "native"
     assert native_provider.metadata["native_active_view_selector_count"] == 1
 
@@ -262,6 +269,56 @@ def test_candidate_native_selector_ignores_unaffected_and_unknown_net_ids():
     assert selected["sink_indices_cpu"].numel() == 0
     assert selected["static"]["net_flat_topo_sort_start"].tolist() == [0]
     assert selected["static"]["flat_pin_to_start"].tolist() == [0]
+
+
+@pytest.mark.parametrize("order", [(0, 1, 2), (2, 1, 0), (1, 2, 0)])
+@pytest.mark.parametrize("active_nets", [[1], [2], [2, 1, 2], [-1, 0, 99]])
+def test_candidate_csr_selector_matches_scan_for_interleaved_input_rows(order, active_nets):
+    candidates = [
+        {"candidate_id": 7, "net_id": 1, "parent_node_id": 4,
+         "child_node_ids": [1], "segment_split_ratio": 0.25, "synthetic_node_id": -1},
+        {"candidate_id": 8, "net_id": 2, "candidate_node_id": 6},
+        {"candidate_id": 9, "net_id": 1, "parent_node_id": 4,
+         "child_node_ids": [1], "segment_split_ratio": 0.75, "synthetic_node_id": -2},
+    ]
+    candidates = [candidates[row] for row in order]
+    packed = pack_candidate_topology(
+        **_candidate_values(_multi_valid_net_fixture()), candidates=candidates,
+    )["prepared_timing_inputs"]
+    selected = select_packed_candidate_inputs_native(packed, active_net_ids=active_nets)
+    scan_payload = {key: value for key, value in packed.items()
+                    if key not in {"net_candidate_start", "flat_candidate_by_net"}}
+    reference = select_packed_candidate_inputs_native(scan_payload, active_net_ids=active_nets)
+    torch.testing.assert_close(
+        {key: value for key, value in selected.items() if key != "metadata"},
+        {key: value for key, value in reference.items() if key != "metadata"},
+        rtol=0, atol=0,
+    )
+    assert selected["metadata"]["candidate_selector_indexed"]
+    assert not reference["metadata"]["candidate_selector_indexed"]
+    assert selected["candidate_indices_cpu"].tolist() == [
+        row for row, candidate in enumerate(candidates) if candidate["net_id"] in active_nets
+    ]
+
+
+def test_candidate_native_packer_limits_payload_to_candidate_nets():
+    values = _multi_valid_net_fixture()
+    drivers = values["net2driver"].clone()
+    packed = pack_candidate_topology(
+        **_candidate_values(values),
+        candidates=[{
+            "candidate_id": 8,
+            "net_id": 2,
+            "parent_node_id": 5,
+            "child_node_ids": [6],
+            "segment_split_ratio": 0.5,
+            "synthetic_node_id": -1,
+        }],
+    )
+
+    assert packed["metadata"]["net_ids"] == [2]
+    assert packed["metadata"]["compact_node_to_original"] == [5, -1, 6]
+    torch.testing.assert_close(values["net2driver"], drivers)
 
 
 def test_candidate_state_builder_uses_native_topology_when_flat_inputs_exist():
@@ -375,3 +432,73 @@ def test_candidate_state_builder_uses_native_topology_when_flat_inputs_exist():
     assert result.buffer_optimization_state.candidate_node_id.tolist() == [1, 3]
     assert result.buffer_relaxed_timing_payload["net_flat_topo_sort"].numel() == 6
     assert result.buffer_relaxed_timing_payload["metadata"]["net_ids"] == [1]
+
+
+@pytest.mark.parametrize("use_columns", [False, True])
+def test_live_candidate_rc_matches_native_packing_without_double_counting_wire_cap(use_columns):
+    values = _fixture()
+    nets, _, _ = _python_reference(values)
+    candidates = [{
+        'candidate_id': 7, 'net_id': 1, 'parent_node_id': 4,
+        'child_node_ids': [1], 'x_dbu': 1500, 'y_dbu': 0,
+        'segment_split_ratio': .5, 'synthetic_node_id': -1,
+        'buffer_main_type_index': 7,
+    }]
+    packed = pack_candidate_topology(**_candidate_values(values), candidates=candidates)
+    state = build_discrete_candidate_state(candidates, buffer_main_type_index=7, legal_buffer_count=2, fixed_bsu_index=0, dtype=torch.float64)
+    payload = build_relaxed_buffer_timing_payload(
+        nets, candidates, buffer_state=state,
+        per_size_input_cap=torch.tensor([[.2, .3]], dtype=torch.float64),
+        per_size_delay=torch.tensor([[.1, .2]], dtype=torch.float64),
+        per_size_output_slew=torch.tensor([[.1, .2]], dtype=torch.float64),
+        prebuilt_inputs=packed['prepared_timing_inputs'], dtype=torch.float64,
+    )
+    if not use_columns:
+        payload.pop("candidate_segment_columns")
+    provider = RelaxedBufferDynamicNetProvider(static_payload=payload, buffer_state=state)
+    kwargs = {'driver_arrival':torch.zeros(1, dtype=torch.float64), 'driver_slew':torch.ones(1, dtype=torch.float64), 'active_net_ids':{1}}
+    packed_result = provider._run_lane(**kwargs)
+    caps = values['pin_capacitance']
+    provider.bind_live_geometry(
+        new_x=values['node_x'], new_y=values['node_y'],
+        r_unit=values['r_unit'], c_unit=values['c_unit'],
+        dbu=values['dbu'], scale_factor=values['scale_factor'],
+        topology_epoch=0, forward_id='native_contract',
+        pin_capacitance_by_sense={'base':caps, 'rise':caps, 'fall':caps},
+    )
+    live_result = provider._run_lane(**kwargs)
+    for key in ['lin', 'lout', 'sink_arrival', 'sink_slew']:
+        torch.testing.assert_close(live_result[key], packed_result[key])
+    provider.release_live_geometry(forward_id='native_contract')
+
+
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)])
+def test_native_segment_columns_preserve_geometry_and_gradients_in_candidate_order(order):
+    values = _fixture()
+    candidates = [
+        {"candidate_id": i, "net_id": 1, "parent_node_id": 4, "child_node_ids": [1],
+         "segment_split_ratio": ratio, "synthetic_node_id": -1 - i}
+        for i, ratio in enumerate((0.25, 0.75))
+    ]
+    candidates = [candidates[i] for i in order]
+    payload = pack_candidate_topology(**_candidate_values(values), candidates=candidates)["prepared_timing_inputs"]
+    state = type("State", (), {"candidate_records": candidates})()
+    results = []
+    for use_columns in (False, True):
+        current = dict(payload)
+        if not use_columns:
+            current.pop("candidate_segment_columns")
+        x = values["node_x"].clone().requires_grad_()
+        y = values["node_y"].clone().requires_grad_()
+        geometry = CandidateLiveGeometry(current, state)
+        geometry.bind(new_x=x, new_y=y,
+                      pin_capacitance_by_sense={"base": values["pin_capacitance"]},
+                      **{key: values[key] for key in ("r_unit", "c_unit", "scale_factor", "dbu")})
+        rc = geometry.forward_overrides(active_view=None, device=x.device, dtype=x.dtype, sense="base")
+        weights = torch.arange(1, rc["edge_resistance"].numel() + 1, dtype=x.dtype)
+        gradients = torch.autograd.grad(((rc["edge_resistance"] + rc["edge_capacitance"]) * weights).sum(), (x, y))
+        results.append((rc, gradients))
+    for key in results[0][0]:
+        torch.testing.assert_close(results[1][0][key], results[0][0][key], rtol=0, atol=0)
+    for actual, expected in zip(results[1][1], results[0][1], strict=True):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)

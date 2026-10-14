@@ -1,0 +1,33 @@
+#pragma once
+
+#include "utility/src/torch.h"
+
+pybind11::dict candidate_net_subgraph_backward_cpu(
+    at::Tensor net_flat_topo_sort,
+    at::Tensor net_flat_topo_sort_start,
+    at::Tensor pin_fa,
+    at::Tensor flat_pin_to_start,
+    at::Tensor flat_pin_to,
+    at::Tensor edge_resistance,
+    at::Tensor candidate_index_by_node,
+    at::Tensor candidate_bu,
+    at::Tensor buffer_input_cap,
+    at::Tensor buffer_delay,
+    at::Tensor buffer_output_slew,
+    at::Tensor sink_node_id,
+    at::Tensor sink_net_index,
+    at::Tensor lin,
+    at::Tensor lout,
+    at::Tensor slew_in,
+    at::Tensor slew_out,
+    at::Tensor grad_lout_input,
+    at::Tensor grad_lin_input,
+    at::Tensor grad_arrival_in_input,
+    at::Tensor grad_arrival_out_input,
+    at::Tensor grad_slew_in_input,
+    at::Tensor grad_slew_out_input,
+    at::Tensor grad_sink_arrival,
+    at::Tensor grad_sink_slew,
+    at::Tensor grad_sink_load,
+    at::Tensor grad_sink_net_delay,
+    at::Tensor grad_sink_net_impulse);

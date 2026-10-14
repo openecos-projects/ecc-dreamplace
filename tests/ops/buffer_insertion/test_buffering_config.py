@@ -189,7 +189,6 @@ def test_candidate_discrete_net_gradient_config_rejects_joint_flow():
 @pytest.mark.parametrize(
     "overrides, message",
     (
-        ({"buffering_mode": "candidate"}, "requires buffering_mode=segment"),
         (
             {"buffering_fixed_bsu_index": None},
             "requires buffering_fixed_buffer_master or buffering_fixed_bsu_index",
@@ -224,6 +223,22 @@ def test_discrete_net_gradient_config_rejects_conflicting_controls(overrides, me
 
     with pytest.raises(ValueError, match=message):
         build_buffering_config_from_params(SimpleNamespace(**values), flow_kind="buffering")
+
+
+def test_candidate_mode_ignores_legacy_segment_strategy():
+    config = build_buffering_config_from_params(
+        SimpleNamespace(
+            buffering_mode="candidate",
+            buffering_segment_strategy="discrete_net_gradient",
+            buffering_candidate_strategy="discrete_net_gradient",
+            buffering_fixed_bsu_index=7,
+            buffering_continuous_steps=1,
+        ),
+        flow_kind="buffering",
+    )
+
+    assert config.segment_strategy == "continuous"
+    assert config.active_strategy == "discrete_net_gradient"
 
 
 def test_config_ignores_removed_segment_aliases():

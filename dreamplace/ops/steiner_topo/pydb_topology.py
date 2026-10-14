@@ -328,6 +328,7 @@ def build_edge_rc_by_net_from_rc_timing_topology(
     scale_factor=1.0,
     r_unit=1.0,
     c_unit=0.0,
+    selected_net_ids=None,
 ):
     topo = _as_int_list(topology.get("net_flat_topo_sort", []))
     topo_start = _as_int_list(topology.get("net_flat_topo_sort_start", []))
@@ -353,9 +354,12 @@ def build_edge_rc_by_net_from_rc_timing_topology(
         return float(x), float(y)
 
     num_slices = max(0, len(topo_start) - 1)
+    selected = None if selected_net_ids is None else set(selected_net_ids)
     denom = max(1.0, float(scale_factor) * float(dbu))
     for slice_index in range(num_slices):
         net_id = int(net_ids[slice_index]) if slice_index < len(net_ids) else slice_index
+        if selected is not None and net_id not in selected:
+            continue
         begin = int(topo_start[slice_index])
         end = int(topo_start[slice_index + 1])
         if begin < 0 or end < begin or end > len(topo):

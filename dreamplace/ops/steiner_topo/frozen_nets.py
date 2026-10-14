@@ -8,6 +8,7 @@ class FrozenNets:
         self.net_ids = ()
         self.vertex_map = None
         self.segment_state = None
+        self.candidate_state = None
 
     def freeze(self, topo, net_ids):
         if topo.num_vertices is None:
@@ -36,6 +37,8 @@ class FrozenNets:
             self.vertex_map = outputs[-1]
             if self.segment_state is not None:
                 self._remap_segments()
+            if self.candidate_state is not None:
+                self._remap_candidates()
             return outputs[:-1]
         self.vertex_map = None
         return outputs
@@ -76,3 +79,32 @@ class FrozenNets:
             dict(row, parent_node_id=parent, child_node_id=child)
             for row, parent, child in zip(state.segment_rows, parents, children, strict=True)
         )
+
+    def _remap_candidates(self):
+        state = self.candidate_state
+        records = []
+        for raw in state.candidate_records:
+            row = dict(raw)
+            net_id = row.get("net_id", row.get("affected_net_id"))
+            # Candidate state contains inactive positions for every affected
+            # net.  Only accepted candidates on retained nets belong to the
+            # frozen vertex domain; inactive/unfrozen rows are rebuilt by the
+            # candidate lane after this topology refresh.
+            if net_id is None or int(net_id) not in self.net_ids:
+                records.append(row)
+                continue
+            for name in (
+                "parent_node_id",
+                "tree_node_id",
+                "node_id",
+                "candidate_node_id",
+                "segment_parent_node_id",
+                "segment_child_node_id",
+            ):
+                if row.get(name) is not None:
+                    row[name] = int(self.remap(torch.tensor([row[name]]))[0])
+            row["child_node_ids"] = self.remap(
+                torch.tensor(row["child_node_ids"], dtype=torch.long)
+            ).tolist()
+            records.append(row)
+        state.candidate_records = tuple(records)

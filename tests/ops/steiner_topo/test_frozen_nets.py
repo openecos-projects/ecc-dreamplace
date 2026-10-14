@@ -2,6 +2,7 @@
 
 import pytest
 import torch
+from types import SimpleNamespace
 
 from dreamplace.ops.buffer_insertion.segment_count_state import build_segment_count_state
 from dreamplace.ops.net_subgraph_timing.segment_count_tensor_builder import build_segment_count_timing_inputs
@@ -113,3 +114,73 @@ def test_invalid_retained_tree_is_rejected_before_cache_publication():
         topo.rebuild_tree(pos)
     assert topo.topology_generation == generation
     assert topo.pin_fa is parents
+
+
+def test_accepted_candidate_rebases_with_frozen_tree_and_follows_live_pins():
+    topo, pos = make_topology()
+    topo.freeze_nets([1])
+    child = int(topo.net_flat_topo_sort[-1])
+    parent = int(topo.pin_fa[child])
+    state = SimpleNamespace(candidate_records=({
+        "net_id": 1, "candidate_id": 42, "parent_node_id": parent,
+        "child_node_ids": [child], "segment_parent_node_id": parent,
+        "segment_child_node_id": child, "tree_node_id": None, "segment_split_ratio": .25,
+    },), activation_param=torch.nn.Parameter(torch.tensor([[0., 1., 0., 0.]])))
+    topo.frozen_nets.candidate_state = state
+    pos[7] = 3.
+    pos[10] = 0.
+    topo.rebuild_tree(pos)
+    mapping = topo.frozen_nets.vertex_map
+    row = state.candidate_records[0]
+    assert row == {"net_id": 1, "candidate_id": 42, "parent_node_id": int(mapping[parent]),
+                   "child_node_ids": [int(mapping[child])], "segment_parent_node_id": int(mapping[parent]),
+                   "segment_child_node_id": int(mapping[child]), "tree_node_id": None, "segment_split_ratio": .25}
+    assert state.activation_param.detach().tolist() == [[0., 1., 0., 0.]]
+    pos.requires_grad_(True)
+    x, y = topo(pos)
+    midpoint = .75 * x[row["parent_node_id"]] + .25 * x[row["child_node_ids"][0]]
+    grad, = torch.autograd.grad(midpoint, pos)
+    assert float(grad.sum()) == pytest.approx(1.)
+    assert float(grad.abs().sum()) == pytest.approx(1.)
+
+
+def test_unfrozen_candidate_records_are_left_for_active_refresh():
+    topo, pos = make_topology()
+    topo.freeze_nets([1])
+    frozen_child = int(topo.net_flat_topo_sort[-1])
+    frozen_parent = int(topo.pin_fa[frozen_child])
+    fresh_child = int(topo.net_flat_topo_sort[1])
+    fresh_parent = int(topo.pin_fa[fresh_child])
+    state = SimpleNamespace(
+        candidate_records=(
+            {
+                "net_id": 1,
+                "node_id": frozen_child,
+                "candidate_node_id": frozen_child,
+                "parent_node_id": frozen_parent,
+                "child_node_ids": [frozen_child],
+                "tree_node_id": None,
+            },
+            {
+                "net_id": 0,
+                "node_id": fresh_child,
+                "candidate_node_id": fresh_child,
+                "parent_node_id": fresh_parent,
+                "child_node_ids": [fresh_child],
+                "tree_node_id": None,
+            },
+        ),
+    )
+    topo.frozen_nets.candidate_state = state
+    topo.rebuild_tree(pos)
+
+    records = state.candidate_records
+    mapping = topo.frozen_nets.vertex_map
+    assert records[0]["parent_node_id"] == int(mapping[frozen_parent])
+    assert records[0]["child_node_ids"] == [int(mapping[frozen_child])]
+    assert records[0]["node_id"] == int(mapping[frozen_child])
+    assert records[0]["candidate_node_id"] == int(mapping[frozen_child])
+    assert records[1]["parent_node_id"] == fresh_parent
+    assert records[1]["child_node_ids"] == [fresh_child]
+    assert records[1]["node_id"] == fresh_child
+    assert records[1]["candidate_node_id"] == fresh_child

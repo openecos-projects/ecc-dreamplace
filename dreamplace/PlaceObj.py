@@ -992,6 +992,7 @@ class PlaceObj(nn.Module):
         self._relaxed_buffer_dynamic_net_provider_key = None
         self._timing_geometry_cache = None
         self._virtual_cell_density_view = None
+        self._candidate_density_view = None
         self.pin2pin_weight = params.pin2pin_weight
 
         self.gpu = params.gpu
@@ -2394,12 +2395,19 @@ class PlaceObj(nn.Module):
 
     def refresh_after_geometry_change(self):
         """Invalidate density and pin caches after area or geometry changes."""
-        self.op_collections.density_op.reset()
-        self.op_collections.density_overflow_op.reset()
-        self.op_collections.pin_utilization_map_op.reset()
+        for operator_name in (
+            "density_op",
+            "density_overflow_op",
+            "pin_utilization_map_op",
+        ):
+            operator = getattr(self.op_collections, operator_name, None)
+            if operator is not None:
+                operator.reset()
         self._timing_geometry_cache = None
         if self._virtual_cell_density_view is not None:
             self._virtual_cell_density_view._density_ops.clear()
+        if self._candidate_density_view is not None:
+            self._candidate_density_view._density_ops.clear()
 
     @staticmethod
     def _telemetry_scalar(value):
@@ -3081,10 +3089,11 @@ class PlaceObj(nn.Module):
             {"FE_DBTC149_n_2224:A"} if enable_pin_cap_weight_debug else set()
         )
         pin_name_to_idx = {}
-        for idx, pin_name in enumerate(self.placedb.pin_names):
-            decoded_name = pin_name.decode("utf-8") if isinstance(pin_name, bytes) else str(pin_name)
-            if decoded_name in debug_target_pins:
-                pin_name_to_idx[decoded_name] = idx
+        if enable_pin_cap_weight_debug:
+            for idx, pin_name in enumerate(self.placedb.pin_names):
+                decoded_name = pin_name.decode("utf-8") if isinstance(pin_name, bytes) else str(pin_name)
+                if decoded_name in debug_target_pins:
+                    pin_name_to_idx[decoded_name] = idx
         for pin_name, global_pin_id in pin_name_to_idx.items():
             node_id = int(data_collections.pin2node_map[global_pin_id].item())
             pin_offset = int(data_collections.pin_2_libpin_offset[global_pin_id].item())
@@ -5093,9 +5102,14 @@ class PlaceObj(nn.Module):
         enabled = bool(getattr(self.params, "enable_relaxed_buffer_timing", False))
         if enabled and bool(getattr(self.params, "timing_opt_enabled", False)):
             state = self._segment_count_state_for_virtual_density()
-            return state is not None and (
-                state.z_param.requires_grad or bool((state.z_param.detach() > 0).any())
-            )
+            if state is not None:
+                return state.z_param.requires_grad or bool((state.z_param.detach() > 0).any())
+            candidate_state = getattr(self.data_collections, "buffer_optimization_state", None)
+            if candidate_state is not None and hasattr(candidate_state, "activation_param"):
+                return candidate_state.activation_param.requires_grad or bool(
+                    (candidate_state.activation_param.detach() > 0).any()
+                )
+            return False
         return enabled
 
     def _segment_live_geometry_enabled(self):
@@ -5172,9 +5186,20 @@ class PlaceObj(nn.Module):
         legal_table = {} if payload is None else dict(payload.get("buffer_legal_table", {}) or {})
         legal_cell_ids = list(legal_table.get("legal_cell_ids", ()) or ())
         state = self._segment_count_state_for_virtual_density()
-        if state is None or state.fixed_bsu_index is None:
-            raise ValueError("virtual density requires the resolved fixed buffer master")
-        bsu_index = int(state.fixed_bsu_index)
+        if state is None:
+            candidate_state = getattr(self.data_collections, "buffer_optimization_state", None)
+            if candidate_state is None or not hasattr(candidate_state, "activation_param"):
+                raise ValueError("virtual density requires the resolved fixed buffer master")
+            if not legal_cell_ids:
+                raise ValueError("virtual density requires candidate buffer cell dimensions")
+            # Candidate buffering may select different drive types per row.
+            # Use the first table entry for the conservative shared density
+            # footprint; virtual timing still carries the selected type.
+            bsu_index = 0
+        else:
+            if state.fixed_bsu_index is None:
+                raise ValueError("virtual density requires the resolved fixed buffer master")
+            bsu_index = int(state.fixed_bsu_index)
         if bsu_index < 0 or bsu_index >= len(legal_cell_ids):
             raise ValueError(
                 "virtual density requires buffering_fixed_bsu_index in buffer_legal_table"
@@ -5191,6 +5216,9 @@ class PlaceObj(nn.Module):
         return width + 2.0 * float(self.params.cell_padding_x), height
 
     def combined_density_overflow(self, pos):
+        if self._candidate_density_view is not None:
+            overflow, maximum = self._candidate_density_view(pos, mode="overflow")
+            return overflow.reshape(1), maximum.reshape(1)
         state = self._active_segment_count_state_for_virtual_density()
         if state is None:
             return self.op_collections.density_overflow_op(pos)
@@ -5201,6 +5229,8 @@ class PlaceObj(nn.Module):
 
     def placement_density(self, pos):
         """Use the same density view for GP and density-weight initialization."""
+        if self._candidate_density_view is not None:
+            return self._candidate_density_view(pos)
         if len(self.placedb.regions) > 0:
             return self.op_collections.fence_region_density_merged_op(pos)
         state = self._active_segment_count_state_for_virtual_density()
@@ -5286,9 +5316,7 @@ class PlaceObj(nn.Module):
             return None
         bind = getattr(provider, "bind_live_geometry", None)
         if not callable(bind):
-            raise RuntimeError(
-                "segment live geometry requires a compatible dynamic provider"
-            )
+            raise RuntimeError("live buffer geometry requires a compatible provider")
         rc_timing = self.op_collections.elmore_delay_op
         topology_epoch = int(
             getattr(
@@ -5668,6 +5696,40 @@ class PlaceObj(nn.Module):
             build_buffer_device_lut_from_metadata,
         )
 
+        candidate_activation = buffer_state.candidate_bu()
+        affected_net_ids = (
+            buffer_state.timing_affected_net_ids()
+            if getattr(buffer_state, "is_typed_candidate", False) else None
+        )
+        candidate_forward_backend = (
+            "cuda_explicit_autograd"
+            if candidate_activation.is_cuda
+            else "native_explicit_autograd"
+        )
+        provider_cache_key = (
+            "candidate",
+            id(payload),
+            id(buffer_state),
+            str(candidate_activation.device),
+            str(candidate_activation.dtype),
+            candidate_forward_backend,
+        )
+        cached_provider = getattr(self, "_relaxed_buffer_dynamic_net_provider", None)
+        if (
+            isinstance(cached_provider, RelaxedBufferDynamicNetProvider)
+            and getattr(self, "_relaxed_buffer_dynamic_net_provider_key", None)
+            == provider_cache_key
+        ):
+            cached_provider.update_buffer_state(buffer_state, affected_net_ids=affected_net_ids)
+            cached_provider.reset_runtime_metadata()
+            cached_provider.metadata["provider_reused"] = True
+            if isinstance(payload, dict):
+                payload_metadata = dict(payload.get("metadata", {}) or {})
+                payload_metadata.update(dict(cached_provider.metadata))
+                payload["metadata"] = payload_metadata
+                data_collections.buffer_relaxed_timing_payload = payload
+            return cached_provider
+
         buffer_device_lut = None
         device_lut_metadata = {"status": "skipped", "reason": "missing_metadata"}
         source_metadata = getattr(data_collections, "buffering_metadata", None)
@@ -5706,41 +5768,12 @@ class PlaceObj(nn.Module):
                     "error": str(exc),
                 }
 
-        candidate_activation = buffer_state.candidate_bu()
-        candidate_forward_backend = (
-            "cuda_explicit_autograd"
-            if candidate_activation.is_cuda
-            else "native_explicit_autograd"
-        )
-        provider_cache_key = (
-            "candidate",
-            id(payload),
-            id(buffer_state),
-            str(candidate_activation.device),
-            str(candidate_activation.dtype),
-            candidate_forward_backend,
-        )
-        cached_provider = getattr(self, "_relaxed_buffer_dynamic_net_provider", None)
-        if (
-            isinstance(cached_provider, RelaxedBufferDynamicNetProvider)
-            and getattr(self, "_relaxed_buffer_dynamic_net_provider_key", None)
-            == provider_cache_key
-        ):
-            cached_provider.update_buffer_state(buffer_state)
-            cached_provider.reset_runtime_metadata()
-            cached_provider.metadata["provider_reused"] = True
-            if isinstance(payload, dict):
-                payload_metadata = dict(payload.get("metadata", {}) or {})
-                payload_metadata.update(dict(cached_provider.metadata))
-                payload["metadata"] = payload_metadata
-                data_collections.buffer_relaxed_timing_payload = payload
-            return cached_provider
-
         provider = RelaxedBufferDynamicNetProvider(
             static_payload=dict(payload),
             buffer_state=buffer_state,
             buffer_device_lut=buffer_device_lut,
             forward_backend=candidate_forward_backend,
+            affected_net_ids=affected_net_ids,
         )
         provider.metadata["provider_reused"] = False
         self._relaxed_buffer_dynamic_net_provider = provider

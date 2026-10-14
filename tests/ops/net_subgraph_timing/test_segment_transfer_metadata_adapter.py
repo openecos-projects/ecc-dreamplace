@@ -2,16 +2,17 @@ import unittest
 from types import SimpleNamespace
 
 import torch
-
 from dreamplace.ops.buffer_insertion.buffer_library import (
     lookup_buffer_delay_for_bsu,
     lookup_buffer_transition_for_bsu,
+    lookup_lut_value_with_status_mode,
 )
 from dreamplace.ops.net_subgraph_timing.segment_transfer import (
     SegmentTransferInput,
     analytic_segment_transfer,
     build_buffer_device_lut_from_metadata,
 )
+from dreamplace.ops.net_subgraph_timing.segment_transfer.metadata_adapter import _resample_lut
 
 
 def _metadata():
@@ -60,6 +61,24 @@ def _contract():
 
 
 class SegmentTransferMetadataAdapterTest(unittest.TestCase):
+    def test_resampling_matches_scalar_lookup_at_boundaries_and_extrapolation(self):
+        target_slew = [-2.0, 0.0, 0.5, 1.0, 3.0, 8.0]
+        target_cap = [-1.0, 0.0, 0.2, 2.0, 5.0]
+        for slew_axis, cap_axis in (([0.0], [0.0]), ([0.0], [0.0, 2.0]),
+                                    ([0.0, 1.0, 3.0], [0.0]),
+                                    ([0.0, 1.0, 3.0], [0.0, 2.0])):
+            lut = torch.arange(len(slew_axis) * len(cap_axis), dtype=torch.float64)
+            lut = (lut.square() + .3).reshape(len(slew_axis), len(cap_axis))
+            expected = torch.tensor([
+                [lookup_lut_value_with_status_mode(
+                    values=lut, trans_axis=slew_axis, cap_axis=cap_axis,
+                    dim=[len(slew_axis), len(cap_axis)], input_slew=slew, output_cap=cap,
+                    boundary_mode="extrapolate",
+                )[0] for cap in target_cap] for slew in target_slew
+            ], dtype=torch.float64)
+            actual = _resample_lut(lut, slew_axis, cap_axis, target_slew, target_cap)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     def test_phase_device_propagates_distinct_liberty_delay_slew_and_input_cap(self):
         metadata = _metadata()
         metadata.flat_lib_pin_rcap = [0.03, 0.0, 0.06, 0.0]

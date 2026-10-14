@@ -49,6 +49,31 @@ def _fixture():
     return nets, candidates, buffer_library
 
 
+def test_generated_segment_candidates_preserve_native_chain_order():
+    from dreamplace.ops.buffer_insertion.buffering_state_builder import _generate_candidates_from_nets
+
+    net = {
+        "net_id": 5, "net_name": "signal", "driver_pin_id": 0,
+        "driver_pin_name": "driver/Y", "net_pin_ids": [0, 1, 2],
+        "undirected_edges": [(0, 10), (10, 1), (10, 2)],
+        "coordinates": {0: (0, 0), 10: (100, 0), 1: (200, 0), 2: (100, 100)},
+        "pin_name_by_id": {0: "driver/Y", 1: "load1/A", 2: "load2/A"},
+    }
+    candidates, _ = _generate_candidates_from_nets(
+        [net], params=SimpleNamespace(), data_collections=SimpleNamespace(),
+        buffer_main_type_index=4, max_candidates_per_segment=3,
+    )
+    assert [
+        {k: c[k] for k in ("segment_tree_depth", "segment_parent_node_id", "segment_child_node_id", "segment_split_ratio")}
+        for c in sorted(candidates, key=lambda c: (c["segment_tree_depth"], c["segment_child_node_id"], c["segment_split_ratio"]))
+    ] == [
+        {"segment_tree_depth": depth, "segment_parent_node_id": parent,
+         "segment_child_node_id": child, "segment_split_ratio": ratio}
+        for depth, parent, child in [(0, 0, 10), (1, 10, 1), (1, 10, 2)]
+        for ratio in (0.25, 0.5, 0.75)
+    ]
+
+
 def test_state_builder_prefers_live_timing_device_over_stale_position_device():
     from dreamplace.ops.buffer_insertion.buffering_state_builder import (
         _buffer_timing_device,
@@ -64,6 +89,32 @@ def test_state_builder_prefers_live_timing_device_over_stale_position_device():
     )
 
     assert _buffer_timing_device(model, data_collections) == torch.device("cuda:1")
+
+
+def test_native_candidate_filter_drops_non_root_driver_nets():
+    from dreamplace.ops.buffer_insertion.buffering_state_builder import (
+        _native_candidate_net_filter,
+    )
+
+    topology = {
+        "net_flat_topo_sort_start": torch.tensor([0, 2, 4], dtype=torch.int32),
+        "net_flat_topo_sort": torch.tensor([0, 1, 2, 3], dtype=torch.int32),
+        "pin_fa": torch.tensor([-1, 0, 3, 2], dtype=torch.int32),
+    }
+    placedb = SimpleNamespace(
+        flat_net2pin_start_map=torch.tensor([0, 2, 4], dtype=torch.int32),
+        flat_net2pin_map=torch.tensor([0, 1, 2, 3], dtype=torch.int32),
+        net2driver_pin_map=torch.tensor([0, 2], dtype=torch.int32),
+    )
+    model = SimpleNamespace(placedb=placedb)
+    data = SimpleNamespace(buffering_timing_topology=topology)
+
+    accepted, summary = _native_candidate_net_filter(
+        model, data, SimpleNamespace(), [0, 1]
+    )
+
+    assert accepted == [0]
+    assert summary["dropped"] == [{"net_id": 1, "reason": "driver_not_root"}]
 
 
 def test_state_builder_builds_payload_without_backward_dependency():

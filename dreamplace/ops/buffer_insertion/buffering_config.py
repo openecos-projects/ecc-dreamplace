@@ -145,8 +145,11 @@ def build_buffering_config_from_params(params, flow_kind=None):
             "buffering_candidate_strategy=discrete_net_gradient requires "
             "buffering_mode=candidate"
         )
-    if mode == "candidate" and segment_strategy != "continuous":
-        raise ValueError("discrete_net_gradient requires buffering_mode=segment")
+    if mode == "candidate":
+        # Candidate mode does not execute the segment lane.  Normalize a
+        # legacy segment strategy instead of exposing that implementation
+        # detail to callers selecting the candidate flow.
+        segment_strategy = "continuous"
     fixed_bsu_index = _resolve_optional_int(params, "buffering_fixed_bsu_index")
     if fixed_bsu_index is not None and fixed_bsu_index < 0:
         raise ValueError("buffering_fixed_bsu_index must be nonnegative")
@@ -257,7 +260,10 @@ def build_buffering_config_from_params(params, flow_kind=None):
         canonical_joint = (
             inferred_flow == "joint"
             and str(getattr(params, "joint_quality_profile", "") or "")
-            == "segment_count_direct_joint_v1"
+            in {
+                "segment_count_direct_joint_v1",
+                "discrete_alternating_sizing_buffering_v1",
+            }
         )
         inflation_placement = inferred_flow == "placement" and _enabled(
             _get_param(params, "timing_opt_enabled", False)

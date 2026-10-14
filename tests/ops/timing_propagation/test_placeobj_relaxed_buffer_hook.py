@@ -402,6 +402,16 @@ def test_timing_obj_can_install_relaxed_buffer_dynamic_net_provider(monkeypatch)
     import torch.nn as nn
     import dreamplace.PlaceObj as place_obj_module
     from dreamplace.PlaceObj import PlaceObj
+    from dreamplace.ops.net_subgraph_timing import segment_transfer
+
+    lut_builds = []
+    build_lut = segment_transfer.build_buffer_device_lut_from_metadata
+
+    def counted_lut(*args, **kwargs):
+        lut_builds.append(1)
+        return build_lut(*args, **kwargs)
+
+    monkeypatch.setattr(segment_transfer, "build_buffer_device_lut_from_metadata", counted_lut)
 
     monkeypatch.setattr(
         place_obj_module,
@@ -517,6 +527,7 @@ def test_timing_obj_can_install_relaxed_buffer_dynamic_net_provider(monkeypatch)
     place_obj.data_collections = SimpleNamespace(
         buffer_optimization_state=state,
         buffer_relaxed_timing_payload=payload,
+        buffering_metadata=_buffer_lut_metadata(),
         inst_libcell_offset=None,
         net_flat_topo_sort=torch.empty(0, dtype=torch.int32),
         net_flat_topo_sort_start=torch.empty(0, dtype=torch.int32),
@@ -592,6 +603,7 @@ def test_timing_obj_can_install_relaxed_buffer_dynamic_net_provider(monkeypatch)
     reused_provider = place_obj._build_relaxed_buffer_dynamic_net_provider()
     assert reused_provider is provider
     assert reused_provider.metadata["provider_reused"] is True
+    assert lut_builds == [1]
 
 
 def test_placeobj_builds_segment_count_dynamic_net_provider():

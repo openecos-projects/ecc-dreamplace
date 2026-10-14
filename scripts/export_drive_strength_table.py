@@ -5,37 +5,15 @@ import argparse
 import json
 from pathlib import Path
 
-from dreamplace.ops.buffer_insertion.drive_type_table import (
-    DRIVE_TYPE_TABLE_SCHEMA,
-    EXPECTED_DRIVE_TYPE_MASTERS,
-)
+from dreamplace.flows.buffer_drive_table import build_drive_strength_table
 
 
 def export_table(pdk_path, output_path):
     pdk_path = Path(pdk_path)
     payload = json.loads(pdk_path.read_text())
-    configured = tuple(str(value) for value in payload.get("buffers", ()))
-    missing = [name for name in EXPECTED_DRIVE_TYPE_MASTERS if name not in configured]
-    if missing:
-        raise ValueError(f"case PDK is missing approved buffers: {missing}")
-    rows = [
-        {
-            "drive_type_id": index,
-            "master_name": name,
-            "drive_strength": strength,
-        }
-        for index, (name, strength) in enumerate(
-            zip(EXPECTED_DRIVE_TYPE_MASTERS, (8.0, 12.0, 16.0, 20.0))
-        )
-    ]
-    result = {
-        "schema": DRIVE_TYPE_TABLE_SCHEMA,
-        "source": "case-pdk-buffer-list",
-        "library": str(payload.get("name", "ics55")),
-        "units": {"drive_strength": "relative"},
-        "source_pdk": str(pdk_path),
-        "buffers": rows,
-    }
+    result = build_drive_strength_table(
+        payload.get("name", "ics55"), payload.get("buffers", ()), pdk_path
+    )
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")

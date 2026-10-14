@@ -5,16 +5,51 @@ import logging
 import math
 import os
 import time
+from enum import Enum
 
 import dreamplace.NonLinearPlace as NonLinearPlace
 
 
 def finalize_inflation_s5b1(engine):
     """One native commit/refresh followed by legalization and placement-RC STA."""
+    return finalize_discrete_window(engine, engine.placer.inflation_s5b1)
+
+
+class MaterializationAreaPolicy(Enum):
+    EXACT = "exact_virtual_area"
+    CAPACITY = "bounded_after_native_sizing_and_buffer_commit"
+
+
+def validate_materialized_area(physical_area, summary, accepted, area_policy):
+    """Validate physical commit accounting independently of artifact naming."""
+    expected_area = float(summary["gp_area"]["movable"])
+    if area_policy is MaterializationAreaPolicy.EXACT:
+        if not math.isclose(physical_area, expected_area, rel_tol=1e-6):
+            raise RuntimeError("virtual-to-real materialization changed physical movable area")
+    elif area_policy is MaterializationAreaPolicy.CAPACITY:
+        rebuild = dict(summary.get("refresh", {}).get("rebuild", {}) or {})
+        pre_nodes = int((rebuild.get("pre_counts", {}) or {}).get("nodes", 0) or 0)
+        post_nodes = int((rebuild.get("post_counts", {}) or {}).get("nodes", 0) or 0)
+        if post_nodes != pre_nodes + accepted:
+            raise RuntimeError("terminal rebuild node count does not match committed buffers")
+        capacity = float(summary["gp_area"].get("capacity", 0.0) or 0.0)
+        if not math.isfinite(physical_area) or physical_area <= 0.0:
+            raise RuntimeError("terminal movable area is non-finite or empty")
+        if capacity > 0.0 and physical_area > capacity * (1.0 + 1e-6):
+            raise RuntimeError("terminal movable area exceeds placement capacity")
+    else:
+        raise ValueError(f"unknown materialization area policy: {area_policy!r}")
+    summary["materialized_area_consistency"] = area_policy.value
+
+
+def finalize_discrete_window(
+    engine, owner, *, artifact_stem="inflation_s5b1",
+    area_policy=MaterializationAreaPolicy.EXACT,
+):
+    """Finalize a virtual electrical window using the canonical ECC lifecycle."""
     from dreamplace.ops.placeio_common.physical_mutation import write_native_def
     from dreamplace.ops.routability.gpugr_context import write_back_movable_lpos
 
-    owner = engine.placer.inflation_s5b1
     request = owner.terminal_request
     if request is None or owner.terminal_commit_started:
         raise RuntimeError("S5B1 terminal commit is missing or was already attempted")
@@ -22,11 +57,11 @@ def finalize_inflation_s5b1(engine):
     started = time.perf_counter()
     params, placedb = engine.params, engine.placedb
     result_dir = str(params.result_dir)
-    stem = os.path.join(result_dir, params.design_name() + "_inflation_s5b1")
+    stem = os.path.join(result_dir, params.design_name() + "_" + artifact_stem)
     summary = {"status": "pending", **owner.terminal_summary, "request": request.to_summary(),
                "atomic_across_sizing_and_buffer": False}
     try:
-        summary["native_sizing"] = owner._sync_native_sizing()
+        summary["native_sizing"] = owner.sync_native_sizing()
         write_back_movable_lpos(engine.placer.pos[0], params, placedb)
         backend = engine._physical_mutation_backend()
         commit = backend.commit_buffers(request, output_dir=result_dir)
@@ -48,9 +83,15 @@ def finalize_inflation_s5b1(engine):
         if summary["refresh"].get("status") != "ok":
             raise RuntimeError(f"S5B1 terminal full refresh failed: {summary['refresh']}")
         physical_area = float(placedb.total_movable_node_area)
-        if not math.isclose(physical_area, summary["gp_area"]["movable"], rel_tol=1e-6):
-            raise RuntimeError("virtual-to-real materialization changed physical movable area")
+        expected_area = float(summary["gp_area"]["movable"])
         summary["materialized_movable_area"] = physical_area
+        summary["materialized_area_delta_from_gp"] = physical_area - expected_area
+        summary["materialized_area_relative_delta_from_gp"] = (
+            (physical_area - expected_area) / expected_area
+            if expected_area
+            else None
+        )
+        validate_materialized_area(physical_area, summary, accepted, area_policy)
         placedb.cooptimization_geometry = None
         owner.ops.steiner_topo_op.frozen_nets.segment_state = None
         owner.data.buffer_optimization_state = None
@@ -62,6 +103,8 @@ def finalize_inflation_s5b1(engine):
         summary["virtual_view_removed"] = True
 
         terminal_params = copy.copy(params)
+        terminal_params.flow_kind = "placement"
+        terminal_params.joint_quality_profile = ""
         terminal_params.global_place_flag = 0
         terminal_params.legalize_flag = 1
         terminal_params.timing_opt_enabled = 0
@@ -91,7 +134,7 @@ def finalize_inflation_s5b1(engine):
                        native_sta_role="diagnostic_no_SPEF", new_gp_steps=0,
                        backend_capabilities=dict(placedb.backend_caps))
         engine.last_run_result = {"status": "ok", "rsmt": engine.rsmt,
-                                  "hpwl": engine.hpwl, "inflation_s5b1_terminal": summary}
+                                  "hpwl": engine.hpwl, artifact_stem + "_terminal": summary}
         return engine.last_run_result
     except Exception as exc:
         summary.update(status="failed", error=str(exc))

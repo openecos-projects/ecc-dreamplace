@@ -2946,6 +2946,10 @@ class PlacementEngine:
         # self.placedb = PlaceDB(engine_data_ieda)
         # self.placedb.init_db(params)
         print('init db done')
+        if (
+            bool(getattr(self.params, "diff_opt_enabled", False))
+        ):
+            return self.run_diff_opt()
         if getattr(self.params, "flow_kind", None) == FlowKind.STA.value:
             return self.run_sta_only()
         if self._is_joint_staged_smoke_v1():
@@ -2984,6 +2988,21 @@ class PlacementEngine:
             if placement_debug.get("status") == "failed":
                 self.last_run_result = placement_debug
                 return self.last_run_result
+
+            alternating = self.placer.alternating_discrete
+            if alternating is not None:
+                from dreamplace.flows.committed_topology import (
+                    MaterializationAreaPolicy, finalize_discrete_window,
+                )
+
+                result = finalize_discrete_window(
+                    self, alternating.owner,
+                    artifact_stem="discrete_alternating_sizing_buffering",
+                    area_policy=MaterializationAreaPolicy.CAPACITY,
+                )
+                alternating.last_finalize_result = result
+                alternating._write_summary(status="completed")
+                return result
             if bool(getattr(self.params, "timing_opt_enabled", False)):
                 from dreamplace.flows.committed_topology import finalize_inflation_s5b1
 
@@ -3189,6 +3208,12 @@ class PlacementEngine:
             final_ppa = finalize_gr_sizing(self, final_ppa)
         self.last_run_result = final_ppa
         return final_ppa
+
+    def run_diff_opt(self):
+        """Execute the standalone placement-parasitic timing flow."""
+        from dreamplace.flows.diff_opt import run_diff_opt
+
+        return run_diff_opt(self)
 
 
 def main(argv=None, output_stream=None):

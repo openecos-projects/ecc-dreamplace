@@ -197,6 +197,7 @@ def build_arg_parser():
             "proximal_alternating_v1",
             "staged_smoke_v1",
             "segment_count_direct_joint_v1",
+            "discrete_alternating_sizing_buffering_v1",
         ),
         help="Compact joint optimization profile.",
     )
@@ -664,6 +665,13 @@ _BUFFERING_VALUE_OVERRIDES = (
     ("joint_segment_sizing_enabled", int),
     ("joint_segment_route_b_enabled", int),
     ("joint_segment_virtual_density_enabled", int),
+    ("joint_alternating_outer_rounds", int),
+    ("joint_alternating_sizing_rounds", int),
+    ("joint_alternating_sizing_shared_budget", int),
+    ("joint_alternating_sizing_shared_budget_percent", float),
+    ("joint_alternating_buffering_rounds", int),
+    ("joint_alternating_buffering_selection_fraction", float),
+    ("joint_alternating_buffer_commit_each_round", int),
 )
 
 

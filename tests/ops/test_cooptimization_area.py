@@ -95,6 +95,18 @@ def test_runtime_sizing_preserves_centers_and_entry_footprint_across_rounds():
     assert coordinate_area(before_area, data, db, pos) == AreaState(5.0, 3.0, 10.0)
 
 
+def test_sizing_window_initializes_missing_routability_snapshots():
+    data, db, pos = make_geometry()
+    del data.original_node_size_x
+    del data.original_node_size_y
+
+    window = SizingWindowGeometry(data, db, pos)
+
+    torch.testing.assert_close(data.original_node_size_x, data.node_size_x)
+    torch.testing.assert_close(data.original_node_size_y, data.node_size_y)
+    assert not bool(window.inflated.any())
+
+
 @pytest.mark.parametrize(
     "filler,added_area,expected",
     [

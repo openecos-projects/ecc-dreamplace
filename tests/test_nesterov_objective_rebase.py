@@ -17,6 +17,34 @@ def _quadratic(target):
     return objective_and_gradient
 
 
+def test_refresh_changed_objective_preserves_momentum_and_uses_current_gradient():
+    position = torch.nn.Parameter(torch.tensor([4.]))
+    optimizer = NesterovAcceleratedGradientOptimizer(
+        [position], lr=.1, obj_and_grad_fn=_quadratic([0.]),
+        constraint_fn=lambda value: value, use_bb=False,
+    )
+    position.grad = torch.zeros_like(position)
+    optimizer.step()
+    group = optimizer.param_groups[0]
+    momentum = {key: [value.detach().clone() for value in group[key]] for key in ("u_k", "a_k", "alpha_k")}
+    stale_gradient = group["g_k"][0].clone()
+    optimizer.obj_and_grad_fn = _quadratic([10.])
+    expected_objective, expected_gradient = optimizer.obj_and_grad_fn(position)
+
+    summary = optimizer.refresh_objective_state(reason="changed_target")
+
+    assert summary["relative_gradient_changes"][0] > 0
+    assert not torch.equal(stale_gradient, group["g_k"][0])
+    torch.testing.assert_close(group["g_k"][0], expected_gradient)
+    torch.testing.assert_close(group["obj_k"][0], expected_objective)
+    for key, values in momentum.items():
+        for actual, expected in zip(group[key], values, strict=True):
+            torch.testing.assert_close(actual, expected)
+    before = position.detach().clone()
+    optimizer.step()
+    assert position.item() > before.item()
+
+
 @pytest.mark.parametrize("use_bb", [False, True])
 @pytest.mark.parametrize("slope", [0.0, 0.05, 1.0])
 def test_zero_curvature_keeps_steps_finite(use_bb, slope):

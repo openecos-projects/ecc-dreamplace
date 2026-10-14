@@ -253,10 +253,15 @@ def test_best_master_restore_rebuilds_vt_and_leakage_state():
     )
 
 
-@pytest.mark.parametrize("owner", ["segment_joint", "timing_opt"])
+@pytest.mark.parametrize("owner", ["segment_joint", "timing_opt", "alternating"])
 def test_best_restore_preserves_milestone_owned_cells_and_geometry(owner):
     placer = _placer()
-    placer.params = SimpleNamespace(timing_opt_enabled=owner == "timing_opt")
+    from dreamplace.flows.alternating_discrete import PROFILE
+
+    placer.params = SimpleNamespace(
+        timing_opt_enabled=owner == "timing_opt",
+        joint_quality_profile=PROFILE if owner == "alternating" else "",
+    )
     placer._segment_direct_joint_enabled = lambda: owner == "segment_joint"
     placer.data_collections = SimpleNamespace(inst_cell_id=torch.tensor([1]),
                                              node_size_x=torch.tensor([540.]))

@@ -33,6 +33,23 @@ class FlowConfigTest(unittest.TestCase):
             FlowKind.STA,
             infer_flow_kind(types.SimpleNamespace(flow_kind="sta")),
         )
+        self.assertEqual(
+            FlowKind.JOINT,
+            infer_flow_kind(
+                types.SimpleNamespace(
+                    joint_quality_profile="discrete_alternating_sizing_buffering_v1"
+                )
+            ),
+        )
+        self.assertEqual(
+            FlowKind.JOINT,
+            infer_flow_kind(
+                types.SimpleNamespace(
+                    flow_kind="placement",
+                    joint_quality_profile="discrete_alternating_sizing_buffering_v1",
+                )
+            ),
+        )
 
     def test_explicit_flow_kind_overrides_inference(self):
         from dreamplace.flows.flow_config import FlowKind, infer_flow_kind
@@ -47,8 +64,94 @@ class FlowConfigTest(unittest.TestCase):
             ),
         )
 
+    def test_discrete_alternating_profile_resolves_joint_contract(self):
+        from dreamplace.flows.flow_config import FlowKind, resolve_flow_config
+
+        resolved = resolve_flow_config(
+            {
+                "joint_quality_profile": "discrete_alternating_sizing_buffering_v1",
+                "buffering_candidate_drive_strength_table": "/tmp/drive-strength.json",
+            },
+            explicit_keys=("buffering_candidate_drive_strength_table",),
+        )
+
+        self.assertEqual(FlowKind.JOINT.value, resolved["flow_kind"])
+        self.assertEqual("joint", resolved["placement_sizing_mode"])
+        self.assertEqual("real_size", resolved["sizing_parameterization"])
+        self.assertEqual("candidate", resolved["buffering_mode"])
+        self.assertEqual(
+            "discrete_net_gradient",
+            resolved["buffering_candidate_strategy"],
+        )
+        self.assertEqual("four_strength_table", resolved["buffering_candidate_drive_type_mode"])
+        self.assertEqual(5, resolved["joint_alternating_outer_rounds"])
+        self.assertEqual("final_only", resolved["joint_alternating_buffer_commit_policy"])
+
+    def test_discrete_alternating_profile_keeps_nesterov_for_placement(self):
+        from dreamplace.flows.flow_config import resolve_flow_config
+
+        resolved = resolve_flow_config(
+            {
+                "flow_kind": "joint",
+                "joint_quality_profile": "discrete_alternating_sizing_buffering_v1",
+                "global_place_stages": [
+                    {"iteration": 3000, "optimizer": "nesterov"}
+                ],
+                "buffering_candidate_drive_strength_table": "/tmp/drive-strength.json",
+            },
+            explicit_keys=(
+                "global_place_stages",
+                "buffering_candidate_drive_strength_table",
+            ),
+        )
+
+        assert resolved["global_place_stages"][0]["optimizer"] == "nesterov"
+
+    def test_discrete_alternating_profile_clears_legacy_segment_strategy(self):
+        from dreamplace.flows.flow_config import resolve_flow_config
+
+        resolved = resolve_flow_config(
+            {
+                "flow_kind": "placement",
+                "joint_quality_profile": "discrete_alternating_sizing_buffering_v1",
+                "buffering_mode": "candidate",
+                "buffering_segment_strategy": "discrete_net_gradient",
+                "buffering_candidate_strategy": "discrete_net_gradient",
+                "buffering_candidate_drive_type_mode": "four_strength_table",
+                "buffering_candidate_drive_strength_table": "/tmp/drive-strength.json",
+            },
+            explicit_keys=(
+                "buffering_segment_strategy",
+                "buffering_candidate_strategy",
+                "buffering_candidate_drive_type_mode",
+                "buffering_candidate_drive_strength_table",
+            ),
+        )
+        self.assertEqual("continuous", resolved["buffering_segment_strategy"])
+
+    def test_discrete_alternating_coordinator_owns_only_placement_optimizer_group(self):
+        from dreamplace.flows.joint_coordinator import JointCoordinator
+
+        params = types.SimpleNamespace(
+            flow_kind="joint",
+            joint_quality_profile="discrete_alternating_sizing_buffering_v1",
+            placement_sizing_mode="joint",
+            joint_segment_sizing_enabled=True,
+            joint_buffer_outer_iterations=1,
+            joint_buffer_overflow_gate=0.3,
+            joint_alternating_buffer_commit_each_round=0,
+        )
+        coordinator = JointCoordinator(params, buffering_lane=types.SimpleNamespace())
+        groups = coordinator.collect_param_groups(
+            placement_params=[object()],
+            sizing_params=[object()],
+        )
+        self.assertTrue(coordinator.is_discrete_alternating)
+        self.assertEqual(["placement"], [group["group_name"] for group in groups])
+
     def test_timing_driven_placement_is_a_placement_profile(self):
         from dreamplace.flows.flow_config import FlowKind, apply_flow_defaults
+        from dreamplace.flows.flow_profiles import TIMING_DRIVEN_PLACEMENT_DEFAULTS
 
         params = types.SimpleNamespace(
             flow_kind="placement",
@@ -59,20 +162,17 @@ class FlowConfigTest(unittest.TestCase):
 
         self.assertEqual(FlowKind.PLACEMENT, flow_kind)
         self.assertEqual("placement", params.flow_kind)
-        self.assertEqual(3000, params.global_place_stages[0]["iteration"])
-        self.assertEqual(256, params.global_place_stages[0]["num_bins_x"])
-        self.assertEqual(256, params.global_place_stages[0]["num_bins_y"])
-        self.assertEqual(3000, params.random_seed)
-        self.assertEqual(0.8, params.target_density)
-        self.assertEqual(0.1, params.stop_overflow)
+        fields = (
+            "global_place_stages", "random_seed", "target_density", "stop_overflow",
+            "with_sta", "timing_topology_refresh_interval",
+            "timing_topology_enable_overflow_threshold", "pin2pin_weight",
+            "pin2pin_min_weight", "pin2pin_max_weight", "pin2pin_accumulate_weight",
+        )
+        self.assertEqual(
+            {name: dict(TIMING_DRIVEN_PLACEMENT_DEFAULTS)[name] for name in fields},
+            {name: getattr(params, name) for name in fields},
+        )
         self.assertEqual(1, params.diff_timing_driven_placement)
-        self.assertEqual(1, params.with_sta)
-        self.assertEqual(15, params.timing_topology_refresh_interval)
-        self.assertEqual(0.35, params.timing_topology_enable_overflow_threshold)
-        self.assertEqual(0.0005, params.pin2pin_weight)
-        self.assertEqual(10.0, params.pin2pin_min_weight)
-        self.assertEqual(50.0, params.pin2pin_max_weight)
-        self.assertEqual(0.2, params.pin2pin_accumulate_weight)
 
     def test_resolve_flow_config_copies_input(self):
         from dreamplace.flows.flow_config import resolve_flow_config
@@ -395,7 +495,9 @@ class FlowConfigTest(unittest.TestCase):
         self.assertTrue(state["restore_best"])
         self.assertIsNone(state["patience"])
 
-    def test_timing_lut_2d_native_op_auto_targets_gpu_fast_loop(self):
+    def test_timing_lut_2d_native_op_auto_targets_supported_fast_loop_tensors(self):
+        import torch
+
         from dreamplace.ops.timing_propagation.timing_propagation import (
             TimingPropagation,
         )
@@ -406,16 +508,15 @@ class FlowConfigTest(unittest.TestCase):
             "auto"
         )
 
-        self.assertTrue(
-            model._use_lut_2d_native_op_for_tensor(types.SimpleNamespace(is_cuda=True))
-        )
+        for dtype in (torch.float32, torch.float64):
+            self.assertTrue(model._use_lut_2d_native_op_for_tensor(torch.empty(0, dtype=dtype)))
         self.assertFalse(
-            model._use_lut_2d_native_op_for_tensor(types.SimpleNamespace(is_cuda=False))
+            model._use_lut_2d_native_op_for_tensor(torch.empty(0, dtype=torch.int64))
         )
 
         model.production_fast_loop = False
         self.assertFalse(
-            model._use_lut_2d_native_op_for_tensor(types.SimpleNamespace(is_cuda=True))
+            model._use_lut_2d_native_op_for_tensor(torch.empty(0, dtype=torch.float32))
         )
 
     def test_timing_lut_2d_native_op_explicit_modes(self):

@@ -27,6 +27,10 @@
         "description": "max timing checks used by placement WNS/TNS: setup_only or setup_plus_recovery",
         "default": "setup_plus_recovery"
     },
+    "timing_propagation_device": {
+        "description": "TimingPropagation device: inherit the placement device, or explicitly use cpu/cuda",
+        "default": "inherit"
+    },
     "placement_sizing_mode": {
         "description": "placement optimization lane, place_only | size_only | joint",
         "default": "place_only"
@@ -146,6 +150,46 @@
     "joint_quality_profile": {
         "description": "optional canonical profile for joint optimization",
         "default": ""
+    },
+    "joint_alternating_outer_rounds": {
+        "description": "outer rounds for the discrete alternating sizing/buffering profile",
+        "default": 5
+    },
+    "joint_alternating_sizing_rounds": {
+        "description": "discrete sizing rounds before each candidate buffering round",
+        "default": 5
+    },
+    "joint_alternating_sizing_shared_budget": {
+        "description": "use one shared sizing action budget per discrete sizing round",
+        "default": 1
+    },
+    "joint_alternating_sizing_shared_budget_percent": {
+        "description": "shared sizing budget percentage for the alternating profile",
+        "default": 1.0
+    },
+    "joint_alternating_sizing_action_policy": {
+        "description": "sizing action reduction policy for the alternating profile",
+        "default": "quad_shared_budget_all_legal"
+    },
+    "joint_alternating_buffering_rounds": {
+        "description": "candidate buffering rounds after each sizing block",
+        "default": 1
+    },
+    "joint_alternating_buffering_selection_fraction": {
+        "description": "fraction of eligible nets selected by each candidate buffering round",
+        "default": 0.001
+    },
+    "joint_alternating_buffering_mode": {
+        "description": "buffering backend for the alternating profile",
+        "default": "candidate"
+    },
+    "joint_alternating_buffer_commit_each_round": {
+        "description": "whether to physically commit virtual buffers after every alternating round",
+        "default": 0
+    },
+    "joint_alternating_buffer_commit_policy": {
+        "description": "physical buffer commit policy for the alternating profile",
+        "default": "final_only"
     },
     "place_io_engine": {
         "description": "physical database backend used by DREAMPlace",

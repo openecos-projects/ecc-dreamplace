@@ -730,6 +730,27 @@ def apply_flow_defaults(params):
                 }
             })
         for name, value in window_defaults.items():
+            candidate_buffering_mode = (
+                str(getattr(params, "buffering_mode", "segment") or "segment")
+                == "candidate"
+            )
+            if candidate_buffering_mode and name in {
+                "buffering_mode",
+                "buffering_segment_strategy",
+                "buffering_segment_count_z_init",
+                "buffering_segment_count_timing_backend",
+                "buffering_segment_transfer_backend",
+                "buffering_segment_live_geometry",
+                "buffering_segment_integer_projection_interval",
+                "buffering_segment_integer_projection_start_step",
+                "buffering_segment_integer_projection_project_bsu",
+                "buffering_discrete_count_proximal_lambda",
+                "buffering_segment_projection_min_z_to_insert",
+                "buffering_segment_projection_require_setup_criticality",
+                "buffering_fixed_bsu_index",
+                "buffering_fixed_buffer_master",
+            }:
+                continue
             if name in {
                 "placement_sizing_mode", "sizing_parameterization", "continuous_size_dynamics_mode",
                 "buffering_mode", "buffering_segment_strategy", "buffering_segment_count_z_init",

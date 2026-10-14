@@ -25,6 +25,7 @@ import unittest
 from dataclasses import dataclass, field
 from typing import Optional
 from dreamplace.ops.timing_propagation.crash_stage_marker import write_crash_stage_marker
+from dreamplace.ops.timing_propagation.hard_scatter_native import scatter_slew_max
 from dreamplace.ops.timing_propagation.critical_endpoint_pruning import (
     DynamicCriticalEndpointSelector,
 )
@@ -246,6 +247,13 @@ def smooth_scatter_max_tau(
     if tau_value <= 0.0:
         raise ValueError("tau must be positive for smooth scatter max")
 
+    native = lut_entry_2d_op._select_module(dest) if lut_entry_2d_op is not None else None
+    if (dest.dtype in (torch.float32, torch.float64) and eps == 1e-30
+            and hasattr(native, "smooth_scatter_forward")):
+        from .smooth_scatter_native import smooth_scatter_max_native
+
+        return smooth_scatter_max_native(dest, index, src, tau=tau_value, include_self=include_self)
+
     idx = index.long()
     vals = src
     target_size = dest.shape[0]
@@ -389,8 +397,8 @@ class LUTS_INFO:
         self.flat_luts_dim = flat_luts_dim
         
         # --- 2. 计算实际维度 ---
-        self.trans_dims_actual = flat_luts_dim[:, 0].long()
-        self.cap_dims_actual = flat_luts_dim[:, 1].long()
+        self.trans_dims_actual = flat_luts_dim[:, 0].long().contiguous()
+        self.cap_dims_actual = flat_luts_dim[:, 1].long().contiguous()
 
         # --- 3. 预计算不同 LUT 类型的布尔掩码 ---
         # A LUT is valid as long as it has at least one timing axis.
@@ -1261,7 +1269,7 @@ class TimingPropagation(nn.Module):
             return True
         return bool(
             getattr(self, "production_fast_loop", False)
-            and getattr(tensor, "is_cuda", False)
+            and tensor.dtype in (torch.float32, torch.float64)
         )
 
     def _surrogate_slew_input_tensor(self, pin_slew):
@@ -2156,7 +2164,7 @@ class TimingPropagation(nn.Module):
         if cache is None:
             cache = {}
             self._cell_aat_static_cache = cache
-        key = (int(inst_arcs.data_ptr()), tuple(inst_arcs.shape), str(inst_arcs.device))
+        key = (int(inst_arcs.data_ptr()), tuple(inst_arcs.shape), str(inst_arcs.device), inst_arcs._version)
         cached = cache.get(key)
         if cached is not None:
             self._cell_aat_static_cache_hits = int(
@@ -2176,6 +2184,9 @@ class TimingPropagation(nn.Module):
             "is_pos_unate": is_pos_unate,
             "is_neg_unate": is_neg_unate,
             "is_non_unate": is_non_unate,
+            "pos_arc_indices": is_pos_unate.nonzero(as_tuple=True)[0],
+            "neg_arc_indices": is_neg_unate.nonzero(as_tuple=True)[0],
+            "non_arc_indices": is_non_unate.nonzero(as_tuple=True)[0],
             "has_pos_unate": bool(torch.any(is_pos_unate).detach().cpu().item()),
             "has_neg_unate": bool(torch.any(is_neg_unate).detach().cpu().item()),
             "has_non_unate": bool(torch.any(is_non_unate).detach().cpu().item()),
@@ -3725,6 +3736,18 @@ class TimingPropagation(nn.Module):
         dtype = input_trans.dtype
         batch_size = arc_idxs.shape[0]
 
+        native_lut = lut_entry_2d_op._select_module(input_trans) if lut_entry_2d_op is not None else None
+        if (self._use_lut_2d_native_op_for_tensor(input_trans)
+                and hasattr(native_lut, "indexed_forward")
+                and not getattr(luts_info, "use_2d_coeff_cache", False)
+                and not getattr(luts_info, "use_2d_coeff_op", False)
+                and not any(table.requires_grad for table in (
+                    luts_info.flat_luts_values, luts_info.flat_luts_trans_table,
+                    luts_info.flat_luts_cap_table))):
+            from .lut_entry_indexed import lut_entry_indexed
+
+            return lut_entry_indexed(input_trans, output_caps, arc_idxs, luts_info)
+
         # --- 1. 获取当前批次对应的掩码和维度 ---
         is_scalar_batch = luts_info.is_scalar[arc_idxs]
         is_trans_1d_batch = luts_info.is_trans_1d[arc_idxs]
@@ -4188,8 +4211,8 @@ class TimingPropagation(nn.Module):
             mode=self.timing_aggregation_mode,
             tau_ps=self.timing_aggregation_tau_ps,
         )
-        pin_rtran = torch.scatter_reduce(pin_rtran, 0, arc_out_pins.long(), r_trans, reduce="amax", include_self=False)
-        pin_ftran = torch.scatter_reduce(pin_ftran, 0, arc_out_pins.long(), f_trans, reduce="amax", include_self=False)
+        pin_rtran = scatter_slew_max(pin_rtran, arc_out_pins.long(), r_trans, include_self=False)
+        pin_ftran = scatter_slew_max(pin_ftran, arc_out_pins.long(), f_trans, include_self=False)
 
         net_in_pins = torch.unique(self.pin_net[arc_out_pins])
         return (net_in_pins, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran)
@@ -4212,6 +4235,18 @@ class TimingPropagation(nn.Module):
         # Get outpin and inpin ranges for all cells
 
         level_inst_arcs = inst_arcs
+        if use_surrogate is None:
+            use_surrogate = self._cell_modeling_enabled()
+        if lut_entry_2d_op is not None:
+            from .cell_aat_native import try_cell_aat_native
+
+            native_result = try_cell_aat_native(
+                self, inst_arcs, (pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
+                                 pin_net_cap_rise, pin_net_cap_fall),
+                use_surrogate=use_surrogate, need_delay_updates=need_delay_updates,
+            )
+            if native_result is not None:
+                return native_result
         static_level_data = (
             self._get_cell_aat_static_level_data(level_inst_arcs)
             if getattr(self, "use_cell_aat_static_cache", False)
@@ -4248,9 +4283,9 @@ class TimingPropagation(nn.Module):
             has_neg_unate = torch.any(is_neg_unate)
             has_non_unate = torch.any(is_non_unate)
         else:
-            is_pos_unate = static_level_data["is_pos_unate"]
-            is_neg_unate = static_level_data["is_neg_unate"]
-            is_non_unate = static_level_data["is_non_unate"]
+            is_pos_unate = static_level_data["pos_arc_indices"]
+            is_neg_unate = static_level_data["neg_arc_indices"]
+            is_non_unate = static_level_data["non_arc_indices"]
             has_pos_unate = static_level_data["has_pos_unate"]
             has_neg_unate = static_level_data["has_neg_unate"]
             has_non_unate = static_level_data["has_non_unate"]
@@ -4271,9 +4306,6 @@ class TimingPropagation(nn.Module):
         else:
             delay_rr_updates = delay_rf_updates = None
             delay_fr_updates = delay_ff_updates = None
-        if use_surrogate is None:
-            use_surrogate = self._cell_modeling_enabled()
-
         profile_enabled = bool(getattr(self, "timing_propagation_profile", False))
         level_profile = None
         if profile_enabled:
@@ -4598,6 +4630,17 @@ class TimingPropagation(nn.Module):
             net_arcs_global_indices.numel(), device=pin_rAAT.device)
         net_arcs_level = self.net_flat_arcs[net_arcs_global_indices]
 
+        if lut_entry_2d_op is not None:
+            from .net_aat_native import try_net_aat_native
+
+            native_result = try_net_aat_native(
+                self, net_arcs_level, (pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
+                                      pin_net_delay_rise, pin_net_delay_fall,
+                                      pin_net_impulse_rise, pin_net_impulse_fall), SLEW_SQRT_EPS,
+            )
+            if native_result is not None:
+                return native_result
+
         arc_fopins = net_arcs_level[:, 1]
         arc_fipins = net_arcs_level[:, 0]
 
@@ -4629,10 +4672,8 @@ class TimingPropagation(nn.Module):
             mode=self.timing_aggregation_mode,
             tau_ps=self.timing_aggregation_tau_ps,
         )
-        pin_rtran = torch.scatter_reduce(pin_rtran, 0, arc_fopins.long(
-        ), r_tran_updates, reduce="amax", include_self=True)
-        pin_ftran = torch.scatter_reduce(pin_ftran, 0, arc_fopins.long(
-        ), f_tran_updates, reduce="amax", include_self=True)
+        pin_rtran = scatter_slew_max(pin_rtran, arc_fopins.long(), r_tran_updates)
+        pin_ftran = scatter_slew_max(pin_ftran, arc_fopins.long(), f_tran_updates)
         logging.debug(f"Net AAT Level Time: {time.time() - start_time:.4f}s")
         return pin_rAAT, pin_fAAT, pin_rtran, pin_ftran
 

@@ -30,7 +30,9 @@ class RecoveryChecksTest(unittest.TestCase):
             backend_endpoint_fSlew=torch.tensor([2.5]) if native_f else None,
             arcs_info=SimpleNamespace(r_check_luts=None, f_check_luts=None),
         )
-        op.lut_entry_vectorized = lambda _cells, data, clock, _arcs, _luts: data + 0.1 * clock
+        op.lut_entry_vectorized = (
+            lambda _cells, clock, data, _arcs, _luts: 0.1 * clock + data
+        )
         return op
 
     def test_recovery_requires_native_endpoint_slews_for_recovery_metric(self):
@@ -58,23 +60,74 @@ class RecoveryChecksTest(unittest.TestCase):
                 scatter_timing_min,
             )
 
-    def test_recovery_native_slews_preserve_live_slew_gradients(self):
+    def test_recovery_replaces_reference_check_with_live_check_and_gradient(self):
+        for mode in ("hard", "smooth"):
+            with self.subTest(mode=mode):
+                op = self._recovery_fixture()
+                op.timing_aggregation_mode = mode
+                # Max required time is anchor - check(clock_slew, data_slew).
+                # Increasing data slew tightens rise, decreasing it relaxes fall.
+                rise = torch.tensor([0.0, 3.0], requires_grad=True)
+                fall = torch.tensor([0.0, 1.0], requires_grad=True)
+                result = calculate_recovery_rat(
+                    op,
+                    torch.tensor([100.0, 100.0]),
+                    torch.tensor([100.0, 100.0]),
+                    rise,
+                    fall,
+                    scatter_timing_min,
+                )
+                torch.testing.assert_close(
+                    result,
+                    (torch.tensor([100.0, 99.0]), torch.tensor([100.0, 101.5])),
+                )
+                gradients = torch.autograd.grad(
+                    result[0][1] + result[1][1], (rise, fall)
+                )
+                torch.testing.assert_close(
+                    gradients, (torch.tensor([0.0, -1.0]), torch.tensor([0.0, -1.0]))
+                )
+
+    def test_recovery_at_reference_slew_does_not_duplicate_smooth_constraint(self):
         op = self._recovery_fixture()
-        pin_rtran = torch.zeros(2, requires_grad=True)
-        pin_ftran = torch.zeros(2, requires_grad=True)
-        pin_rRAT, pin_fRAT = calculate_recovery_rat(
+        op.timing_aggregation_mode = "smooth"
+        required = (torch.tensor([100.0, 100.0]), torch.tensor([100.0, 100.0]))
+        result = calculate_recovery_rat(
+            op,
+            *required,
+            torch.tensor([0.0, 2.0]),
+            torch.tensor([0.0, 2.5]),
+            scatter_timing_min,
+        )
+        torch.testing.assert_close(result, required)
+
+    def test_recovery_qualifies_each_check_transition_before_reduction(self):
+        op = self._recovery_fixture()
+        op.endpoints_timing_check_arcs = op.endpoints_timing_check_arcs.repeat(2, 1)
+        op.endpoints_timing_check_arcs[1, 3] = 1
+        op.endpoints_timing_check_max_valid = torch.tensor(
+            [[True, False], [False, True]]
+        )
+        op.lut_entry_vectorized = lambda _cells, clock, data, arcs, _luts: (
+            0.1 * clock + torch.where(arcs == 0, 1.0, 10.0) * data
+        )
+        rise = torch.tensor([0.0, 3.0], requires_grad=True)
+        fall = torch.tensor([0.0, 1.0], requires_grad=True)
+        result = calculate_recovery_rat(
             op,
             torch.tensor([100.0, 100.0]),
             torch.tensor([100.0, 100.0]),
-            pin_rtran,
-            pin_ftran,
+            rise,
+            fall,
             scatter_timing_min,
         )
-        rise_grad, fall_grad = torch.autograd.grad(
-            pin_rRAT[1] + pin_fRAT[1], (pin_rtran, pin_ftran)
+        torch.testing.assert_close(
+            result, (torch.tensor([100.0, 99.0]), torch.tensor([100.0, 115.0]))
         )
-        self.assertAlmostEqual(float(rise_grad[1]), 1.0)
-        self.assertAlmostEqual(float(fall_grad[1]), 1.0)
+        gradients = torch.autograd.grad(result[0][1] + result[1][1], (rise, fall))
+        torch.testing.assert_close(
+            gradients, (torch.tensor([0.0, -1.0]), torch.tensor([0.0, -10.0]))
+        )
 
     def test_setup_only_accepts_recovery_arcs_without_native_slews(self):
         op = self._recovery_fixture(

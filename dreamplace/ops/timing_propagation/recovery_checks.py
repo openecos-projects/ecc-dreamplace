@@ -105,40 +105,49 @@ def calculate_recovery_rat(timing, pin_rRAT, pin_fRAT, pin_rtran, pin_ftran, sca
         native_r = native_r_by_pin[endpoint_pins]
         native_f = native_f_by_pin[endpoint_pins]
 
-    # Exported check LUTs use (related/data transition, constrained/clock
-    # transition), matching native iSTA's TimingTable::findValue query order.
+    # All exported check LUTs use (related-clock, constrained-data) slew.
     native_check_r = timing.lut_entry_vectorized(
-        lib_cells, native_r, clock_r_slew, lib_arcs, timing.arcs_info.r_check_luts
+        lib_cells, clock_r_slew, native_r, lib_arcs, timing.arcs_info.r_check_luts
     )
     native_check_f = timing.lut_entry_vectorized(
-        lib_cells, native_f, clock_f_slew, lib_arcs, timing.arcs_info.f_check_luts
+        lib_cells, clock_f_slew, native_f, lib_arcs, timing.arcs_info.f_check_luts
     )
-    # Native iSTA recovery RAT is capture_time + check_time.
-    capture_r = pin_rRAT[endpoint_pins] - native_check_r
-    capture_f = pin_fRAT[endpoint_pins] - native_check_f
+    # Max required time is capture anchor - check time, including recovery.
+    capture_r = pin_rRAT[endpoint_pins] + native_check_r
+    capture_f = pin_fRAT[endpoint_pins] + native_check_f
 
     live_check_r = timing.lut_entry_vectorized(
-        lib_cells, pin_rtran[endpoint_pins], clock_r_slew, lib_arcs, timing.arcs_info.r_check_luts
+        lib_cells,
+        clock_r_slew,
+        pin_rtran[endpoint_pins],
+        lib_arcs,
+        timing.arcs_info.r_check_luts,
     )
     live_check_f = timing.lut_entry_vectorized(
-        lib_cells, pin_ftran[endpoint_pins], clock_f_slew, lib_arcs, timing.arcs_info.f_check_luts
+        lib_cells,
+        clock_f_slew,
+        pin_ftran[endpoint_pins],
+        lib_arcs,
+        timing.arcs_info.f_check_luts,
     )
-    new_r = capture_r + live_check_r
-    new_f = capture_f + live_check_f
-    pin_rRAT = scatter_timing_min(
-        pin_rRAT,
-        endpoint_pins,
-        new_r,
-        include_self=True,
-        mode=timing.timing_aggregation_mode,
-        tau_ps=timing.timing_aggregation_tau_ps,
+    candidates = (capture_r - live_check_r, capture_f - live_check_f)
+    valid = (
+        torch.ones((rows.size(0), 2), dtype=torch.bool, device=rows.device)
+        if valid is None
+        else valid[recovery]
     )
-    pin_fRAT = scatter_timing_min(
-        pin_fRAT,
-        endpoint_pins,
-        new_f,
-        include_self=True,
-        mode=timing.timing_aggregation_mode,
-        tau_ps=timing.timing_aggregation_tau_ps,
+    # Replace the reference check: retaining it would clamp relaxed constraints
+    # and count the same constraint twice in smooth mode.
+    return tuple(
+        scatter_timing_min(
+            required,
+            endpoint_pins[edge_valid],
+            candidate[edge_valid],
+            include_self=False,
+            mode=timing.timing_aggregation_mode,
+            tau_ps=timing.timing_aggregation_tau_ps,
+        )
+        for required, candidate, edge_valid in zip(
+            (pin_rRAT, pin_fRAT), candidates, valid.unbind(dim=1)
+        )
     )
-    return pin_rRAT, pin_fRAT

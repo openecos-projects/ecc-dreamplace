@@ -31,10 +31,11 @@ class RefreshController:
             with_sta=True,
             **asdict(raw_db.export_options),
         )
-        validate_timing_schema(new_pydb)
+        sparse_timing_view = validate_timing_schema(new_pydb)
 
         raw_db.dm_inst = dm_inst
         raw_db.pydb = new_pydb
+        raw_db.sparse_timing_view = sparse_timing_view
         raw_db.refresh_generation += 1
         fresh_rc = dict(summary.get("rcx") or {}).get("status") == "ok"
         PlaceIOFunction._promote(

@@ -129,6 +129,8 @@ def build_critical_path_rows(
     path_valid = _cpu_list(batch.path_valid)
     invalid_reasons = _cpu_list(batch.invalid_reason)
     max_residuals = _cpu_list(batch.max_residual_ps)
+    path_arrivals = _cpu_list(getattr(batch, "path_arrivals", None))
+    path_delays = _cpu_list(getattr(batch, "path_delays", None))
 
     arrivals = {
         0: _tensor_values(timing_op, "pin_rAAT_live_snapshot", "pin_rAAT"),
@@ -153,12 +155,11 @@ def build_critical_path_rows(
         "ff": _cpu_list(getattr(timing_op, "cell_arc_ff_delays", None)),
     }
     required_values = [
-        *arrivals.values(),
         *slews.values(),
         *loads.values(),
-        *net_delays.values(),
-        *cell_delays.values(),
     ]
+    if not path_arrivals:
+        required_values.extend((*arrivals.values(), *net_delays.values(), *cell_delays.values()))
     if any(not values for values in required_values):
         raise RuntimeError("critical path report requires live timing state")
 
@@ -179,7 +180,7 @@ def build_critical_path_rows(
             pin_offset = pin_begin + step_index
             pin_id = int(path_pins[pin_offset])
             transition = int(path_transitions[pin_offset])
-            arrival = float(arrivals[transition][pin_id])
+            arrival = float(path_arrivals[pin_offset] if path_arrivals else arrivals[transition][pin_id])
             row = {
                 "path_index": path_index,
                 "path_valid": int(valid),
@@ -221,10 +222,10 @@ def build_critical_path_rows(
                 source_transition = int(path_transitions[source_offset])
                 arc_id = int(path_arc_ids[arc_cursor])
                 arc_cursor += 1
-                source_arrival = float(arrivals[source_transition][source_pin_id])
+                source_arrival = float(path_arrivals[source_offset] if path_arrivals else arrivals[source_transition][source_pin_id])
                 source_slew = float(slews[source_transition][source_pin_id])
                 delay = float(
-                    _path_delay(
+                    path_delays[arc_cursor - 1] if path_arrivals else _path_delay(
                         cell_delays,
                         net_delays,
                         arc_id,

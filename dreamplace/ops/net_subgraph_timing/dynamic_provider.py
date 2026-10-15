@@ -102,6 +102,8 @@ def _index_select_cpu(tensor, index):
 class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
     """TimingPropagation net AAT provider for relaxed buffer candidates."""
 
+    supports_sparse_timing = True
+
     def __init__(
         self,
         *,

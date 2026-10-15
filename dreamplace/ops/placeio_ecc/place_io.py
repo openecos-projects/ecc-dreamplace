@@ -4,6 +4,7 @@ from dreamplace.ops.placeio_common.backend_contract import ecc_backend_caps
 
 from .backend_caps import DEFAULT_BACKEND_CAPS
 from .export_options import PyDbExportOptions
+from .sparse_timing_schema import SparseTimingView
 from .timing_schema import validate_timing_schema
 
 
@@ -23,6 +24,7 @@ class ECCPlaceIOBackend:
     with_routability: bool = False
     refresh_generation: int = 0
     export_options: PyDbExportOptions = PyDbExportOptions()
+    sparse_timing_view: SparseTimingView | None = None
 
 
 def _module_from_data_manager(data_manager):
@@ -68,8 +70,7 @@ class PlaceIOFunction:
             with_sta=with_sta,
             **asdict(export_options),
         )
-        if with_sta:
-            validate_timing_schema(pydb)
+        sparse_timing_view = validate_timing_schema(pydb) if with_sta else None
         return ECCPlaceIOBackend(
             module=module,
             workspace=workspace,
@@ -87,6 +88,7 @@ class PlaceIOFunction:
             route_num_bins_y=route_num_bins_y,
             with_routability=with_routability,
             export_options=export_options,
+            sparse_timing_view=sparse_timing_view,
         )
 
     @staticmethod

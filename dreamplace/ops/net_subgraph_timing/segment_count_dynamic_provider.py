@@ -306,6 +306,8 @@ def _path_edge_rc_summary(path_node_ids, edge_rc):
 class SegmentCountDynamicNetProvider(DynamicNetProvider):
     """TimingPropagation provider for segment-count relaxed buffering."""
 
+    supports_sparse_timing = True
+
     def __init__(
         self,
         *,

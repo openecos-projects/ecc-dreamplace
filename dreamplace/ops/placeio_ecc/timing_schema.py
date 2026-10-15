@@ -26,6 +26,12 @@ def read_qualification_arrays(pydb):
 
 def validate_timing_schema(pydb):
     version = int(getattr(pydb, "timing_schema_version", 0))
+    if version == 3:
+        from .sparse_timing_schema import read_sparse_timing_view
+
+        view = read_sparse_timing_view(pydb)
+        view.require_supported()
+        return view
     if version != TIMING_SCHEMA_VERSION:
         raise RuntimeError(
             f"ECC timing requires schema {TIMING_SCHEMA_VERSION}, got {version}; "

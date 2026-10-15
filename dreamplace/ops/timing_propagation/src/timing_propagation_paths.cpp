@@ -679,6 +679,7 @@ TraversalPruningRefreshResult CriticalEndpointTraversalPruner::refresh(
       endpoint_count == 0 ? 0 : std::min<int64_t>(endpoint_count, max_task_count);
 
   struct LocalTraversalMarks {
+    std::vector<uint8_t> visited_pin;
     std::vector<uint8_t> kept_arc;
   };
 
@@ -690,7 +691,8 @@ TraversalPruningRefreshResult CriticalEndpointTraversalPruner::refresh(
         (endpoint_count * task_id) / std::max<int64_t>(1, task_count);
     const int64_t end =
         (endpoint_count * (task_id + 1)) / std::max<int64_t>(1, task_count);
-    std::vector<uint8_t> visited_pin(static_cast<size_t>(num_pins_), 0);
+    auto& visited_pin = local_marks[static_cast<size_t>(task_id)].visited_pin;
+    visited_pin.assign(static_cast<size_t>(num_pins_), 0);
     auto& kept_arc_local = local_marks[static_cast<size_t>(task_id)].kept_arc;
     kept_arc_local.assign(static_cast<size_t>(num_flat_arcs_), 0);
     std::vector<int64_t> stack;
@@ -747,7 +749,11 @@ TraversalPruningRefreshResult CriticalEndpointTraversalPruner::refresh(
   }
 
   std::vector<uint8_t> kept_arc(static_cast<size_t>(num_flat_arcs_), 0);
+  std::vector<uint8_t> kept_pin(static_cast<size_t>(num_pins_), 0);
   for (const auto& marks : local_marks) {
+    for (int64_t pin = 0; pin < num_pins_; ++pin) {
+      kept_pin[static_cast<size_t>(pin)] |= marks.visited_pin[static_cast<size_t>(pin)];
+    }
     for (int64_t arc_idx = 0; arc_idx < num_flat_arcs_; ++arc_idx) {
       if (marks.kept_arc[static_cast<size_t>(arc_idx)]) {
         kept_arc[static_cast<size_t>(arc_idx)] = 1;
@@ -787,6 +793,13 @@ TraversalPruningRefreshResult CriticalEndpointTraversalPruner::refresh(
       std::chrono::duration<double, std::milli>(finished_at - started_at).count();
 
   TraversalPruningRefreshResult result;
+  std::vector<int64_t> kept_pins;
+  for (int64_t pin = 0; pin < num_pins_; ++pin) {
+    if (kept_pin[static_cast<size_t>(pin)]) {
+      kept_pins.push_back(pin);
+    }
+  }
+  result.kept_pin_indices = i64_tensor_from_vector(kept_pins);
   result.kept_flat_arc_indices = i64_tensor_from_vector(kept_indices);
   result.kept_level_offsets = i64_tensor_from_vector(kept_level_offsets);
   result.kept_counts_by_level = i64_tensor_from_vector(kept_counts_by_level);

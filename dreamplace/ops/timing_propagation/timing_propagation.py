@@ -658,6 +658,7 @@ class TimingPropagation(nn.Module):
                  endpoints_timing_check_max_valid=None,
                  backend_endpoint_rSlew=None,
                  backend_endpoint_fSlew=None,
+                 sparse_timing_view=None,
                  ):
         super(TimingPropagation, self).__init__()
         write_crash_stage_marker(
@@ -669,6 +670,8 @@ class TimingPropagation(nn.Module):
         )
 
         self.num_pins = pin_net.shape[0]
+        self.sparse_timing_view = sparse_timing_view
+        self._sparse_runtime = None
         # TimingPropagation keeps the Python timing state on the same exported
         # basis as PyPlaceDB:
         #   - delay / AAT / RAT / slew / slack are in ps
@@ -1143,6 +1146,12 @@ class TimingPropagation(nn.Module):
         residual_tolerance_ps,
         include_recovery,
     ):
+        if getattr(self, "sparse_timing_view", None) is not None:
+            return self._sparse_runtime.extract_paths(
+                snapshot, global_k=global_k, max_depth=max_depth,
+                residual_tolerance_ps=residual_tolerance_ps,
+                include_recovery=include_recovery,
+            )
         if snapshot["aggregation_mode"] != "hard":
             raise RuntimeError("critical path snapshot does not use hard aggregation")
         if snapshot["topology_epoch"] != int(self.critical_path_topology_epoch):
@@ -1770,14 +1779,17 @@ class TimingPropagation(nn.Module):
         parity_device = torch.device(f"cuda:{self._resolved_gpu_id_for_cuda()}")
         saved_traversal_pruner = self._traversal_pruner
         saved_traversal_result = self.last_traversal_pruning_result
+        saved_sparse_runtime = getattr(self, "_sparse_runtime", None)
         self._traversal_pruner = None
         self.last_traversal_pruning_result = None
+        self._sparse_runtime = None
         try:
             cpu_op = copy.deepcopy(self)
             cuda_op = copy.deepcopy(self)
         finally:
             self._traversal_pruner = saved_traversal_pruner
             self.last_traversal_pruning_result = saved_traversal_result
+            self._sparse_runtime = saved_sparse_runtime
         for op, device in ((cpu_op, torch.device("cpu")), (cuda_op, parity_device)):
             op.timing_propagation_parity_check = False
             op.timing_propagation_profile = False
@@ -2322,6 +2334,9 @@ class TimingPropagation(nn.Module):
         return torch.as_tensor(array_value, dtype=torch.int32, device="cpu").contiguous()
 
     def _ensure_traversal_pruner(self):
+        if getattr(self, "sparse_timing_view", None) is not None:
+            self._traversal_pruner_topology_source = "sparse_state_predecessor_csr"
+            return self._sparse_runtime.topology
         if self._traversal_pruner is not None:
             return self._traversal_pruner
         if _tp_cpp is None or not hasattr(_tp_cpp, "CriticalEndpointTraversalPruner"):
@@ -4234,7 +4249,6 @@ class TimingPropagation(nn.Module):
 
         # Get outpin and inpin ranges for all cells
 
-        level_inst_arcs = inst_arcs
         if use_surrogate is None:
             use_surrogate = self._cell_modeling_enabled()
         if lut_entry_2d_op is not None:
@@ -4247,319 +4261,18 @@ class TimingPropagation(nn.Module):
             )
             if native_result is not None:
                 return native_result
-        static_level_data = (
-            self._get_cell_aat_static_level_data(level_inst_arcs)
-            if getattr(self, "use_cell_aat_static_cache", False)
-            else None
+        from .cell_aat_queries import query_cell_aat_updates
+
+        updates = query_cell_aat_updates(
+            self, inst_arcs, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
+            pin_net_cap_rise, pin_net_cap_fall, use_surrogate=use_surrogate,
+            need_delay_updates=need_delay_updates, profile_level=profile_level,
         )
-
-        if static_level_data is None:
-            arc_in_pins = level_inst_arcs[:, 0]
-            arc_out_pins = level_inst_arcs[:, 1]
-            lib_cell_idxs = level_inst_arcs[:, 2]
-            lib_arc_idxs = level_inst_arcs[:, 3]
-            timing_senses = level_inst_arcs[:, 4]
-        else:
-            arc_in_pins = static_level_data["arc_in_pins"]
-            arc_out_pins = static_level_data["arc_out_pins"]
-            lib_cell_idxs = static_level_data["lib_cell_idxs"]
-            lib_arc_idxs = static_level_data["lib_arc_idxs"]
-
-        if torch.logical_and(arc_out_pins == 2485, arc_in_pins == 3200).any():
-            logging.warning(f"flat arc index is: {torch.where(torch.logical_and(arc_out_pins == 2485, arc_in_pins == 3200))}")
-
-        # 1. 准备输入条件 (Prepare inputs)
-        pin_r_slew_in = pin_rtran[arc_in_pins]
-        pin_f_slew_in = pin_ftran[arc_in_pins]
-        pin_r_load_out = pin_net_cap_rise[arc_out_pins]
-        pin_f_load_out = pin_net_cap_fall[arc_out_pins]
-
-        # 2. 根据 Unate 类型进行分组 (Group arcs by unate type)
-        if static_level_data is None:
-            is_pos_unate = timing_senses == 1
-            is_neg_unate = timing_senses == -1
-            is_non_unate = ~(is_pos_unate | is_neg_unate)
-            has_pos_unate = torch.any(is_pos_unate)
-            has_neg_unate = torch.any(is_neg_unate)
-            has_non_unate = torch.any(is_non_unate)
-        else:
-            is_pos_unate = static_level_data["pos_arc_indices"]
-            is_neg_unate = static_level_data["neg_arc_indices"]
-            is_non_unate = static_level_data["non_arc_indices"]
-            has_pos_unate = static_level_data["has_pos_unate"]
-            has_neg_unate = static_level_data["has_neg_unate"]
-            has_non_unate = static_level_data["has_non_unate"]
-
-        num_level_arcs = level_inst_arcs.shape[0]
-
-        r_trans = torch.zeros(num_level_arcs, device=device, dtype=self.dtype)
-        f_trans = torch.zeros(num_level_arcs, device=device, dtype=self.dtype)
-        # 初始化 AAT 更新张量
-        r_aat_updates = torch.full_like(r_trans, -float('inf'), device=device, dtype=self.dtype)
-        f_aat_updates = torch.full_like(r_trans, -float('inf'), device=device, dtype=self.dtype)
-        # --- 3. 按需计算每种 Unate 类型的 Delay 和 Tran ---
-        if need_delay_updates:
-            delay_rr_updates = torch.full_like(r_trans, -float('inf'), device=device, dtype=self.dtype)
-            delay_rf_updates = torch.full_like(r_trans, -float('inf'), device=device, dtype=self.dtype)
-            delay_fr_updates = torch.full_like(r_trans, -float('inf'), device=device, dtype=self.dtype)
-            delay_ff_updates = torch.full_like(r_trans, -float('inf'), device=device, dtype=self.dtype)
-        else:
-            delay_rr_updates = delay_rf_updates = None
-            delay_fr_updates = delay_ff_updates = None
-        profile_enabled = bool(getattr(self, "timing_propagation_profile", False))
-        level_profile = None
-        if profile_enabled:
-            level_profile = {
-                "level": None if profile_level is None else int(profile_level),
-                "num_arcs": int(num_level_arcs),
-                "query_count": 0,
-                "query_build_ms": 0.0,
-                "query_eval_ms": 0.0,
-                "cell_update_ms": 0.0,
-                "unique_net_ms": 0.0,
-            }
-            for key in self._cell_aat_detail_count_keys():
-                level_profile[key] = 0
-            profile_timer = self._sync_profile_clock(device)
-
-        level_queries = []
-
-        def register_level_query(name, mask, pin_slew, pin_load, arc_type, luts):
-            level_queries.append(
-                {
-                    "name": name,
-                    "lib_cell_idxs": lib_cell_idxs[mask],
-                    "pin_slew": pin_slew[mask],
-                    "pin_net_caps": pin_load[mask],
-                    "lib_arc_idxs": lib_arc_idxs[mask],
-                    "luts": luts,
-                    "node_ids": arc_out_pins[mask],
-                    "arc_type": arc_type,
-                }
-            )
-
-        if has_pos_unate:
-            register_level_query(
-                "pos_delay_rr",
-                is_pos_unate,
-                pin_r_slew_in,
-                pin_r_load_out,
-                1,
-                self.arcs_info.r_delay_luts,
-            )
-            register_level_query(
-                "pos_tran_rr",
-                is_pos_unate,
-                pin_r_slew_in,
-                pin_r_load_out,
-                3,
-                self.arcs_info.r_trans_luts,
-            )
-            register_level_query(
-                "pos_delay_ff",
-                is_pos_unate,
-                pin_f_slew_in,
-                pin_f_load_out,
-                0,
-                self.arcs_info.f_delay_luts,
-            )
-            register_level_query(
-                "pos_tran_ff",
-                is_pos_unate,
-                pin_f_slew_in,
-                pin_f_load_out,
-                2,
-                self.arcs_info.f_trans_luts,
-            )
-
-        if has_neg_unate:
-            register_level_query(
-                "neg_delay_fr",
-                is_neg_unate,
-                pin_f_slew_in,
-                pin_r_load_out,
-                1,
-                self.arcs_info.r_delay_luts,
-            )
-            register_level_query(
-                "neg_tran_fr",
-                is_neg_unate,
-                pin_f_slew_in,
-                pin_r_load_out,
-                3,
-                self.arcs_info.r_trans_luts,
-            )
-            register_level_query(
-                "neg_delay_rf",
-                is_neg_unate,
-                pin_r_slew_in,
-                pin_f_load_out,
-                0,
-                self.arcs_info.f_delay_luts,
-            )
-            register_level_query(
-                "neg_tran_rf",
-                is_neg_unate,
-                pin_r_slew_in,
-                pin_f_load_out,
-                2,
-                self.arcs_info.f_trans_luts,
-            )
-
-        if has_non_unate:
-            register_level_query(
-                "non_delay_rr",
-                is_non_unate,
-                pin_r_slew_in,
-                pin_r_load_out,
-                1,
-                self.arcs_info.r_delay_luts,
-            )
-            register_level_query(
-                "non_delay_fr",
-                is_non_unate,
-                pin_f_slew_in,
-                pin_r_load_out,
-                1,
-                self.arcs_info.r_delay_luts,
-            )
-            register_level_query(
-                "non_tran_rr",
-                is_non_unate,
-                pin_r_slew_in,
-                pin_r_load_out,
-                3,
-                self.arcs_info.r_trans_luts,
-            )
-            register_level_query(
-                "non_tran_fr",
-                is_non_unate,
-                pin_f_slew_in,
-                pin_r_load_out,
-                3,
-                self.arcs_info.r_trans_luts,
-            )
-            register_level_query(
-                "non_delay_ff",
-                is_non_unate,
-                pin_f_slew_in,
-                pin_f_load_out,
-                0,
-                self.arcs_info.f_delay_luts,
-            )
-            register_level_query(
-                "non_delay_rf",
-                is_non_unate,
-                pin_r_slew_in,
-                pin_f_load_out,
-                0,
-                self.arcs_info.f_delay_luts,
-            )
-            register_level_query(
-                "non_tran_ff",
-                is_non_unate,
-                pin_f_slew_in,
-                pin_f_load_out,
-                2,
-                self.arcs_info.f_trans_luts,
-            )
-            register_level_query(
-                "non_tran_rf",
-                is_non_unate,
-                pin_r_slew_in,
-                pin_f_load_out,
-                2,
-                self.arcs_info.f_trans_luts,
-            )
-
-        if level_profile is not None:
-            profile_now = self._sync_profile_clock(device)
-            level_profile["query_build_ms"] = (profile_now - profile_timer) * 1000.0
-            level_profile["query_count"] = len(level_queries)
-            profile_timer = profile_now
-
-        query_results = {
-            query["name"]: result
-            for query, result in zip(
-                level_queries,
-                self._entry_queries_with_optional_surrogate(
-                    level_queries,
-                    use_surrogate,
-                    profile=level_profile,
-                ),
-            )
-        }
-        if level_profile is not None:
-            profile_now = self._sync_profile_clock(device)
-            level_profile["query_eval_ms"] = (profile_now - profile_timer) * 1000.0
-            profile_timer = profile_now
-        
-        # A. Positive Unate (r->r, f->f)
-        if has_pos_unate:
-            mask = is_pos_unate
-            delay_rr = query_results["pos_delay_rr"]
-            tran_rr = query_results["pos_tran_rr"]
-            delay_ff = query_results["pos_delay_ff"]
-            tran_ff = query_results["pos_tran_ff"]
-
-            if need_delay_updates:
-                delay_rr_updates[mask] = delay_rr
-                delay_ff_updates[mask] = delay_ff
-            r_trans[mask] = tran_rr
-            f_trans[mask] = tran_ff
-            r_aat_updates[mask] = pin_rAAT[arc_in_pins[mask]] + delay_rr
-            f_aat_updates[mask] = pin_fAAT[arc_in_pins[mask]] + delay_ff
-
-        # B. Negative Unate (f->r, r->f)
-        if has_neg_unate:
-            mask = is_neg_unate
-            delay_fr = query_results["neg_delay_fr"]
-            tran_fr = query_results["neg_tran_fr"]
-            delay_rf = query_results["neg_delay_rf"]
-            tran_rf = query_results["neg_tran_rf"]
-
-            if need_delay_updates:
-                delay_fr_updates[mask] = delay_fr
-                delay_rf_updates[mask] = delay_rf
-            r_trans[mask] = tran_fr
-            f_trans[mask] = tran_rf
-            r_aat_updates[mask] = pin_fAAT[arc_in_pins[mask]] + delay_fr # <-- 使用 pin_fAAT
-            f_aat_updates[mask] = pin_rAAT[arc_in_pins[mask]] + delay_rf # <-- 使用 pin_rAAT
-
-        # C. Non-Unate (worst of all applicable cases)
-        if has_non_unate:
-            mask = is_non_unate
-            delay_rr_non = query_results["non_delay_rr"]
-            delay_fr_non = query_results["non_delay_fr"]
-            tran_rr_non = query_results["non_tran_rr"]
-            tran_fr_non = query_results["non_tran_fr"]
-            if need_delay_updates:
-                delay_fr_updates[mask] = delay_fr_non
-                delay_rr_updates[mask] = delay_rr_non
-
-            # unate_r_delays = torch.maximum(delay_rr_non, delay_fr_non)
-            r_trans[mask] = smooth_max(tran_rr_non, tran_fr_non, alpha=SMOOTH_MAX_ALPHA)
-
-            aat_rr = pin_rAAT[arc_in_pins[mask]] + delay_rr_non
-            aat_fr = pin_fAAT[arc_in_pins[mask]] + delay_fr_non
-            r_aat_updates[mask] = smooth_max(aat_rr, aat_fr, alpha=SMOOTH_MAX_ALPHA)
-
-            # Fall output calculation (worst of f->f and r->f)
-            delay_ff_non = query_results["non_delay_ff"]
-            delay_rf_non = query_results["non_delay_rf"]
-            tran_ff_non = query_results["non_tran_ff"]
-            tran_rf_non = query_results["non_tran_rf"]
-
-            f_trans[mask] = smooth_max(tran_ff_non, tran_rf_non, alpha=SMOOTH_MAX_ALPHA)
-
-            if need_delay_updates:
-                delay_ff_updates[mask] = delay_ff_non
-                delay_rf_updates[mask] = delay_rf_non
-
-            aat_ff = pin_fAAT[arc_in_pins[mask]] + delay_ff_non
-            aat_rf = pin_rAAT[arc_in_pins[mask]] + delay_rf_non
-            f_aat_updates[mask] = smooth_max(aat_ff, aat_rf, alpha=SMOOTH_MAX_ALPHA)
-
+        r_aat_updates, f_aat_updates, r_trans, f_trans = updates.lanes
+        delay_rr_updates, delay_fr_updates, delay_rf_updates, delay_ff_updates = updates.delays
+        level_profile = updates.profile
+        profile_timer = self._sync_profile_clock(device) if level_profile is not None else None
+        arc_out_pins = inst_arcs[:, 1]
         # --- 4. 存储和更新 (Store and Update) ---
         # The logic from here remains the same, as r_delays, f_delays, etc. are now fully populated.
 
@@ -5053,6 +4766,28 @@ class TimingPropagation(nn.Module):
                 pin_net_cap_rise=pin_net_cap_rise,
                 pin_net_cap_fall=pin_net_cap_fall,
             )
+        if getattr(self, "sparse_timing_view", None) is not None:
+            from .sparse_runtime import SparseTimingRuntime
+
+            if (self._sparse_runtime is None
+                    or self._sparse_runtime.view is not self.sparse_timing_view
+                    or self._sparse_runtime.topology_epoch != self.critical_path_topology_epoch
+                    or self._sparse_runtime.schedule.device != self.device):
+                self._sparse_runtime = SparseTimingRuntime(self)
+            outputs = self._sparse_runtime.forward(
+                (pin_net_delay_rise, pin_net_delay_fall),
+                (pin_net_impulse_rise, pin_net_impulse_fall),
+                (pin_net_cap_rise, pin_net_cap_fall),
+                surrogate_flags=(clk2q_use_surrogate, cell_use_surrogate),
+                dynamic_net_provider=dynamic_net_provider,
+                surrogate_mode=surrogate_mode,
+            )
+            self.last_parity_payload = self._try_run_cpu_cuda_parity(
+                pin_net_delays, pin_net_impulses, pin_net_caps, surrogate_mode,
+                outputs[0], outputs[1], self.last_endpoint_slack_tensor,
+            )
+            self.last_profile_payload["parity"] = self.last_parity_payload
+            return tuple(value.to(return_device) if torch.is_tensor(value) else value for value in outputs)
         critical_path_snapshot_requested = bool(
             getattr(self, "_critical_path_snapshot_requested", False)
         )
@@ -5484,27 +5219,29 @@ class TimingPropagation(nn.Module):
         pin_net_impulse_fall=None,
         critical_path_pin_net_delay_rise=None,
         critical_path_pin_net_delay_fall=None,
+        capture_critical_path=True,
     ):
-        self._capture_critical_path_snapshot(
-            pin_rAAT=pin_rAAT,
-            pin_fAAT=pin_fAAT,
-            pin_rRAT=pin_rRAT,
-            pin_fRAT=pin_fRAT,
-            pin_net_delay_rise=(
-                pin_net_delay_rise
-                if critical_path_pin_net_delay_rise is None
-                else critical_path_pin_net_delay_rise
-            ),
-            pin_net_delay_fall=(
-                pin_net_delay_fall
-                if critical_path_pin_net_delay_fall is None
-                else critical_path_pin_net_delay_fall
-            ),
-            cell_arc_rr_delays=cell_arc_rr_delays,
-            cell_arc_fr_delays=cell_arc_fr_delays,
-            cell_arc_rf_delays=cell_arc_rf_delays,
-            cell_arc_ff_delays=cell_arc_ff_delays,
-        )
+        if capture_critical_path:
+            self._capture_critical_path_snapshot(
+                pin_rAAT=pin_rAAT,
+                pin_fAAT=pin_fAAT,
+                pin_rRAT=pin_rRAT,
+                pin_fRAT=pin_fRAT,
+                pin_net_delay_rise=(
+                    pin_net_delay_rise
+                    if critical_path_pin_net_delay_rise is None
+                    else critical_path_pin_net_delay_rise
+                ),
+                pin_net_delay_fall=(
+                    pin_net_delay_fall
+                    if critical_path_pin_net_delay_fall is None
+                    else critical_path_pin_net_delay_fall
+                ),
+                cell_arc_rr_delays=cell_arc_rr_delays,
+                cell_arc_fr_delays=cell_arc_fr_delays,
+                cell_arc_rf_delays=cell_arc_rf_delays,
+                cell_arc_ff_delays=cell_arc_ff_delays,
+            )
         self.pin_rtran_live, self.pin_ftran_live = pin_rtran, pin_ftran
         self.pin_net_cap_rise_live, self.pin_net_cap_fall_live = (
             pin_net_cap_rise,

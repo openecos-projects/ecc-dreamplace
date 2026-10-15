@@ -10,6 +10,7 @@
 namespace dreamplace {
 
 struct TraversalPruningRefreshResult {
+  at::Tensor kept_pin_indices;
   at::Tensor kept_flat_arc_indices;
   at::Tensor kept_level_offsets;
   at::Tensor kept_counts_by_level;

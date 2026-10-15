@@ -6420,6 +6420,9 @@ class PlaceObj(nn.Module):
 
         rows = []
         qualification = getattr(data_collections, "endpoints_max_valid", None)
+        from dreamplace.ops.timing_propagation.endpoint_qualification import reporting_endpoint_validity
+
+        qualification = reporting_endpoint_validity(timing_op, qualification)
         reasons = getattr(data_collections, "endpoints_max_reason", None)
         qualification = None if qualification is None else qualification.detach().cpu().numpy()
         reasons = None if reasons is None else reasons.detach().cpu().numpy()
@@ -9911,6 +9914,7 @@ class PlaceObj(nn.Module):
                 if getattr(placedb, "backend_endpoint_fSlew", None) is not None
                 and len(placedb.backend_endpoint_fSlew) > 0 else None
             ),
+            sparse_timing_view=getattr(data_collections, "sparse_timing_view", None),
             pin_pair_arc_keys=data_collections.pin_pair_arc_keys,
             flat_pin_pair_arc_start=data_collections.flat_pin_pair_arc_start,
             flat_pin_pair_arc_indices=data_collections.flat_pin_pair_arc_indices,

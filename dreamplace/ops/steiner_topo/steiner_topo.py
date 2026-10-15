@@ -13,6 +13,7 @@ from pathlib import Path
 
 import dreamplace.ops.steiner_topo.steiner_topo_cpp as steiner_topo_cpp
 import dreamplace.configure as configure
+from dreamplace.ops.steiner_topo.frozen_nets import FrozenNets
 # if configure.compile_configurations["CUDA_FOUND"] == "TRUE":
 #     import dreamplace.ops.steiner_topo.steiner_topo_cuda as steiner_topo_cuda
 #     import dreamplace.ops.steiner_topo.steiner_topo_cuda_segment as steiner_topo_cuda_segment
@@ -50,8 +51,8 @@ class SteinerTopoFunction(Function):
 
         pos, net_vertex_start, pin_relate_x, pin_relate_y = ctx.saved_tensors
         grad_pos = steiner_topo_cpp.backward(
-            grad_newx,
-            grad_newy,
+            grad_newx.contiguous(),
+            grad_newy.contiguous(),
             pos,
             pin_relate_x,
             pin_relate_y
@@ -127,6 +128,12 @@ class SteinerTopo(nn.Module):
         self.net_flat_topo_sort_start = None
         self.num_vertices = None
 
+        self.topology_generation = 0
+        self.rebuild_count = 0
+        self.forward_count = 0
+        self._frozen_topology_generation = None
+        self.frozen_nets = FrozenNets()
+
         self.algorithm = algorithm
         self.deterministic_flag = bool(deterministic_flag)
         self.collect_edge_geometry_stats = bool(collect_edge_geometry_stats)
@@ -143,8 +150,14 @@ class SteinerTopo(nn.Module):
            or self.num_vertices is None:
             raise RuntimeError(
                 "SteinerTopo topology not initialized. Call rebuild_tree and update_topology first.")
+        if (
+            self.topology_frozen
+            and self._frozen_topology_generation != self.topology_generation
+        ):
+            raise RuntimeError("SteinerTopo frozen topology generation changed")
 
         if self.deterministic_flag:
+            self.forward_count += 1
             return SteinerTopoDeterministicFunction.apply(
                 pos,
                 self.pin_relate_x,
@@ -160,6 +173,7 @@ class SteinerTopo(nn.Module):
             self.num_vertices,
             self.deterministic_flag
         )
+        self.forward_count += 1
         # outputs = (
         #     updated_newx,
         #     updated_newy,
@@ -194,6 +208,10 @@ class SteinerTopo(nn.Module):
             self._sanitize_pin_relate_indices()
 
     def load_ggr_topology_pack(self, pack, pin_pos):
+        if self.topology_frozen:
+            raise RuntimeError("SteinerTopo cannot replace a frozen topology")
+        if self.frozen_nets.net_ids:
+            raise RuntimeError("retained buffered nets require the FLUTE topology provider")
         from dreamplace.ops.steiner_topo.ggr_l_shape_topology import (
             build_steiner_cache_from_ggr_pack,
         )
@@ -203,6 +221,8 @@ class SteinerTopo(nn.Module):
             pin_pos,
         )
         self.update_cache(cache_tuple, sanitize_pin_relate=False)
+        self.topology_generation += 1
+        self.rebuild_count += 1
         self.edge_l_directions = edge_l_directions.contiguous()
         if self.collect_edge_geometry_stats:
             self.last_edge_geometry_stats = self._collect_edge_geometry_stats(
@@ -534,7 +554,12 @@ class SteinerTopo(nn.Module):
         })
         return stats
 
-    def rebuild_tree(self, pos):
+    def rebuild_tree(self, pos, *, resolve_l_directions=True):
+        if self.topology_frozen:
+            raise RuntimeError(
+                "SteinerTopo topology is frozen for the active optimization window"
+            )
+        pos = pos.detach().cpu().contiguous()
 
         new_outputs_tuple = steiner_topo_cpp.build_tree(
             pos,
@@ -544,9 +569,20 @@ class SteinerTopo(nn.Module):
             str(_FLUTE_POWV_FILE),
             str(_FLUTE_POST_FILE),
             deterministic_flag=self.deterministic_flag,
+            **self.frozen_nets.build_options(self),
         )
 
-        self.update_cache(new_outputs_tuple)
+        self.update_cache(self.frozen_nets.unpack(new_outputs_tuple))
+        self.topology_generation += 1
+        self.rebuild_count += 1
+        # Directions belong to edges, including when only unbuffered nets rebuild.
+        # Timing-only rebuilds reuse the last routing feedback. A route refresh
+        # clears directions here and resolves once against its new feedback.
+        if self.edge_l_directions is not None:
+            self.edge_l_directions = (
+                self.l_direction_resolver.resolve_l_directions(self)
+                if resolve_l_directions and self.l_direction_resolver is not None else None
+            )
         if self.collect_edge_geometry_stats:
             self.last_edge_geometry_stats = self._collect_edge_geometry_stats(
                 self.flat_pin_from,
@@ -874,6 +910,32 @@ class SteinerTopo(nn.Module):
             print("Top 10 nets by Steiner point count:")
             for net_name, count in sorted_nets:
                 print(f"  {net_name}: {count}")
+
+    @property
+    def topology_frozen(self):
+        return self._frozen_topology_generation is not None
+
+    @property
+    def frozen_topology_generation(self):
+        return self._frozen_topology_generation
+
+    def freeze_topology(self):
+        if self.num_vertices is None or self.topology_generation <= 0:
+            raise RuntimeError("SteinerTopo cannot freeze an uninitialized topology")
+        if self.topology_frozen:
+            if self._frozen_topology_generation != self.topology_generation:
+                raise RuntimeError("SteinerTopo frozen topology generation changed")
+            return self._frozen_topology_generation
+        self._frozen_topology_generation = int(self.topology_generation)
+        return self._frozen_topology_generation
+
+    def freeze_nets(self, net_ids):
+        self.frozen_nets.freeze(self, net_ids)
+
+    def unfreeze_topology(self):
+        generation = self._frozen_topology_generation
+        self._frozen_topology_generation = None
+        return generation
 
 
 '''

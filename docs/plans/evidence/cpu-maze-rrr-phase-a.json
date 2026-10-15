@@ -1,0 +1,168 @@
+{
+  "artifacts": {
+    "comparison_output": {
+      "path": "/tmp/ecc-cpu-maze-rrr-phase-a/compare_cpu.out",
+      "sha256": "a89e79940331ff5272feb0e0911ece7d091087ff97c0e177679d6d97d13a605a"
+    },
+    "cpu_runtime_files": [
+      {
+        "path": "/tmp/ecc-cpu-maze-rrr-phase-a/runtime/draw_placement.cpython-311-x86_64-linux-gnu.so",
+        "sha256": "7c045fa727a52f3264e5c0c453c709c73a6a6d547ad2c1d64f42c4981448ebc1",
+        "size_bytes": 180456
+      },
+      {
+        "path": "/tmp/ecc-cpu-maze-rrr-phase-a/runtime/flute_cpp.cpython-311-x86_64-linux-gnu.so",
+        "sha256": "d4ee4392b8f741746f3ffbea61bbaf1e700da4c4328d5b0a3a8db6c563a8c07b",
+        "size_bytes": 151512
+      },
+      {
+        "path": "/tmp/ecc-cpu-maze-rrr-phase-a/runtime/gpugr.cpython-311-x86_64-linux-gnu.so",
+        "sha256": "3b0daf4cc8366993dc30d54fd726b113757bfbb75d7c57ba7e2e147dc890e4ba",
+        "size_bytes": 826832
+      },
+      {
+        "path": "/tmp/ecc-cpu-maze-rrr-phase-a/runtime/gputimer.cpython-311-x86_64-linux-gnu.so",
+        "sha256": "fccbe4b0660595388357ea3a5fd479f37cfbc4e84db17bf8e9f48dca69cf1e53",
+        "size_bytes": 654872
+      },
+      {
+        "path": "/tmp/ecc-cpu-maze-rrr-phase-a/runtime/io_parser.cpython-311-x86_64-linux-gnu.so",
+        "sha256": "31d27b2366e75be9f5fffab60bbfc447e9b194f955887e32467c8fd8d0701076",
+        "size_bytes": 1035768
+      },
+      {
+        "path": "/tmp/ecc-cpu-maze-rrr-phase-a/runtime/libflute.so",
+        "sha256": "746ce111337551c64dc67ff9669249f27f6706cc41c25d08162e33944c610405",
+        "size_bytes": 119848
+      },
+      {
+        "path": "/tmp/ecc-cpu-maze-rrr-phase-a/runtime/libxplace_common.so",
+        "sha256": "adc7b2480bcb12ade5bdf792fd34c1b38cb77d2fcab5ec5b7c1ff720c7c78b95",
+        "size_bytes": 3466480
+      },
+      {
+        "path": "/tmp/ecc-cpu-maze-rrr-phase-a/runtime/routedp.cpython-311-x86_64-linux-gnu.so",
+        "sha256": "3cb24b9584823b39139c5c0a48e03822a722c1894aebdc9f0c1c4c52ed0f4755",
+        "size_bytes": 196776
+      }
+    ],
+    "route_state_unit_binary": {
+      "path": "/tmp/ecc-cpu-maze-rrr-phase-a/unittest_cpu_route_state",
+      "sha256": "f5536eb989fd4a3f498751c12f6d85121fa3262af0f383c2d493479b55398668"
+    }
+  },
+  "claim_level": "CPU route-state accounting and existing pattern-route parity",
+  "commands": [
+    {
+      "command": "XPLACE_ENABLE_CUDA=OFF XPLACE_INSTALL=OFF XPLACE_BUILD_DIR=/tmp/ecc-cpu-maze-rrr-phase-a/xplace-build JOBS=6 bash thirdparty/build_xplace_gpugr.sh",
+      "exit_code": 0,
+      "name": "cpu_only_build"
+    },
+    {
+      "command": "XPLACE_ENABLE_CUDA=OFF XPLACE_INSTALL=ON XPLACE_RUNTIME_DIR=/tmp/ecc-cpu-maze-rrr-phase-a/runtime XPLACE_BUILD_DIR=/tmp/ecc-cpu-maze-rrr-phase-a/xplace-build JOBS=6 bash thirdparty/build_xplace_gpugr.sh",
+      "exit_code": 0,
+      "name": "cpu_only_install"
+    },
+    {
+      "command": "/usr/bin/g++ -std=c++17 -O2 -Icpp_to_py cpp_to_py/gpugr/gr/CpuRouteState.cpp cpp_to_py/gpugr/gr/CpuRouteTypes.cpp cpp_to_py/gpugr/unittest_cpu_route_state.cpp -o /tmp/ecc-cpu-maze-rrr-phase-a/unittest_cpu_route_state && /tmp/ecc-cpu-maze-rrr-phase-a/unittest_cpu_route_state",
+      "exit_code": 0,
+      "name": "route_state_unit"
+    },
+    {
+      "command": "XPLACE_CPU_RUNTIME_ROOT=/tmp/ecc-cpu-maze-rrr-phase-a/runtime /home/zhaoxueyan/code/ipd-timing-opt-ecc/ecc/.venv/bin/python cpp_to_py/gpugr/unittest_cpu_pattern_route.py",
+      "exit_code": 0,
+      "name": "cpu_pattern_route_fixture"
+    },
+    {
+      "command": "/home/zhaoxueyan/code/ipd-timing-opt-ecc/ecc/.venv/bin/python cpp_to_py/gpugr/unittest_cpu_backend_build_guards.py",
+      "exit_code": 0,
+      "name": "cpu_backend_build_guards"
+    },
+    {
+      "command": "LD_LIBRARY_PATH=/tmp/ecc-cpu-maze-rrr-phase-a/runtime /home/zhaoxueyan/code/ipd-timing-opt-ecc/ecc/.venv/bin/python /tmp/ecc-cpu-maze-rrr-phase-a/compare_cpu.py",
+      "exit_code": 0,
+      "name": "cpu_backend_parity_probe"
+    }
+  ],
+  "effective_parameters": {
+    "build_type": "Release",
+    "python": "/home/zhaoxueyan/code/ipd-timing-opt-ecc/ecc/.venv/bin/python",
+    "python_version": "3.11.15",
+    "requested_workers": {
+      "cpu_pr": 1,
+      "cpu_pr_mt": 2
+    },
+    "route_grid": {
+      "layers": [
+        "M1",
+        "M2"
+      ],
+      "x": 8,
+      "y": 8
+    },
+    "rrr_iters": 0,
+    "torch": "2.11.0+cpu",
+    "torch_cuda": false,
+    "xplace_cuda": false
+  },
+  "exit_condition": {
+    "details": [
+      "CPU PR and CPU PR MT existing toy fixture hashes are identical after route-state extraction.",
+      "CPU-only native build and isolated install completed.",
+      "Route-state add/remove/restore and invalid-mutation checks passed.",
+      "No positive CPU RRR backend or S50 default was enabled."
+    ],
+    "result": "pass"
+  },
+  "observations": {
+    "backend_build_guards": "5 tests passed, 2 skipped",
+    "cpu_pr": {
+      "effective_workers": 1,
+      "raw_routes": [
+        [
+          -1
+        ],
+        [
+          -1
+        ]
+      ],
+      "route_hash64": 9725586522189377745,
+      "terminal_status": "completed",
+      "via_map_hash64": 9834329205242510091,
+      "wire_map_hash64": 9834329205242510091
+    },
+    "cpu_pr_mt": {
+      "effective_workers": 2,
+      "raw_routes": [
+        [
+          -1
+        ],
+        [
+          -1
+        ]
+      ],
+      "route_hash64": 9725586522189377745,
+      "terminal_status": "completed",
+      "via_map_hash64": 9834329205242510091,
+      "wire_map_hash64": 9834329205242510091
+    },
+    "fixture_scope": "toy fixture parity/accounting only; raw route payload is no-route for both nets and is not a connectivity qualification",
+    "parity": "route hash, wire map hash, via map hash, raw routes, and demand-map tensors matched",
+    "pattern_route_fixture": "3 tests passed: cpu_pr, cpu_pr_mt(1 worker), cpu_pr_mt(2 workers)",
+    "route_state_unit": "CPU_ROUTE_STATE_TEST=passed"
+  },
+  "phase": "A",
+  "phase_name": "route-state/accounting extraction",
+  "schema_version": 1,
+  "validation_followups": {
+    "dreamplace": "db08779a",
+    "xplace": "e4161ee",
+    "atomic_route_state_binary_sha256": "c26f48aee96f6b0a3190d0d622c9355c58ce50b693445c3063a47b0cbe116f81"
+  },
+  "source_commits": {
+    "dreamplace": "20c19ec83f3f5097c6170e77e4ba667a54de9db6",
+    "xplace": "b132020dd00fa165718a40b11bf2b5bad0750c7f",
+    "xplace_baseline": "dadc709cac779dd15f36f0f43c552f5c23880777"
+  },
+  "status": "pass"
+}

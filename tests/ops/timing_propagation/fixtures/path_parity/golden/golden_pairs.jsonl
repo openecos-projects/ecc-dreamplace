@@ -1,0 +1,7 @@
+{"clamped":false,"dst_pin":"inst:u_inv0/pin:A","first_path_rank":0,"occurrence_count":4,"src_pin":"inst:u_buf0/pin:Y","weight":10.549367088607593}
+{"clamped":false,"dst_pin":"port:y_buf","first_path_rank":2,"occurrence_count":2,"src_pin":"inst:u_buf1/pin:Y","weight":10.169620253164556}
+{"clamped":false,"dst_pin":"inst:u_xor0/pin:A","first_path_rank":0,"occurrence_count":4,"src_pin":"inst:u_inv0/pin:Y","weight":10.549367088607593}
+{"clamped":false,"dst_pin":"port:y_inv","first_path_rank":0,"occurrence_count":2,"src_pin":"inst:u_inv1/pin:Y","weight":10.2}
+{"clamped":false,"dst_pin":"inst:u_buf1/pin:A","first_path_rank":2,"occurrence_count":2,"src_pin":"inst:u_xor0/pin:Y","weight":10.169620253164556}
+{"clamped":false,"dst_pin":"inst:u_inv1/pin:A","first_path_rank":0,"occurrence_count":2,"src_pin":"inst:u_xor0/pin:Y","weight":10.2}
+{"clamped":false,"dst_pin":"inst:u_buf0/pin:A","first_path_rank":0,"occurrence_count":4,"src_pin":"port:a","weight":10.549367088607593}

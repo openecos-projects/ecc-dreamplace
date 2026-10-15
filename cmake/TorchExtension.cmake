@@ -75,13 +75,18 @@ set_target_properties(torch PROPERTIES
   IMPORTED_LOCATION "${TORCH_LIBRARY}"
   INTERFACE_INCLUDE_DIRECTORIES "${TORCH_INCLUDE_DIRS}"
   INTERFACE_LINK_LIBRARIES "${LINK_LIBS}"
-  INTERFACE_COMPILE_OPTIONS "-D_GLIBCXX_USE_CXX11_ABI=${CMAKE_CXX_ABI}"
   )
 
 # CXX only 
 function(add_torch_extension target_name)
+  set(oneValueArgs TARGET_CXX_ABI)
   set(multiValueArgs EXTRA_INCLUDE_DIRS EXTRA_LINK_LIBRARIES EXTRA_DEFINITIONS)
-  cmake_parse_arguments(ARG "" "" "${multiValueArgs}" ${ARGN})
+  cmake_parse_arguments(ARG "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+  if ("${ARG_TARGET_CXX_ABI}" STREQUAL "")
+    set(TORCH_TARGET_CXX_ABI "${CMAKE_CXX_ABI}")
+  else()
+    set(TORCH_TARGET_CXX_ABI "${ARG_TARGET_CXX_ABI}")
+  endif()
   if (TORCH_ENABLE_CUDA)
     cuda_add_library(${target_name} STATIC ${ARG_UNPARSED_ARGUMENTS})
   else()
@@ -98,6 +103,9 @@ function(add_torch_extension target_name)
     TORCH_VERSION_MINOR=${TORCH_VERSION_MINOR}
     ENABLE_CUDA=${TORCH_ENABLE_CUDA}
     ${ARG_EXTRA_DEFINITIONS})
+  target_compile_options(${target_name} PRIVATE
+    -U_GLIBCXX_USE_CXX11_ABI
+    -D_GLIBCXX_USE_CXX11_ABI=${TORCH_TARGET_CXX_ABI})
   set_target_properties(${target_name} PROPERTIES 
     POSITION_INDEPENDENT_CODE ON
     CXX_VISIBILITY_PRESET "hidden"
@@ -106,8 +114,14 @@ function(add_torch_extension target_name)
 endfunction()
 
 function(add_pytorch_extension target_name)
+  set(oneValueArgs TARGET_CXX_ABI)
   set(multiValueArgs EXTRA_INCLUDE_DIRS EXTRA_LINK_LIBRARIES EXTRA_DEFINITIONS)
-  cmake_parse_arguments(ARG "" "" "${multiValueArgs}" ${ARGN})
+  cmake_parse_arguments(ARG "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+  if ("${ARG_TARGET_CXX_ABI}" STREQUAL "")
+    set(TORCH_TARGET_CXX_ABI "${CMAKE_CXX_ABI}")
+  else()
+    set(TORCH_TARGET_CXX_ABI "${ARG_TARGET_CXX_ABI}")
+  endif()
   if (TORCH_ENABLE_CUDA)
     set(CUDA_SRCS "${ARG_UNPARSED_ARGUMENTS}")
     list(FILTER CUDA_SRCS INCLUDE REGEX ".*cu$")
@@ -121,6 +135,9 @@ function(add_pytorch_extension target_name)
         TORCH_MINOR_VERSION=${TORCH_MINOR_VERSION}
         ENABLE_CUDA=${TORCH_ENABLE_CUDA}
         ${ARG_EXTRA_DEFINITIONS})
+      target_compile_options(${target_name}_cuda_tmp PRIVATE
+        -U_GLIBCXX_USE_CXX11_ABI
+        -D_GLIBCXX_USE_CXX11_ABI=${TORCH_TARGET_CXX_ABI})
       set_target_properties(${target_name}_cuda_tmp PROPERTIES 
         POSITION_INDEPENDENT_CODE ON
         CXX_VISIBILITY_PRESET "hidden"
@@ -142,4 +159,7 @@ function(add_pytorch_extension target_name)
     TORCH_VERSION_MINOR=${TORCH_VERSION_MINOR}
     ENABLE_CUDA=${TORCH_ENABLE_CUDA}
     ${ARG_EXTRA_DEFINITIONS})
+  target_compile_options(${target_name} PRIVATE
+    -U_GLIBCXX_USE_CXX11_ABI
+    -D_GLIBCXX_USE_CXX11_ABI=${TORCH_TARGET_CXX_ABI})
 endfunction()

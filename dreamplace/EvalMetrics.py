@@ -22,6 +22,7 @@
 import time
 import torch
 import pdb
+from dreamplace.ops.routability.cooptimization_area import movable_area_for_metrics
 
 
 def _as_log_verbose(value, default=0):
@@ -72,6 +73,20 @@ class EvalMetrics(object):
         self.weight_hpwl = None
         self.macro_overlap = None
         self.macro_overlap_weight = None
+        self.wns = None
+        self.tns = None
+        self.timing_objective = None
+        self.size_min = None
+        self.size_mean = None
+        self.size_max = None
+        self.vt_class_proportions = None
+        self.slew_violation = None
+        self.cap_violation = None
+        self.leakage = None
+        self.ws = None
+        self.ts = None
+        self.max_slew_violation = None
+        self.max_load_cap_violation = None
         self.l_shape_fast_mode = None
         self.l_shape_energy_valid = None
         self.l_shape_cost = None
@@ -355,6 +370,34 @@ class EvalMetrics(object):
                 content += ", TopoTie %.4f" % (self.soft_l_same_net_topo_tie_ratio)
         if self.gamma is not None:
             content += ", gamma %.6E" % (self.gamma)
+        if self.wns is not None:
+            content += ", WNS %.6E" % (self.wns)
+        if self.tns is not None:
+            content += ", TNS %.6E" % (self.tns)
+        if self.timing_objective is not None:
+            content += ", TimingObj %.6E" % (self.timing_objective)
+        if self.size_min is not None and self.size_mean is not None and self.size_max is not None:
+            content += ", Size[min/mean/max]=%.6E/%.6E/%.6E" % (
+                self.size_min,
+                self.size_mean,
+                self.size_max,
+            )
+        if self.vt_class_proportions is not None:
+            content += ", VTProp [%s]" % ", ".join(["%.3E" % i for i in self.vt_class_proportions])
+        if self.slew_violation is not None:
+            content += ", SlewVio %.6E" % (self.slew_violation)
+        if self.cap_violation is not None:
+            content += ", CapVio %.6E" % (self.cap_violation)
+        if self.leakage is not None:
+            content += ", Leakage %.6E" % (self.leakage)
+        if self.ws is not None:
+            content += ", WS %.6E" % (self.ws)
+        if self.ts is not None:
+            content += ", TS %.6E" % (self.ts)
+        if self.max_slew_violation is not None:
+            content += ", MaxSlewViolation %.6E" % (self.max_slew_violation)
+        if self.max_load_cap_violation is not None:
+            content += ", MaxLoadCapViolation %.6E" % (self.max_load_cap_violation)
         if self.eval_time is not None:
             content += ", time %.3fms" % (self.eval_time * 1000)
 
@@ -391,7 +434,7 @@ class EvalMetrics(object):
             if "overflow" in ops:
                 overflow, max_density = ops["overflow"](var)
                 if overflow.numel() == 1:
-                    self.overflow = overflow.data / placedb.total_movable_node_area
+                    self.overflow = overflow.data / movable_area_for_metrics(data_collections, placedb)
                     self.max_density = max_density.data
                 else:
                     self.overflow = (
@@ -401,7 +444,7 @@ class EvalMetrics(object):
                     self.max_density = max_density.data
             if "goverflow" in ops:
                 overflow, max_density = ops["goverflow"](var)
-                self.goverflow = overflow.data / placedb.total_movable_node_area
+                self.goverflow = overflow.data / movable_area_for_metrics(data_collections, placedb)
                 self.gmax_density = max_density.data
             if "route_utilization" in ops:
                 route_utilization_map = ops["route_utilization"](var)

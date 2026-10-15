@@ -21,11 +21,23 @@ add_pytorch_extension(segment_compaction_cpp
   EXTRA_LINK_LIBRARIES ${LINK_LIBS}
 )
 
+add_pytorch_extension(segment_energy_gradient_cpp
+  src/segment_energy_gradient.cpp
+  EXTRA_INCLUDE_DIRS ${INCLUDE_DIRS}
+  EXTRA_LINK_LIBRARIES ${LINK_LIBS}
+)
+
 add_pytorch_extension(adaptive_padding_cpp
   src/adaptive_padding.cpp
 )
 
 if(TORCH_ENABLE_CUDA)
+add_pytorch_extension(segment_energy_gradient_cuda
+  src/segment_energy_gradient_cuda.cpp
+  src/segment_energy_gradient_cuda_kernel.cu
+  EXTRA_INCLUDE_DIRS ${INCLUDE_DIRS}
+  EXTRA_LINK_LIBRARIES ${LINK_LIBS}
+)
 add_pytorch_extension(segment_compaction_cuda
   src/segment_compaction_cuda.cpp
   src/segment_compaction_cuda_kernel.cu
@@ -37,6 +49,7 @@ endif(TORCH_ENABLE_CUDA)
 install(TARGETS
   same_net_topo_scoring_cpp
   segment_compaction_cpp
+  segment_energy_gradient_cpp
   adaptive_padding_cpp
   DESTINATION dreamplace/ops/${OP_NAME}
 )
@@ -44,11 +57,12 @@ install(TARGETS
 if(TORCH_ENABLE_CUDA)
 install(TARGETS
   segment_compaction_cuda
+  segment_energy_gradient_cuda
   DESTINATION dreamplace/ops/${OP_NAME}
 )
 endif(TORCH_ENABLE_CUDA)
 
-file(GLOB INSTALL_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/*.py)
+file(GLOB INSTALL_SRCS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.py)
 install(FILES ${INSTALL_SRCS} DESTINATION dreamplace/ops/${OP_NAME})
 
 file(GLOB INSTALL_MISC ${CMAKE_CURRENT_SOURCE_DIR}/*.lef)

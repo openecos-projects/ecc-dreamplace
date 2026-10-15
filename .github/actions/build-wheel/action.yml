@@ -41,7 +41,8 @@ runs:
         CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)" \
           uv build --wheel --verbose --no-build-isolation
 
-        if ldd build/xplace-runtime-cpu/*.so \
+        test -n "$(find thirdparty/xplace/cpp_to_py/cpybin -maxdepth 1 -name '*.so' -print -quit)"
+        if ldd thirdparty/xplace/cpp_to_py/cpybin/*.so \
           | grep -Eqi 'cuda|cublas|cudnn|nccl|nvjit|nvshmem'; then
           echo "CPU-only GPUGR unexpectedly depends on CUDA libraries" >&2
           exit 1
@@ -78,4 +79,4 @@ runs:
         repo_root="$PWD"
         cd /tmp
         "$repo_root/.venv/bin/python" \
-          "$repo_root/unittest/ops/routability_wheel_smoke.py"
+          "$repo_root/tests/ops/routability_wheel_smoke.py"

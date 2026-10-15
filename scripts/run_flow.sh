@@ -38,14 +38,8 @@ function fn_PostDP {
     fn_runInvs "tmp.tcl" "log/postDP_$1_$2.log"
 }
 
-function fn_Tuner {
-    mkdir -p tunerLog >/dev/null 2>&1
-    # gpu multiobj cfg aux base_ppa reuse_params iterations workers d_ratio c_ratio m_points
-    sh ../run_tuner.sh "$@" tunerLog 2>&1 | tee tunerLog/log.txt
-}
-
 # Run command
-if [[ $1 = @(runInvs|PreDP|PostDP|Tuner) ]]; then
+if [[ $1 = @(runInvs|PreDP|PostDP) ]]; then
     until fn_$1 ${@:2}; do
         echo "Command crashed with exit code $?. Respawning..." >&2
         sleep 1

@@ -1,0 +1,288 @@
+{
+  "status": "implemented_built_migrated_and_validated",
+  "scope": "CPU coarse-guided maze RRR acceleration; external alignment measured, not improved",
+  "source": {
+    "base_xplace_commit": "59991041a13ed8b8e19efd730bee6ad6185a4990",
+    "branch": "timing-routability-opt",
+    "uncommitted": false,
+    "modified_and_new_files": {
+      "cpp_to_py/gpugr/PyBindCppMain.cpp": "806d2b3634c48d1eec9973ee4509cbae3140e79157df403aae8d511f2d9996a1",
+      "cpp_to_py/gpugr/gr/CPURouter.cpp": "8058d2a36071da3b9d9d484a132ebbccd3116110cea1cabef4825ddc895b1a95",
+      "cpp_to_py/gpugr/gr/CPURouter.h": "c8fbe3a453d9d1148d72009a7a92246c1e56d6ec46f847ea4ebd8f807f0f86f0",
+      "cpp_to_py/gpugr/gr/CpuMazeBatch.cpp": "23f1be577da6d1c4895a4fb43cf0b0a6b57c23f6e0fbf1685049ff12035b0a0b",
+      "cpp_to_py/gpugr/gr/CpuMazeCoarseGrid.cpp": "844d40580275cdb38f225340bf6c40d3d1ee455a6ac97d1030a2cb8424d8f589",
+      "cpp_to_py/gpugr/gr/CpuMazeCoarseGrid.h": "5d5e8bc7849e8130b420931d27d21fd0b923f1332269cadba7012b247731c48c",
+      "cpp_to_py/gpugr/gr/CpuMazeRouter.cpp": "b438c080de5226daa122ccd5e7edacd3e004eb1e2be3a61aeeccce82dd59d1e7",
+      "cpp_to_py/gpugr/gr/CpuMazeRouter.h": "addeb624532b7eb53c42d4564df11c6064e54bce2363283fef90b529e759a007",
+      "cpp_to_py/gpugr/gr/CpuMazeRrr.cpp": "2c805e4e2c5018dde74447e844e78fcc4c83af3eb6300d7911693a51739a3dcd",
+      "cpp_to_py/gpugr/gr/CpuMazeSearch.cpp": "993740f43ff7cff4a4fd8fd2ca61791575148e942d6efbe5e8cd6755eb5b5d39",
+      "cpp_to_py/gpugr/gr/CpuMazeSearch.h": "8727edf1bdcc1961ba0f569dde1953eaa778b6e4f5740d171c86dc1cb37cb6ed",
+      "cpp_to_py/gpugr/gr/CpuRouteTypes.h": "e692ec8274b16d5953e6fea6796e608e36104e294ab2ed8b2c18a4d1113886a8",
+      "cpp_to_py/gpugr/unittest_cpu_maze_coarse.cpp": "0b9eebaef5e9d0c22e809adab8e3052576e3ab42f4684d0d1d3504c8d3e0f7cb"
+    },
+    "isolated_worktree": "/home/zhaoxueyan/code/xplace-cpu-rrr-coarse-20261009",
+    "isolated_branch": "codex/cpu-rrr-coarse",
+    "implementation_commit": "2b6cae363ebd425a3973892386663901451be06b"
+  },
+  "algorithm": {
+    "coarsening_scale": 8,
+    "physical_grid": [
+      512,
+      512
+    ],
+    "coarse_grid": [
+      64,
+      64
+    ],
+    "routing_layers": [
+      "MET2",
+      "MET5"
+    ],
+    "wire_coarse_cost": "integer mean of legal fine edge costs multiplied by scale",
+    "via_coarse_cost": "integer mean of legal fine via costs",
+    "search": "deterministic coarse A-star, fine corridor radii 0/1/2, full-grid rescue",
+    "cache": "invalidate changed integer-cost blocks during serial commits; refresh before next fixed 32-net batch",
+    "native_full_grid_control": "csrn_scale=1",
+    "default_rrr_iters": 0,
+    "experimental_backend": "cpu_pr_maze"
+  },
+  "controls": {
+    "backend": "cpu_pr_maze",
+    "rrrIters": 3,
+    "threads": 8,
+    "route_xSize": 512,
+    "route_ySize": 512,
+    "bottom_routing_layer": "MET2",
+    "top_routing_layer": "MET5",
+    "clock_net_names": [
+      "Clk"
+    ],
+    "csrn_scale": 8
+  },
+  "input_def_sha256": "dd0231ba72f7cd8f9bb24f29f709aabf890e7327e35c67b28e47b50a06d205e1",
+  "performance": {
+    "archived_full_grid_workers8_seconds": 609.1003667530022,
+    "full_rebuild_coarse_workers8_seconds": 32.24149869001121,
+    "incremental_coarse_workers8_seconds": 16.003730224998435,
+    "installed_incremental_coarse_workers8_seconds": 16.076351031981176,
+    "incremental_coarse_workers1_seconds": 29.227224631991703,
+    "single_baseline_to_installed_speedup": 37.88797380334009,
+    "archived_cuda_rrr3_seconds": 14.287156259000767,
+    "cpu_executed_rrr_iters": 2,
+    "cpu_best_state_restored": true,
+    "coarse_full_rebuild_incremental_and_worker1_8_same_iteration_final_hashes": true,
+    "coarse_all_route_packs_byte_identical": true,
+    "iterations": [
+      {
+        "iteration": 1,
+        "selected_net_count": 15397,
+        "rerouted_net_count": 15397,
+        "failed_net_count": 0,
+        "overflow_net_count": 15817,
+        "overflow_wire_resource_count": 278015,
+        "overflow_via_resource_count": 55027,
+        "overflow_wire_excess": 253573.94509124756,
+        "overflow_via_excess": 41564.5,
+        "wire_length": 819970,
+        "via_count": 149675,
+        "routed_net_count": 16127,
+        "failed_route_count": 0,
+        "unrouted_net_count": 0,
+        "route_hash64": 2192247201096151600,
+        "wire_map_hash64": 9005696902720537000,
+        "via_map_hash64": 794225372044358100,
+        "best_state": true,
+        "parallel_batch_count": 482,
+        "conflict_fallback_count": 904,
+        "search_seconds": 1.2950755089999992,
+        "fallback_search_seconds": 2.1249534009999995,
+        "max_active_searches": 8,
+        "worker_search_seconds": 7.065943928000008,
+        "coarse_build_seconds": 0.43584015100000056,
+        "maze_coarsening_scale": 8,
+        "maze_coarse_x_size": 64,
+        "maze_coarse_y_size": 64,
+        "coarse_expanded_states": 13556203,
+        "fine_expanded_states": 21289418,
+        "corridor_retries": 0,
+        "full_search_fallbacks": 0,
+        "cost_rebuild_seconds": 0.30983670499999955,
+        "commit_seconds": 0.011718122999999475,
+        "rollback_seconds": 0,
+        "total_seconds": 4.420723232
+      },
+      {
+        "iteration": 2,
+        "selected_net_count": 15817,
+        "rerouted_net_count": 15817,
+        "failed_net_count": 0,
+        "overflow_net_count": 15886,
+        "overflow_wire_resource_count": 365948,
+        "overflow_via_resource_count": 31866,
+        "overflow_wire_excess": 310685.50540590286,
+        "overflow_via_excess": 21797,
+        "wire_length": 890986,
+        "via_count": 219514,
+        "routed_net_count": 16127,
+        "failed_route_count": 0,
+        "unrouted_net_count": 0,
+        "route_hash64": 471948859473799200,
+        "wire_map_hash64": 17270551159295545000,
+        "via_map_hash64": 10782295096573061000,
+        "best_state": false,
+        "parallel_batch_count": 495,
+        "conflict_fallback_count": 1278,
+        "search_seconds": 1.661182339,
+        "fallback_search_seconds": 3.631162615999997,
+        "max_active_searches": 8,
+        "worker_search_seconds": 8.746025906999986,
+        "coarse_build_seconds": 0.472318147,
+        "maze_coarsening_scale": 8,
+        "maze_coarse_x_size": 64,
+        "maze_coarse_y_size": 64,
+        "coarse_expanded_states": 20652526,
+        "fine_expanded_states": 30645368,
+        "corridor_retries": 0,
+        "full_search_fallbacks": 0,
+        "cost_rebuild_seconds": 0.35864799999999797,
+        "commit_seconds": 0.01750976100000004,
+        "rollback_seconds": 0,
+        "total_seconds": 6.425115311
+      }
+    ],
+    "worker8_peak_rss_bytes": 2339614720,
+    "worker1_peak_rss_bytes": 773070848
+  },
+  "alignment": {
+    "scope": "same original DEF, Liberty, SDC and ideal clock; both native RC rows evaluated by OpenROAD read-only STA; external reference reroutes with OpenROAD GR50",
+    "rows": {
+      "bm64-full-grid": {
+        "wns_ns": -2.80303,
+        "tns_ns": -852.581421,
+        "relative_absolute_tns_gap_percent": 20.360024604151093
+      },
+      "bm64-scale8": {
+        "wns_ns": -2.385395,
+        "tns_ns": -737.840576,
+        "relative_absolute_tns_gap_percent": 31.078013347068946
+      },
+      "openroad_gr50": {
+        "wns_ns": -2.999287,
+        "tns_ns": -1070.544556,
+        "skipped_clock_net_count": 1,
+        "skipped_fanout_net_count": 0,
+        "routed_signal_net_count": 16208,
+        "slew_violation_count": 858,
+        "cap_violation_count": 175,
+        "worst_slew_slack_ns": -1.256865382194519,
+        "worst_cap_slack_pf": -0.08220967650413513,
+        "instance_count": 16692,
+        "net_count": 16211
+      }
+    },
+    "alignment_improved": false,
+    "excluded_net": "Clk"
+  },
+  "validation": {
+    "standalone_full_grid_search": "passed",
+    "standalone_coarse_search_and_cache": "passed",
+    "coarse_asan_ubsan": "passed",
+    "installed_native_tests": 13,
+    "rrr_zero_parity": "passed",
+    "native_fixture_worker_1_2_4_8_routes_and_usage": "passed",
+    "bm64_worker_1_8_routes_usage_and_complete_pack": "passed",
+    "bm64_failed_or_unrouted_eligible_nets": 0,
+    "bm64_native_rc_eligible_nets": 16208,
+    "bm64_native_rc_covered_pins": 56299,
+    "bm64_rc_gradient_finite": "passed",
+    "installed_s50": {
+      "status": "ok",
+      "optimizer_steps": 50,
+      "gr_calls": 2,
+      "clock_gradient_samples": 1,
+      "real_master_pin_geometry_changes": "passed",
+      "best_state_restored": true,
+      "legalization_and_terminal_sta": "passed"
+    }
+  },
+  "runtime": {
+    "interpreter": "/home/zhaoxueyan/code/ipd-timing-opt-ecc/ecc/.venv/bin/python-nix",
+    "gpugr_path": "/home/zhaoxueyan/code/ipd-timing-opt-ecc/ecc/.venv/lib/python3.11/site-packages/thirdparty/xplace/cpp_to_py/cpybin/gpugr.cpython-311-x86_64-linux-gnu.so",
+    "gpugr_sha256": "ffd5484e271946c8e540350ad2f61136368999f19a90d5f22fe84a7eafaf2257",
+    "cuda_enabled": false,
+    "runpath": "$ORIGIN",
+    "qualification_env": {
+      "SKBUILD_EDITABLE_SKIP": "/home/zhaoxueyan/code/ipd-timing-opt-ecc/ecc/chipcompiler/thirdparty/ecc-dreamplace/build:/home/zhaoxueyan/code/ipd-timing-opt-ecc/ecc/chipcompiler/thirdparty/ecc-tools/build"
+    },
+    "installed_run_has_no_ECC_XPLACE_ROOT_override": true
+  },
+  "artifacts": {
+    "bm64-full-grid_report": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_rrr_coarse_20261009/bm64-full-grid/report.json",
+      "sha256": "c32acb44ba123fb9333648a075bd892117f14d8ef7a05b75468a7762285ba54e"
+    },
+    "bm64-scale8_report": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_rrr_coarse_20261009/bm64-scale8/report.json",
+      "sha256": "decbfefe81a4a75d5b559ee1538a8ab4e056697b3331814ddef1433aacc8c41e"
+    },
+    "bm64-scale8-cache_report": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_rrr_coarse_20261009/bm64-scale8-cache/report.json",
+      "sha256": "86a376c655d95362f9ce044373c9981b4e7eea143bee58b02c10ca202007470d"
+    },
+    "bm64-scale8-worker1_report": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_rrr_coarse_20261009/bm64-scale8-worker1/report.json",
+      "sha256": "96c019312b12f5a73931c4120f4283b2f6ebdfac89ae0b44a9506c8587514a01"
+    },
+    "bm64-installed_report": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_rrr_coarse_20261009/bm64-installed/report.json",
+      "sha256": "f6c279e1df1ea2b4532b1065ab172ad601caaf32f888e8b342f0884cb593add0"
+    },
+    "full_grid_native_rc_sta": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_rrr_coarse_20261009/bm64-full-grid/route-pack.sta/report.json",
+      "sha256": "5adcf86813d67ac5b2ce003ed460cfda841ece1c7d3ae805080f4b182d7fcf36"
+    },
+    "coarse_native_rc_sta": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_rrr_coarse_20261009/bm64-scale8/route-pack.sta/report.json",
+      "sha256": "e843c60ab3891f1a006de705fa2239b78388e218d85ead80ae321480526aaee4"
+    },
+    "coarse_rc_validation": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_rrr_coarse_20261009/bm64-scale8/route-pack.rc.json",
+      "sha256": "c03f3c79a76e647771a5b78136bc6d2b10c052df19ecd3a7dec10f80227c5964"
+    },
+    "openroad_gr50": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_rrr_coarse_20261009/external-gr50/report.json",
+      "sha256": "3e61912b461bbab4bd5752ba8d1c34e65474d981680cfcdf100805e2a508924f"
+    },
+    "installed_native_tests": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_rrr_coarse_20261009/native-tests-installed.log",
+      "sha256": "6e69117e0efcddfb313f754fdf2f139601d1a922e442c5b278f3124e87f96d85"
+    },
+    "installed_s50": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_rrr_coarse_20261009/s50-installed/report.json",
+      "sha256": "b651fda1135f8c40f26cd6e876cdf77f787769df80544161b2853247f1123321"
+    },
+    "runtime_migration": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_rrr_coarse_20261009/runtime-migration.json",
+      "sha256": "19414ade526b9150965b97c1e1e4c5d806027cfe2b1cad68f749d564ff245dd3"
+    },
+    "asan_ubsan_log": {
+      "path": "/home/zhaoxueyan/code/xplace-cpu-rrr-coarse-20261009/build_coarse_checks/sanitized-final.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "limitations": [
+    "The full-grid timing reference is the archived matched baseline, not a newly repeated full-grid run.",
+    "CPU and CUDA algorithms, builds and completed iteration counts differ.",
+    "This implementation uses mean fine costs and A-star, not bit-for-bit CUDA coarse aggregation or sweep kernels.",
+    "Successful restricted refinement can differ from the global minimum-cost full-grid path.",
+    "BM64 native-RC STA is farther from external OpenROAD GR50 in this one comparison.",
+    "Only the small fixture, not full BM64, was rerun for a complete S50 flow.",
+    "Ordinary editable auto-build was bypassed during qualification using the existing validated runtime; this is not a fresh qualification of uv sync or every CLI mode."
+  ],
+  "review": {
+    "standards": "0 actionable findings; no blockers",
+    "spec": "0 actionable findings; no blockers",
+    "baseline": "59991041a13ed8b8e19efd730bee6ad6185a4990",
+    "scope": "13-file Xplace implementation diff"
+  }
+}

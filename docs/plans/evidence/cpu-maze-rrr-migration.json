@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "status": "passed",
+  "operation": "scoped migration to original ipd-timing-opt-ecc checkout",
+  "source_dreamplace": "5df9ee29af8ae51efa3dbf2d33f6017fb01bf33f",
+  "source_xplace": "a3221385434d5b7989bf2fd70fb757c761594e87",
+  "target_dreamplace_base": "85b1ce6578519c683fb51affab5bece55173a0c7",
+  "scope": "Xplace fast-forward plus 16-path DreamPlace feature patch; historical cleanup branch not transplanted",
+  "build": "Xplace freshly configured and built against target venv Torch 2.11 CPU; installed source and wheel runtime extensions have matching hashes",
+  "runtime_provenance": {
+    "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_migrated_20261009/runtime-provenance.json",
+    "sha256": "98ad14076158e22552f44dcf28f429d49a7b666a93d2684a6b58449a67dc8543"
+  },
+  "native_gpugr_sha256": "6da10cf899ed5a438c509b3f982889751edaa4f6a4e70482917bd1474d61498e",
+  "focused_tests": "55 passed, 2 skipped, 6 subtests passed in the target checkout test set",
+  "focused_tests_log": {
+    "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_migrated_20261009/focused-retry.log",
+    "sha256": "fa7b83e9ac5b0772a3a12f313c33d08538e49ad05e658e4043ce2321471a8377"
+  },
+  "s50_acceptance": {
+    "status": "passed",
+    "scope": "synthetic clocked fixture, not a BM64 QoR rerun",
+    "optimizer_steps": 50,
+    "backend": "cpu_pr_maze",
+    "rrr_iters": 1,
+    "router_calls": 2,
+    "real_clock_gradient": "passed",
+    "cell_and_vt_writeback": "passed",
+    "pin_geometry_refresh": "passed",
+    "legalization_and_terminal_sta": "passed",
+    "best_state_restore": "passed",
+    "default_installed_xplace_resolution": "passed without ECC_XPLACE_ROOT override",
+    "report": {
+      "path": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_migrated_20261009/s50-installed/report.json",
+      "sha256": "cfb3fae726c679aa85cd563ea0407a2de6e958814989815186a79524b4e4d9f0"
+    }
+  },
+  "runtime_environment": "Existing target ECC and DreamPlace native libraries use Nix glibc. Added ignored .venv/bin/python-nix with matching ELF interpreter and native dependencies; retained primary Python. Validation skips import-time editable rebuilding after explicit build/install.",
+  "defaults": "auto/cpu_pr/cpu_pr_mt/CUDA behavior and default RRR=0 retained; ECC diff_sizing builder remains cpu_pr_mt",
+  "preservation": "Original untracked path sets preserved in ECC and DreamPlace; ECC-Tools source and revision untouched",
+  "archive_root": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_migrated_20261009",
+  "publication": "local migration only; no push"
+}

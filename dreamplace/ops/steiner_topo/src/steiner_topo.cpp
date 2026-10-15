@@ -9,15 +9,21 @@
 #include "flute.hpp"
 #include "utility/src/torch.h"
 #include <algorithm>
-#include <cassert>
-#include <filesystem>
-#include <iostream>
-#include <mutex>
+#include <cmath>
+#include <cstdlib>
+#include <limits>
+#include <map>
 #include <omp.h>
 #include <queue>
+#include <sstream>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
+#include <filesystem>
+#include "frozen_net_topology.h"
+
+void bindLDirectionMatcher(pybind11::module_& m);
 
 DREAMPLACE_BEGIN_NAMESPACE
 
@@ -37,17 +43,82 @@ void loadFluteLut(const std::string &powv_file,
 
 }  // namespace
 
-struct NetResult {
-  int num_steiner = 0;
-  int netid = 0;
-  std::vector<int> newx;
-  std::vector<int> newy;
-  std::vector<int> vtx_relate_x;
-  std::vector<int> vtx_relate_y;
-  std::vector<int> vtx_fa;
-  std::vector<int> net_flat_topo_idx;
-  std::vector<int> local2global_idx;
-};
+void checkFlatCpuContiguous(const at::Tensor &tensor, const char *name) {
+  TORCH_CHECK(tensor.defined(), name, " must be defined");
+  TORCH_CHECK(tensor.device().is_cpu(), name, " must reside on CPU");
+  TORCH_CHECK(tensor.dim() == 1, name, " must be a flat tensor");
+  TORCH_CHECK(tensor.is_contiguous(), name, " must be contiguous");
+}
+
+void checkFloatingPosTensor(const at::Tensor &tensor, const char *name) {
+  checkFlatCpuContiguous(tensor, name);
+  TORCH_CHECK(tensor.numel() % 2 == 0, name,
+              " must have an even number of elements");
+  TORCH_CHECK(tensor.scalar_type() == at::kFloat ||
+                  tensor.scalar_type() == at::kDouble,
+              name, " must have dtype torch.float32 or torch.float64");
+}
+
+void checkRelationTensor(const at::Tensor &relation, const char *name,
+                         int64_t expected_size, int num_pins) {
+  checkFlatCpuContiguous(relation, name);
+  TORCH_CHECK(relation.scalar_type() == at::kInt, name,
+              " must have dtype torch.int32");
+  TORCH_CHECK(relation.numel() == expected_size, name, " length ",
+              relation.numel(), " does not match expected vertex count ",
+              expected_size);
+
+  const int *relation_ptr = relation.data_ptr<int>();
+  for (int64_t vertex_id = 0; vertex_id < expected_size; ++vertex_id) {
+    const int pin_id = relation_ptr[vertex_id];
+    TORCH_CHECK(pin_id >= 0 && pin_id < num_pins, name, "[", vertex_id,
+                "] = ", pin_id, " is outside [0, ", num_pins, ")");
+  }
+}
+
+void checkBuildInputs(const at::Tensor &pos, const at::Tensor &flat_netpin,
+                      const at::Tensor &netpin_start) {
+  checkFloatingPosTensor(pos, "pos");
+  checkFlatCpuContiguous(flat_netpin, "flat_netpin");
+  checkFlatCpuContiguous(netpin_start, "netpin_start");
+  TORCH_CHECK(flat_netpin.scalar_type() == at::kInt,
+              "flat_netpin must have dtype torch.int32");
+  TORCH_CHECK(netpin_start.scalar_type() == at::kInt,
+              "netpin_start must have dtype torch.int32");
+  TORCH_CHECK(netpin_start.numel() >= 2,
+              "netpin_start must contain at least one net interval");
+
+  const int64_t num_pins = pos.numel() / 2;
+  TORCH_CHECK(num_pins <= std::numeric_limits<int>::max(),
+              "pos has too many pins for the int32 native topology API");
+  const int *flat_netpin_ptr = flat_netpin.data_ptr<int>();
+  const int *netpin_start_ptr = netpin_start.data_ptr<int>();
+  TORCH_CHECK(netpin_start_ptr[0] == 0,
+              "netpin_start must begin at zero");
+  TORCH_CHECK(netpin_start_ptr[netpin_start.numel() - 1] == flat_netpin.numel(),
+              "netpin_start must end at flat_netpin length ", flat_netpin.numel());
+  std::vector<int> global_pin_owner(num_pins, -1);
+  for (int64_t net_id = 0; net_id + 1 < netpin_start.numel(); ++net_id) {
+    const int begin = netpin_start_ptr[net_id];
+    const int end = netpin_start_ptr[net_id + 1];
+    TORCH_CHECK(begin >= 0 && begin < end && end <= flat_netpin.numel(),
+                "netpin_start has invalid interval [", begin, ", ", end,
+                ") for net ", net_id);
+    std::unordered_set<int> net_pin_ids;
+    for (int local_idx = begin; local_idx < end; ++local_idx) {
+      const int pin_id = flat_netpin_ptr[local_idx];
+      TORCH_CHECK(pin_id >= 0 && pin_id < num_pins, "flat_netpin[",
+                  local_idx, "] = ", pin_id, " is outside [0, ", num_pins,
+                  ")");
+      TORCH_CHECK(net_pin_ids.insert(pin_id).second, "flat_netpin repeats "
+                  "global pin ", pin_id, " within net ", net_id);
+      TORCH_CHECK(global_pin_owner[pin_id] == -1, "flat_netpin global pin ",
+                  pin_id, " appears in multiple nets: ",
+                  global_pin_owner[pin_id], " and ", net_id);
+      global_pin_owner[pin_id] = static_cast<int>(net_id);
+    }
+  }
+}
 
 template <typename T>
 int computeSteinerTreeLauncher(
@@ -58,65 +129,129 @@ int computeSteinerTreeLauncher(
     std::vector<int> &vtx_fa, std::vector<int> &flat_vtx_to,
     std::vector<int> &flat_vtx_from, std::vector<int> &net_flat_topo_idx,
     std::vector<int> &flat_vtx_to_start, int *net_flat_topo_idx_start,
-    bool deterministic_flag) {
+    bool deterministic_flag, std::vector<NetResult> net_result) {
 
   constexpr int scale = 1000;
   int total_steiner = 0;
-  std::vector<NetResult> net_result(num_nets);
 
 #pragma omp parallel for reduction(+ : total_steiner) if(!deterministic_flag)
   for (int netid = 0; netid < num_nets; ++netid) {
+    NetResult &result = net_result[netid];
+    if (!result.net_flat_topo_idx.empty()) {
+      total_steiner += result.num_steiner;
+      continue;  // Buffered nets retain their entire tree, not just active edges.
+    }
     int degree = netpin_start[netid + 1] - netpin_start[netid];
-    bool duplicate_pin = false;
+    if (degree <= 0) {
+      result.error = "SteinerTopo build requires at least one real pin for net " +
+                     std::to_string(netid);
+      continue;
+    }
 
-    // --- Collect unique pin coordinates and map local indices ---
-    std::map<Point<int>, std::vector<int>> pos2local_map;
+    // Keep physical sites separate from synthesized Steiner locations.  The
+    // former defines stable terminal ownership; the latter never does.
+    std::map<Point<int>, std::vector<int>> pin_sites;
     std::vector<int> vx, vy;
     vx.reserve(degree);
     vy.reserve(degree);
-    net_result[netid].local2global_idx.resize(degree);
+    result.local2global_idx.resize(degree);
+    const auto quantize_lattice_coordinate = [](double scaled_coordinate,
+                                                int *quantized_coordinate) {
+      if (!std::isfinite(scaled_coordinate) ||
+          scaled_coordinate < std::numeric_limits<int>::min() - 0.5 ||
+          scaled_coordinate > std::numeric_limits<int>::max() + 0.5) {
+        return false;
+      }
+      const long long rounded_coordinate = std::llround(scaled_coordinate);
+      if (rounded_coordinate < std::numeric_limits<int>::min() ||
+          rounded_coordinate > std::numeric_limits<int>::max()) {
+        return false;
+      }
+      *quantized_coordinate = static_cast<int>(rounded_coordinate);
+      return true;
+    };
     for (int cur_local_idx = 0; cur_local_idx < degree; ++cur_local_idx) {
       int pin_global_idx = flat_netpin[netpin_start[netid] + cur_local_idx];
-      Point<int> point(static_cast<int>(x[pin_global_idx] * scale),
-                       static_cast<int>(y[pin_global_idx] * scale));
-      net_result[netid].local2global_idx[cur_local_idx] = pin_global_idx;
-      pos2local_map[point].push_back(cur_local_idx);
-      net_result[netid].newx.push_back(point.x());
-      net_result[netid].newy.push_back(point.y());
+      const T raw_x = x[pin_global_idx];
+      const T raw_y = y[pin_global_idx];
+      const double scaled_x = static_cast<double>(raw_x) * scale;
+      const double scaled_y = static_cast<double>(raw_y) * scale;
+      int quantized_x = 0;
+      int quantized_y = 0;
+      if (!quantize_lattice_coordinate(scaled_x, &quantized_x) ||
+          !quantize_lattice_coordinate(scaled_y, &quantized_y)) {
+        std::ostringstream message;
+        message << "SteinerTopo build received a non-finite or out-of-range "
+                << "coordinate: net=" << netid << ", local_pin="
+                << cur_local_idx << ", global_pin=" << pin_global_idx
+                << ", raw=(" << raw_x << ", " << raw_y << ")"
+                << ", scaled=(" << scaled_x << ", " << scaled_y << ")";
+        result.error = message.str();
+        break;
+      }
 
-      // Check for duplicate pins at same location
-      if (pos2local_map[point].size() > 1) {
-        duplicate_pin = true;
-      } else if (pos2local_map[point].size() == 1) {
+      // The integer FLUTE tree is a frozen quantized approximation.  Raw
+      // continuous positions may remain elsewhere in the same lattice cell;
+      // forward/backward gather those raw values through direct pin witnesses.
+      Point<int> point(quantized_x, quantized_y);
+      result.local2global_idx[cur_local_idx] = pin_global_idx;
+      std::vector<int> &site_members = pin_sites[point];
+      if (site_members.empty()) {
         vx.push_back(point.x());
         vy.push_back(point.y());
       }
+      site_members.push_back(cur_local_idx);
+      result.newx.push_back(point.x());
+      result.newy.push_back(point.y());
+    }
+    if (!result.error.empty()) {
+      continue;
     }
 
-    int num_valid_pins = pos2local_map.size();
+    std::vector<int> canonical_for_local(degree, -1);
+    for (auto &[point, site_members] : pin_sites) {
+      std::sort(site_members.begin(), site_members.end(),
+                [&result](int lhs, int rhs) {
+                  return result.local2global_idx[lhs] <
+                         result.local2global_idx[rhs];
+                });
+      const auto driver_it =
+          std::find(site_members.begin(), site_members.end(), 0);
+      const int canonical_local =
+          driver_it == site_members.end() ? site_members.front() : *driver_it;
+      for (const int local_idx : site_members) {
+        canonical_for_local[local_idx] = canonical_local;
+      }
+    }
+
+    int num_valid_pins = pin_sites.size();
     std::vector<std::vector<int>> edge(degree);
     auto add_edge = [&edge](int u, int v) {
       edge[u].push_back(v);
       edge[v].push_back(u);
     };
 
-    if (num_valid_pins == 1) {
-      // --- net with only one unique pin location ---
-      wl[netid] = 0;
-      net_result[netid].vtx_fa.resize(degree);
-      net_result[netid].net_flat_topo_idx.resize(degree);
-      net_result[netid].vtx_relate_x.resize(degree);
-      net_result[netid].vtx_relate_y.resize(degree);
-      for (const auto &[pos, indices] : pos2local_map) {
-        int first_local_idx = indices[0];
-        for (const auto &local_idx : indices) {
-          net_result[netid].vtx_relate_x[local_idx] = local_idx;
-          net_result[netid].vtx_relate_y[local_idx] = local_idx;
-          if (local_idx != first_local_idx) {
-            add_edge(local_idx, first_local_idx);
+    auto publish_real_pin_expansion = [&]() {
+      for (const auto &[point, site_members] : pin_sites) {
+        const int canonical_local = canonical_for_local[site_members.front()];
+        for (const int local_idx : site_members) {
+          result.vtx_relate_x[local_idx] = local_idx;
+          result.vtx_relate_y[local_idx] = local_idx;
+          if (local_idx != canonical_local) {
+            add_edge(local_idx, canonical_local);
           }
         }
       }
+    };
+
+    if (num_valid_pins == 1) {
+      // --- net with only one unique pin location ---
+      wl[netid] = 0;
+      result.vtx_fa.resize(degree);
+      result.net_flat_topo_idx.resize(degree);
+      result.vtx_relate_x.resize(degree);
+      result.vtx_relate_y.resize(degree);
+      publish_real_pin_expansion();
     } else {
       // --- nets with >= 2 unique pin locations ---
       flute::Tree ftree =
@@ -127,34 +262,43 @@ int computeSteinerTreeLauncher(
       for (int bid = 0; bid < 2 * ftree.deg - 2; ++bid) {
         flute::Branch &b = ftree.branch[bid];
         Point<int> p(b.x, b.y);
-        auto it = pos2local_map.find(p);
+        auto it = pin_sites.find(p);
         bool is_original_pin_loc =
-            (it != pos2local_map.end() && !it->second.empty());
+            (it != pin_sites.end() && !it->second.empty());
         if (!is_original_pin_loc &&
             pos2steiner_map.find(p) == pos2steiner_map.end()) {
           // It's a new Steiner point location
           int steiner_local_idx = degree + num_steiner_points++;
           pos2steiner_map[p] = steiner_local_idx;
-          pos2local_map[p].push_back(steiner_local_idx);
-          net_result[netid].newx.push_back(b.x);
-          net_result[netid].newy.push_back(b.y);
+          result.newx.push_back(b.x);
+          result.newy.push_back(b.y);
         }
       }
-      net_result[netid].num_steiner = num_steiner_points;
-      total_steiner += net_result[netid].num_steiner;
+      result.num_steiner = num_steiner_points;
+      total_steiner += result.num_steiner;
 
-      const int total_vertex_local = degree + net_result[netid].num_steiner;
+      const int total_vertex_local = degree + result.num_steiner;
       UnifiedUFS<int> ufs(total_vertex_local);
 
       edge.resize(total_vertex_local);
-      net_result[netid].vtx_relate_x.resize(total_vertex_local);
-      net_result[netid].vtx_relate_y.resize(total_vertex_local);
-      net_result[netid].vtx_fa.resize(total_vertex_local);
-      net_result[netid].net_flat_topo_idx.resize(total_vertex_local);
+      result.vtx_relate_x.resize(total_vertex_local);
+      result.vtx_relate_y.resize(total_vertex_local);
+      result.vtx_fa.resize(total_vertex_local);
+      result.net_flat_topo_idx.resize(total_vertex_local);
 
       // store adjacency for Steiner diagonal connections
       std::map<int, std::vector<int>> steiner_adj_vertices_map;
       int cur_wl = 0;
+
+      auto local_for_point = [&pin_sites, &pos2steiner_map,
+                              &canonical_for_local](const Point<int> &point) {
+        const auto pin_it = pin_sites.find(point);
+        if (pin_it != pin_sites.end()) {
+          return canonical_for_local[pin_it->second.front()];
+        }
+        const auto steiner_it = pos2steiner_map.find(point);
+        return steiner_it == pos2steiner_map.end() ? -1 : steiner_it->second;
+      };
 
       // --- construct relate ---
       for (int bid = 0; bid < 2 * ftree.deg - 2; ++bid) {
@@ -167,14 +311,21 @@ int computeSteinerTreeLauncher(
         if (p1 == p2)
           continue;
 
-        int u_local = pos2local_map[p1][0];
-        int v_local = pos2local_map[p2][0];
+        int u_local = local_for_point(p1);
+        int v_local = local_for_point(p2);
+        if (u_local < 0 || v_local < 0) {
+          std::ostringstream message;
+          message << "SteinerTopo could not resolve a FLUTE branch endpoint: "
+                  << "net=" << netid << ", branch=" << bid << ", p1=("
+                  << p1.x() << ", " << p1.y() << "), p2=(" << p2.x()
+                  << ", " << p2.y() << ")";
+          result.error = message.str();
+          break;
+        }
         add_edge(u_local, v_local);
 
-        cur_wl += std::abs(net_result[netid].newx[u_local] -
-                           net_result[netid].newx[v_local]) +
-                  std::abs(net_result[netid].newy[u_local] -
-                           net_result[netid].newy[v_local]);
+        cur_wl += std::abs(result.newx[u_local] - result.newx[v_local]) +
+                  std::abs(result.newy[u_local] - result.newy[v_local]);
 
         bool is_steiner_u = (u_local >= degree);
         bool is_steiner_v = (v_local >= degree);
@@ -199,47 +350,172 @@ int computeSteinerTreeLauncher(
           }
         }
       }
-      wl[netid] = cur_wl;
-      for (const auto &[pos, indices] : pos2local_map) {
-        int first_local_idx = indices[0];
-        if (first_local_idx >= degree) {
-          auto [x_pin_local, y_pin_local] = ufs.getRelateVertex(
-              first_local_idx, degree, steiner_adj_vertices_map,
-              net_result[netid].newx, net_result[netid].newy);
-          net_result[netid].vtx_relate_x[first_local_idx] = x_pin_local;
-          net_result[netid].vtx_relate_y[first_local_idx] = y_pin_local;
-        } else {
-          for (const auto &local_idx : indices) {
-            if (local_idx >= degree) {
-              net_result[netid].vtx_relate_x[local_idx] = first_local_idx;
-              net_result[netid].vtx_relate_y[local_idx] = first_local_idx;
-            } else {
-              net_result[netid].vtx_relate_x[local_idx] = local_idx;
-              net_result[netid].vtx_relate_y[local_idx] = local_idx;
-            }
-            if (local_idx != first_local_idx) {
-              add_edge(local_idx, first_local_idx);
-            }
-          }
-        }
-      }
-
-      // output for duplicate pin pos
-      if (duplicate_pin) {
-        for (auto &[pos, indices] : pos2local_map) {
-          if (indices.size() < 2)
-            continue;
-          std::cout << "Position (" << pos.x() << ", " << pos.y()
-                    << ") has local indices: ";
-          for (const auto &idx : indices) {
-            std::cout << idx << "(" << net_result[netid].local2global_idx[idx]
-                      << ") ";
-          }
-          std::cout << std::endl;
-        }
-      }
-
       free(ftree.branch);
+      if (!result.error.empty()) {
+        continue;
+      }
+      wl[netid] = cur_wl;
+
+      publish_real_pin_expansion();
+      std::vector<int> raw_relate_x(total_vertex_local, -1);
+      std::vector<int> raw_relate_y(total_vertex_local, -1);
+      for (int local_idx = 0; local_idx < degree; ++local_idx) {
+        raw_relate_x[local_idx] = local_idx;
+        raw_relate_y[local_idx] = local_idx;
+      }
+      for (const auto &[point, steiner_local] : pos2steiner_map) {
+        const auto [x_candidate, y_candidate] = ufs.getRelateVertex(
+            steiner_local, degree, steiner_adj_vertices_map, result.newx,
+            result.newy);
+        raw_relate_x[steiner_local] = x_candidate;
+        raw_relate_y[steiner_local] = y_candidate;
+      }
+
+      std::map<int, std::vector<int>> x_witnesses;
+      std::map<int, std::vector<int>> y_witnesses;
+      for (const auto &[point, site_members] : pin_sites) {
+        const int canonical_local = canonical_for_local[site_members.front()];
+        x_witnesses[point.x()].push_back(canonical_local);
+        y_witnesses[point.y()].push_back(canonical_local);
+      }
+      auto sort_witnesses = [&result](std::map<int, std::vector<int>> &table) {
+        for (auto &[coordinate, candidates] : table) {
+          std::sort(candidates.begin(), candidates.end(), [&result](int lhs,
+                                                                    int rhs) {
+            return result.local2global_idx[lhs] <
+                   result.local2global_idx[rhs];
+          });
+          candidates.erase(std::unique(candidates.begin(), candidates.end()),
+                           candidates.end());
+        }
+      };
+      sort_witnesses(x_witnesses);
+      sort_witnesses(y_witnesses);
+
+      auto select_direct_witness =
+          [&](int steiner_local, int raw_candidate, bool x_axis) {
+            const int cached_coordinate =
+                x_axis ? result.newx[steiner_local] : result.newy[steiner_local];
+            const int raw_coordinate =
+                raw_candidate >= 0 && raw_candidate < degree
+                    ? (x_axis ? result.newx[raw_candidate]
+                              : result.newy[raw_candidate])
+                    : std::numeric_limits<int>::min();
+            if (raw_candidate >= 0 && raw_candidate < degree &&
+                raw_coordinate == cached_coordinate) {
+              return canonical_for_local[raw_candidate];
+            }
+
+            const auto &witnesses = x_axis ? x_witnesses : y_witnesses;
+            const auto witness_it = witnesses.find(cached_coordinate);
+            if (witness_it == witnesses.end() || witness_it->second.empty()) {
+              std::ostringstream message;
+              message << "SteinerTopo direct witness unavailable: net=" << netid
+                      << ", local_vertex=" << steiner_local << ", axis="
+                      << (x_axis ? "x" : "y") << ", cached_coordinate="
+                      << cached_coordinate << ", raw_ufs_candidate="
+                      << raw_candidate << ", candidate_count=0";
+              result.error = message.str();
+              return -1;
+            }
+
+            const std::vector<int> &candidates = witness_it->second;
+            const auto best_candidate = std::min_element(
+                candidates.begin(), candidates.end(), [&](int lhs, int rhs) {
+                  const int lhs_other =
+                      x_axis ? result.newy[lhs] : result.newx[lhs];
+                  const int rhs_other =
+                      x_axis ? result.newy[rhs] : result.newx[rhs];
+                  const int steiner_other =
+                      x_axis ? result.newy[steiner_local]
+                             : result.newx[steiner_local];
+                  const long long lhs_delta =
+                      static_cast<long long>(lhs_other) - steiner_other;
+                  const long long rhs_delta =
+                      static_cast<long long>(rhs_other) - steiner_other;
+                  const long long lhs_distance =
+                      lhs_delta < 0 ? -lhs_delta : lhs_delta;
+                  const long long rhs_distance =
+                      rhs_delta < 0 ? -rhs_delta : rhs_delta;
+                  if (lhs_distance != rhs_distance) {
+                    return lhs_distance < rhs_distance;
+                  }
+                  return result.local2global_idx[lhs] <
+                         result.local2global_idx[rhs];
+                });
+            return *best_candidate;
+          };
+
+      for (const auto &[point, steiner_local] : pos2steiner_map) {
+        result.vtx_relate_x[steiner_local] =
+            select_direct_witness(steiner_local, raw_relate_x[steiner_local],
+                                  true);
+        if (!result.error.empty()) {
+          break;
+        }
+        result.vtx_relate_y[steiner_local] =
+            select_direct_witness(steiner_local, raw_relate_y[steiner_local],
+                                  false);
+        if (!result.error.empty()) {
+          break;
+        }
+      }
+    }
+
+    if (!result.error.empty()) {
+      continue;
+    }
+
+    const int total_vertex_local = degree + result.num_steiner;
+    if (static_cast<int>(result.vtx_relate_x.size()) != total_vertex_local ||
+        static_cast<int>(result.vtx_relate_y.size()) != total_vertex_local) {
+      std::ostringstream message;
+      message << "SteinerTopo relation length mismatch before cache publish: net="
+              << netid << ", vertices=" << total_vertex_local
+              << ", relation_x=" << result.vtx_relate_x.size()
+              << ", relation_y=" << result.vtx_relate_y.size();
+      result.error = message.str();
+      continue;
+    }
+    for (int local_vertex = 0; local_vertex < total_vertex_local;
+         ++local_vertex) {
+      const auto validate_axis = [&](int relation_local, bool x_axis) {
+        const int cached_coordinate =
+            x_axis ? result.newx[local_vertex] : result.newy[local_vertex];
+        if (relation_local < 0 || relation_local >= degree) {
+          std::ostringstream message;
+          message << "SteinerTopo published a non-real relation: net=" << netid
+                  << ", local_vertex=" << local_vertex << ", axis="
+                  << (x_axis ? "x" : "y") << ", cached_coordinate="
+                  << cached_coordinate << ", relation=" << relation_local
+                  << ", real_pin_count=" << degree;
+          result.error = message.str();
+          return;
+        }
+        const int relation_coordinate =
+            x_axis ? result.newx[relation_local] : result.newy[relation_local];
+        if (relation_coordinate != cached_coordinate) {
+          std::ostringstream message;
+          message << "SteinerTopo published an axis-mismatched relation: net="
+                  << netid << ", local_vertex=" << local_vertex << ", axis="
+                  << (x_axis ? "x" : "y") << ", cached_coordinate="
+                  << cached_coordinate << ", relation=" << relation_local
+                  << ", relation_coordinate=" << relation_coordinate;
+          result.error = message.str();
+          return;
+        }
+      };
+      validate_axis(result.vtx_relate_x[local_vertex], true);
+      if (!result.error.empty()) {
+        break;
+      }
+      validate_axis(result.vtx_relate_y[local_vertex], false);
+      if (!result.error.empty()) {
+        break;
+      }
+    }
+    if (!result.error.empty()) {
+      continue;
     }
 
     // --- graph stucture ---
@@ -269,6 +545,10 @@ int computeSteinerTreeLauncher(
       }
     };
     topo_sort(netid);
+  }
+
+  for (int netid = 0; netid < num_nets; ++netid) {
+    TORCH_CHECK(net_result[netid].error.empty(), net_result[netid].error);
   }
 
   // --- merge net results ---
@@ -303,8 +583,8 @@ int computeSteinerTreeLauncher(
     };
     for (int local_id = 0; local_id < degree + degree_steiner; ++local_id) {
       int global_idx = local2global(local_id);
-      newx[global_idx] = net_result[netid].newx[local_id] / scale;
-      newy[global_idx] = net_result[netid].newy[local_id] / scale;
+      newx[global_idx] = static_cast<T>(net_result[netid].newx[local_id]) / static_cast<T>(scale);
+      newy[global_idx] = static_cast<T>(net_result[netid].newy[local_id]) / static_cast<T>(scale);
       vtx_fa[global_idx] = local2global(net_result[netid].vtx_fa[local_id]);
       vtx_relate_x[global_idx] = local2global(net_result[netid].vtx_relate_x[local_id]);
       vtx_relate_y[global_idx] = local2global(net_result[netid].vtx_relate_y[local_id]);
@@ -329,8 +609,6 @@ int computeSteinerTreeLauncher(
       flat_vtx_to_start[i + 1] = flat_vtx_to.size();
   }
   
-  // DEBUG
-  std::cout << "build tree done" << std::endl;
   return 0;
 }
 
@@ -375,19 +653,16 @@ std::vector<at::Tensor> build_tree(at::Tensor pos, at::Tensor flat_netpin,
                                    int ignore_net_degree,
                                    const std::string &powv_file,
                                    const std::string &post_file,
-                                   bool deterministic_flag) {
-  CHECK_FLAT_CPU(pos);
-  CHECK_EVEN(pos);
-  CHECK_CONTIGUOUS(pos);
-  CHECK_FLAT_CPU(flat_netpin);
-  CHECK_CONTIGUOUS(flat_netpin);
-  CHECK_FLAT_CPU(netpin_start);
-  CHECK_CONTIGUOUS(netpin_start);
-
+                                   bool deterministic_flag,
+                                   const std::vector<int>& frozen_net_ids,
+                                   const std::vector<at::Tensor>& previous_cache) {
+  checkBuildInputs(pos, flat_netpin, netpin_start);
+  TORCH_CHECK(netpin_start.numel() - 1 <= std::numeric_limits<int>::max(),
+              "netpin_start has too many nets for the int32 native topology API");
   loadFluteLut(powv_file, post_file);
 
-  const int num_nets = netpin_start.numel() - 1;
-  const int num_pins = pos.numel() / 2;
+  const int num_nets = static_cast<int>(netpin_start.numel() - 1);
+  const int num_pins = static_cast<int>(pos.numel() / 2);
   std::vector<int> vtx_relate_x_vec;
   std::vector<int> vtx_relate_y_vec;
   std::vector<int> vtx_fa_vec;
@@ -408,6 +683,10 @@ std::vector<at::Tensor> build_tree(at::Tensor pos, at::Tensor flat_netpin,
   DREAMPLACE_DISPATCH_FLOATING_TYPES(pos, "computeSteinerTreeLauncher", [&] {
     std::vector<scalar_t> newx_vec;
     std::vector<scalar_t> newy_vec;
+    auto retained = restoreFrozenNets(
+        frozen_net_ids, previous_cache, pos.data_ptr<scalar_t>(),
+        pos.data_ptr<scalar_t>() + num_pins, flat_netpin.data_ptr<int>(),
+        netpin_start.data_ptr<int>(), num_nets, num_pins);
 
     computeSteinerTreeLauncher<scalar_t>(
         DREAMPLACE_TENSOR_DATA_PTR(pos, scalar_t),
@@ -420,7 +699,7 @@ std::vector<at::Tensor> build_tree(at::Tensor pos, at::Tensor flat_netpin,
         flat_vtx_to_vec, flat_vtx_from_vec, net_flat_topo_idx_vec,
         flat_vtx_to_start_vec,
         DREAMPLACE_TENSOR_DATA_PTR(net_flat_topo_idx_start_tensor, int),
-        deterministic_flag);
+        deterministic_flag, std::move(retained));
 
     auto newx                     = convertVecToTens(newx_vec, options_float);
     auto newy                     = convertVecToTens(newy_vec, options_float);
@@ -446,6 +725,9 @@ std::vector<at::Tensor> build_tree(at::Tensor pos, at::Tensor flat_netpin,
               net_flat_topo_idx_start_tensor};
   });
 
+  if (!frozen_net_ids.empty())
+    result.push_back(frozenVertexMap(frozen_net_ids, previous_cache, result, num_pins));
+
   return result;
 }
 
@@ -454,15 +736,16 @@ std::vector<at::Tensor> steiner_topo_forward(at::Tensor pin_pos,
                                              at::Tensor cached_vtx_relate_y,
                                              int num_vertices,
                                              bool deterministic_flag) {
-  CHECK_FLAT_CPU(pin_pos);
-  CHECK_EVEN(pin_pos);
-  CHECK_CONTIGUOUS(pin_pos);
-  CHECK_FLAT_CPU(cached_vtx_relate_x);
-  CHECK_CONTIGUOUS(cached_vtx_relate_x);
-  CHECK_FLAT_CPU(cached_vtx_relate_y);
-  CHECK_CONTIGUOUS(cached_vtx_relate_y);
+  checkFloatingPosTensor(pin_pos, "pin_pos");
+  TORCH_CHECK(num_vertices >= 0, "num_vertices must be non-negative");
+  TORCH_CHECK(pin_pos.numel() / 2 <= std::numeric_limits<int>::max(),
+              "pin_pos has too many pins for the int32 native topology API");
 
-  const int num_pins = pin_pos.numel() / 2;
+  const int num_pins = static_cast<int>(pin_pos.numel() / 2);
+  checkRelationTensor(cached_vtx_relate_x, "cached_vtx_relate_x",
+                      num_vertices, num_pins);
+  checkRelationTensor(cached_vtx_relate_y, "cached_vtx_relate_y",
+                      num_vertices, num_pins);
   auto options_float = pin_pos.options();
 
   std::vector<at::Tensor> result;
@@ -497,23 +780,26 @@ std::vector<at::Tensor> steiner_topo_forward(at::Tensor pin_pos,
 at::Tensor steiner_topo_backward(at::Tensor grad_newx, at::Tensor grad_newy,
                                  at::Tensor pos, at::Tensor vtx_relate_x,
                                  at::Tensor vtx_relate_y) {
+  checkFlatCpuContiguous(grad_newx, "grad_newx");
+  checkFlatCpuContiguous(grad_newy, "grad_newy");
+  checkFloatingPosTensor(pos, "pos");
+  TORCH_CHECK(grad_newx.scalar_type() == pos.scalar_type(),
+              "grad_newx dtype must match pos dtype");
+  TORCH_CHECK(grad_newy.scalar_type() == pos.scalar_type(),
+              "grad_newy dtype must match pos dtype");
+  TORCH_CHECK(grad_newx.numel() == grad_newy.numel(),
+              "grad_newx and grad_newy lengths must match");
+  TORCH_CHECK(pos.numel() / 2 <= std::numeric_limits<int>::max(),
+              "pos has too many pins for the int32 native topology API");
 
-  CHECK_FLAT_CPU(grad_newx);
-  CHECK_CONTIGUOUS(grad_newx);
-  CHECK_FLAT_CPU(grad_newy);
-  CHECK_CONTIGUOUS(grad_newy);
-  CHECK_FLAT_CPU(pos);
-  CHECK_EVEN(pos);
-  CHECK_CONTIGUOUS(pos);
-  CHECK_FLAT_CPU(vtx_relate_x);
-  CHECK_CONTIGUOUS(vtx_relate_x);
-  CHECK_FLAT_CPU(vtx_relate_y);
-  CHECK_CONTIGUOUS(vtx_relate_y);
+  auto grad_pin = at::zeros_like(pos);
 
-  auto grad_pin = at::zeros(pos.numel());
-
-  int num_vertices = grad_newx.numel();
-  int num_pins = pos.numel() / 2;
+  const int64_t num_vertices = grad_newx.numel();
+  const int num_pins = static_cast<int>(pos.numel() / 2);
+  checkRelationTensor(vtx_relate_x, "vtx_relate_x", num_vertices, num_pins);
+  checkRelationTensor(vtx_relate_y, "vtx_relate_y", num_vertices, num_pins);
+  TORCH_CHECK(num_vertices <= std::numeric_limits<int>::max(),
+              "gradient has too many vertices for the int32 native topology API");
 
   DREAMPLACE_DISPATCH_FLOATING_TYPES(
       pos, "computeSteinerTopoGradLauncher", [&] {
@@ -521,7 +807,8 @@ at::Tensor steiner_topo_backward(at::Tensor grad_newx, at::Tensor grad_newy,
             DREAMPLACE_TENSOR_DATA_PTR(grad_newx, scalar_t),
             DREAMPLACE_TENSOR_DATA_PTR(grad_newy, scalar_t),
             DREAMPLACE_TENSOR_DATA_PTR(vtx_relate_x, int),
-            DREAMPLACE_TENSOR_DATA_PTR(vtx_relate_y, int), num_vertices,
+            DREAMPLACE_TENSOR_DATA_PTR(vtx_relate_y, int),
+            static_cast<int>(num_vertices),
             DREAMPLACE_TENSOR_DATA_PTR(grad_pin, scalar_t),
             DREAMPLACE_TENSOR_DATA_PTR(grad_pin, scalar_t) + num_pins);
       });
@@ -532,6 +819,7 @@ at::Tensor steiner_topo_backward(at::Tensor grad_newx, at::Tensor grad_newy,
 DREAMPLACE_END_NAMESPACE
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  bindLDirectionMatcher(m);
   m.def("forward", &DREAMPLACE_NAMESPACE::steiner_topo_forward,
         "SteinerTopo forward",
         pybind11::arg("pin_pos"),
@@ -549,5 +837,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         pybind11::arg("ignore_net_degree"),
         pybind11::arg("powv_file"),
         pybind11::arg("post_file"),
-        pybind11::arg("deterministic_flag") = false);
+        pybind11::arg("deterministic_flag") = false,
+        pybind11::arg("frozen_net_ids") = std::vector<int>{},
+        pybind11::arg("previous_cache") = std::vector<at::Tensor>{});
 }

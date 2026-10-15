@@ -34,9 +34,10 @@ from .l_shape_routability import (
     LShapeRoutabilityOp,
     LShapeRoutabilityMixin,
     create_l_shape_routability_op,
-    plot_l_shape_segments,
-    plot_segment_density_map
 )
+
+from .l_shape_segment_plots import plot_l_shape_segments
+from .l_shape_source_plots import plot_segment_density_map
 
 from .enhanced_inflation_controller import (
     InflationGeometrySnapshot,

@@ -20,6 +20,14 @@ from .profile_timing import l_shape_log_verbose
 logger = logging.getLogger(__name__)
 
 
+def segment_domain_mask(x, y, width, height, xl, yl, xh, yh):
+    """Rectangles with a positive intersection with the placement domain."""
+    return (
+        (x + width > xl) & (x < xh) & (y + height > yl) & (y < yh)
+        & (width > 0) & (height > 0)
+    )
+
+
 class SegmentDensityMapFunction(Function):
     """
     Compute density map for routing segments using C++/CUDA backends.
@@ -66,7 +74,20 @@ class SegmentDensityMapFunction(Function):
         Returns:
             density_map: [num_bins_x, num_bins_y]
         """
-        num_movable_nodes = num_segments
+        valid = segment_domain_mask(
+            segment_pos[:num_segments] + offset_x,
+            segment_pos[num_segments:] + offset_y,
+            segment_size_x_clamped, segment_size_y_clamped, xl, yl, xh, yh,
+        )
+        if not bool(valid.all()):
+            segment_pos = torch.cat((
+                segment_pos[:num_segments][valid], segment_pos[num_segments:][valid],
+            ))
+            segment_size_x_clamped = segment_size_x_clamped[valid]
+            segment_size_y_clamped = segment_size_y_clamped[valid]
+            offset_x, offset_y, ratio = offset_x[valid], offset_y[valid], ratio[valid]
+            sorted_segment_map = torch.argsort(segment_size_x_clamped).to(torch.int32)
+        num_movable_nodes = segment_pos.numel() // 2
         num_filler_nodes = 0
         
         if not isinstance(target_density, torch.Tensor) or target_density.dim() != 2:
@@ -78,7 +99,9 @@ class SegmentDensityMapFunction(Function):
         # Supply-aware overflow is handled outside this raw density kernel.
         cpp_target_density = 1.0
         
-        if segment_pos.is_cuda:
+        if num_movable_nodes == 0:
+            output = initial_density_map.clone()
+        elif segment_pos.is_cuda:
             output = electric_potential_cuda.density_map(
                 segment_pos.view(segment_pos.numel()),
                 segment_size_x_clamped,

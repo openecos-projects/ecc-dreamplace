@@ -1,0 +1,13 @@
+{"canonical_pin":"port:a","opentimer_pin":"a"}
+{"canonical_pin":"inst:u_buf0/pin:A","opentimer_pin":"u_buf0:A"}
+{"canonical_pin":"inst:u_buf0/pin:Y","opentimer_pin":"u_buf0:Y"}
+{"canonical_pin":"inst:u_buf1/pin:A","opentimer_pin":"u_buf1:A"}
+{"canonical_pin":"inst:u_buf1/pin:Y","opentimer_pin":"u_buf1:Y"}
+{"canonical_pin":"inst:u_inv0/pin:A","opentimer_pin":"u_inv0:A"}
+{"canonical_pin":"inst:u_inv0/pin:Y","opentimer_pin":"u_inv0:Y"}
+{"canonical_pin":"inst:u_inv1/pin:A","opentimer_pin":"u_inv1:A"}
+{"canonical_pin":"inst:u_inv1/pin:Y","opentimer_pin":"u_inv1:Y"}
+{"canonical_pin":"inst:u_xor0/pin:A","opentimer_pin":"u_xor0:A"}
+{"canonical_pin":"inst:u_xor0/pin:Y","opentimer_pin":"u_xor0:Y"}
+{"canonical_pin":"port:y_buf","opentimer_pin":"y_buf"}
+{"canonical_pin":"port:y_inv","opentimer_pin":"y_inv"}

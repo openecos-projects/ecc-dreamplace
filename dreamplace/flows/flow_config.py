@@ -457,11 +457,16 @@ def _apply_discrete_net_gradient_defaults(params, flow_kind):
     inflation_placement = (
         flow_kind == FlowKind.PLACEMENT and _param_enabled(params, "timing_opt_enabled")
     )
+    diff_opt_placement = (
+        flow_kind == FlowKind.PLACEMENT
+        and _param_enabled(params, "diff_opt_enabled")
+    )
     if (
         flow_kind != FlowKind.BUFFERING
         and not canonical_joint
         and not discrete_alternating_joint
         and not inflation_placement
+        and not diff_opt_placement
     ):
         raise ValueError("discrete_net_gradient requires standalone flow_kind=buffering")
     candidate_drive_type_mode = str(

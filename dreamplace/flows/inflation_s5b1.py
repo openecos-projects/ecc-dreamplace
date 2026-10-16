@@ -272,6 +272,32 @@ class InflationS5B1:
         """Prepare the current candidate/segment lane for a timing window."""
         return self._prepare(model, pos, active_only=active_only)
 
+    def refresh_candidate_geometry_after_topology(self, model, *, reason):
+        """Refresh retained candidate geometry after a live topology update."""
+
+        if self.lane is None:
+            return {"status": "skipped", "reason": "lane_uninitialized"}
+        state = self.lane._current_state()
+        if state is None or not hasattr(state, "activation_param"):
+            return {"status": "skipped", "reason": "non_candidate_state"}
+        activation = state.activation_param.detach()
+        active = activation > 0 if activation.ndim == 1 else activation.sum(dim=1) > 0
+        if not bool(active.any().item()):
+            return {"status": "ok", "reason": "no_active_candidates", "candidate_count": 0}
+        summary = self.lane.refresh_candidate_geometry(
+            model=model,
+            params=self.params,
+            reason=reason,
+            active_only=True,
+        )
+        self.data.buffer_retained_candidate_state = summary
+        self.lane.attach_state(self.data)
+        self.ops.steiner_topo_op.frozen_nets.candidate_state = self.lane._current_state()
+        self.params.enable_relaxed_buffer_timing = True
+        model._virtual_cell_density_view = None
+        model._timing_geometry_cache = None
+        return summary
+
     def _sizing(self, model, pos, geometry, capacity):
         data = self.data
         size, vt = data.get_continuous_size_parameter(), data.vt_logits

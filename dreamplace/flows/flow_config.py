@@ -761,14 +761,6 @@ def apply_flow_defaults(params):
                 str(getattr(params, "buffering_mode", "segment") or "segment")
                 == "candidate"
                 and str(getattr(params, "buffering_candidate_strategy", "continuous") or "continuous") == "discrete_net_gradient"
-<<<<<<< HEAD
-=======
-                and str(
-                    getattr(params, "buffering_candidate_strategy", "continuous")
-                    or "continuous"
-                )
-                == "discrete_net_gradient"
->>>>>>> 5cf15142 (feat(buffering): add typed discrete candidate drive flow)
             )
             if candidate_buffering_mode and name in {
                 "buffering_mode",

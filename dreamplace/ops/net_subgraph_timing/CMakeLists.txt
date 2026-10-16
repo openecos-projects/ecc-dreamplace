@@ -5,9 +5,12 @@ set(INCLUDE_DIRS
   ${CMAKE_CURRENT_SOURCE_DIR}/..
   )
 
+set_source_files_properties(src/candidate_backward_cpu.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+
 add_pytorch_extension(${TARGET_NAME}_cpp
   src/net_subgraph_timing.cpp
   src/segment_count_packer.cpp
+  src/candidate_backward_cpu.cpp
   EXTRA_INCLUDE_DIRS ${INCLUDE_DIRS}
   EXTRA_LINK_LIBRARIES utility_cxx OpenMP::OpenMP_CXX
   )
@@ -20,6 +23,7 @@ if(TORCH_ENABLE_CUDA)
 add_pytorch_extension(${TARGET_NAME}_cuda
   src/segment_transfer_cuda.cpp
   src/segment_transfer_cuda_kernel.cu
+  src/candidate_sink_gradients.cu
   EXTRA_INCLUDE_DIRS ${INCLUDE_DIRS}
   EXTRA_LINK_LIBRARIES utility_cxx
   )

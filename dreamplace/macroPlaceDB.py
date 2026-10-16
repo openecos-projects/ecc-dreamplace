@@ -4626,6 +4626,7 @@ class MacroPlaceDB(object):
         self.dbu = float(pydb.dbu)
         
         if params.with_sta:
+            self.sparse_timing_view = getattr(self.rawdb, "sparse_timing_view", None)
             self.start_points = np.array(pydb.start_points, dtype=np.int32)
             self.end_points = np.array(pydb.end_points, dtype=np.int32)
             from dreamplace.ops.placeio_ecc.timing_schema import read_qualification_arrays

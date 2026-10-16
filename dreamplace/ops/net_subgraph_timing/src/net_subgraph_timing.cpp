@@ -1,3 +1,4 @@
+#include "candidate_backward_cpu.h"
 #include <torch/extension.h>
 
 #include <cmath>
@@ -2395,6 +2396,7 @@ py::dict segment_transfer_forward(
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("candidate_net_subgraph_backward", &candidate_net_subgraph_backward_cpu, "Candidate timing reverse pass (CPU)");
   m.doc() = "Buffer-aware net subgraph timing forward operators";
   m.def("forward", &forward, "Fixed-state buffer-aware net subgraph forward (C++)");
   m.def("segment_count_forward", &segment_count_forward, "Segment-count relaxed timing forward (C++)");

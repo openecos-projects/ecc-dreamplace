@@ -17,6 +17,7 @@ import torch
 from dreamplace.flows.timing_opt_config import (
     DEFAULT_TIMING_OPT_COEFFICIENTS, TIMING_OPT_COEFFICIENT_FIELDS,
 )
+from dreamplace.flows.timing_opt_schedule import TimingOptWindowSchedule
 from dreamplace.ops.buffer_insertion.buffering_config import build_buffering_config_from_params
 from dreamplace.ops.buffer_insertion.buffering_lane import BufferingOptimizationLane
 from dreamplace.ops.buffer_insertion.discrete_virtual_scheduler import (
@@ -51,9 +52,21 @@ class SizingState:
 
 
 class InflationS5B1:
-    def __init__(self, params, placedb, data, ops, refresh_topology):
+    def __init__(
+        self,
+        params,
+        placedb,
+        data,
+        ops,
+        refresh_topology,
+        *,
+        window_limit=None,
+        refresh_candidates_after_sizing=False,
+    ):
         self.params, self.placedb, self.data, self.ops = params, placedb, data, ops
         self.refresh_topology = refresh_topology
+        self.window_limit = window_limit
+        self.refresh_candidates_after_sizing = bool(refresh_candidates_after_sizing)
         self.oscillation = CellOscillationState()
         self.candidates = build_quad_candidate_table(
             data.flat_libcell_info, data.flat_libcell_leakage
@@ -63,19 +76,23 @@ class InflationS5B1:
         self.window_count = 0
         self.attempts = set()
         self.summaries = []
-        self.milestones = tuple(float(value) for value in getattr(
-            params, "timing_opt_overflow_milestones", (),
-        ))
-        if ((self.milestones and len(self.milestones) > params.timing_opt_max_windows)
-                or any(not math.isfinite(value) or not 0 < value < 1 for value in self.milestones)
-                or any(a <= b for a, b in zip(self.milestones, self.milestones[1:]))):
-            raise ValueError("S5B1 milestones must be descending in (0, 1) and fit the window limit")
-        self.pending_milestones = list(self.milestones)
+        self.schedule = TimingOptWindowSchedule(
+            getattr(params, "timing_opt_overflow_milestones", ()),
+            params.timing_opt_max_windows,
+        )
+        self.milestones = self.schedule.milestones
+        self.pending_milestones = self.schedule.pending_milestones
         self.capacity = capture_area(data, placedb).capacity
         self.native_cell_ids = data.inst_cell_id.detach().cpu().clone()
         self.terminal_request = None
         self.terminal_commit_started = False
         placedb.cooptimization_geometry = data
+
+    @contextmanager
+    def electrical_window(self):
+        """Public compatibility name shared by discrete timing owners."""
+        with self._electrical_window():
+            yield
 
     @contextmanager
     def _electrical_window(self):
@@ -165,8 +182,25 @@ class InflationS5B1:
         state = self.lane._current_state() if state is None else state
         if state is None:
             return 0.0
+        if getattr(state, "is_typed_candidate", False):
+            cell_ids = state.drive_type_cell_ids.to(
+                device=self.data.flat_libcell_width.device,
+            )
+            widths = self.data.flat_libcell_width[cell_ids].double()
+            heights = self.data.flat_libcell_height[cell_ids].double()
+            counts = state.activation_param.detach().double().sum(dim=0).to(
+                widths.device,
+            )
+            padding = 2.0 * float(getattr(self.params, "cell_padding_x", 0.0))
+            return float(((widths + padding) * heights * counts).sum())
         width, height = model._segment_virtual_buffer_size()
-        return float(state.z_param.detach().sum()) * width * height
+        if hasattr(state, "z_param"):
+            count = state.z_param.detach().sum()
+        elif hasattr(state, "activation_param"):
+            count = state.activation_param.detach().sum()
+        else:
+            return 0.0
+        return float(count) * width * height
 
     def _fits(self, model, capacity):
         return capture_area(
@@ -175,6 +209,8 @@ class InflationS5B1:
 
     @staticmethod
     def _counts(state):
+        if not hasattr(state, "z_param"):
+            return {}
         rows = state.positive_segment_indices()
         return {
             (int(net), int(parent), int(child)): float(count)
@@ -188,7 +224,7 @@ class InflationS5B1:
 
     @staticmethod
     def _transfer_counts(state, counts):
-        if not counts:
+        if not counts or not hasattr(state, "z_param"):
             return
         candidate_keys = torch.stack(
             (state.segment_net_id, state.parent_node_id, state.child_node_id), dim=1,
@@ -209,7 +245,7 @@ class InflationS5B1:
                 list(counts.values()), dtype=state.z_param.dtype, device=state.z_param.device,
             )
 
-    def _prepare(self, model, pos):
+    def _prepare(self, model, pos, *, active_only=False):
         counts = {} if self.lane is None else self._counts(self.lane._current_state())
         self.refresh_topology(pos)
         # The refresh remaps the retained state before fresh B candidates are built.
@@ -225,11 +261,42 @@ class InflationS5B1:
         if state is None:
             raise RuntimeError(f"S5B1 state construction failed: {lane.summarize()}")
         self._transfer_counts(state, counts)
-        state.z_param.requires_grad_(requires_grad=False)
-        state.bsu_index_param.requires_grad_(requires_grad=False)
+        if hasattr(state, "z_param"):
+            state.z_param.requires_grad_(requires_grad=False)
+            state.bsu_index_param.requires_grad_(requires_grad=False)
         lane.attach_state(self.data)
         self.lane = lane
         model._virtual_cell_density_view = None
+
+    def prepare(self, model, pos, *, active_only=False):
+        """Prepare the current candidate/segment lane for a timing window."""
+        return self._prepare(model, pos, active_only=active_only)
+
+    def refresh_candidate_geometry_after_topology(self, model, *, reason):
+        """Refresh retained candidate geometry after a live topology update."""
+
+        if self.lane is None:
+            return {"status": "skipped", "reason": "lane_uninitialized"}
+        state = self.lane._current_state()
+        if state is None or not hasattr(state, "activation_param"):
+            return {"status": "skipped", "reason": "non_candidate_state"}
+        activation = state.activation_param.detach()
+        active = activation > 0 if activation.ndim == 1 else activation.sum(dim=1) > 0
+        if not bool(active.any().item()):
+            return {"status": "ok", "reason": "no_active_candidates", "candidate_count": 0}
+        summary = self.lane.refresh_candidate_geometry(
+            model=model,
+            params=self.params,
+            reason=reason,
+            active_only=True,
+        )
+        self.data.buffer_retained_candidate_state = summary
+        self.lane.attach_state(self.data)
+        self.ops.steiner_topo_op.frozen_nets.candidate_state = self.lane._current_state()
+        self.params.enable_relaxed_buffer_timing = True
+        model._virtual_cell_density_view = None
+        model._timing_geometry_cache = None
+        return summary
 
     def _sizing(self, model, pos, geometry, capacity):
         data = self.data
@@ -256,7 +323,21 @@ class InflationS5B1:
                 blocked_instances=blocked, size_parameterization="real_size",
             )
             if not summary["num_changed_instances"]:
-                break
+                # A fixed-budget timing window records a no-op attempt and
+                # rebuilds the graph for the next round.  Ending early here
+                # made S5B1 report fewer rounds than the configured budget.
+                rounds.append(
+                    {
+                        "round": round_id,
+                        "loss": float(loss.detach()),
+                        "fits": self._fits(model, capacity),
+                        "actions": summary.get("selected_scores", ()),
+                        "changed_instance_count": 0,
+                        "no_action": True,
+                    }
+                )
+                loss = self._loss(model, pos)
+                continue
             rows = summary["applied_instance_ids"]
             previous = data.inst_cell_id[rows].detach().cpu().tolist()
             with torch.no_grad():
@@ -278,8 +359,46 @@ class InflationS5B1:
         return {"initial_loss": initial_loss, "best_loss": best_loss,
                 "best_round": best_round, "rounds": rounds}
 
+    def run_sizing(self, model, pos, geometry, capacity):
+        return self._sizing(model, pos, geometry, capacity)
+
     def _buffering(self, model, pos, capacity):
         state = self.lane._current_state()
+        if hasattr(state, "activation_param"):
+            from dreamplace.ops.buffer_insertion.discrete_candidate_buffer_runner import (
+                run_discrete_candidate_buffer_scheduler,
+            )
+
+            try:
+                loop_summary = run_discrete_candidate_buffer_scheduler(
+                    lane=self.lane,
+                    model=model,
+                    rounds=int(getattr(self.lane.config, "continuous_steps", 0)),
+                    allow_existing_activation=True,
+                )
+            finally:
+                # Candidate timing is a window-local probe.  Leaving its
+                # large expanded provider enabled during ordinary GP makes
+                # every subsequent placement step pay for all candidate rows.
+                self.params.enable_relaxed_buffer_timing = False
+            count = int(state.activation_param.detach().sum().cpu().item())
+            terminal = dict(loop_summary.terminal_metrics or {})
+            from dreamplace.ops.buffer_insertion.buffering_lane import _tensor_digest
+            return {
+                "initial_loss": float(terminal.get("loss", 0.0)),
+                "final_loss": float(terminal.get("loss", 0.0)),
+                "scheduled": int(loop_summary.iterations),
+                "accepted": count,
+                "gradient_norm": None,
+                "cumulative_count": count,
+                "trace_path": loop_summary.trace_path,
+                "trace_sha256": loop_summary.trace_sha256,
+                "accepted_action_digest": _tensor_digest(
+                    (("candidate_activation", state.activation_param),)
+                ),
+                "strategy": "discrete_net_gradient",
+                "best_restore": dict(loop_summary.best_restore or {}),
+            }
         before = state.z_param.detach().clone()
         state.z_param.requires_grad_(requires_grad=True)
         try:
@@ -316,9 +435,14 @@ class InflationS5B1:
                 "gradient_norm": float(gradient.norm()),
                 "cumulative_count": int(state.z_param.detach().sum())}
 
+    def run_buffering(self, model, pos, capacity):
+        return self._buffering(model, pos, capacity)
+
     def _retain_buffered_nets(self, model):
         """Ordinary GP carries only buffered trees; B gets fresh full candidates."""
         state = self.lane._current_state()
+        if not hasattr(state, "z_param"):
+            return
         counts = self._counts(state)
         nets_with_buffers = {key[0] for key in counts}
         if not nets_with_buffers:
@@ -351,6 +475,9 @@ class InflationS5B1:
         topo.frozen_nets.segment_state = retained
         model._virtual_cell_density_view = None
 
+    def retain_buffered_nets(self, model):
+        return self._retain_buffered_nets(model)
+
     def run(self, model, pos, *, iteration):
         started = time.perf_counter()
         if self.data.sizing_parameterization != "real_size":
@@ -366,20 +493,20 @@ class InflationS5B1:
         entry = capture_area(self.data, self.placedb, self.virtual_area(model))
         if not entry.fits():
             raise RuntimeError("S5B1 entry exceeds placement capacity")
-        with self._electrical_window(), self._sizing_coefficients(model) as coefficients:
-            sizing = self._sizing(model, pos, geometry, entry.capacity)
+        with self.electrical_window(), self._sizing_coefficients(model) as coefficients:
+            sizing = self.run_sizing(model, pos, geometry, entry.capacity)
             sizing["coefficients"] = coefficients
         sizing_done = time.perf_counter()
         preparation_ms = buffering_ms = 0.0
         buffering = {"status": "disabled", "scheduled": 0, "accepted": 0,
                      "cumulative_count": 0}
         if bool(getattr(self.params, "timing_opt_buffering_enabled", False)):
-            self._prepare(model, pos)
+            self.prepare(model, pos)
             prepared = time.perf_counter()
-            with self._electrical_window():
-                buffering = self._buffering(model, pos, entry.capacity)
+            with self.electrical_window():
+                buffering = self.run_buffering(model, pos, entry.capacity)
             buffering_done = time.perf_counter()
-            self._retain_buffered_nets(model)
+            self.retain_buffered_nets(model)
             preparation_ms = (prepared - sizing_done) * 1000.
             buffering_ms = (buffering_done - prepared) * 1000.
         return {"iteration": int(iteration), "sizing": sizing, "buffering": buffering,
@@ -409,6 +536,9 @@ class InflationS5B1:
         invalidate_route_state(self.placedb)
         return summary
 
+    def sync_native_sizing(self):
+        return self._sync_native_sizing()
+
     def prepare_terminal_request(self, model, pos, *, iteration):
         """Materialize all retained counts from the final frame, without reselection."""
         from dreamplace.ops.buffer_insertion.buffering_lane import _tensor_digest
@@ -418,13 +548,26 @@ class InflationS5B1:
             raise RuntimeError("S5B1 final materialization was already prepared")
         if not bool(torch.isfinite(pos).all()):
             raise RuntimeError("S5B1 final placement coordinates are non-finite")
-        cumulative_count = 0 if self.lane is None else int(self.lane._current_state().z_param.sum())
+        state = None if self.lane is None else self.lane._current_state()
+        candidate_mode = state is not None and hasattr(state, "activation_param")
+        cumulative_count = 0
+        if state is not None:
+            count_tensor = (
+                state.activation_param
+                if candidate_mode
+                else state.z_param
+            )
+            cumulative_count = int(count_tensor.detach().sum().cpu().item())
         if self.lane is None:
             self.lane = BufferingOptimizationLane(
                 build_buffering_config_from_params(self.params, flow_kind="placement"),
                 placedb=self.placedb,
             )
             projection = None
+        elif candidate_mode:
+            projection = self.lane.last_projection_result
+            if projection is None:
+                projection = self.lane.project(iteration=iteration, final=True)
         else:
             # Rebuild the ordinary nets and repack current retained references.
             # Frozen buffered nets retain their identity; no new S or B occurs.
@@ -457,17 +600,27 @@ class InflationS5B1:
             commit_enabled=True, refresh_mode="full_rebuild", rebuild_mode="full_rebuild",
         )
         model._timing_geometry_cache = None
-        with self._electrical_window(), torch.no_grad():
-            outputs = model.timing_obj(pos)
-            loss = model._timing_loss(*outputs)
-            if not bool(torch.isfinite(loss)):
-                raise RuntimeError("S5B1 final virtual timing loss is non-finite")
-            gp_timing = dict(zip(("wns", "tns", "ws", "ts"),
-                                 (float(value) for value in outputs), strict=True))
-            timing = self.ops.timing_propagation_op
-            gp_timing["slew_violation_ns"] = timing.last_total_slew_violation
-            gp_timing["cap_violation_ff"] = timing.last_total_cap_violation
-            gp_timing["objective_terms"] = dict(model.last_timing_objective_terms)
+        candidate_provider_was_enabled = bool(
+            getattr(self.params, "enable_relaxed_buffer_timing", False)
+        )
+        if candidate_mode:
+            # The regular GP loop keeps the expanded candidate provider off,
+            # but terminal reporting must include any accepted typed actions.
+            self.params.enable_relaxed_buffer_timing = True
+        try:
+            with self._electrical_window(), torch.no_grad():
+                outputs = model.timing_obj(pos)
+                loss = model._timing_loss(*outputs)
+                if not bool(torch.isfinite(loss)):
+                    raise RuntimeError("S5B1 final virtual timing loss is non-finite")
+                gp_timing = dict(zip(("wns", "tns", "ws", "ts"),
+                                     (float(value) for value in outputs), strict=True))
+                timing = self.ops.timing_propagation_op
+                gp_timing["slew_violation_ns"] = timing.last_total_slew_violation
+                gp_timing["cap_violation_ff"] = timing.last_total_cap_violation
+                gp_timing["objective_terms"] = dict(model.last_timing_objective_terms)
+        finally:
+            self.params.enable_relaxed_buffer_timing = candidate_provider_was_enabled
         model._timing_geometry_cache = None
         self.terminal_summary = {
             "virtual_count": cumulative_count,
@@ -488,8 +641,17 @@ class InflationS5B1:
         model.refresh_after_geometry_change()
         return state
 
-    def before_inflation(self, model, pos, *, iteration, stage):
+    def before_inflation(self, model, pos, *, iteration, stage, optimizer=None):
         """Consume a window once per original attempt, before its route/snapshot."""
+        schedule = getattr(self, "schedule", None)
+        if schedule is not None:
+            event = schedule.inflation_event(iteration=iteration, stage=stage)
+            if event is None:
+                return None
+            summary = self._run_window(model, pos, iteration=iteration, stage=stage)
+            summary["trigger"] = event
+            self._write_summaries()
+            return summary
         attempt = (int(stage), int(iteration))
         if (self.milestones or attempt in self.attempts
                 or self.window_count >= self.params.timing_opt_max_windows):
@@ -507,14 +669,27 @@ class InflationS5B1:
         in descending order, including no-op and rolled-back electrical windows.
         """
         overflow = float(metric.overflow[-1])
-        if not self.pending_milestones or overflow > self.pending_milestones[0]:
+        schedule = getattr(self, "schedule", None)
+        pending = (
+            schedule.pending_milestones
+            if schedule is not None
+            else self.pending_milestones
+        )
+        if not pending or overflow > pending[0]:
             return
         if not callable(getattr(optimizer, "rebase_objective_state", None)):
             raise RuntimeError("S5B1 overflow windows require an optimizer with objective rebasing")
-        while self.pending_milestones and overflow <= self.pending_milestones[0]:
-            threshold = self.pending_milestones.pop(0)
+        while pending and overflow <= pending[0]:
+            event = (
+                schedule.next_overflow_event(
+                    overflow, iteration=iteration, stage=stage
+                )
+                if schedule is not None
+                else {"threshold": pending.pop(0), "overflow": overflow}
+            )
+            threshold = event["threshold"]
             summary = self._run_window(model, pos, iteration=iteration, stage=stage)
-            summary["trigger"] = {"threshold": threshold, "overflow": overflow}
+            summary["trigger"] = event
             summary["optimizer_rebase"] = optimizer.rebase_objective_state(reason="s5b1_milestone")
         # Resizing also moves lower-left corners and changes density normalization.
         # Stopping/inflation decisions must see the published geometry.
@@ -523,14 +698,17 @@ class InflationS5B1:
         self._write_summaries()
 
     def _run_window(self, model, pos, *, iteration, stage):
-        self.window_count += 1  # No-op, capacity rejection and rollback consume it.
+        if hasattr(self, "schedule"):
+            self.window_count = self.schedule.window_count
+        else:
+            self.window_count += 1
         before = capture_area(self.data, self.placedb, self.virtual_area(model),
                               capacity=self.capacity)
         summary = self.run(model, pos, iteration=iteration)
         after = coordinate_area(before, self.data, self.placedb, pos, self.virtual_area(model))
         summary.update(window=self.window_count, stage=int(stage),
                        area={"before": before.__dict__, "after": after.__dict__},
-                       native_sizing=self._sync_native_sizing())
+                       native_sizing=self.sync_native_sizing())
         if model.inflation_state.target_area is not None:
             model.inflation_state.target_area = after.movable + after.filler
         model.refresh_routability_operators()

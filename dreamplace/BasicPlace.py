@@ -594,6 +594,7 @@ class PlaceDataCollection(object):
             )
 
             if params.with_sta:
+                self.sparse_timing_view = getattr(placedb, "sparse_timing_view", None)
                 # diff timing opt
                 self.inrdelays = torch.from_numpy(
                     placedb.inrdelays

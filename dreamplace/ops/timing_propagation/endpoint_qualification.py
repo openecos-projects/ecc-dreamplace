@@ -28,3 +28,15 @@ def endpoint_metrics(slack, zero):
         negative.sum() + zero,
         torch.where(torch.isfinite(worst), worst, zero),
     )
+
+
+def reporting_endpoint_validity(timing, fallback):
+    """Physical report rows are valid if any legal state/check qualifies.
+
+    Schema-v2 path-specific qualification is intentionally invalid; schema-v3
+    supplies the matching endpoint AAT/required projection instead.
+    """
+    runtime = getattr(timing, "_sparse_runtime", None)
+    if runtime is None:
+        return fallback
+    return runtime.endpoint_validity[timing.end_points.long()]

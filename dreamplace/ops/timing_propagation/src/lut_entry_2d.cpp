@@ -1,3 +1,4 @@
+#include "timing_cpu_bindings.h"
 #include "utility/src/torch.h"
 #include "utility/src/utils.h"
 #include <omp.h>
@@ -423,7 +424,7 @@ void lut2dForwardLauncher(
         const scalar_t cin = output_caps_ptr[batch_idx];
         const int32_t trans_dim = trans_dims_actual_ptr[batch_idx];
         const int32_t cap_dim = cap_dims_actual_ptr[batch_idx];
-        
+
         // 如果LUT无效 (例如维度小于2)，则直接输出0并跳过
         if (trans_dim < 2 || cap_dim < 2) {
             output_ptr[batch_idx] = 0.0;
@@ -446,7 +447,7 @@ void lut2dForwardLauncher(
 
         // 根据区域 (低区外插, 内部插值, 高区外插) 修正索引
         int32_t trans_idx_high, cap_idx_high;
-        
+
         if (tin < trans_min) trans_idx_high = 1; // 低区外插，使用点0和1
         else if (tin >= trans_max) trans_idx_high = trans_dim - 1; // 高区外插，使用点 N-2 和 N-1
         else trans_idx_high = trans_idx_padded; // 内部插值
@@ -454,7 +455,7 @@ void lut2dForwardLauncher(
         if (cin < cap_min) cap_idx_high = 1;
         else if (cin >= cap_max) cap_idx_high = cap_dim - 1;
         else cap_idx_high = cap_idx_padded;
-        
+
         // 确保索引不越界
         trans_idx_high = std::max(1, std::min(trans_idx_high, trans_dim - 1));
         cap_idx_high = std::max(1, std::min(cap_idx_high, cap_dim - 1));
@@ -507,6 +508,7 @@ void lut2dForwardLauncher(
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    registerTimingCpu(m);
     m.def("forward", &lut_2d_forward_cpp, "2D LUT forward");
     m.def("backward", &lut_2d_backward_cpp, "2D LUT backward");
     m.def("build_coefficients", &lut_2d_build_coefficients_cpp, "2D LUT coefficient build");
@@ -576,7 +578,7 @@ void lut2dBackwardLauncher(
         const scalar_t t1 = trans_table[trans_idx_high];
         const scalar_t c0 = cap_table[cap_idx_low];
         const scalar_t c1 = cap_table[cap_idx_high];
-        
+
         const int32_t idx00 = trans_idx_low * cap_dim + cap_idx_low;
         const int32_t idx01 = trans_idx_low * cap_dim + cap_idx_high;
         const int32_t idx10 = trans_idx_high * cap_dim + cap_idx_low;
@@ -592,13 +594,22 @@ void lut2dBackwardLauncher(
 
         const bool is_t_degenerate = std::abs(t_interval) < denom_epsilon;
         const bool is_c_degenerate = std::abs(c_interval) < denom_epsilon;
-        
+
         const scalar_t grad_out = grad_output_ptr[batch_idx];
 
         // --- Step 2: 根据链式法则计算梯度 ---
-        if (is_t_degenerate || is_c_degenerate) {
-            // 暂不处理退化情况的梯度，这在实践中很少发生且通常可以忽略
-            // 严格来说，这里也应该计算梯度，但会使代码更复杂
+        if (is_t_degenerate && is_c_degenerate) {
+            grad_lut_values[idx00] = grad_out;
+        } else if (is_t_degenerate) {
+            const scalar_t fraction = (cin - c0) / c_interval;
+            grad_lut_values[idx00] = grad_out * (1 - fraction);
+            grad_lut_values[idx01] = grad_out * fraction;
+            grad_output_caps_ptr[batch_idx] = grad_out * (v01 - v00) / c_interval;
+        } else if (is_c_degenerate) {
+            const scalar_t fraction = (tin - t0) / t_interval;
+            grad_lut_values[idx00] = grad_out * (1 - fraction);
+            grad_lut_values[idx10] = grad_out * fraction;
+            grad_input_trans_ptr[batch_idx] = grad_out * (v10 - v00) / t_interval;
         } else {
             const scalar_t safe_denominator = t_interval * c_interval;
             const scalar_t inv_safe_denominator = 1.0 / safe_denominator;
@@ -608,7 +619,7 @@ void lut2dBackwardLauncher(
             scalar_t wb = (t1 - tin) * (cin - c0);
             scalar_t wc = (tin - t0) * (c1 - cin);
             scalar_t wd = (tin - t0) * (cin - c0);
-            
+
             // 因为每个 batch item 的 LUT value 是独立的，所以不需要 atomic 操作
             grad_lut_values[idx00] = grad_out * wa * inv_safe_denominator;
             grad_lut_values[idx01] = grad_out * wb * inv_safe_denominator;

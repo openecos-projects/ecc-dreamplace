@@ -229,6 +229,7 @@ class RoutabilityControllerTest(unittest.TestCase):
             pin_utilization_map_op=pin,
         )
         model._virtual_cell_density_view = SimpleNamespace(_density_ops={1: object()})
+        model._candidate_density_view = SimpleNamespace(_density_ops={1: object()})
         model._timing_geometry_cache = object()
 
         model.refresh_after_geometry_change()
@@ -238,6 +239,7 @@ class RoutabilityControllerTest(unittest.TestCase):
             [1, 1, 1],
         )
         self.assertEqual(model._virtual_cell_density_view._density_ops, {})
+        self.assertEqual(model._candidate_density_view._density_ops, {})
         self.assertIsNone(model._timing_geometry_cache)
 
     def test_grid_sync_rebuilds_objective_owned_operators_only_when_grid_changes(self):

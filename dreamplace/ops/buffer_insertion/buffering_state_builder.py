@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+import logging
 import os
 import time
 
@@ -15,9 +16,11 @@ from .buffer_selection import resolve_fixed_buffer_selection
 from .net_eligibility import clock_net_ids
 from .candidates import sample_buffer_candidates
 from .contract import BufferFamilyContract
+from .drive_type_table import load_drive_type_table
 from .optimization_state import (
     build_buffer_optimization_state,
     build_discrete_candidate_state,
+    build_typed_discrete_candidate_state,
 )
 from .segment_count_state import (
     build_packed_segment_count_state,
@@ -134,7 +137,7 @@ def _live_timing_topology(data_collections):
     }
 
 
-def _build_edge_rc_from_live_topology(data_collections, params, topology):
+def _build_edge_rc_from_live_topology(data_collections, params, topology, *, net_ids=None):
     if topology is None:
         return None, None
     dbu = getattr(data_collections, "buffering_timing_topology_dbu", None)
@@ -164,6 +167,7 @@ def _build_edge_rc_from_live_topology(data_collections, params, topology):
         scale_factor=scale_factor,
         r_unit=r_unit,
         c_unit=c_unit,
+        selected_net_ids=net_ids,
     )
     summary = dict(summary)
     summary["status"] = "ok"
@@ -650,6 +654,127 @@ def _bounded_nets(nets, *, net_cap):
     return result[: max(0, int(net_cap))]
 
 
+def _native_candidate_net_filter(model, data_collections, params, net_ids):
+    """Return nets whose driver is rooted in the live native topology.
+
+    The Python adapter may re-root a malformed live tree for legacy buffering,
+    while the native candidate packer intentionally rejects that topology.  A
+    candidate row must be filtered before state construction so activation rows
+    and packed rows keep the same identity.
+    """
+    requested = [int(net_id) for net_id in net_ids]
+    topology = _live_timing_topology(data_collections)
+    pydb = _pydb(data_collections, params)
+    if pydb is None:
+        for owner in (
+            getattr(model, "placedb", None),
+            model,
+        ):
+            for name in ("pydb", "rawdb"):
+                value = getattr(owner, name, None) if owner is not None else None
+                if value is not None:
+                    pydb = value
+                    break
+            if pydb is not None:
+                break
+    if topology is None:
+        return requested, {"status": "unavailable", "dropped": []}
+
+    def values(*names):
+        for name in names:
+            if isinstance(topology, dict) and name in topology:
+                value = topology[name]
+                if torch.is_tensor(value):
+                    return value.detach().cpu().tolist()
+                if hasattr(value, "tolist"):
+                    return value.tolist()
+                return list(value)
+        owners = (
+            getattr(model, "placedb", None),
+            data_collections,
+            pydb,
+            params,
+        )
+        for owner in owners:
+            if owner is None:
+                continue
+            for name in names:
+                value = getattr(owner, name, None)
+                if value is not None:
+                    if torch.is_tensor(value):
+                        return value.detach().cpu().tolist()
+                    if hasattr(value, "tolist"):
+                        return value.tolist()
+                    return list(value)
+        return None
+
+    flat_start = values("flat_net2pin_start_map")
+    flat_net2pin = values("flat_net2pin_map")
+    net2driver = values("net2driver_pin_map")
+    topo_start = values("net_flat_topo_sort_start")
+    topo = values("net_flat_topo_sort")
+    pin_fa = values("pin_fa")
+    if any(value is None for value in (flat_start, flat_net2pin, net2driver, topo_start, topo, pin_fa)):
+        return requested, {"status": "unavailable", "dropped": []}
+
+    topology_net_ids = values("net_ids") or []
+    topology_index = (
+        {int(net_id): int(index) for index, net_id in enumerate(topology_net_ids)}
+        if topology_net_ids
+        else None
+    )
+    accepted = []
+    dropped = []
+    for net_id in requested:
+        reason = None
+        topology_index_for_net = (
+            topology_index.get(net_id)
+            if topology_index is not None
+            else net_id
+        )
+        if topology_index_for_net is None:
+            reason = "missing_topology_net"
+        elif net_id < 0 or net_id + 1 >= len(flat_start):
+            reason = "invalid_net_id"
+        elif topology_index_for_net < 0 or topology_index_for_net + 1 >= len(topo_start):
+            reason = "missing_topology_slice"
+        else:
+            begin = int(flat_start[net_id])
+            end = int(flat_start[net_id + 1])
+            driver = int(net2driver[net_id]) if 0 <= net_id < len(net2driver) else -1
+            topo_begin = int(topo_start[topology_index_for_net])
+            topo_end = int(topo_start[topology_index_for_net + 1])
+            if end - begin <= 1:
+                reason = "single_pin_net"
+            elif begin < 0 or end < begin or end > len(flat_net2pin):
+                reason = "invalid_pin_range"
+            elif driver < 0 or driver not in {int(value) for value in flat_net2pin[begin:end]}:
+                reason = "invalid_driver"
+            elif topo_begin < 0 or topo_end <= topo_begin or topo_end > len(topo):
+                reason = "missing_topology"
+            elif driver >= len(pin_fa) or int(pin_fa[driver]) >= 0:
+                reason = "driver_not_root"
+            else:
+                node_ids = {int(value) for value in topo[topo_begin:topo_end]}
+                if driver not in node_ids:
+                    reason = "driver_missing_from_topology"
+                elif any(
+                    int(node_id) < 0 or int(node_id) >= len(pin_fa)
+                    for node_id in node_ids
+                ):
+                    reason = "topology_node_out_of_range"
+        if reason is None:
+            accepted.append(net_id)
+        else:
+            dropped.append({"net_id": net_id, "reason": reason})
+    return accepted, {
+        "status": "filtered" if dropped else "ok",
+        "requested_count": len(requested),
+        "accepted_count": len(accepted),
+        "dropped": dropped,
+    }
+
+
 def _bounded_candidates(candidates, *, net_ids, candidate_cap):
     net_ids = {int(net_id) for net_id in net_ids}
     result = []
@@ -784,6 +909,15 @@ def _buffer_legal_table(buffer_library, legal_bsu):
             float(buffer_library[int(bsu)].get("legal_size_value", int(bsu)))
             for bsu in legal_bsu
         ],
+        "buffer_main_type_indices": [
+            int(
+                buffer_library[int(bsu)].get(
+                    "buffer_main_type_index",
+                    buffer_library[int(bsu)].get("main_type_index", -1),
+                )
+            )
+            for bsu in legal_bsu
+        ],
     }
 
 
@@ -798,6 +932,11 @@ def _contextual_candidate(
     item = dict(candidate)
     item["local_candidate_id"] = int(item["candidate_id"])
     item["candidate_id"] = int(global_candidate_id)
+    if _is_segment_candidate(item):
+        parent = int(item["parent_node_id"])
+        item["segment_parent_node_id"] = parent
+        item["segment_child_node_id"] = int(item["child_node_ids"][0])
+        item["segment_tree_depth"] = int(tree_view["depth_by_node"][parent])
     item["driver_pin_id"] = int(tree_view.get("root_node_id", net.get("driver_pin_id", -1)))
     item["driver_pin_name"] = str(net.get("driver_pin_name", "")) or _pin_name(
         net,
@@ -992,6 +1131,7 @@ def _resolve_common_inputs(
     model=None,
     mode=None,
     runtime_profile=None,
+    net_ids=None,
 ):
     runtime_stage_started_at = time.perf_counter()
     nets = _get_data_value(data_collections, "buffering_nets", "buffer_nets")
@@ -1036,6 +1176,7 @@ def _resolve_common_inputs(
                 data_collections,
                 params,
                 topology,
+                net_ids=net_ids,
             )
             _record_runtime_stage(
                 runtime_profile,
@@ -1056,6 +1197,7 @@ def _resolve_common_inputs(
             if topology is not None and edge_rc_by_net:
                 nets, adapter_summary = build_buffering_nets_from_pydb(
                     pydb,
+                    net_ids=net_ids,
                     topology=topology,
                     edge_rc_by_net=edge_rc_by_net,
                     pin_cap_by_pin_id=pin_cap_by_pin_id,
@@ -1066,6 +1208,7 @@ def _resolve_common_inputs(
             else:
                 nets, adapter_summary = build_buffering_nets_from_pydb(
                     pydb,
+                    net_ids=net_ids,
                     pin_cap_by_pin_id=pin_cap_by_pin_id,
                     pin_cap_source=pin_cap_source,
                     runtime_profile=runtime_profile,
@@ -1089,6 +1232,11 @@ def _resolve_common_inputs(
         "buffering_candidates",
         "buffer_candidates",
     )
+    if net_ids is not None:
+        selected_ids = set(net_ids)
+        nets = [net for net in nets or () if int(net["net_id"]) in selected_ids]
+        if candidates is not None:
+            candidates = [row for row in candidates if int(row["net_id"]) in selected_ids]
     _record_runtime_stage(
         runtime_profile,
         "common_candidate_rows_lookup_ms",
@@ -1268,9 +1416,17 @@ def _build_candidate_buffering_state_for_model(
     dtype = torch.float32
     selected_nets = _bounded_nets(nets, net_cap=None)
     net_ids = [int(net.get("net_id", index)) for index, net in enumerate(selected_nets)]
+    valid_candidate_net_ids, candidate_net_filter = _native_candidate_net_filter(
+        model,
+        data_collections,
+        params,
+        net_ids,
+    )
+    if candidate_net_filter.get("status") != "ok":
+        logging.info("candidate net topology filter: %s", candidate_net_filter)
     selected_candidates = _bounded_candidates(
         candidates,
-        net_ids=net_ids,
+        net_ids=valid_candidate_net_ids,
         candidate_cap=None,
     )
     if not selected_nets or not selected_candidates:
@@ -1281,30 +1437,65 @@ def _build_candidate_buffering_state_for_model(
     candidate_strategy = str(
         getattr(config, "candidate_strategy", "continuous") or "continuous"
     )
+    candidate_drive_type_mode = str(
+        getattr(config, "candidate_drive_type_mode", "single_fixed")
+        or "single_fixed"
+    ).strip()
     per_size = _per_size_tensors(
         selected_candidates,
         buffer_library,
         dtype=dtype,
         shared_rows=True,
     )
-    fixed_bsu_index, fixed_buffer_master, fixed_buffer_source = (
-        resolve_fixed_buffer_selection(params, config, buffer_library)
-    )
+    drive_type_table = None
+    if candidate_drive_type_mode == "four_strength_table":
+        table_path = str(
+            getattr(config, "candidate_drive_strength_table", "")
+            or getattr(params, "buffering_candidate_drive_strength_table", "")
+            or ""
+        ).strip()
+        if not table_path:
+            raise ValueError(
+                "four_strength_table requires buffering_candidate_drive_strength_table"
+            )
+        drive_type_table = load_drive_type_table(
+            table_path,
+            buffer_library=buffer_library,
+        )
+        fixed_bsu_index, fixed_buffer_master, fixed_buffer_source = None, "", "typed_table"
+    else:
+        fixed_bsu_index, fixed_buffer_master, fixed_buffer_source = (
+            resolve_fixed_buffer_selection(params, config, buffer_library)
+        )
     state_device = _buffer_timing_device(model, data_collections)
     if candidate_strategy == "discrete_net_gradient":
-        if fixed_bsu_index is None:
-            raise ValueError(
-                "candidate discrete_net_gradient requires a fixed buffer"
+        if candidate_drive_type_mode == "four_strength_table":
+            state = build_typed_discrete_candidate_state(
+                selected_candidates,
+                buffer_main_type_index=buffer_main_type_index,
+                legal_buffer_count=len(per_size["legal_bsu"]),
+                drive_type_table=drive_type_table,
+                dtype=dtype,
+                device=state_device,
             )
-        state = build_discrete_candidate_state(
-            selected_candidates,
-            buffer_main_type_index=buffer_main_type_index,
-            legal_buffer_count=len(per_size["legal_bsu"]),
-            fixed_bsu_index=fixed_bsu_index,
-            dtype=dtype,
-            device=state_device,
+        else:
+            if fixed_bsu_index is None:
+                raise ValueError(
+                    "candidate discrete_net_gradient requires a fixed buffer"
+                )
+            state = build_discrete_candidate_state(
+                selected_candidates,
+                buffer_main_type_index=buffer_main_type_index,
+                legal_buffer_count=len(per_size["legal_bsu"]),
+                fixed_bsu_index=fixed_bsu_index,
+                dtype=dtype,
+                device=state_device,
+            )
+    elif candidate_drive_type_mode != "single_fixed":
+        raise ValueError(
+            "four_strength_table requires candidate discrete_net_gradient"
         )
-    else:
+    elif candidate_strategy == "continuous":
         state = build_buffer_optimization_state(
             selected_candidates,
             buffer_main_type_index=buffer_main_type_index,
@@ -1400,8 +1591,20 @@ def _build_candidate_buffering_state_for_model(
             "net_source": net_source,
             "candidate_count": int(selected_candidate_count),
             "net_count": int(selected_net_count),
+            "candidate_net_filter": candidate_net_filter,
             "legal_size_count": int(len(per_size["legal_bsu"])),
             "candidate_strategy": candidate_strategy,
+            "candidate_drive_type_mode": candidate_drive_type_mode,
+            "candidate_drive_type_count": (
+                int(drive_type_table.count)
+                if drive_type_table is not None
+                else 0
+            ),
+            "candidate_drive_type_table": (
+                drive_type_table.to_metadata()
+                if drive_type_table is not None
+                else None
+            ),
             "candidate_topology_builder_backend_requested": "native_auto",
             "candidate_topology_builder_backend_used": (
                 "native_cpp" if native_packing is not None else "python"
@@ -1410,11 +1613,13 @@ def _build_candidate_buffering_state_for_model(
             "fixed_bsu_index": (
                 fixed_bsu_index
                 if candidate_strategy == "discrete_net_gradient"
+                and candidate_drive_type_mode == "single_fixed"
                 else None
             ),
             "fixed_buffer_master": (
                 fixed_buffer_master
                 if candidate_strategy == "discrete_net_gradient"
+                and candidate_drive_type_mode == "single_fixed"
                 else ""
             ),
             "fixed_buffer_selection_source": (
@@ -1718,7 +1923,7 @@ def _build_segment_count_buffering_state_for_model(
     )
 
 
-def build_buffering_state_for_model(model, params, config):
+def build_buffering_state_for_model(model, params, config, *, net_ids=None, candidate_records=None):
     """Build canonical relaxed buffer state from model-attached buffer inputs."""
 
     mode = str(getattr(config, "mode", getattr(params, "buffering_mode", "candidate")))
@@ -1785,8 +1990,11 @@ def build_buffering_state_for_model(model, params, config):
             model=model,
             mode=mode,
             runtime_profile=runtime_profile,
+            net_ids=net_ids,
         )
     common_inputs_ms = (time.perf_counter() - runtime_stage_started_at) * 1000.0
+    if candidate_records is not None:
+        common["candidates"] = candidate_records
     if mode == "segment":
         result = _build_segment_count_buffering_state_for_model(
             model=model,

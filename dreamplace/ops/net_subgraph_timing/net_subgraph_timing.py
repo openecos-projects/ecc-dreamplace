@@ -4,22 +4,14 @@ import math
 import torch
 from torch.autograd import Function
 
-
-_NATIVE_RECOMPUTE_OUTPUT_KEYS = (
-    "lout",
-    "lin",
-    "effective_node_cap",
-    "arrival_in",
-    "arrival_out",
-    "slew_in",
-    "slew_out",
-    "sink_arrival",
-    "sink_slew",
-    "sink_load",
-    "sink_cap",
-    "sink_net_delay",
-    "sink_net_impulse",
+from .candidate_native_autograd import (
+    CANDIDATE_OUTPUT_KEYS,
+    CandidateNativeAutogradFunction as _CandidateNativeAutogradFunction,
 )
+
+
+_NATIVE_RECOMPUTE_OUTPUT_KEYS = CANDIDATE_OUTPUT_KEYS
+
 
 _EXPLICIT_OUTPUT_KEYS = _NATIVE_RECOMPUTE_OUTPUT_KEYS
 
@@ -74,16 +66,14 @@ def _root_values_by_node(
 ):
     if int(num_nodes) <= 0:
         return torch.empty((0,), dtype=dtype, device=device)
-    topo = net_flat_topo_sort.detach().cpu().tolist()
-    topo_start = net_flat_topo_sort_start.detach().cpu().tolist()
-    root_values = [
-        torch.zeros((), dtype=dtype, device=device) for _ in range(int(num_nodes))
-    ]
-    for net_idx in range(len(topo_start) - 1):
-        value = driver_values[net_idx].to(device=device, dtype=dtype)
-        for pos in range(topo_start[net_idx], topo_start[net_idx + 1]):
-            root_values[int(topo[pos])] = value
-    return torch.stack(root_values)
+    topo = net_flat_topo_sort.to(device=device, dtype=torch.long)
+    starts = net_flat_topo_sort_start.to(device=device, dtype=torch.long)
+    values = torch.repeat_interleave(
+        driver_values.to(device=device, dtype=dtype),
+        starts[1:] - starts[:-1],
+        output_size=topo.numel(),
+    )
+    return torch.zeros(num_nodes, dtype=dtype, device=device).index_copy(0, topo, values)
 
 
 def _attach_sink_relative_outputs(
@@ -282,6 +272,14 @@ def net_subgraph_forward_relaxed(
     )
 
     def interpolate(input_cap, delay, output_slew, source):
+        if getattr(buffer_state, "_shared_gradient_probe", False):
+            indices = buffer_state.drive_type_bsu_index.long()
+            return {
+                "buffer_input_cap": input_cap.index_select(1, indices),
+                "buffer_delay": delay.index_select(1, indices),
+                "buffer_output_slew": output_slew.index_select(1, indices),
+                "bsu_index_status": {"coordinate_source": source},
+            }
         return interpolate_buffer_values_by_bsu_index(
             buffer_state.bsu_index(),
             per_size_input_cap=input_cap,
@@ -294,7 +292,11 @@ def net_subgraph_forward_relaxed(
     candidate_node_id = buffer_state.candidate_node_id.to(
         dtype=torch.long if backend == "cuda_explicit_autograd" else torch.int32
     )
-    candidate_bu = buffer_state.candidate_bu()
+    candidate_bu = (
+        buffer_state.activation_param
+        if getattr(buffer_state, "_shared_gradient_probe", False)
+        else buffer_state.candidate_bu()
+    )
     upstream_retained_cap = _candidate_upstream_retained_cap(
         edge_capacitance=kwargs.get("edge_capacitance"),
         pin_fa=kwargs["pin_fa"],
@@ -306,7 +308,10 @@ def net_subgraph_forward_relaxed(
     def retain_upstream_wire_cap(values):
         values = dict(values)
         values["buffer_input_cap"] = (
-            values["buffer_input_cap"] + upstream_retained_cap
+            values["buffer_input_cap"] + (
+                upstream_retained_cap[:, None]
+                if values["buffer_input_cap"].ndim == 2 else upstream_retained_cap
+            )
         )
         values["buffer_upstream_retained_cap"] = upstream_retained_cap
         return values
@@ -618,6 +623,15 @@ class _NativeRecomputeAutogradFunction(Function):
             sink_node_id,
             sink_net_index,
         ) = ctx.saved_tensors
+        edge_resistance_var = edge_resistance.detach().requires_grad_(
+            bool(ctx.needs_input_grad[5])
+        )
+        node_capacitance_var = node_capacitance.detach().requires_grad_(
+            bool(ctx.needs_input_grad[6])
+        )
+        edge_capacitance_var = edge_capacitance.detach().requires_grad_(
+            bool(ctx.needs_input_grad[7])
+        )
         driver_arrival_var = driver_arrival.detach().requires_grad_(
             bool(ctx.needs_input_grad[8])
         )
@@ -643,9 +657,11 @@ class _NativeRecomputeAutogradFunction(Function):
                 pin_fa=pin_fa,
                 flat_pin_to_start=flat_pin_to_start,
                 flat_pin_to=flat_pin_to,
-                edge_resistance=edge_resistance,
-                node_capacitance=node_capacitance,
-                edge_capacitance=edge_capacitance,
+                edge_resistance=edge_resistance_var,
+                node_capacitance=node_capacitance_var,
+                edge_capacitance=(
+                    edge_capacitance_var if edge_capacitance_var.numel() else None
+                ),
                 driver_arrival=driver_arrival_var,
                 driver_slew=driver_slew_var,
                 candidate_node_id=candidate_node_id,
@@ -692,6 +708,9 @@ class _NativeRecomputeAutogradFunction(Function):
             grad_inputs = []
             grad_input_names = []
             for name, value in (
+                ("edge_resistance", edge_resistance_var),
+                ("node_capacitance", node_capacitance_var),
+                ("edge_capacitance", edge_capacitance_var),
                 ("driver_arrival", driver_arrival_var),
                 ("driver_slew", driver_slew_var),
                 ("candidate_bu", candidate_bu_var),
@@ -721,9 +740,9 @@ class _NativeRecomputeAutogradFunction(Function):
             None,
             None,
             None,
-            None,
-            None,
-            None,
+            grad_by_name.get("edge_resistance"),
+            grad_by_name.get("node_capacitance"),
+            grad_by_name.get("edge_capacitance"),
             grad_driver_arrival,
             grad_driver_slew,
             None,
@@ -847,18 +866,16 @@ def _sink_net_indices_from_inputs(
     sinks = [int(value) for value in sink_node_id.detach().cpu().tolist()]
     if not sinks:
         return []
-    sink_pos_by_node = {node: index for index, node in enumerate(sinks)}
-    indices = [-1 for _ in sinks]
     topo = [int(value) for value in net_flat_topo_sort.detach().cpu().tolist()]
     topo_start = [
         int(value) for value in net_flat_topo_sort_start.detach().cpu().tolist()
     ]
-    for net_idx in range(max(0, len(topo_start) - 1)):
-        for pos in range(topo_start[net_idx], topo_start[net_idx + 1]):
-            sink_pos = sink_pos_by_node.get(int(topo[pos]))
-            if sink_pos is not None:
-                indices[sink_pos] = int(net_idx)
-    return indices
+    net_by_node = {
+        int(topo[pos]): net_idx
+        for net_idx in range(max(0, len(topo_start) - 1))
+        for pos in range(topo_start[net_idx], topo_start[net_idx + 1])
+    }
+    return [net_by_node.get(node, -1) for node in sinks]
 
 
 def net_subgraph_forward_cuda(
@@ -1268,155 +1285,6 @@ def net_subgraph_forward_cuda_fixed_bsu_liberty_autograd(
     return result
 
 
-class _CudaExplicitAutogradFunction(Function):
-    @staticmethod
-    def forward(
-        ctx,
-        net_flat_topo_sort,
-        net_flat_topo_sort_start,
-        pin_fa,
-        flat_pin_to_start,
-        flat_pin_to,
-        edge_resistance,
-        node_capacitance,
-        edge_capacitance,
-        driver_arrival,
-        driver_slew,
-        candidate_node_id,
-        candidate_bu,
-        buffer_input_cap,
-        buffer_delay,
-        buffer_output_slew,
-        sink_node_id,
-        sink_net_index,
-    ):
-        with torch.no_grad():
-            result = net_subgraph_forward_cuda(
-                net_flat_topo_sort=net_flat_topo_sort,
-                net_flat_topo_sort_start=net_flat_topo_sort_start,
-                pin_fa=pin_fa,
-                flat_pin_to_start=flat_pin_to_start,
-                flat_pin_to=flat_pin_to,
-                edge_resistance=edge_resistance,
-                node_capacitance=node_capacitance,
-                edge_capacitance=edge_capacitance,
-                driver_arrival=driver_arrival,
-                driver_slew=driver_slew,
-                candidate_node_id=candidate_node_id,
-                candidate_bu=candidate_bu,
-                buffer_input_cap=buffer_input_cap,
-                buffer_delay=buffer_delay,
-                buffer_output_slew=buffer_output_slew,
-                sink_node_id=sink_node_id,
-                sink_net_index=sink_net_index,
-            )
-        ctx.save_for_backward(
-            net_flat_topo_sort,
-            net_flat_topo_sort_start,
-            pin_fa,
-            flat_pin_to_start,
-            flat_pin_to,
-            edge_resistance,
-            driver_arrival,
-            driver_slew,
-            candidate_bu,
-            buffer_input_cap,
-            buffer_delay,
-            buffer_output_slew,
-            sink_node_id,
-            sink_net_index,
-            result["candidate_index_by_node"],
-            result["lin"],
-            result["lout"],
-            result["slew_in"],
-            result["slew_out"],
-        )
-        ctx.output_keys = _EXPLICIT_OUTPUT_KEYS
-        return tuple(result[key] for key in _EXPLICIT_OUTPUT_KEYS)
-
-    @staticmethod
-    def backward(ctx, *grad_outputs):
-        (
-            net_flat_topo_sort,
-            net_flat_topo_sort_start,
-            pin_fa,
-            flat_pin_to_start,
-            flat_pin_to,
-            edge_resistance,
-            driver_arrival,
-            driver_slew,
-            candidate_bu,
-            buffer_input_cap,
-            buffer_delay,
-            buffer_output_slew,
-            sink_node_id,
-            sink_net_index,
-            candidate_index_by_node,
-            lin,
-            lout,
-            slew_in,
-            slew_out,
-        ) = ctx.saved_tensors
-        grad_by_key = dict(zip(ctx.output_keys, grad_outputs))
-
-        def grad_or_zero(key, reference):
-            value = grad_by_key.get(key)
-            if value is None or value.numel() == 0:
-                return torch.zeros_like(reference)
-            return value.to(device=reference.device, dtype=reference.dtype).contiguous()
-
-        sink_reference = lin.new_zeros((int(sink_node_id.numel()),))
-        native = importlib.import_module(f"{__package__}.net_subgraph_timing_cuda")
-        grads = native.candidate_net_subgraph_backward(
-            net_flat_topo_sort,
-            net_flat_topo_sort_start,
-            pin_fa,
-            flat_pin_to_start,
-            flat_pin_to,
-            edge_resistance,
-            candidate_index_by_node,
-            candidate_bu,
-            buffer_input_cap,
-            buffer_delay,
-            buffer_output_slew,
-            sink_node_id,
-            sink_net_index,
-            lin,
-            lout,
-            slew_in,
-            slew_out,
-            grad_or_zero("lout", lout),
-            grad_or_zero("lin", lin),
-            grad_or_zero("arrival_in", lin),
-            grad_or_zero("arrival_out", lin),
-            grad_or_zero("slew_in", slew_in),
-            grad_or_zero("slew_out", slew_out),
-            grad_or_zero("sink_arrival", sink_reference),
-            grad_or_zero("sink_slew", sink_reference),
-            grad_or_zero("sink_load", sink_reference),
-            grad_or_zero("sink_net_delay", sink_reference),
-            grad_or_zero("sink_net_impulse", sink_reference),
-        )
-        return (
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            grads["grad_driver_arrival"] if ctx.needs_input_grad[8] else None,
-            grads["grad_driver_slew"] if ctx.needs_input_grad[9] else None,
-            None,
-            grads["grad_candidate_bu"] if ctx.needs_input_grad[11] else None,
-            grads["grad_buffer_input_cap"] if ctx.needs_input_grad[12] else None,
-            grads["grad_buffer_delay"] if ctx.needs_input_grad[13] else None,
-            grads["grad_buffer_output_slew"] if ctx.needs_input_grad[14] else None,
-            None,
-            None,
-        )
-
 
 def net_subgraph_forward_cuda_explicit_autograd(
     *,
@@ -1471,7 +1339,7 @@ def net_subgraph_forward_cuda_explicit_autograd(
         sink_net_index = torch.as_tensor(indices, dtype=torch.long, device=device)
     else:
         sink_net_index = index_tensor(sink_net_index)
-    outputs = _CudaExplicitAutogradFunction.apply(
+    outputs = _CandidateNativeAutogradFunction.apply(
         net_flat_topo_sort,
         net_flat_topo_sort_start,
         pin_fa,
@@ -1537,6 +1405,7 @@ class _NativeExplicitAutogradFunction(Function):
                 sink_node_id=sink_node_id,
                 sink_net_index=sink_net_index,
             )
+        ctx.edge_capacitance_count = int(edge_capacitance.numel())
         ctx.save_for_backward(
             net_flat_topo_sort,
             net_flat_topo_sort_start,
@@ -1638,6 +1507,8 @@ class _NativeExplicitAutogradFunction(Function):
         grad_buffer_input_cap = [0.0 for _ in range(num_candidates)]
         grad_buffer_delay = [0.0 for _ in range(num_candidates)]
         grad_buffer_output_slew = [0.0 for _ in range(num_candidates)]
+        grad_edge_resistance = [0.0 for _ in range(num_nodes)]
+        grad_effective_cap = [0.0 for _ in range(num_nodes)]
 
         grad_by_key = {
             key: grad
@@ -1651,6 +1522,7 @@ class _NativeExplicitAutogradFunction(Function):
             ("arrival_out", grad_arrival_out),
             ("slew_in", grad_slew_in),
             ("slew_out", grad_slew_out),
+            ("effective_node_cap", grad_effective_cap),
         ):
             _add_grad_output(
                 target,
@@ -1664,6 +1536,7 @@ class _NativeExplicitAutogradFunction(Function):
                 ("sink_arrival", grad_arrival_out),
                 ("sink_slew", grad_slew_out),
                 ("sink_load", grad_lin),
+                ("sink_cap", grad_effective_cap),
             ):
                 values = _grad_output_list(
                     grad_by_key.get(key),
@@ -1742,6 +1615,7 @@ class _NativeExplicitAutogradFunction(Function):
                     wire_delta = edge_resistance_values[node] * lin_values[node]
                     grad_arrival_out[parent] += grad_arrival_in[node]
                     grad_lin[node] += grad_arrival_in[node] * edge_resistance_values[node]
+                    grad_edge_resistance[node] += grad_arrival_in[node] * lin_values[node]
 
                     slew_value = slew_in_values[node]
                     if abs(slew_value) > 0.0:
@@ -1752,6 +1626,7 @@ class _NativeExplicitAutogradFunction(Function):
                             grad_slew_in[node] * (log10 * log10) * wire_delta / slew_value
                         )
                         grad_lin[node] += grad_wire_delta * edge_resistance_values[node]
+                        grad_edge_resistance[node] += grad_wire_delta * lin_values[node]
                 else:
                     grad_driver_arrival[net_idx] += grad_arrival_in[node]
                     grad_driver_slew[net_idx] += grad_slew_in[node]
@@ -1786,15 +1661,26 @@ class _NativeExplicitAutogradFunction(Function):
         def as_grad(values):
             return torch.as_tensor(values, dtype=dtype, device=device)
 
+        grad_node_capacitance = [
+            value + direct for value, direct in zip(grad_lout, grad_effective_cap, strict=True)
+        ]
+        grad_edge_capacitance = [0.0 for _ in range(ctx.edge_capacitance_count)]
+        if ctx.edge_capacitance_count:
+            for node, parent in enumerate(parents):
+                if parent >= 0:
+                    grad_edge_capacitance[node] = 0.5 * (
+                        grad_node_capacitance[parent] + grad_node_capacitance[node]
+                    )
+
         return (
             None,
             None,
             None,
             None,
             None,
-            None,
-            None,
-            None,
+            as_grad(grad_edge_resistance) if ctx.needs_input_grad[5] else None,
+            as_grad(grad_node_capacitance) if ctx.needs_input_grad[6] else None,
+            as_grad(grad_edge_capacitance) if ctx.needs_input_grad[7] else None,
             as_grad(grad_driver_arrival) if ctx.needs_input_grad[8] else None,
             as_grad(grad_driver_slew) if ctx.needs_input_grad[9] else None,
             None,
@@ -1845,7 +1731,23 @@ def net_subgraph_forward_native_explicit_autograd(
             dtype=torch.int32,
             device=net_flat_topo_sort.device,
         )
-    outputs = _NativeExplicitAutogradFunction.apply(
+    native = importlib.import_module(f"{__package__}.net_subgraph_timing_cpp")
+    if hasattr(native, "candidate_net_subgraph_backward"):
+        function = _CandidateNativeAutogradFunction
+        if sink_node_id.numel() and not sink_net_index.numel():
+            sink_net_index = torch.tensor(
+                _sink_net_indices_from_inputs(
+                    net_flat_topo_sort=net_flat_topo_sort,
+                    net_flat_topo_sort_start=net_flat_topo_sort_start,
+                    sink_node_id=sink_node_id,
+                    sink_net_index=None,
+                ),
+                device=sink_node_id.device,
+                dtype=torch.long,
+            )
+    else:
+        function = _NativeExplicitAutogradFunction
+    outputs = function.apply(
         net_flat_topo_sort.contiguous(),
         net_flat_topo_sort_start.contiguous(),
         pin_fa.contiguous(),

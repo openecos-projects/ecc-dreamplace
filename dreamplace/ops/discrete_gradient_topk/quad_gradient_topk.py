@@ -388,6 +388,7 @@ def apply_discrete_quad_gradient_topk_update(
         "num_vt_applied": action_counts["vt_slowdown"] + action_counts["vt_speedup"],
         "num_vt_slowdown_applied": action_counts["vt_slowdown"],
         "num_vt_speedup_applied": action_counts["vt_speedup"],
+        "action_counts": dict(action_counts),
         "num_changed_instances": int(changed_rows.numel()),
         "num_candidate_moves": int(torch.count_nonzero(finite_candidates).item()),
         "num_improving_candidates": int(torch.count_nonzero(improving_candidates).item()),

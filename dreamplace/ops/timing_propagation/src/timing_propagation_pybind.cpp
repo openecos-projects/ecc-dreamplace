@@ -11,6 +11,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   py::class_<dreamplace::TraversalPruningRefreshResult>(
       m, "TraversalPruningRefreshResult")
+      .def_readonly("kept_pin_indices",
+                    &dreamplace::TraversalPruningRefreshResult::kept_pin_indices)
       .def_readonly("kept_flat_arc_indices",
                     &dreamplace::TraversalPruningRefreshResult::kept_flat_arc_indices)
       .def_readonly("kept_level_offsets",

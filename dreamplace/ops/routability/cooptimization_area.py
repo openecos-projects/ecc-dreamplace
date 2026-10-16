@@ -128,6 +128,14 @@ class SizingWindowGeometry:
         self.data = data
         self.pos = pos
         self.num_nodes = data.node_size_x.numel()
+        # Routability inflation normally creates these snapshots in
+        # PlaceDataCollection.  Joint alternating sizing can also run with
+        # routability disabled, where the legacy snapshots are absent; the
+        # input geometry itself is then the correct preserved baseline.
+        if not hasattr(data, "original_node_size_x"):
+            data.original_node_size_x = data.node_size_x.detach().clone()
+        if not hasattr(data, "original_node_size_y"):
+            data.original_node_size_y = data.node_size_y.detach().clone()
         count = placedb.num_movable_nodes
         self.width = data.node_size_x[:count].detach().clone()
         self.height = data.node_size_y[:count].detach().clone()
@@ -159,6 +167,10 @@ class SizingWindowGeometry:
     def apply_pins(self, pin_ids):
         data = self.data
         nodes = data.pin2node_map[pin_ids].long()
+        if not hasattr(data, "original_pin_offset_x"):
+            data.original_pin_offset_x = data.pin_offset_x.detach().clone()
+        if not hasattr(data, "original_pin_offset_y"):
+            data.original_pin_offset_y = data.pin_offset_y.detach().clone()
         with torch.no_grad():
             data.original_pin_offset_x[pin_ids] = data.pin_offset_x[pin_ids]
             data.original_pin_offset_y[pin_ids] = data.pin_offset_y[pin_ids]

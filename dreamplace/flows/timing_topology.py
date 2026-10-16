@@ -43,6 +43,32 @@ def publish_live_timing_topology(context, new_x, new_y, *, update_kind):
         "node_x": new_x,
         "node_y": new_y,
     }
+    topology = data.buffering_timing_topology
+    params = context.params
+    placedb = context.placedb
+    placedb_params = getattr(placedb, "params", None)
+    scale_factor = getattr(
+        params, "scale_factor", getattr(placedb_params, "scale_factor", 1.0)
+    )
+    shift_factor = getattr(
+        params, "shift_factor", getattr(placedb_params, "shift_factor", (0.0, 0.0))
+    )
+    shift_x = float(shift_factor[0]) if len(shift_factor) > 0 else 0.0
+    shift_y = float(shift_factor[1]) if len(shift_factor) > 1 else 0.0
+    if scale_factor is None or float(scale_factor) == 0.0:
+        scale_factor = 1.0
+    topology["node_x_dbu"] = (
+        new_x.to(torch.float64) / float(scale_factor) + shift_x
+    ).round()
+    topology["node_y_dbu"] = (
+        new_y.to(torch.float64) / float(scale_factor) + shift_y
+    ).round()
+    if placedb is not None:
+        topology["dbu"] = placedb.dbu
+        data.buffering_timing_topology_dbu = placedb.dbu
+        data.buffering_timing_topology_r_unit = getattr(placedb, "r_unit", None)
+        data.buffering_timing_topology_c_unit = getattr(placedb, "c_unit", None)
+    data.buffering_timing_topology_scale_factor = scale_factor
     return data.buffering_timing_topology
 
 
@@ -89,35 +115,6 @@ def refresh_live_timing_topology(context, pos):
         new_y,
         update_kind=update_kind,
     )
-    params = context.params
-    placedb = context.placedb
-    placedb_params = getattr(placedb, "params", None)
-    scale_factor = getattr(
-        params,
-        "scale_factor",
-        getattr(placedb_params, "scale_factor", 1.0),
-    )
-    shift_factor = getattr(
-        params,
-        "shift_factor",
-        getattr(placedb_params, "shift_factor", (0.0, 0.0)),
-    )
-    shift_x = float(shift_factor[0]) if len(shift_factor) > 0 else 0.0
-    shift_y = float(shift_factor[1]) if len(shift_factor) > 1 else 0.0
-    if scale_factor is None or float(scale_factor) == 0.0:
-        scale_factor = 1.0
-    topology["node_x_dbu"] = (
-        new_x.to(torch.float64) / float(scale_factor) + shift_x
-    ).round()
-    topology["node_y_dbu"] = (
-        new_y.to(torch.float64) / float(scale_factor) + shift_y
-    ).round()
-    data = context.data_collections
-    if placedb is not None:
-        data.buffering_timing_topology_dbu = getattr(placedb, "dbu", None)
-        data.buffering_timing_topology_r_unit = getattr(placedb, "r_unit", None)
-        data.buffering_timing_topology_c_unit = getattr(placedb, "c_unit", None)
-    data.buffering_timing_topology_scale_factor = scale_factor
     context.record_stage("topology_refresh_ms", started)
     return topology
 

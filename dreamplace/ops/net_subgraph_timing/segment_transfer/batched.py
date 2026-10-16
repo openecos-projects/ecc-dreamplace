@@ -134,7 +134,7 @@ def _lookup_device_per_size(
     }
 
 
-def lookup_buffer_device_per_size(buffer_device_lut, *, input_slew, output_load):
+def lookup_buffer_device_per_size(buffer_device_lut, *, input_slew, output_load, tables=None):
     """Evaluate every legal buffer size at each candidate slew/load point."""
 
     input_slew = _require_vector("input_slew", input_slew)
@@ -148,10 +148,17 @@ def lookup_buffer_device_per_size(buffer_device_lut, *, input_slew, output_load)
         raise ValueError("input_slew and output_load must have the same length")
     _require_nonnegative("input_slew", input_slew)
     _require_nonnegative("output_load", output_load)
-    tables = buffer_device_lut.tensors(
-        dtype=input_slew.dtype,
-        device=input_slew.device,
-    )
+    if tables is None:
+        tables = buffer_device_lut.tensors(dtype=input_slew.dtype, device=input_slew.device)
+    if input_slew.dtype in (torch.float32, torch.float64):
+        from .native_device_lookup import try_buffer_device_lookup_native
+
+        result = try_buffer_device_lookup_native(input_slew, output_load, tables)
+        if result is not None:
+            result["per_size_input_cap"] = tables["input_cap_by_size"].view(1, -1).expand(
+                input_slew.numel(), -1
+            )
+            return result
     return _lookup_device_per_size(
         input_slew=input_slew,
         output_load=output_load,

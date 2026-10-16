@@ -3,6 +3,8 @@ import time
 
 import torch
 
+from .candidate_live_geometry import CandidateSegmentColumns
+
 
 def _cpu_contiguous(value, *, dtype=None):
     tensor = torch.as_tensor(value).detach()
@@ -161,6 +163,14 @@ def pack_candidate_topology(
     result["metadata"] = metadata
     prepared = result["prepared_timing_inputs"]
     prepared["metadata"] = metadata
+    # Native output candidate rows retain input order. Reuse these columns for
+    # all-segment payloads instead of reparsing every candidate during B1.
+    if bool(candidate_values["candidate_is_segment"].all()):
+        prepared["candidate_segment_columns"] = CandidateSegmentColumns(
+            parents=candidate_values["candidate_parent_node_id"],
+            children=candidate_values["candidate_child_node_id"],
+            ratios=candidate_values["candidate_split_ratio"],
+        )
     prepared["native_input_keys"] = (
         "net_flat_topo_sort",
         "net_flat_topo_sort_start",

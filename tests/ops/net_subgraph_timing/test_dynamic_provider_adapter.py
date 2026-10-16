@@ -1,9 +1,12 @@
+import pytest
 import torch
 
 from dreamplace.ops.buffer_insertion.optimization_state import (
     build_buffer_optimization_state,
     build_discrete_candidate_state,
+    build_typed_discrete_candidate_state,
 )
+from dreamplace.ops.buffer_insertion.drive_type_table import DriveTypeEntry, DriveTypeTable
 from dreamplace.ops.net_subgraph_timing.dynamic_provider import (
     RelaxedBufferDynamicNetProvider,
 )
@@ -60,6 +63,47 @@ def _build_provider():
         affected_net_ids=[5],
     )
     return provider, state
+
+
+def test_candidate_provider_updates_active_scope_without_discarding_static_views():
+    provider, state = _build_provider()
+    view = provider._active_view([5])
+    for scope, expected in (((), set()), ((5,), {5}), (None, {5})):
+        provider.update_buffer_state(state, affected_net_ids=scope)
+        assert provider.affected_net_ids == expected
+        assert provider._active_view([5]) is view
+        assert provider.has_dynamic_nets([5]) == bool(expected)
+
+
+def test_reused_candidate_geometry_refreshes_rc_caps_and_coordinate_gradients():
+    provider, _state = _build_provider()
+    cached_geometry = None
+    for forward_id, distance, capacitance in ((1, 3.0, 1.0), (2, 6.0, 2.0)):
+        results = []
+        fresh, _fresh_state = _build_provider()
+        for current in (provider, fresh):
+            x = torch.tensor([0.0, 1.0, 1.0 + distance], requires_grad=True)
+            current.bind_live_geometry(
+                new_x=x, new_y=torch.zeros_like(x),
+                r_unit=1.0, c_unit=1.0, scale_factor=1.0, dbu=1.0,
+                topology_epoch=0, forward_id=forward_id,
+                pin_capacitance_by_sense={"base": torch.tensor([0.0, 0.0, capacitance])},
+            )
+            if current is provider:
+                if cached_geometry is not None:
+                    assert current._candidate_geometry is cached_geometry
+                cached_geometry = current._candidate_geometry
+            output = current._run_lane(
+                driver_arrival=torch.tensor([0.2]), driver_slew=torch.tensor([0.3]),
+                active_net_ids={5}, use_buffer_device=False,
+            )
+            current.release_live_geometry(forward_id=forward_id)
+            gradient = torch.autograd.grad(output["sink_arrival"].sum(), x)[0]
+            results.append((output["sink_arrival"], output["sink_load"], gradient))
+            assert current._candidate_geometry.rc == {}
+            assert current._candidate_geometry.node_caps == {}
+        for reused, expected in zip(results[0], results[1], strict=True):
+            torch.testing.assert_close(reused, expected)
 
 
 def _build_two_net_provider():
@@ -393,6 +437,78 @@ def test_discrete_candidate_active_view_preserves_global_gradient_and_lut_row_id
     grad, = torch.autograd.grad(result["sink_arrival"].sum(), state.activation_param)
     assert float(grad[0].abs()) > 0.0
     assert float(grad[1].abs()) == 0.0
+
+
+@pytest.mark.parametrize("backend", ["python", "native_explicit_autograd"])
+def test_typed_provider_matches_fixed_master_with_fractional_timing_tables(backend):
+    reference_provider, reference_state = _build_discrete_provider()
+    candidates = list(reference_state.candidate_records)
+    table = DriveTypeTable(
+        entries=tuple(DriveTypeEntry(i, f"BUF{i}", float(i + 1), i, i) for i in range(4)),
+        source="fixture",
+    )
+    typed_state = build_typed_discrete_candidate_state(
+        candidates, buffer_main_type_index=4, legal_buffer_count=4,
+        drive_type_table=table,
+    )
+    payload = dict(reference_provider.static_payload)
+    payload.update(
+        per_size_input_cap=torch.tensor([[0.2, 0.3, 0.4, 0.5]]),
+        per_size_delay=torch.tensor([[0.1, 0.15, 0.2, 0.25]]),
+        per_size_output_slew=torch.tensor([[0.1, 0.15, 0.2, 0.25]]),
+    )
+    typed_provider = RelaxedBufferDynamicNetProvider(
+        static_payload=payload, buffer_state=typed_state, forward_backend=backend,
+    )
+    driver = {"driver_arrival": torch.tensor([0.0]), "driver_slew": torch.tensor([0.1])}
+    for type_id in range(4):
+        fixed_state = build_discrete_candidate_state(
+            candidates, buffer_main_type_index=4, legal_buffer_count=4,
+            fixed_bsu_index=type_id,
+        )
+        fixed_provider = RelaxedBufferDynamicNetProvider(
+            static_payload=payload, buffer_state=fixed_state, forward_backend=backend,
+        )
+        typed_state.set_gradient_drive_type(type_id)
+        for activation in (0.0, 1.0):
+            with torch.no_grad():
+                typed_state.activation_param.zero_()
+                typed_state.activation_param[:, type_id] = activation
+                fixed_state.activation_param.fill_(activation)
+            typed_result = typed_provider._run_lane(**driver, active_net_ids={5})
+            fixed_result = fixed_provider._run_lane(**driver, active_net_ids={5})
+            for key in ("lin", "sink_arrival", "sink_slew"):
+                torch.testing.assert_close(typed_result[key], fixed_result[key])
+            for key in ("buffer_input_cap", "buffer_delay", "buffer_output_slew"):
+                torch.testing.assert_close(
+                    typed_result["relaxed_buffer_model"][key],
+                    fixed_result["relaxed_buffer_model"][key],
+                )
+            typed_grad, = torch.autograd.grad(typed_result["sink_arrival"].sum(), typed_state.activation_param)
+            fixed_grad, = torch.autograd.grad(fixed_result["sink_arrival"].sum(), fixed_state.activation_param)
+            torch.testing.assert_close(typed_grad[:, type_id], fixed_grad)
+    typed_state.clear_gradient_drive_type()
+
+
+def test_typed_candidate_active_only_scopes_dynamic_nets_after_projection():
+    provider, reference_state = _build_discrete_provider(two_nets=True)
+    table = DriveTypeTable(
+        entries=tuple(
+            DriveTypeEntry(i, f"BUF{i}", float(i + 1), i, i)
+            for i in range(4)
+        ),
+        source="fixture",
+    )
+    typed_state = build_typed_discrete_candidate_state(
+        list(reference_state.candidate_records),
+        buffer_main_type_index=4,
+        legal_buffer_count=4,
+        drive_type_table=table,
+    )
+    with torch.no_grad():
+        typed_state.activation_param[0, 2] = 1.0
+    typed_state.timing_active_only = True
+    assert typed_state.timing_affected_net_ids() == (5,)
 
 
 def test_native_provider_keeps_static_net_subgraph_payload_on_cpu():

@@ -92,7 +92,7 @@ class LogSumExpWirelengthMergedFunction(Function):
         ctx.netpin_start = netpin_start
         ctx.net_weights = net_weights
         ctx.net_mask = net_mask
-        ctx.pin_mask = pin_mask
+        ctx.pin_mask = pin_mask.bool()
         ctx.gamma = gamma
         ctx.grad_intermediate = output[1]
         ctx.pos = pos

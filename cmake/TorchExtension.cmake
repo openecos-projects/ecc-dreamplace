@@ -6,6 +6,9 @@
 # This one is recommended from CMake 3.12+.
 # It should try to find the Python associated with the environment variable.
 # find_package(Python COMPONENTS Interpreter Development)
+if(DEFINED Python_EXECUTABLE AND NOT DEFINED PYTHON_EXECUTABLE)
+  set(PYTHON_EXECUTABLE "${Python_EXECUTABLE}")
+endif()
 add_subdirectory(thirdparty/pybind11)
 
 if (DEFINED TORCH_INSTALL_PREFIX AND DEFINED TORCH_ENABLE_CUDA AND DEFINED TORCH_VERSION)
@@ -14,11 +17,14 @@ if (DEFINED TORCH_INSTALL_PREFIX AND DEFINED TORCH_ENABLE_CUDA AND DEFINED TORCH
 else()
   # Auto-detect from the Python torch package.
   execute_process(COMMAND ${PYTHON_EXECUTABLE} -c
-    "import torch; print(torch.__path__[0]); print(int(torch.cuda.is_available())); print(torch.__version__);"
-    OUTPUT_VARIABLE TORCH_OUTPUT OUTPUT_STRIP_TRAILING_WHITESPACE)
+    "import torch; print(torch.__path__[0]); print(int(torch.backends.cuda.is_built())); print(torch.__version__);"
+    OUTPUT_VARIABLE TORCH_OUTPUT OUTPUT_STRIP_TRAILING_WHITESPACE
+    COMMAND_ERROR_IS_FATAL ANY)
   string(REPLACE "\n" ";" TORCH_OUTPUT_LIST ${TORCH_OUTPUT})
   list(GET TORCH_OUTPUT_LIST 0 TORCH_INSTALL_PREFIX)
-  list(GET TORCH_OUTPUT_LIST 1 TORCH_ENABLE_CUDA)
+  if(NOT DEFINED TORCH_ENABLE_CUDA)
+    list(GET TORCH_OUTPUT_LIST 1 TORCH_ENABLE_CUDA)
+  endif()
   list(GET TORCH_OUTPUT_LIST 2 TORCH_VERSION)
 endif()
 
@@ -29,17 +35,13 @@ list(GET TORCH_VERSION_LIST 1 TORCH_VERSION_MINOR)
 message(STATUS TORCH_INSTALL_PREFIX=${TORCH_INSTALL_PREFIX})
 message(STATUS TORCH_VERSION=${TORCH_VERSION_MAJOR}.${TORCH_VERSION_MINOR})
 
-if ("${TORCH_VERSION_MAJOR}.${TORCH_VERSION_MINOR}" VERSION_LESS 1.6)
-  message(SEND_ERROR "require PyTorch version >=1.6")
-#elseif ("${TORCH_VERSION_MAJOR}.${TORCH_VERSION_MINOR}" VERSION_GREATER_EQUAL 1.8)
-#  message(SEND_ERROR "require PyTorch version < 1.8")
+if ("${TORCH_VERSION_MAJOR}.${TORCH_VERSION_MINOR}" VERSION_LESS 2.11 OR
+    "${TORCH_VERSION_MAJOR}.${TORCH_VERSION_MINOR}" VERSION_GREATER_EQUAL 2.12)
+  message(FATAL_ERROR "ECC DreamPlace native extensions require PyTorch >=2.11,<2.12")
 endif()
 
 if (TORCH_ENABLE_CUDA)
-  find_package(CUDA 9.0)
-  if (NOT CUDA_FOUND)
-    set(TORCH_ENABLE_CUDA 0 CACHE BOOL "Whether enable CUDA" FORCE)
-  endif(NOT CUDA_FOUND)
+  find_package(CUDA REQUIRED)
 endif()
 message(STATUS TORCH_ENABLE_CUDA=${TORCH_ENABLE_CUDA})
 
@@ -73,13 +75,18 @@ set_target_properties(torch PROPERTIES
   IMPORTED_LOCATION "${TORCH_LIBRARY}"
   INTERFACE_INCLUDE_DIRECTORIES "${TORCH_INCLUDE_DIRS}"
   INTERFACE_LINK_LIBRARIES "${LINK_LIBS}"
-  INTERFACE_COMPILE_OPTIONS "-D_GLIBCXX_USE_CXX11_ABI=${CMAKE_CXX_ABI}"
   )
 
 # CXX only 
 function(add_torch_extension target_name)
+  set(oneValueArgs TARGET_CXX_ABI)
   set(multiValueArgs EXTRA_INCLUDE_DIRS EXTRA_LINK_LIBRARIES EXTRA_DEFINITIONS)
-  cmake_parse_arguments(ARG "" "" "${multiValueArgs}" ${ARGN})
+  cmake_parse_arguments(ARG "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+  if ("${ARG_TARGET_CXX_ABI}" STREQUAL "")
+    set(TORCH_TARGET_CXX_ABI "${CMAKE_CXX_ABI}")
+  else()
+    set(TORCH_TARGET_CXX_ABI "${ARG_TARGET_CXX_ABI}")
+  endif()
   if (TORCH_ENABLE_CUDA)
     cuda_add_library(${target_name} STATIC ${ARG_UNPARSED_ARGUMENTS})
   else()
@@ -96,6 +103,9 @@ function(add_torch_extension target_name)
     TORCH_VERSION_MINOR=${TORCH_VERSION_MINOR}
     ENABLE_CUDA=${TORCH_ENABLE_CUDA}
     ${ARG_EXTRA_DEFINITIONS})
+  target_compile_options(${target_name} PRIVATE
+    -U_GLIBCXX_USE_CXX11_ABI
+    -D_GLIBCXX_USE_CXX11_ABI=${TORCH_TARGET_CXX_ABI})
   set_target_properties(${target_name} PROPERTIES 
     POSITION_INDEPENDENT_CODE ON
     CXX_VISIBILITY_PRESET "hidden"
@@ -104,8 +114,14 @@ function(add_torch_extension target_name)
 endfunction()
 
 function(add_pytorch_extension target_name)
+  set(oneValueArgs TARGET_CXX_ABI)
   set(multiValueArgs EXTRA_INCLUDE_DIRS EXTRA_LINK_LIBRARIES EXTRA_DEFINITIONS)
-  cmake_parse_arguments(ARG "" "" "${multiValueArgs}" ${ARGN})
+  cmake_parse_arguments(ARG "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+  if ("${ARG_TARGET_CXX_ABI}" STREQUAL "")
+    set(TORCH_TARGET_CXX_ABI "${CMAKE_CXX_ABI}")
+  else()
+    set(TORCH_TARGET_CXX_ABI "${ARG_TARGET_CXX_ABI}")
+  endif()
   if (TORCH_ENABLE_CUDA)
     set(CUDA_SRCS "${ARG_UNPARSED_ARGUMENTS}")
     list(FILTER CUDA_SRCS INCLUDE REGEX ".*cu$")
@@ -119,6 +135,9 @@ function(add_pytorch_extension target_name)
         TORCH_MINOR_VERSION=${TORCH_MINOR_VERSION}
         ENABLE_CUDA=${TORCH_ENABLE_CUDA}
         ${ARG_EXTRA_DEFINITIONS})
+      target_compile_options(${target_name}_cuda_tmp PRIVATE
+        -U_GLIBCXX_USE_CXX11_ABI
+        -D_GLIBCXX_USE_CXX11_ABI=${TORCH_TARGET_CXX_ABI})
       set_target_properties(${target_name}_cuda_tmp PROPERTIES 
         POSITION_INDEPENDENT_CODE ON
         CXX_VISIBILITY_PRESET "hidden"
@@ -140,4 +159,7 @@ function(add_pytorch_extension target_name)
     TORCH_VERSION_MINOR=${TORCH_VERSION_MINOR}
     ENABLE_CUDA=${TORCH_ENABLE_CUDA}
     ${ARG_EXTRA_DEFINITIONS})
+  target_compile_options(${target_name} PRIVATE
+    -U_GLIBCXX_USE_CXX11_ABI
+    -D_GLIBCXX_USE_CXX11_ABI=${TORCH_TARGET_CXX_ABI})
 endfunction()

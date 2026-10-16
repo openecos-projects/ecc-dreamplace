@@ -110,7 +110,9 @@ template <typename CoordType> class UnifiedUFS {
                 for (auto vertex : steiner_adj_vertices_map[root[dir_large]]) {
                     candidate_pins.insert(ufs[dir_large].findfa(vertex));
                 }
-                assert(candidate_pins.size() < 4);
+                if (candidate_pins.empty()) {
+                    continue;
+                }
                 auto min_pin = std::min_element(candidate_pins.begin(), candidate_pins.end(), 
                     [dir_small, &newx, &newy, u](const int& a, const int& b) {
                         return (dir_small == LEFT) ? 

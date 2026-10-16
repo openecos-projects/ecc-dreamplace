@@ -22,6 +22,26 @@
 import time
 import torch
 import pdb
+from dreamplace.ops.routability.cooptimization_area import movable_area_for_metrics
+
+
+def _as_log_verbose(value, default=0):
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("", "0", "false", "no", "off"):
+            return 0
+        if normalized in ("true", "yes", "on"):
+            return 1
+        try:
+            return int(float(normalized))
+        except ValueError:
+            return int(default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
 
 
 class EvalMetrics(object):
@@ -53,6 +73,100 @@ class EvalMetrics(object):
         self.weight_hpwl = None
         self.macro_overlap = None
         self.macro_overlap_weight = None
+        self.wns = None
+        self.tns = None
+        self.timing_objective = None
+        self.size_min = None
+        self.size_mean = None
+        self.size_max = None
+        self.vt_class_proportions = None
+        self.slew_violation = None
+        self.cap_violation = None
+        self.leakage = None
+        self.ws = None
+        self.ts = None
+        self.max_slew_violation = None
+        self.max_load_cap_violation = None
+        self.l_shape_fast_mode = None
+        self.l_shape_energy_valid = None
+        self.l_shape_cost = None
+        self.l_shape_weighted_cost = None
+        self.l_shape_weight = None
+        self.l_shape_target_weight = None
+        self.l_shape_weight_candidate = None
+        self.l_shape_cap_active = None
+        self.l_shape_base_grad_norm = None
+        self.l_shape_grad_raw_norm = None
+        self.l_shape_grad_norm = None
+        self.l_shape_grad_ratio = None
+        self.l_shape_target_ratio = None
+        self.l_shape_overflow = None
+        self.l_shape_overflow_ratio = None
+        self.l_shape_overflow_ema = None
+        self.l_shape_overflow_max_density = None
+        self.l_shape_capacity_al_enabled = None
+        self.l_shape_capacity_al_updated = None
+        self.l_shape_capacity_al_g_h_max = None
+        self.l_shape_capacity_al_g_v_max = None
+        self.l_shape_capacity_al_g_h_sum = None
+        self.l_shape_capacity_al_g_v_sum = None
+        self.l_shape_capacity_al_g_h_pos_ratio = None
+        self.l_shape_capacity_al_g_v_pos_ratio = None
+        self.l_shape_capacity_al_q_h_max = None
+        self.l_shape_capacity_al_q_v_max = None
+        self.l_shape_capacity_al_q_h_sum = None
+        self.l_shape_capacity_al_q_v_sum = None
+        self.l_shape_capacity_al_lambda_h_max = None
+        self.l_shape_capacity_al_lambda_v_max = None
+        self.l_shape_capacity_al_lambda_h_sum = None
+        self.l_shape_capacity_al_lambda_v_sum = None
+        self.l_shape_capacity_al_energy_h = None
+        self.l_shape_capacity_al_energy_v = None
+        self.l_shape_capacity_al_energy_total = None
+        self.l_shape_capacity_al_pq_h_min = None
+        self.l_shape_capacity_al_pq_h_max = None
+        self.l_shape_capacity_al_pq_v_min = None
+        self.l_shape_capacity_al_pq_v_max = None
+        self.l_shape_capacity_al_active_memory_bins_h = None
+        self.l_shape_capacity_al_active_memory_bins_v = None
+        self.l_shape_macro_exclusion_enabled = None
+        self.l_shape_macro_exclusion_macro_count = None
+        self.l_shape_macro_exclusion_body_bins = None
+        self.l_shape_macro_exclusion_halo_bins = None
+        self.l_shape_macro_exclusion_active_bins = None
+        self.l_shape_macro_exclusion_source_max = None
+        self.l_shape_macro_exclusion_source_sum = None
+        self.l_shape_macro_exclusion_body_source_max = None
+        self.l_shape_macro_exclusion_body_source_sum = None
+        self.l_shape_macro_exclusion_halo_source_max = None
+        self.l_shape_macro_exclusion_halo_source_sum = None
+        self.l_shape_macro_exclusion_usage_max = None
+        self.l_shape_macro_exclusion_usage_sum = None
+        self.l_shape_macro_exclusion_usage_bins = None
+        self.l_shape_macro_exclusion_dominates_bins = None
+        self.l_shape_macro_exclusion_routing_dominates_bins = None
+        self.l_shape_log_verbose = 0
+        self.soft_l_diag_count = None
+        self.soft_l_mean_cost_gap = None
+        self.soft_l_raw_cost_gap_p50 = None
+        self.soft_l_biased_cost_gap_p50 = None
+        self.soft_l_tau_source_gap = None
+        self.soft_l_mean_max_prob = None
+        self.soft_l_mean_entropy = None
+        self.soft_l_near_tie_ratio = None
+        self.soft_l_tau = None
+        self.soft_l_effective_hotspot_weight = None
+        self.soft_l_resolver_agreement_ratio = None
+        self.soft_l_target_demand_supply_ratio = None
+        self.soft_l_current_demand_supply_ratio = None
+        self.soft_l_same_net_topo_nets = None
+        self.soft_l_same_net_topo_segments_h = None
+        self.soft_l_same_net_topo_segments_v = None
+        self.soft_l_same_net_topo_diag_edges = None
+        self.soft_l_same_net_topo_edges_with_topology = None
+        self.soft_l_same_net_topo_edges_with_observed_intervals = None
+        self.soft_l_same_net_topo_mean_gap = None
+        self.soft_l_same_net_topo_tie_ratio = None
 
     def __str__(self):
         """
@@ -116,8 +230,174 @@ class EvalMetrics(object):
         if self.macro_overlap_weight is not None:
             content += ", MacroOverlapWeight %.6E" % (
                 self.macro_overlap_weight)
+        l_shape_energy_invalid = (
+            self.l_shape_fast_mode is not None
+            and bool(self.l_shape_fast_mode)
+            and self.l_shape_energy_valid is not None
+            and not bool(self.l_shape_energy_valid)
+        )
+        if l_shape_energy_invalid:
+            content += ", LShapeCostRaw N/A(fast_mode)"
+            content += ", LShapeCostWeighted N/A(fast_mode)"
+        elif self.l_shape_cost is not None:
+            content += ", LShapeCostRaw %.6E" % (self.l_shape_cost)
+            if self.l_shape_weighted_cost is not None:
+                content += ", LShapeCostWeighted %.6E" % (self.l_shape_weighted_cost)
+        elif self.l_shape_weighted_cost is not None:
+            content += ", LShapeCostWeighted %.6E" % (self.l_shape_weighted_cost)
+        if _as_log_verbose(self.l_shape_log_verbose) >= 2:
+            if self.l_shape_weight is not None:
+                content += ", LWeight %.6E" % (self.l_shape_weight)
+            if self.l_shape_weight_candidate is not None:
+                content += ", LWCandidate %.6E" % (self.l_shape_weight_candidate)
+            if self.l_shape_target_weight is not None:
+                content += ", LWCap %.6E" % (self.l_shape_target_weight)
+            if self.l_shape_cap_active is not None:
+                content += ", LWCapAct %d" % (1 if self.l_shape_cap_active else 0)
+            if self.l_shape_base_grad_norm is not None:
+                content += ", LBaseGrad %.6E" % (self.l_shape_base_grad_norm)
+            if self.l_shape_grad_norm is not None:
+                content += ", LGrad %.6E" % (self.l_shape_grad_norm)
+            if self.l_shape_grad_raw_norm is not None:
+                content += ", LGradRaw %.6E" % (self.l_shape_grad_raw_norm)
+            if self.l_shape_grad_ratio is not None:
+                content += ", LGradRatio %.4f" % (self.l_shape_grad_ratio)
+            if self.l_shape_target_ratio is not None:
+                content += ", LTargetRatio %.4f" % (self.l_shape_target_ratio)
+            if self.l_shape_overflow is not None:
+                content += ", LOvRaw %.6E" % (self.l_shape_overflow)
+            if self.l_shape_overflow_ratio is not None:
+                content += ", LOvRatio %.6E" % (self.l_shape_overflow_ratio)
+            if self.l_shape_overflow_ema is not None:
+                content += ", LOvEma %.6E" % (self.l_shape_overflow_ema)
+            if self.l_shape_overflow_max_density is not None:
+                content += ", LMaxDen %.6E" % (self.l_shape_overflow_max_density)
+            if self.l_shape_capacity_al_energy_total is not None:
+                content += ", LCapALE %.6E" % (
+                    self.l_shape_capacity_al_energy_total
+                )
+            if self.l_shape_capacity_al_q_h_max is not None:
+                content += ", LCapALQHMax %.6E" % (
+                    self.l_shape_capacity_al_q_h_max
+                )
+            if self.l_shape_capacity_al_lambda_h_max is not None:
+                content += ", LCapALLamHMax %.6E" % (
+                    self.l_shape_capacity_al_lambda_h_max
+                )
+            if self.l_shape_capacity_al_g_h_sum is not None:
+                content += ", LCapALGHSum %.6E" % (
+                    self.l_shape_capacity_al_g_h_sum
+                )
+            if self.l_shape_capacity_al_g_h_pos_ratio is not None:
+                content += ", LCapALGHRatio %.4f" % (
+                    self.l_shape_capacity_al_g_h_pos_ratio
+                )
+            if self.l_shape_capacity_al_g_v_sum is not None:
+                content += ", LCapALGVSum %.6E" % (
+                    self.l_shape_capacity_al_g_v_sum
+                )
+            if self.l_shape_capacity_al_g_v_pos_ratio is not None:
+                content += ", LCapALGVRatio %.4f" % (
+                    self.l_shape_capacity_al_g_v_pos_ratio
+                )
+            if self.l_shape_macro_exclusion_macro_count is not None:
+                content += ", LMacroCnt %d" % (
+                    self.l_shape_macro_exclusion_macro_count
+                )
+            if self.l_shape_macro_exclusion_active_bins is not None:
+                content += ", LMacroBins %d" % (
+                    self.l_shape_macro_exclusion_active_bins
+                )
+            if self.l_shape_macro_exclusion_source_max is not None:
+                content += ", LMacroMax %.6E" % (
+                    self.l_shape_macro_exclusion_source_max
+                )
+            if self.l_shape_macro_exclusion_usage_sum is not None:
+                content += ", LMacroUsage %.6E" % (
+                    self.l_shape_macro_exclusion_usage_sum
+                )
+            if self.l_shape_macro_exclusion_usage_bins is not None:
+                content += ", LMacroUsageBins %d" % (
+                    self.l_shape_macro_exclusion_usage_bins
+                )
+            if self.soft_l_diag_count is not None:
+                content += ", SoftDiag %d" % (self.soft_l_diag_count)
+            if self.soft_l_mean_cost_gap is not None:
+                content += ", SoftGapMean %.4f" % (self.soft_l_mean_cost_gap)
+            if self.soft_l_raw_cost_gap_p50 is not None:
+                content += ", SoftGapP50Raw %.8f" % (self.soft_l_raw_cost_gap_p50)
+            if self.soft_l_biased_cost_gap_p50 is not None:
+                content += ", SoftGapP50Bias %.8f" % (self.soft_l_biased_cost_gap_p50)
+            if self.soft_l_tau_source_gap is not None:
+                content += ", SoftTauSrc %.8f" % (self.soft_l_tau_source_gap)
+            if self.soft_l_mean_max_prob is not None:
+                content += ", SoftConf %.4f" % (self.soft_l_mean_max_prob)
+            if self.soft_l_mean_entropy is not None:
+                content += ", SoftEnt %.4f" % (self.soft_l_mean_entropy)
+            if self.soft_l_near_tie_ratio is not None:
+                content += ", SoftTie %.4f" % (self.soft_l_near_tie_ratio)
+            if self.soft_l_tau is not None:
+                content += ", SoftTau %.8f" % (self.soft_l_tau)
+            if self.soft_l_effective_hotspot_weight is not None:
+                content += ", SoftHot %.4f" % (self.soft_l_effective_hotspot_weight)
+            if self.soft_l_resolver_agreement_ratio is not None:
+                content += ", SoftAgree %.4f" % (
+                    self.soft_l_resolver_agreement_ratio
+                )
+            if self.soft_l_target_demand_supply_ratio is not None:
+                content += ", SoftDSRatio %.4f" % (
+                    self.soft_l_target_demand_supply_ratio
+                )
+            if self.soft_l_current_demand_supply_ratio is not None:
+                content += ", SoftLoadRatio %.4f" % (
+                    self.soft_l_current_demand_supply_ratio
+                )
+            if self.soft_l_same_net_topo_nets is not None:
+                content += ", TopoNets %d" % (self.soft_l_same_net_topo_nets)
+            if self.soft_l_same_net_topo_diag_edges is not None:
+                content += ", TopoDiag %d" % (self.soft_l_same_net_topo_diag_edges)
+            if self.soft_l_same_net_topo_edges_with_topology is not None:
+                content += ", TopoHit %d" % (
+                    self.soft_l_same_net_topo_edges_with_topology
+                )
+            if self.soft_l_same_net_topo_edges_with_observed_intervals is not None:
+                content += ", TopoObs %d" % (
+                    self.soft_l_same_net_topo_edges_with_observed_intervals
+                )
+            if self.soft_l_same_net_topo_mean_gap is not None:
+                content += ", TopoGap %.4f" % (self.soft_l_same_net_topo_mean_gap)
+            if self.soft_l_same_net_topo_tie_ratio is not None:
+                content += ", TopoTie %.4f" % (self.soft_l_same_net_topo_tie_ratio)
         if self.gamma is not None:
             content += ", gamma %.6E" % (self.gamma)
+        if self.wns is not None:
+            content += ", WNS %.6E" % (self.wns)
+        if self.tns is not None:
+            content += ", TNS %.6E" % (self.tns)
+        if self.timing_objective is not None:
+            content += ", TimingObj %.6E" % (self.timing_objective)
+        if self.size_min is not None and self.size_mean is not None and self.size_max is not None:
+            content += ", Size[min/mean/max]=%.6E/%.6E/%.6E" % (
+                self.size_min,
+                self.size_mean,
+                self.size_max,
+            )
+        if self.vt_class_proportions is not None:
+            content += ", VTProp [%s]" % ", ".join(["%.3E" % i for i in self.vt_class_proportions])
+        if self.slew_violation is not None:
+            content += ", SlewVio %.6E" % (self.slew_violation)
+        if self.cap_violation is not None:
+            content += ", CapVio %.6E" % (self.cap_violation)
+        if self.leakage is not None:
+            content += ", Leakage %.6E" % (self.leakage)
+        if self.ws is not None:
+            content += ", WS %.6E" % (self.ws)
+        if self.ts is not None:
+            content += ", TS %.6E" % (self.ts)
+        if self.max_slew_violation is not None:
+            content += ", MaxSlewViolation %.6E" % (self.max_slew_violation)
+        if self.max_load_cap_violation is not None:
+            content += ", MaxLoadCapViolation %.6E" % (self.max_load_cap_violation)
         if self.eval_time is not None:
             content += ", time %.3fms" % (self.eval_time * 1000)
 
@@ -154,7 +434,7 @@ class EvalMetrics(object):
             if "overflow" in ops:
                 overflow, max_density = ops["overflow"](var)
                 if overflow.numel() == 1:
-                    self.overflow = overflow.data / placedb.total_movable_node_area
+                    self.overflow = overflow.data / movable_area_for_metrics(data_collections, placedb)
                     self.max_density = max_density.data
                 else:
                     self.overflow = (
@@ -164,7 +444,7 @@ class EvalMetrics(object):
                     self.max_density = max_density.data
             if "goverflow" in ops:
                 overflow, max_density = ops["goverflow"](var)
-                self.goverflow = overflow.data / placedb.total_movable_node_area
+                self.goverflow = overflow.data / movable_area_for_metrics(data_collections, placedb)
                 self.gmax_density = max_density.data
             if "route_utilization" in ops:
                 route_utilization_map = ops["route_utilization"](var)

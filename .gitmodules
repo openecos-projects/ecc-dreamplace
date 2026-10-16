@@ -1,9 +1,16 @@
 [submodule "thirdparty/munkres-cpp"]
 	path = thirdparty/munkres-cpp
 	url = https://github.com/saebyn/munkres-cpp.git
+	ignore = untracked
 [submodule "thirdparty/cub"]
 	path = thirdparty/cub
 	url = https://github.com/NVlabs/cub.git
 [submodule "thirdparty/pybind11"]
 	path = thirdparty/pybind11
 	url = https://github.com/pybind/pybind11.git
+[submodule "xplace"]
+	path = thirdparty/xplace
+	url = https://github.com/zhaoxueyan1/Xplace.git
+	branch = routability-driven-placement
+	shallow = true
+	ignore = untracked

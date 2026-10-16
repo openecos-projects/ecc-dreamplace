@@ -299,6 +299,10 @@ class ElectricPotential(ElectricOverflow):
         deterministic_flag,  # control whether to use deterministic routine
         sorted_node_map,
         movable_macro_mask=None,
+        num_terminal_NIs=0,
+        iopin_density_weight=0.0,
+        m2_pg_rail_density_boxes=None,
+        m2_pg_rail_density_weight=1.0,
         fast_mode=False,
         region_id=None,
         fence_regions=None, # [n_subregion, 4] as dummy macros added to initial density. (xl,yl,xh,yh) rectangles
@@ -380,7 +384,11 @@ class ElectricPotential(ElectricOverflow):
                              padding=padding,
                              deterministic_flag=deterministic_flag,
                              sorted_node_map=sorted_node_map,
-                             movable_macro_mask=movable_macro_mask)
+                             movable_macro_mask=movable_macro_mask,
+                             num_terminal_NIs=num_terminal_NIs,
+                             iopin_density_weight=iopin_density_weight,
+                             m2_pg_rail_density_boxes=m2_pg_rail_density_boxes,
+                             m2_pg_rail_density_weight=m2_pg_rail_density_weight)
         self.fast_mode = fast_mode
         self.fence_regions = fence_regions
         self.node2fence_region_map = node2fence_region_map
@@ -448,6 +456,9 @@ class ElectricPotential(ElectricOverflow):
         self.idct2 = None
         self.idct_idxst = None
         self.idxst_idct = None
+        # Fixed-cell density depends on target_density.  Invalidate it so the
+        # next forward rebuilds the map with the current target density.
+        self.initial_density_map = None
 
     def forward(self, pos, mode="density"):
         assert mode in {"density", "overflow"}, "Only support density mode or overflow mode"
@@ -551,4 +562,3 @@ class ElectricPotential(ElectricOverflow):
                             self.target_density * bin_area).clamp_(min=0.0).sum()
 
             return density_cost, density_map.max() / bin_area
-

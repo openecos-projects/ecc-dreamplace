@@ -1,0 +1,128 @@
+{
+  "status": "correctness_and_runtime_migration_validated",
+  "baseline_xplace": "a3221385434d5b7989bf2fd70fb757c761594e87",
+  "fixed_xplace": "59991041a13ed8b8e19efd730bee6ad6185a4990",
+  "dreamplace_integration_commit": "14678490d47f51434d2817a1232e59f8b7582973",
+  "artifact_root": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_rrr_fixes_20261009",
+  "matched_parameters": {
+    "backend": "cpu_pr_maze",
+    "rrr_iters": 3,
+    "requested_workers": 8,
+    "effective_workers": 8,
+    "parser_threads": 1,
+    "grid": [
+      512,
+      512
+    ],
+    "routing_layers": [
+      "MET2",
+      "MET5"
+    ],
+    "clock_net_names": [
+      "Clk"
+    ],
+    "max_gr_fanout": 100
+  },
+  "input_def": "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_regression_20260920_BM64_experiments/pins_tdp_fillers_noise0025/BM64_pins_tdp_fillers_noise0025.def",
+  "input_def_sha256": "dd0231ba72f7cd8f9bb24f29f709aabf890e7327e35c67b28e47b50a06d205e1",
+  "before_gpugr_sha256": "6da10cf899ed5a438c509b3f982889751edaa4f6a4e70482917bd1474d61498e",
+  "after_gpugr_sha256": "b7b2562f50f27c2e0a2980f26353ad7ed5da199807b2799f1fa7b0b1f2677a91",
+  "installed_import": {
+    "gpugr_path": "/home/zhaoxueyan/code/ipd-timing-opt-ecc/ecc/.venv/lib/python3.11/site-packages/thirdparty/xplace/cpp_to_py/cpybin/gpugr.cpython-311-x86_64-linux-gnu.so",
+    "gpugr_sha256": "b7b2562f50f27c2e0a2980f26353ad7ed5da199807b2799f1fa7b0b1f2677a91",
+    "cuda_enabled": false,
+    "runtime_root": "/home/zhaoxueyan/code/ipd-timing-opt-ecc/ecc/.venv/lib/python3.11/site-packages/thirdparty/xplace"
+  },
+  "checks": {
+    "standalone_cpp_checks": "7 passed",
+    "standalone_search_asan_ubsan": "passed",
+    "native_integration": "13 passed",
+    "native_build_guards": "5 passed",
+    "installed_s50": {
+      "status": "ok",
+      "steps": 50,
+      "actual_gr_calls": 2,
+      "clock_gradient_samples": 1,
+      "best_state_restored": true
+    },
+    "standards_review": "no actionable findings",
+    "spec_review": "no remaining blocking findings; final multi-batch usage hash comparison added"
+  },
+  "bm64": {
+    "before_total_seconds": 620.3143096489948,
+    "after_total_seconds": 609.1003667530022,
+    "single_pair_reduction_percent": 1.8077840090998554,
+    "before_process_peak_rss_bytes": 2341748736,
+    "after_process_peak_rss_bytes": 2339815424,
+    "after_router_storage_estimate_bytes": 9176791568,
+    "memory_accounting": "conservative_router_storage_estimate_not_rss",
+    "iteration_rows": [
+      {
+        "iteration": 1,
+        "selected_nets": 15397,
+        "before_fallbacks": 15341,
+        "after_fallbacks": 934,
+        "before_fallback_percent": 99.63629278430864,
+        "after_fallback_percent": 6.066116775995324,
+        "before_search_seconds": 4.612831458,
+        "after_search_seconds": 66.621035203,
+        "before_fallback_seconds": 207.3005966710003,
+        "after_fallback_seconds": 125.60483754800003,
+        "before_total_seconds": 212.530716894,
+        "after_total_seconds": 192.904255576,
+        "after_max_active_searches": 8
+      },
+      {
+        "iteration": 2,
+        "selected_nets": 15836,
+        "before_fallbacks": 15786,
+        "after_fallbacks": 1296,
+        "before_fallback_percent": 99.68426370295529,
+        "after_fallback_percent": 8.183884819398838,
+        "before_search_seconds": 1.8595671,
+        "after_search_seconds": 128.2934955389998,
+        "before_fallback_seconds": 400.1077267480017,
+        "after_fallback_seconds": 281.8084343839997,
+        "before_total_seconds": 402.647238663,
+        "after_total_seconds": 410.867350194,
+        "after_max_active_searches": 8
+      }
+    ],
+    "same_initial_hashes": true,
+    "same_iteration_hashes": true,
+    "same_accepted_hashes": true,
+    "accepted_hashes": {
+      "route_hash64": 12112451002964389696,
+      "wire_map_hash64": 12960628470812588419,
+      "via_map_hash64": 9014392359478095202
+    },
+    "completed_rrr_iters": 2,
+    "best_state_restored": true,
+    "maze_failures": 0
+  },
+  "limitations": [
+    "One matched timed pair does not establish stable speedup or worker scaling.",
+    "Search against later congested snapshots and expensive remaining serial re-searches still dominate runtime.",
+    "This is CPU-only native qualification; no fresh CUDA build or new timing QoR claim.",
+    "The positive-RRR backend remains opt-in.",
+    "Two abandoned synthetic layouts did not improve their initial PR score; their acceptance-only diagnostic assertions are not qualification failures."
+  ],
+  "routing_input_sha256": {
+    "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_regression_20260920_BM64_experiments/pins_tdp_fillers_noise0025/BM64_pins_tdp_fillers_noise0025.def": "dd0231ba72f7cd8f9bb24f29f709aabf890e7327e35c67b28e47b50a06d205e1",
+    "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_dreamplace_timing_inputs/cases/BM64/input/tech.lef": "d5744eed93fa8e7d4f6700ea42eedab42fe999bf0016712caedc0d06b50361b4",
+    "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_dreamplace_timing_inputs/cases/BM64/input/stdcell_00.lef": "85d7d9fd5bef66aae9e8fea4eecbd025283726baf06acbe6656a58651c31f194",
+    "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_dreamplace_timing_inputs/cases/BM64/input/stdcell_01.lef": "cbeeeff9ad367e4c47f9c82cd04898f6742154cf1226c6a415e22647a516193f",
+    "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_dreamplace_timing_inputs/cases/BM64/input/stdcell_02.lef": "68809cc10e730905f2362901e100a879e6248334bcd4babe7e5113abdb5ab88e"
+  },
+  "s50_fixture_input_sha256": {
+    "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_rrr_fixes_20261009/s50-installed/inputs/fixture.v": "d370464d52458d61aa7a7538120f392463d9c7b6ef949cfd422d66dc49730433",
+    "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_rrr_fixes_20261009/s50-installed/inputs/fixture.sdc": "1b4ddbe065f4fea783992cd4f940ed0cd8e3f99762ec454c5c0577c6ed695e36",
+    "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_rrr_fixes_20261009/s50-installed/inputs/fixture.def": "1b75ef80f8b1fda1ee7a5be6dd594c3cbfc11cf82eaea0308145a495aec1661b",
+    "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_rrr_fixes_20261009/s50-installed/inputs/fixture.lef": "db46746d2b466332cbfb5fae3b433dee4a1be6a692f7cc9ccaab8b604ca71b93",
+    "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_rrr_fixes_20261009/s50-installed/inputs/fixture.lib": "42e3bde2a60c02efc84af26f3b833adf5c3112447a9e7b17951c18a74814ffd5"
+  },
+  "runner_sha256": {
+    "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_rrr_fixes_20261009/bench_bm64_matched.py": "2fd881e85609a4b17372a38851c0d59c47baf953b709398ffc4ad184ea0c9996",
+    "/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc_cpu_maze_rrr_migrated_20261009/native_gr_sizing_rrr.py": "0635212bcb7b62ebc5a8f1c7b8263d8ca651bd5253e975194ee92594c6417f66"
+  }
+}

@@ -8,19 +8,30 @@ set(INCLUDE_DIRS
   )
 
 set(LINK_LIBS 
+  #draw_place_cxx
   utility_cxx
   OpenMP::OpenMP_CXX
   )
 
+if(CAIRO_FOUND)
+  set(INCLUDE_DIRS ${INCLUDE_DIRS} ${CAIRO_INCLUDE_DIRS})
+  set(LINK_LIBS ${LINK_LIBS} ${CAIRO_LIBRARIES})
+  set(DRAWPLACE 1)
+else()
+  set(DRAWPLACE 0)
+endif()
+
 add_pytorch_extension(${TARGET_NAME}_cpp 
   src/global_swap.cpp
   EXTRA_INCLUDE_DIRS ${INCLUDE_DIRS}
-  EXTRA_LINK_LIBRARIES ${LINK_LIBS})
+  EXTRA_LINK_LIBRARIES ${LINK_LIBS}
+  EXTRA_DEFINITIONS DRAWPLACE=${DRAWPLACE})
 
 add_pytorch_extension(${TARGET_NAME}_concurrent_cpp
   src/global_swap_concurrent.cpp
   EXTRA_INCLUDE_DIRS ${INCLUDE_DIRS}
-  EXTRA_LINK_LIBRARIES ${LINK_LIBS})
+  EXTRA_LINK_LIBRARIES ${LINK_LIBS}
+  EXTRA_DEFINITIONS DRAWPLACE=${DRAWPLACE})
 
 install(TARGETS 
   ${TARGET_NAME}_cpp ${TARGET_NAME}_concurrent_cpp 
@@ -31,7 +42,8 @@ add_pytorch_extension(${TARGET_NAME}_cuda
   src/global_swap_cuda.cpp
   src/global_swap_cuda_kernel.cu
   EXTRA_INCLUDE_DIRS ${INCLUDE_DIRS}
-  EXTRA_LINK_LIBRARIES ${LINK_LIBS})
+  EXTRA_LINK_LIBRARIES ${LINK_LIBS}
+  EXTRA_DEFINITIONS DRAWPLACE=${DRAWPLACE})
 
 install(TARGETS 
   ${TARGET_NAME}_cuda 

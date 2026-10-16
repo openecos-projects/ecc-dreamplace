@@ -1,4 +1,7 @@
 build
+build_codex
+build_openroad_schema_check
+/build-*
 lib
 obj
 *.o
@@ -6,6 +9,7 @@ obj
 *.pyc
 results
 log
+logs/
 dreamplace/version.py
 dreamplace/configure.py
 dreamplace/.install_manifest.txt
@@ -19,9 +23,53 @@ install
 .vscode/*
 bin
 include
-unittest
 .cache
-*_unittest
+# Test sources live in tests/ (test/ holds design benchmarks). Locally built test
+# executables land next to their sources, e.g.
+# tests/ops/abacus_legalize_unittest/abacus_unittest; ignore only those binaries.
+/tests/ops/*_unittest/*_unittest
+glog_dump.log
+surrogate_cache/
 
+# Internal planning and experiment records are deliberately not versioned:
+# governance/design plans under docs/ and the per-campaign markdown reports
+# mixed into the regression tree. Keep the regression indexes.
+docs/flow_governance/*.md
+docs/buffering/*.md
+docs/backend_governance/*.md
+test/regression/**/*.md
+!test/regression/README.md
+!test/regression/iccad24/README.md
+# Per-campaign paper/QoR tables are personal experiment records, not test assets.
+test/regression/**/paper/
+*.png
+dreamplace/configure.py
+.codex*
 .direnv
 result
+
+# Xplace gpugr build artifacts (out-of-source build tree; the in-submodule
+# cpp_to_py/cpybin output is covered by the submodule ignore rule in .gitmodules)
+xplace-build-cpu/
+xplace_gpugr-prefix/
+thirdparty/xplace-build/
+
+# Local artifacts from the retired OpenROAD submodule.
+/thirdparty/OpenROAD/
+
+# CMake/Ninja metadata generated in the source checkout by local builds.
+CMakeFiles/
+cmake_install.cmake
+CMakeCache.txt
+CMakeInit.txt
+build.ninja
+.ninja_deps
+.ninja_log
+compile_commands.json
+.cmake/
+.skbuild-info.json
+
+# Generated LEMON configuration from an in-tree CMake configure.
+thirdparty/Limbo/limbo/thirdparty/lemon/cmake/LEMONConfig.cmake
+thirdparty/Limbo/limbo/thirdparty/lemon/lemon/config.h
+thirdparty/Limbo/limbo/thirdparty/lemon/lemon/lemon.pc

@@ -53,7 +53,7 @@ class WeightedAverageWirelengthFunction(Function):
         ctx.pin2net_map = pin2net_map
         ctx.net_weights = net_weights
         ctx.net_mask = net_mask
-        ctx.pin_mask = pin_mask
+        ctx.pin_mask = pin_mask.bool()
         ctx.inv_gamma = inv_gamma
         ctx.pos = pos
         ctx.exp_xy = output[1]
@@ -118,7 +118,7 @@ class WeightedAverageWirelengthAtomicFunction(Function):
         ctx.netpin_start = netpin_start
         ctx.net_weights = net_weights
         ctx.net_mask = net_mask
-        ctx.pin_mask = pin_mask
+        ctx.pin_mask = pin_mask.bool()
         ctx.inv_gamma = inv_gamma
         ctx.exp_xy = output[1]
         ctx.exp_nxy = output[2]
@@ -184,7 +184,7 @@ class WeightedAverageWirelengthMergedFunction(Function):
         ctx.netpin_start = netpin_start
         ctx.net_weights = net_weights
         ctx.net_mask = net_mask
-        ctx.pin_mask = pin_mask
+        ctx.pin_mask = pin_mask.bool()
         ctx.inv_gamma = inv_gamma
         ctx.grad_intermediate = output[1]
         ctx.pos = pos

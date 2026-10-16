@@ -22,7 +22,15 @@ class NesterovAcceleratedGradientOptimizer(Optimizer):
     http://cseweb.ucsd.edu/~jlu/papers/eplace-todaes14/paper.pdf
     """
 
-    def __init__(self, params, lr=required, obj_and_grad_fn=required, constraint_fn=None, use_bb=True):
+    def __init__(
+        self,
+        params,
+        lr=required,
+        obj_and_grad_fn=required,
+        constraint_fn=None,
+        use_bb=True,
+        max_step_size=None,
+    ):
         """
         @brief initialization
         @param params variable to optimize
@@ -51,10 +59,72 @@ class NesterovAcceleratedGradientOptimizer(Optimizer):
         self.obj_and_grad_fn = obj_and_grad_fn
         self.constraint_fn = constraint_fn
         self.use_bb = use_bb
+        if max_step_size is not None and max_step_size <= 0.0:
+            raise ValueError("Invalid max_step_size: {}".format(max_step_size))
+        self.max_step_size = max_step_size
 
         # I do not know how to get generator's length
         if len(self.param_groups) != 1:
             raise ValueError("Only parameters with single tensor is supported")
+
+    def _bound_step_size(self, step_size):
+        """Bound the scalar Nesterov/BB step while preserving its device/dtype."""
+        if not torch.is_tensor(step_size):
+            step_size = torch.as_tensor(
+                step_size,
+                dtype=self.param_groups[0]["params"][0].dtype,
+                device=self.param_groups[0]["params"][0].device,
+            )
+        initial_step = torch.as_tensor(
+            self.param_groups[0]["lr"], dtype=step_size.dtype, device=step_size.device
+        )
+        step_size = torch.where(
+            torch.isfinite(step_size) & (step_size > 0), step_size, initial_step
+        )
+        if self.max_step_size is not None:
+            step_size = torch.clamp(step_size, min=0.0, max=float(self.max_step_size))
+        return step_size
+
+    def rebase_objective_state(self, *, reason):
+        """Re-anchor objective history at the live parameter position."""
+        invalidated_fields = (
+            "g_k",
+            "obj_k",
+            "a_k",
+            "alpha_k",
+            "v_k_1",
+            "g_k_1",
+            "obj_k_1",
+            "v_kp1",
+        )
+        parameter_count = 0
+        obj_eval_count = 0
+        for group in self.param_groups:
+            parameters = list(group["params"])
+            parameter_count += len(parameters)
+            obj_eval_count += int(group.get("obj_eval_count", 0))
+            # Keep the current point as the new major/reference point.  The
+            # gradient and acceleration history below belongs to the old
+            # objective and cannot be reused after a Pin2Pin generation change.
+            group["u_k"] = [parameter.data.clone() for parameter in parameters]
+            group["v_k"] = parameters
+            for field in invalidated_fields:
+                group[field] = []
+            group["v_kp1"] = [None] * len(parameters)
+            for parameter in parameters:
+                if parameter.grad is None:
+                    parameter.grad = torch.zeros_like(parameter)
+                else:
+                    parameter.grad.zero_()
+        return {
+            "status": "rebased",
+            "reason": str(reason),
+            "parameter_count": parameter_count,
+            "obj_eval_count": obj_eval_count,
+            "parameter_gradient_reset": "zero_sentinel",
+            "reanchored_fields": ["u_k", "v_k"],
+            "invalidated_fields": list(invalidated_fields) + ["v_kp1"],
+        }
 
     def __setstate__(self, state):
         super(NesterovAcceleratedGradientOptimizer, self).__setstate__(state)
@@ -82,9 +152,10 @@ class NesterovAcceleratedGradientOptimizer(Optimizer):
                     continue
                 if not group['u_k']:
                     group['u_k'].append(p.data.clone())
-                    # directly use p as v_k to save memory
-                    # group['v_k'].append(torch.autograd.Variable(p.data, requires_grad=True))
+                if not group['v_k']:
+                    # Directly use p as v_k to save memory.
                     group['v_k'].append(p)
+                if not group['g_k']:
                     obj, grad = obj_and_grad_fn(group['v_k'][i])
                     group['g_k'].append(grad.data.clone())  # must clone
                     group['obj_k'].append(obj.data.clone())
@@ -107,9 +178,11 @@ class NesterovAcceleratedGradientOptimizer(Optimizer):
                 g_k_1 = group['g_k_1'][i]
                 obj_k_1 = group['obj_k_1'][i]
                 if not group['alpha_k']:
-                    group['alpha_k'].append(
-                        (v_k - v_k_1).norm(p=2) / (g_k - g_k_1).norm(p=2))
+                    group['alpha_k'].append(self._bound_step_size(
+                        (v_k - v_k_1).norm(p=2) /
+                        (g_k - g_k_1).norm(p=2)))
                 alpha_k = group['alpha_k'][i]
+                alpha_k.data.copy_(self._bound_step_size(alpha_k).data)
 
                 if group['v_kp1'][i] is None:
                     group['v_kp1'][i] = torch.autograd.Variable(
@@ -138,6 +211,7 @@ class NesterovAcceleratedGradientOptimizer(Optimizer):
                     # tt = time.time()
                     alpha_kp1 = torch.sqrt(
                         torch.sum((v_kp1.data - v_k.data)**2) / torch.sum((g_kp1.data - g_k.data)**2))
+                    alpha_kp1 = self._bound_step_size(alpha_kp1)
                     # alpha_kp1 = torch.dist(v_kp1.data, v_k.data, p=2) / torch.dist(g_kp1.data, g_k.data, p=2)
                     backtrack_cnt += 1
                     group['obj_eval_count'] += 1
@@ -216,9 +290,11 @@ class NesterovAcceleratedGradientOptimizer(Optimizer):
                         torch.zeros_like(v_k), requires_grad=True)
                 v_kp1 = group['v_kp1'][i]
                 if not group['alpha_k']:
-                    group['alpha_k'].append(
-                        (v_k - v_k_1).norm(p=2) / (g_k - g_k_1).norm(p=2))
+                    group['alpha_k'].append(self._bound_step_size(
+                        (v_k - v_k_1).norm(p=2) /
+                        (g_k - g_k_1).norm(p=2)))
                 alpha_k = group['alpha_k'][i]
+                alpha_k.data.copy_(self._bound_step_size(alpha_k).data)
                 # line search with alpha_k as hint
                 a_kp1 = (1 + (4 * a_k.pow(2) + 1).sqrt()) / 2
                 coef = (a_k - 1) / a_kp1
@@ -231,6 +307,7 @@ class NesterovAcceleratedGradientOptimizer(Optimizer):
                     lip_step_size = (s_k.norm(p=2) / y_k.norm(p=2)).data
                     step_size = bb_short_step_size if bb_short_step_size > 0 else min(
                         lip_step_size, alpha_k)
+                    step_size = self._bound_step_size(step_size)
 
                 # one step
                 u_kp1 = v_k - step_size * g_k

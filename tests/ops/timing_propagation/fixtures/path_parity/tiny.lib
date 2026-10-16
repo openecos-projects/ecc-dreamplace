@@ -1,0 +1,167 @@
+library (tiny_path_parity) {
+  delay_model : table_lookup;
+  time_unit : "1ps";
+  capacitive_load_unit (1,pf);
+  current_unit : "1mA";
+  voltage_unit : "1V";
+  pulling_resistance_unit : "1kohm";
+  leakage_power_unit : "1nW";
+  input_threshold_pct_fall : 50;
+  input_threshold_pct_rise : 50;
+  output_threshold_pct_fall : 50;
+  output_threshold_pct_rise : 50;
+  slew_lower_threshold_pct_fall : 20;
+  slew_lower_threshold_pct_rise : 20;
+  slew_upper_threshold_pct_fall : 80;
+  slew_upper_threshold_pct_rise : 80;
+
+  lu_table_template (delay_2x2) {
+    variable_1 : input_net_transition;
+    variable_2 : total_output_net_capacitance;
+    index_1 ("1, 10");
+    index_2 ("0.001, 0.01");
+  }
+
+  cell (BUF) {
+    area : 1.0;
+    pin (A) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      max_capacitance : 0.1;
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        timing_type : combinational;
+        cell_rise (delay_2x2) {
+          index_1 ("1, 10");
+          index_2 ("0.001, 0.01");
+          values ("10, 10", "10, 10");
+        }
+        cell_fall (delay_2x2) {
+          index_1 ("1, 10");
+          index_2 ("0.001, 0.01");
+          values ("12, 12", "12, 12");
+        }
+        rise_transition (delay_2x2) {
+          index_1 ("1, 10");
+          index_2 ("0.001, 0.01");
+          values ("1, 1", "1, 1");
+        }
+        fall_transition (delay_2x2) {
+          index_1 ("1, 10");
+          index_2 ("0.001, 0.01");
+          values ("1, 1", "1, 1");
+        }
+      }
+    }
+  }
+
+  cell (INV) {
+    area : 1.0;
+    pin (A) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (Y) {
+      direction : output;
+      function : "!A";
+      max_capacitance : 0.1;
+      timing () {
+        related_pin : "A";
+        timing_sense : negative_unate;
+        timing_type : combinational;
+        cell_rise (delay_2x2) {
+          index_1 ("1, 10");
+          index_2 ("0.001, 0.01");
+          values ("20, 20", "20, 20");
+        }
+        cell_fall (delay_2x2) {
+          index_1 ("1, 10");
+          index_2 ("0.001, 0.01");
+          values ("22, 22", "22, 22");
+        }
+        rise_transition (delay_2x2) {
+          index_1 ("1, 10");
+          index_2 ("0.001, 0.01");
+          values ("1, 1", "1, 1");
+        }
+        fall_transition (delay_2x2) {
+          index_1 ("1, 10");
+          index_2 ("0.001, 0.01");
+          values ("1, 1", "1, 1");
+        }
+      }
+    }
+  }
+
+  cell (XOR2) {
+    area : 1.0;
+    pin (A) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (B) {
+      direction : input;
+      capacitance : 0.001;
+    }
+    pin (Y) {
+      direction : output;
+      function : "A ^ B";
+      max_capacitance : 0.1;
+      timing () {
+        related_pin : "A";
+        timing_sense : non_unate;
+        timing_type : combinational;
+        cell_rise (delay_2x2) {
+          index_1 ("1, 10");
+          index_2 ("0.001, 0.01");
+          values ("30, 30", "30, 30");
+        }
+        cell_fall (delay_2x2) {
+          index_1 ("1, 10");
+          index_2 ("0.001, 0.01");
+          values ("32, 32", "32, 32");
+        }
+        rise_transition (delay_2x2) {
+          index_1 ("1, 10");
+          index_2 ("0.001, 0.01");
+          values ("1, 1", "1, 1");
+        }
+        fall_transition (delay_2x2) {
+          index_1 ("1, 10");
+          index_2 ("0.001, 0.01");
+          values ("1, 1", "1, 1");
+        }
+      }
+      timing () {
+        related_pin : "B";
+        timing_sense : non_unate;
+        timing_type : combinational;
+        cell_rise (delay_2x2) {
+          index_1 ("1, 10");
+          index_2 ("0.001, 0.01");
+          values ("30, 30", "30, 30");
+        }
+        cell_fall (delay_2x2) {
+          index_1 ("1, 10");
+          index_2 ("0.001, 0.01");
+          values ("32, 32", "32, 32");
+        }
+        rise_transition (delay_2x2) {
+          index_1 ("1, 10");
+          index_2 ("0.001, 0.01");
+          values ("1, 1", "1, 1");
+        }
+        fall_transition (delay_2x2) {
+          index_1 ("1, 10");
+          index_2 ("0.001, 0.01");
+          values ("1, 1", "1, 1");
+        }
+      }
+    }
+  }
+}

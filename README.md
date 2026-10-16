@@ -210,6 +210,27 @@ dist/ecc_dreamplace-*
 
 The uv build runs the package build defined by `pyproject.toml`.
 
+
+### Controlling Parallelism
+
+`ecc-dreamplace` has large C++/pybind translation units that can consume
+significant memory during parallel compilation. On systems with limited memory
+(for example, 24 GB), building with the default Ninja parallelism may trigger
+the OOM killer or cause the system to thrash.
+
+The Nix build honors `--cores` via `NIX_BUILD_CORES` (no `--impure` needed).
+See https://nix.dev/manual/nix/2.24/advanced-topics/cores-vs-jobs.
+
+```bash
+# Default: uses the machine's configured Nix cores setting.
+nix build .#default
+
+# Limit to 4 parallel jobs.
+nix build .#default --cores 4
+
+# Single job (most memory-safe, recommended for constrained environments).
+nix build .#default --cores 1
+```
 # Physical Design Flow
 
 The physical design flow requires RTL, Python, and Tcl files from the [TILOS-MacroPlacement](https://github.com/TILOS-AI-Institute/MacroPlacement) repository. Only the codes that we have added and modified are provided in [scripts](scripts). 

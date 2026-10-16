@@ -20,6 +20,8 @@ from dreamplace.flows.flow_profiles import (
     PIN2PIN_TIMING_PLACEMENT_DEFAULTS as _PIN2PIN_TIMING_PLACEMENT_DEFAULTS,
     PROXIMAL_ALTERNATING_JOINT_DEFAULTS as _PROXIMAL_ALTERNATING_JOINT_DEFAULTS,
     SEGMENT_COUNT_DIRECT_JOINT_DEFAULTS as _SEGMENT_COUNT_DIRECT_JOINT_DEFAULTS,
+    DISCRETE_ALTERNATING_SIZING_BUFFERING_DEFAULTS as _DISCRETE_ALTERNATING_DEFAULTS,
+    DISCRETE_ALTERNATING_SIZING_BUFFERING_PROFILE,
     SEGMENT_JOINT_FIXED_WINDOW_SCHEDULE,
     SEGMENT_JOINT_OVERFLOW_MILESTONE_SCHEDULE,
     SIZING_DEFAULTS as _SIZING_DEFAULTS,
@@ -54,6 +56,13 @@ def _has_any_enabled(params, names):
 
 def infer_flow_kind(params):
     explicit = getattr(params, "flow_kind", None) or getattr(params, "flow", None)
+    profile = _joint_quality_profile(params)
+    if profile == DISCRETE_ALTERNATING_SIZING_BUFFERING_PROFILE and explicit in (
+        None,
+        "placement",
+        "joint",
+    ):
+        return FlowKind.JOINT
     if explicit:
         return FlowKind(str(explicit))
 
@@ -245,6 +254,11 @@ def _set_joint_stage_optimizer_default(params):
     buffering or sizing parameter group, and nesterov rejects any group other
     than "placement". Switch the inherited optimizer before the run starts.
     """
+    if (
+        _joint_quality_profile(params)
+        == DISCRETE_ALTERNATING_SIZING_BUFFERING_PROFILE
+    ):
+        return
     stages = getattr(params, "global_place_stages", None) or []
     sizing_enabled = bool(getattr(params, "joint_segment_sizing_enabled", True))
     no_sizing_segment_joint = (
@@ -435,10 +449,20 @@ def _apply_discrete_net_gradient_defaults(params, flow_kind):
         flow_kind == FlowKind.JOINT
         and _joint_quality_profile(params) == "segment_count_direct_joint_v1"
     )
+    discrete_alternating_joint = (
+        flow_kind == FlowKind.JOINT
+        and _joint_quality_profile(params)
+        == DISCRETE_ALTERNATING_SIZING_BUFFERING_PROFILE
+    )
     inflation_placement = (
         flow_kind == FlowKind.PLACEMENT and _param_enabled(params, "timing_opt_enabled")
     )
-    if flow_kind != FlowKind.BUFFERING and not canonical_joint and not inflation_placement:
+    if (
+        flow_kind != FlowKind.BUFFERING
+        and not canonical_joint
+        and not discrete_alternating_joint
+        and not inflation_placement
+    ):
         raise ValueError("discrete_net_gradient requires standalone flow_kind=buffering")
     candidate_drive_type_mode = str(
         getattr(params, "buffering_candidate_drive_type_mode", "single_fixed")
@@ -626,6 +650,16 @@ def apply_flow_defaults(params):
         if _joint_quality_profile(params) == "staged_smoke_v1":
             for name, value in _STAGED_SMOKE_JOINT_DEFAULTS:
                 _set_flow_default(params, name, value, force=True)
+        if (
+            _joint_quality_profile(params)
+            == DISCRETE_ALTERNATING_SIZING_BUFFERING_PROFILE
+        ):
+            for name, value in _DISCRETE_ALTERNATING_DEFAULTS:
+                # This named profile is a complete flow contract.  In
+                # particular, it must replace inherited segment buffering
+                # defaults and legacy strategy values rather than letting the
+                # mode-specific guard in _set_flow_default preserve them.
+                setattr(params, name, value)
         if _joint_quality_profile(params) == "segment_count_direct_joint_v1":
             for name, value in _SEGMENT_COUNT_DIRECT_JOINT_DEFAULTS:
                 if name in {
@@ -796,7 +830,10 @@ def apply_flow_defaults(params):
             else:
                 _set_flow_default(params, name, value, force=True)
     _resolve_timing_propagation_device_default(params)
-    if _param_enabled(params, "timing_opt_enabled"):
+    if (
+        _param_enabled(params, "timing_opt_enabled")
+        and not getattr(params, "_timing_propagation_device_explicit", False)
+    ):
         params.timing_propagation_device = "cpu"
     _normalize_openroad_vt_suffixes(params)
     _resolve_size_parameterization_defaults(params)

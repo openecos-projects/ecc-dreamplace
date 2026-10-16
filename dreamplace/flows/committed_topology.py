@@ -61,7 +61,14 @@ def finalize_discrete_window(
     summary = {"status": "pending", **owner.terminal_summary, "request": request.to_summary(),
                "atomic_across_sizing_and_buffer": False}
     try:
-        summary["native_sizing"] = owner.sync_native_sizing()
+        sync_native_sizing = getattr(
+            owner,
+            "sync_native_sizing",
+            getattr(owner, "_sync_native_sizing", None),
+        )
+        if not callable(sync_native_sizing):
+            raise RuntimeError("S5B1 terminal owner has no native sizing sync")
+        summary["native_sizing"] = sync_native_sizing()
         write_back_movable_lpos(engine.placer.pos[0], params, placedb)
         backend = engine._physical_mutation_backend()
         commit = backend.commit_buffers(request, output_dir=result_dir)

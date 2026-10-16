@@ -257,6 +257,14 @@ def build_commit_action_candidates(
                 int(value) for value in list(entry.get("child_node_ids", []) or [])
             ],
             "bsu": bsu,
+            # Typed candidate buffering keeps the drive type separate from
+            # its family-local BSU index. Preserve that identity in the
+            # compact action so projection validation and the native commit
+            # path observe the same selected type.
+            "drive_type_id": int(entry.get("drive_type_id", bsu)),
+            "drive_type_master_name": str(
+                entry.get("drive_type_master_name", buffer_master_name)
+            ),
             "bsu_selection_mode": str(entry.get("bsu_selection_mode", "fixed_bsu")),
             "bsu_candidate_count": int(entry.get("bsu_candidate_count", 1) or 1),
             "bsu_candidate_evaluations": [

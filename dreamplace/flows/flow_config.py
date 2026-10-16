@@ -294,8 +294,7 @@ def _joint_quality_profile(params):
 
 
 def _mode_buffering_defaults(params):
-    if _buffering_mode(params) == "candidate"
-                and str(getattr(params, "buffering_candidate_strategy", "continuous") or "continuous") == "discrete_net_gradient":
+    if _buffering_mode(params) == "candidate":
         return CANDIDATE_BUFFERING_DEFAULTS
     return SEGMENT_BUFFERING_DEFAULTS
 
@@ -424,8 +423,7 @@ def _apply_discrete_net_gradient_defaults(params, flow_kind):
                 "buffering_mode=candidate"
             )
         strategy = segment_strategy
-    elif mode == "candidate"
-                and str(getattr(params, "buffering_candidate_strategy", "continuous") or "continuous") == "discrete_net_gradient":
+    elif mode == "candidate":
         if segment_strategy != "continuous":
             raise ValueError("discrete_net_gradient requires buffering_mode=segment")
         strategy = candidate_strategy
@@ -484,8 +482,7 @@ def _apply_discrete_net_gradient_defaults(params, flow_kind):
         getattr(params, "buffering_segment_projection_require_setup_criticality", False)
     ):
         raise ValueError("discrete_net_gradient does not allow criticality filtering")
-    if mode == "candidate"
-                and str(getattr(params, "buffering_candidate_strategy", "continuous") or "continuous") == "discrete_net_gradient":
+    if mode == "candidate":
         if bool(getattr(params, "_buffering_continuous_lr_explicit", False)):
             raise ValueError(
                 "candidate discrete_net_gradient does not use buffering_continuous_lr"
@@ -760,7 +757,11 @@ def apply_flow_defaults(params):
             candidate_buffering_mode = (
                 str(getattr(params, "buffering_mode", "segment") or "segment")
                 == "candidate"
-                and str(getattr(params, "buffering_candidate_strategy", "continuous") or "continuous") == "discrete_net_gradient"
+                and str(
+                    getattr(params, "buffering_candidate_strategy", "continuous")
+                    or "continuous"
+                )
+                == "discrete_net_gradient"
             )
             if candidate_buffering_mode and name in {
                 "buffering_mode",

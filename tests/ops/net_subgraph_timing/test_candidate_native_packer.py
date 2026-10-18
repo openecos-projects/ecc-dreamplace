@@ -238,6 +238,33 @@ def test_candidate_native_active_view_matches_python_reference():
     assert native_provider.metadata["native_active_view_selector_count"] == 1
 
 
+def test_candidate_native_active_view_falls_back_for_stale_view_schema(monkeypatch):
+    payload, state = _two_net_candidate_payload()
+
+    def stale_selector(*args, **kwargs):
+        return {}
+
+    import dreamplace.ops.net_subgraph_timing.dynamic_provider as dynamic_provider
+
+    monkeypatch.setattr(
+        dynamic_provider,
+        "select_packed_candidate_inputs_native",
+        stale_selector,
+    )
+    provider = dynamic_provider.RelaxedBufferDynamicNetProvider(
+        static_payload=payload,
+        buffer_state=state,
+    )
+
+    view = provider._active_view({2})
+
+    assert view["node_indices_cpu"].numel() > 0
+    assert provider.metadata["active_view_selector_used"] == "python_reference"
+    assert provider.metadata["active_view_selector_fallback_reason"].startswith(
+        "native_view_missing_fields:"
+    )
+
+
 def test_candidate_native_active_view_preserves_global_candidate_gradient_row():
     payload, state = _two_net_candidate_payload()
     provider = RelaxedBufferDynamicNetProvider(

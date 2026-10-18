@@ -390,14 +390,38 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
                 active_net_ids=cache_key,
             )
             elapsed_ms = (time.perf_counter() - started_at) * 1000.0
-            view["cache_key"] = cache_key
-            self._active_view_cache[cache_key] = view
-            self.metadata["active_view_build_count"] += 1
-            self.metadata["active_view_selector_used"] = "native"
-            self.metadata["active_view_selector_fallback_reason"] = None
-            self.metadata["native_active_view_selector_count"] += 1
-            self.metadata["native_active_view_selector_ms"] += elapsed_ms
-            return view
+            required_view_keys = (
+                "net_ids",
+                "net_indices_cpu",
+                "candidate_indices_cpu",
+                "node_indices_cpu",
+                "sink_indices_cpu",
+                "static",
+                "candidate_node_id_cpu",
+                "sink_pin_id_cpu",
+                "sink_net_id_cpu",
+            )
+            missing_view_keys = [
+                key for key in required_view_keys if key not in view
+            ]
+            if not missing_view_keys:
+                view["cache_key"] = cache_key
+                self._active_view_cache[cache_key] = view
+                self.metadata["active_view_build_count"] += 1
+                self.metadata["active_view_selector_used"] = "native"
+                self.metadata["active_view_selector_fallback_reason"] = None
+                self.metadata["native_active_view_selector_count"] += 1
+                self.metadata["native_active_view_selector_ms"] += elapsed_ms
+                return view
+            # A stale qualified extension can expose the native selector but
+            # return an older view schema.  Rebuild the same active view from
+            # the frozen packed payload instead of passing a partial view to
+            # CandidateLiveGeometry.  This keeps diff_opt independently
+            # restartable from a DEF while remaining compatible with older
+            # native runtimes during source/runtime rollout.
+            fallback_reason = (
+                "native_view_missing_fields:" + ",".join(missing_view_keys)
+            )
 
         topo = self.static_payload["net_flat_topo_sort"].detach().cpu().tolist()
         topo_start = self.static_payload["net_flat_topo_sort_start"].detach().cpu().tolist()

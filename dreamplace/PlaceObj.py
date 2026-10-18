@@ -928,7 +928,7 @@ class PlaceObj(nn.Module):
         self.timing_wns_coeff = float(getattr(params, "timing_wns_coeff", 0.01))
         self.timing_tns_coeff = float(getattr(params, "timing_tns_coeff", 0.0001))
         self.timing_grad_balance_target_ratio = float(
-            getattr(params, "timing_grad_balance_target_ratio", 0.2)
+            getattr(params, "timing_grad_balance_target_ratio", 0.01)
         )
         if self.timing_grad_balance_target_ratio < 0.0:
             raise ValueError("timing_grad_balance_target_ratio must be nonnegative")
@@ -10491,7 +10491,7 @@ class PlaceObj(nn.Module):
         LOWER_PCOF = params.RePlAce_LOWER_PCOF
         UPPER_PCOF = params.RePlAce_UPPER_PCOF
         timing_coeff_growth_factor = float(
-            getattr(params, "timing_coeff_growth_factor", 1.0)
+            getattr(params, "timing_coeff_growth_factor", 1.01)
         )
         if not math.isfinite(timing_coeff_growth_factor) or timing_coeff_growth_factor <= 0:
             raise ValueError("timing_coeff_growth_factor must be a positive finite float")

@@ -115,14 +115,14 @@ The fixed preset may remain in the object when switching `mode` to `inherit`;
 inherit mode always uses the live placement values.
 
 `timing_coeff_growth_factor` controls the WNS/TNS coefficient multiplier at
-each GP density-weight update. The default `1.0` freezes the coefficients;
-`1.01` grows them, and values between zero and one decay them.
+each GP density-weight update. The default `1.01` grows the coefficients;
+`1.0` freezes them, and values between zero and one decay them.
 The multiplier must be positive and finite. Slew/cap weights and the outer norm
 weight retain their own settings. Inherit-mode sizing windows read the resulting
 live coefficients; fixed-mode windows use their configured values. Standalone
 `size_only` sizing, including `diff_sizing` S50, skips this growth schedule.
 
-`timing_grad_balance_target_ratio` defaults to 0.2 for direct-loss placement.
+`timing_grad_balance_target_ratio` defaults to 0.01 for direct-loss placement.
 At the first active timing step, the timing and wirelength gradient L1 norms
 determine the outer timing weight, which is then reused. Set the ratio to 0.0
 to disable balancing and retain weight 1.0. It is a gradient-ratio target,

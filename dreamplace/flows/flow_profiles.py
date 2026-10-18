@@ -159,6 +159,7 @@ PIN2PIN_TIMING_PLACEMENT_DEFAULTS = (
 
 SIZING_DEFAULTS = (
     ("placement_sizing_mode", "size_only"),
+    ("diff_sizing_terminal_gr_sta_enabled", 0),
     ("sizing_parameterization", "logits"),
     ("real_size_learning_rate", 0.1),
     ("real_size_execution_mode", "continuous_only"),

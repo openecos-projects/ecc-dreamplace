@@ -8,6 +8,10 @@ def configure_gr_sizing(params):
     if mode not in {"placement", "gr"}:
         raise ValueError("timing_rc_mode must be placement or gr")
     params.timing_rc_mode = mode
+    terminal_gr_sta_enabled = getattr(params, "diff_sizing_terminal_gr_sta_enabled", 0)
+    if terminal_gr_sta_enabled not in (0, 1, False, True):
+        raise ValueError("diff_sizing_terminal_gr_sta_enabled must be 0 or 1")
+    params.diff_sizing_terminal_gr_sta_enabled = int(bool(terminal_gr_sta_enabled))
     if mode == "placement":
         return
     if getattr(params, "place_io_engine", "ieda") != "ecc" or params.gpu:

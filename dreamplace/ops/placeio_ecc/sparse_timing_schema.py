@@ -64,6 +64,13 @@ def _range(values, count, name, minimum=0):
     _require(np.all((values >= minimum) & (values < count)), f"invalid {name} identity")
 
 
+def _same_launch_tag(tags, source, sink):
+    """Allow a physical inout edge to change load/driver role."""
+    source_tag = tags[source].split("\x1f", 1)
+    sink_tag = tags[sink].split("\x1f", 1)
+    return len(source_tag) == len(sink_tag) == 2 and source_tag[1] == sink_tag[1]
+
+
 @dataclass(frozen=True)
 class SparseTimingView:
     arrays: dict[str, np.ndarray]
@@ -213,8 +220,35 @@ def read_sparse_timing_view(pydb):
         _range(edges[:, 1:], states, f"{name} state")
         src, dst = edges[:, 1], edges[:, 2]
         if name != "slew_only_cell_edges":
-            for field, message in (("state_domain", "changes domain"), ("state_tag", "needs unsupported tag transition"), ("state_source_type", "changes source type")):
-                _require(np.array_equal(arrays[field][src], arrays[field][dst]), f"{name} {message}")
+            _require(
+                np.array_equal(
+                    arrays["state_domain"][src], arrays["state_domain"][dst]
+                ),
+                f"{name} changes domain",
+            )
+            _require(
+                np.array_equal(
+                    arrays["state_source_type"][src],
+                    arrays["state_source_type"][dst],
+                ),
+                f"{name} changes source type",
+            )
+            tag_equal = arrays["state_tag"][src] == arrays["state_tag"][dst]
+            tag_role_transition = np.array(
+                [
+                    _same_launch_tag(tags, int(a), int(b))
+                    for a, b in zip(
+                        arrays["state_tag"][src],
+                        arrays["state_tag"][dst],
+                        strict=True,
+                    )
+                ],
+                dtype=bool,
+            )
+            _require(
+                np.all(tag_equal | tag_role_transition),
+                f"{name} needs unsupported tag transition",
+            )
         if name == "net_edges":
             _require(
                 np.array_equal(edges[:, 0], state_pin[dst]), "net base sink mismatch"

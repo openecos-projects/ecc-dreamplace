@@ -32,6 +32,23 @@ def _file_hash(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+_SDC_GET_PORTS = re.compile(r"\[get_ports\b(.*?)\]", flags=re.IGNORECASE | re.DOTALL)
+_SDC_SET = re.compile(r"^\s*set\s+([A-Za-z_]\w*)\s+(.+?)\s*$", flags=re.IGNORECASE)
+_SDC_CLOCK = re.compile(
+    r"\b(?:create_clock|create_generated_clock)\b(.*?)(?:;|\n|$)",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_SDC_VARIABLE = re.compile(r"\$([A-Za-z_]\w*)")
+
+
+def _sdc_words(value):
+    return [
+        word.strip('{}"')
+        for word in value.strip().strip("{}").split()
+        if word.strip('{}"') and not word.startswith("-")
+    ]
+
+
 def _sdc_clock_port_names(params):
     """Return top-level ports used as SDC clock sources.
 
@@ -47,13 +64,47 @@ def _sdc_clock_port_names(params):
         text = Path(str(sdc_path)).read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return set()
+    text = text.replace("\\\n", " ")
+    text = "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+    variables = {}
+    port_variables = set()
+    for line in text.splitlines():
+        match = _SDC_SET.match(line)
+        if match is None:
+            continue
+        name, value = match.groups()
+        ports = _SDC_GET_PORTS.search(value)
+        variables[name] = _sdc_words(ports.group(1) if ports else value)
+        if ports:
+            port_variables.add(name)
+
+    def resolve(name, seen=frozenset()):
+        if name in seen:
+            return set()
+        result = set()
+        for word in variables.get(name, ()):
+            if word.startswith("$"):
+                result.update(resolve(word[1:], seen | {name}))
+            else:
+                result.add(word)
+        return result
+
+    def collect(expression):
+        result = set()
+        for body in _SDC_GET_PORTS.findall(expression):
+            for word in _sdc_words(body):
+                if word.startswith("$"):
+                    result.update(resolve(word[1:]))
+                else:
+                    result.add(word)
+        for name in _SDC_VARIABLE.findall(expression):
+            if name in port_variables:
+                result.update(resolve(name))
+        return result
+
     names = set()
-    for match in re.finditer(
-        r"\b(?:create_clock|create_generated_clock)\b(?:(?!\n).)*?\[get_ports\s+([^\]\s]+)",
-        text,
-        flags=re.IGNORECASE,
-    ):
-        names.add(match.group(1).strip("{}"))
+    for match in _SDC_CLOCK.finditer(text):
+        names.update(collect(match.group(1)))
     return names
 
 

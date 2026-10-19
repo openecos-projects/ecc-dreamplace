@@ -105,3 +105,16 @@ def test_prepare_reports_snapshot_eligibility(
         "filtered_nets": filtered,
         "covered_pins": 2 if net_ids else 0,
     }
+
+
+def test_sdc_clock_ports_include_generated_clock(tmp_path):
+    sdc = tmp_path / "fixture.sdc"
+    sdc.write_text(
+        "create_clock -name clk -period 1.0 [get_ports {clk}]\n"
+        "create_generated_clock -name div -source [get_ports clk] "
+        "[get_pins u_div/Q]\n"
+        "create_clock -name clk_copy -period 1.0 [get_ports clk_copy]\n"
+    )
+    params = SimpleNamespace(design_inputs={"sdc": str(sdc)})
+
+    assert gr_sizing._sdc_clock_port_names(params) == {"clk", "clk_copy"}

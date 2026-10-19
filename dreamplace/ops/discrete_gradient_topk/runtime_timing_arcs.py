@@ -72,6 +72,53 @@ def map_liberty_arc_transition(
     }
 
 
+def _build_arc_row_index(arcs, pin2node, num_instances):
+    """Build a reusable node-to-arc-row CSR index for one arc table."""
+    output_pin = arcs[:, 1].detach().to(device="cpu", dtype=torch.long)
+    pin2node_cpu = pin2node.detach().to(device="cpu", dtype=torch.long)
+    valid_pin = (output_pin >= 0) & (output_pin < int(pin2node_cpu.numel()))
+    valid_rows = torch.nonzero(valid_pin, as_tuple=False).flatten()
+    if valid_rows.numel() == 0:
+        return torch.empty(0, dtype=torch.long), torch.zeros(
+            int(num_instances) + 1, dtype=torch.long
+        )
+    node_ids = pin2node_cpu[output_pin[valid_rows]]
+    valid_node = (node_ids >= 0) & (node_ids < int(num_instances))
+    valid_rows = valid_rows[valid_node]
+    node_ids = node_ids[valid_node]
+    if valid_rows.numel() == 0:
+        return torch.empty(0, dtype=torch.long), torch.zeros(
+            int(num_instances) + 1, dtype=torch.long
+        )
+    order = torch.argsort(node_ids, stable=True)
+    row_ids = valid_rows[order]
+    sorted_nodes = node_ids[order]
+    counts = torch.bincount(sorted_nodes, minlength=int(num_instances))
+    offsets = torch.zeros(int(num_instances) + 1, dtype=torch.long)
+    offsets[1:] = torch.cumsum(counts, dim=0)
+    return row_ids, offsets
+
+
+def _changed_arc_rows(index, changed_inst_ids):
+    """Gather indexed arc rows for the changed instances."""
+    row_ids, offsets = index
+    if row_ids.numel() == 0:
+        return row_ids
+    changed = torch.unique(
+        torch.as_tensor(changed_inst_ids, dtype=torch.long, device="cpu").reshape(-1)
+    )
+    changed = changed[(changed >= 0) & (changed + 1 < offsets.numel())]
+    if changed.numel() == 0:
+        return row_ids[:0]
+    pieces = []
+    for node_id in changed.tolist():
+        begin = int(offsets[node_id].item())
+        end = int(offsets[node_id + 1].item())
+        if end > begin:
+            pieces.append(row_ids[begin:end])
+    return torch.cat(pieces) if pieces else row_ids[:0]
+
+
 def sync_timing_arc_lut_rows(data, placedb, timing_op, changed_inst_ids):
     """Retarget fixed-topology timing arcs to the current Liberty masters."""
     required = (
@@ -98,16 +145,30 @@ def sync_timing_arc_lut_rows(data, placedb, timing_op, changed_inst_ids):
         dtype=torch.long,
         device=inst_cell_id.device,
     ).reshape(-1)
-    selected_inst = torch.zeros(
-        int(inst_cell_id.numel()),
-        dtype=torch.bool,
-        device=inst_cell_id.device,
-    )
-    selected_inst[changed] = True
 
     table_summaries = {}
-    transition_maps = {}
-    transition_summaries = {}
+    transition_maps = getattr(data, "_runtime_timing_arc_transition_cache", None)
+    if transition_maps is None:
+        transition_maps = {}
+        data._runtime_timing_arc_transition_cache = transition_maps
+    transition_summaries = getattr(
+        data, "_runtime_timing_arc_transition_summary_cache", None
+    )
+    if transition_summaries is None:
+        transition_summaries = {}
+        data._runtime_timing_arc_transition_summary_cache = transition_summaries
+    transition_signature = (id(arc_start), id(flat_arc_info))
+    if (
+        getattr(data, "_runtime_timing_arc_transition_cache_signature", None)
+        != transition_signature
+    ):
+        transition_maps.clear()
+        transition_summaries.clear()
+        data._runtime_timing_arc_transition_cache_signature = transition_signature
+    row_index_cache = getattr(data, "_runtime_timing_arc_row_index_cache", None)
+    if row_index_cache is None:
+        row_index_cache = {}
+        data._runtime_timing_arc_row_index_cache = row_index_cache
     total_updated = 0
     with torch.no_grad():
         for name in ("flat_inst_arcs_by_level", "endpoints_constraint_arcs"):
@@ -125,30 +186,45 @@ def sync_timing_arc_lut_rows(data, placedb, timing_op, changed_inst_ids):
                 raise RuntimeError(f"{name} must contain at least four columns")
             table_summary["row_count"] = int(arcs.shape[0])
 
-            output_pin = arcs[:, 1].long().to(pin2node.device)
-            valid_pin = (output_pin >= 0) & (output_pin < int(pin2node.numel()))
-            safe_pin = output_pin.clamp(
-                min=0,
-                max=max(int(pin2node.numel()) - 1, 0),
+            index_signature = (
+                id(arcs),
+                tuple(int(dim) for dim in arcs.shape),
+                id(pin2node),
+                tuple(int(dim) for dim in pin2node.shape),
             )
-            node_id = pin2node[safe_pin].long().to(inst_cell_id.device)
-            valid_node = valid_pin.to(inst_cell_id.device) & (node_id >= 0) & (
-                node_id < int(inst_cell_id.numel())
-            )
-            selected = valid_node & selected_inst[
-                node_id.clamp(
-                    min=0,
-                    max=max(int(inst_cell_id.numel()) - 1, 0),
+            cached_index = row_index_cache.get(name)
+            if (
+                not isinstance(cached_index, dict)
+                or cached_index.get("signature") != index_signature
+            ):
+                index = _build_arc_row_index(
+                    arcs,
+                    pin2node,
+                    int(inst_cell_id.numel()),
                 )
-            ]
-            selected_count = int(selected.sum().detach().cpu().item())
+                row_index_cache[name] = {
+                    "signature": index_signature,
+                    "index": index,
+                }
+            else:
+                index = cached_index["index"]
+            arc_rows = _changed_arc_rows(index, changed.detach().cpu())
+            selected_count = int(arc_rows.numel())
             table_summary["selected_row_count"] = selected_count
             if selected_count == 0:
                 table_summaries[name] = table_summary
                 continue
 
-            arc_rows = torch.nonzero(selected, as_tuple=False).flatten()
             arc_rows_on_table = arc_rows.to(arcs.device)
+            output_pin = arcs[arc_rows_on_table, 1].long().to(pin2node.device)
+            safe_pin = output_pin.clamp(
+                min=0,
+                max=max(int(pin2node.numel()) - 1, 0),
+            )
+            node_id = pin2node[safe_pin].long().to(inst_cell_id.device)
+            valid_node = (node_id >= 0) & (node_id < int(inst_cell_id.numel()))
+            if not bool(valid_node.all().detach().cpu().item()):
+                raise RuntimeError(f"{name} index contains an invalid instance node")
             old_arc_id = arcs[arc_rows_on_table, 3].long().to(flat_arc_info.device)
             if not bool(
                 ((old_arc_id >= 0) & (old_arc_id < int(flat_arc_info.shape[0])))
@@ -160,7 +236,7 @@ def sync_timing_arc_lut_rows(data, placedb, timing_op, changed_inst_ids):
                 raise RuntimeError(f"{name} contains an invalid Liberty arc id")
             old_arc_info = flat_arc_info[old_arc_id]
             source_cell = old_arc_info[:, 2].long().to(arc_start.device)
-            current_cell = inst_cell_id[node_id[arc_rows]].long().to(arc_start.device)
+            current_cell = inst_cell_id[node_id].long().to(arc_start.device)
             if not bool(
                 (
                     (source_cell >= 0)

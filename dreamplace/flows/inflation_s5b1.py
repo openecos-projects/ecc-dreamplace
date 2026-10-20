@@ -86,6 +86,12 @@ class InflationS5B1:
         self.native_cell_ids = data.inst_cell_id.detach().cpu().clone()
         self.terminal_request = None
         self.terminal_commit_started = False
+        # The native write-back path consumes this geometry even when
+        # routability inflation is disabled and no sizing window ran.
+        if not hasattr(data, "original_node_size_x"):
+            data.original_node_size_x = data.node_size_x.detach().clone()
+        if not hasattr(data, "original_node_size_y"):
+            data.original_node_size_y = data.node_size_y.detach().clone()
         placedb.cooptimization_geometry = data
 
     @contextmanager
@@ -709,8 +715,9 @@ class InflationS5B1:
         summary.update(window=self.window_count, stage=int(stage),
                        area={"before": before.__dict__, "after": after.__dict__},
                        native_sizing=self.sync_native_sizing())
-        if model.inflation_state.target_area is not None:
-            model.inflation_state.target_area = after.movable + after.filler
+        inflation_state = getattr(model, "inflation_state", None)
+        if inflation_state is not None and inflation_state.target_area is not None:
+            inflation_state.target_area = after.movable + after.filler
         model.refresh_routability_operators()
         model.refresh_after_geometry_change()
         self.summaries.append(summary)

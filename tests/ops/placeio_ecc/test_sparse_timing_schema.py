@@ -3,7 +3,6 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-
 from dreamplace.ops.placeio_ecc.sparse_timing_schema import (
     STATE_KEYS,
     read_sparse_timing_view,
@@ -84,6 +83,20 @@ def test_reconvergent_domains_remain_distinct(pydb):
     assert (
         view.semantic_digest == read_sparse_timing_view(deepcopy(pydb)).semantic_digest
     )
+
+
+def test_inout_role_transition_preserves_launch_tag(pydb):
+    arrays = pydb.timing_sparse["arrays"]
+    arrays["net_edges"] = np.array([[2, 0, 3]], dtype=np.int64)
+    arrays["net_threshold_adjustments"] = np.array([[0, 0, 1, 1]], dtype=np.float64)
+    arrays["state_domain"][3] = arrays["state_domain"][0]
+    arrays["state_source_type"][3] = arrays["state_source_type"][0]
+    pydb.timing_sparse["metadata"]["tags"] = ["load\x1fsys", "drive\x1fsys"]
+    sign(pydb.timing_sparse)
+
+    view = read_sparse_timing_view(pydb)
+    view.require_supported()
+    assert view.tags == ("load\x1fsys", "drive\x1fsys")
 
 
 @pytest.mark.parametrize(

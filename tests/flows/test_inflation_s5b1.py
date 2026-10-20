@@ -514,3 +514,35 @@ def test_legacy_inflation_windows_keep_attempt_deduplication(tmp_path, monkeypat
     assert [summary["trigger"] for summary in owner.summaries] == [
         {"mode": "inflation", "iteration": iteration, "stage": 0} for iteration in range(5)
     ]
+
+
+def test_timing_only_milestone_window_accepts_absent_inflation_state(tmp_path, monkeypatch):
+    from dreamplace.NesterovAcceleratedGradientOptimizer import (
+        NesterovAcceleratedGradientOptimizer,
+    )
+
+    owner = milestone_owner(tmp_path, monkeypatch)
+    model = SimpleNamespace(
+        objective_scale=1.,
+        refresh_routability_operators=lambda: None,
+        refresh_after_geometry_change=lambda: None,
+    )
+    pos = torch.nn.Parameter(torch.tensor([2.0, 3.0, 4.0, 5.0]))
+
+    def objective_and_gradient(value):
+        objective = value.square().sum()
+        return objective, torch.autograd.grad(objective, value)[0]
+
+    optimizer = NesterovAcceleratedGradientOptimizer(
+        [pos],
+        lr=0.01,
+        obj_and_grad_fn=objective_and_gradient,
+        constraint_fn=lambda value: value,
+        use_bb=False,
+    )
+    metric = SimpleNamespace(overflow=torch.tensor([0.29]), evaluate=lambda *args: None)
+    pos.grad = torch.ones_like(pos)
+    optimizer.step()
+    owner.before_step(model, pos, optimizer, metric, {}, iteration=1, stage=0)
+    assert owner.schedule.window_count == 1
+    assert owner.summaries[0]["trigger"]["threshold"] == 0.30

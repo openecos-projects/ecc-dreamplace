@@ -1510,6 +1510,22 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         self._timing_grad_balance_state = copy.deepcopy(state)
         return copy.deepcopy(state)
 
+    def _reset_timing_grad_balance_for_restart(self, model, params, *, iteration):
+        if not bool(
+            getattr(params, "timing_grad_balance_reset_on_restart", True)
+        ):
+            return None
+        state = model.reset_timing_grad_balance(reason="inflation_restart")
+        self._timing_grad_balance_state = None
+        logging.info(
+            "timing grad balance reset at iteration=%d reason=inflation_restart "
+            "target_ratio=%.6g status=%s",
+            int(iteration),
+            float(state.get("target_ratio", 0.0)),
+            state.get("status"),
+        )
+        return state
+
     def _diff_tdp_net_weight_artifact_path(self, params):
         return os.path.join(
             params.result_dir,
@@ -5962,6 +5978,11 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     model.refresh_after_geometry_change()
                                     model.initialize_restart_density_weight(
                                         params, placedb)
+                                    self._reset_timing_grad_balance_for_restart(
+                                        model,
+                                        params,
+                                        iteration=iteration,
+                                    )
                                     model.reset_l_shape_weight_state()
                                     if model.density_weight.numel() == 1:
                                         density_weight_repr = "%.6E" % (

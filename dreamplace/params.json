@@ -296,6 +296,10 @@
         "description": "initial target ratio rho between weighted timing-gradient and wirelength-gradient L1 norms; 0 disables automatic timing-gradient balancing",
         "default": 0.01
     },
+    "timing_grad_balance_reset_on_restart": {
+        "description": "reset and reinitialize the timing-gradient balance weight after each inflation/GP restart; 0 preserves the current weight",
+        "default": 1
+    },
     "timing_coeff_growth_factor": {
         "description": "positive finite multiplier applied to WNS/TNS coefficients at each GP density-weight update; 1 disables growth; size_only skips this schedule",
         "default": 1.01

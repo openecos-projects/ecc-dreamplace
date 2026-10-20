@@ -889,6 +889,8 @@ class PlaceObj(nn.Module):
     It includes various ops related to global placement as well.
     """
 
+    TIMING_COEFF_GROWTH_MAX_MULTIPLIER = 1000.0
+
     def __init__(
         self,
         density_weight,
@@ -1698,6 +1700,21 @@ class PlaceObj(nn.Module):
             )
         self.timing_grad_balance_summary = state
         return copy.deepcopy(state)
+
+    def reset_timing_grad_balance(self, reason="restart"):
+        target_ratio = float(self.timing_grad_balance_target_ratio)
+        self.timing_grad_balance_weight = 1.0
+        self.timing_grad_balance_summary = {
+            "artifact": "timing_grad_balance",
+            "artifact_version": 1,
+            "status": "pending" if target_ratio > 0.0 else "disabled",
+            "initialized": target_ratio <= 0.0,
+            "target_ratio": target_ratio,
+            "norm": "l1",
+            "weight_applied": 1.0,
+            "reset_reason": str(reason),
+        }
+        return copy.deepcopy(self.timing_grad_balance_summary)
 
     def initialize_timing_grad_balance(self, pos, *, iteration, overflow):
         if bool(self.timing_grad_balance_summary.get("initialized")):
@@ -10521,6 +10538,25 @@ class PlaceObj(nn.Module):
 
         return self.density_weight
 
+    def _advance_timing_coeff_growth(self, factor):
+        base = getattr(self, "_timing_coeff_growth_base", None)
+        if base is None:
+            base = (
+                float(self.timing_wns_coeff),
+                float(self.timing_tns_coeff),
+            )
+            self._timing_coeff_growth_base = base
+        multiplier = float(
+            getattr(self, "_timing_coeff_growth_multiplier", 1.0)
+        )
+        multiplier = min(
+            multiplier * float(factor),
+            float(self.TIMING_COEFF_GROWTH_MAX_MULTIPLIER),
+        )
+        self._timing_coeff_growth_multiplier = multiplier
+        self.timing_wns_coeff = base[0] * multiplier
+        self.timing_tns_coeff = base[1] * multiplier
+
     def build_update_density_weight(self, params, placedb, algo="overflow"):
         """
         @brief update density weight
@@ -10570,8 +10606,9 @@ class PlaceObj(nn.Module):
                 if joint_density_weight_max is not None:
                     self.density_weight.clamp_(max=joint_density_weight_max)
                 if not self._is_size_only_mode():
-                    self.timing_tns_coeff *= timing_coeff_growth_factor
-                    self.timing_wns_coeff *= timing_coeff_growth_factor
+                    self._advance_timing_coeff_growth(
+                        timing_coeff_growth_factor
+                    )
 
         def update_density_weight_op_overflow(cur_metric, prev_metric, iteration):
             assert (
@@ -10622,8 +10659,9 @@ class PlaceObj(nn.Module):
                 )
                 self.density_weight_step_size *= rate
                 if not self._is_size_only_mode():
-                    self.timing_tns_coeff *= timing_coeff_growth_factor
-                    self.timing_wns_coeff *= timing_coeff_growth_factor
+                    self._advance_timing_coeff_growth(
+                        timing_coeff_growth_factor
+                    )
 
         if not self.quad_penalty and algo == "overflow":
             logging.warn(

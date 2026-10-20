@@ -129,6 +129,10 @@ to disable balancing and retain weight 1.0. It is a gradient-ratio target,
 not a multiplier on WNS/TNS coefficients. Standalone `size_only` sizing does
 not initialize coordinate gradient balancing. ECC exposes the ratio through
 `place.timing_grad_balance_target_ratio`; explicit values override the default.
+`timing_grad_balance_reset_on_restart` defaults to 1, so each inflation/GP
+restart clears the initialized balance state and recomputes the outer weight.
+Set `place.timing_grad_balance_reset_on_restart = 0` to preserve the current
+weight and cached balance state across restarts.
 
 `timing_aggregation_mode` selects AAT/RAT propagation aggregation: `smooth`
 (default) uses LSE, while `hard` uses max/min. LSE uses the positive temperature

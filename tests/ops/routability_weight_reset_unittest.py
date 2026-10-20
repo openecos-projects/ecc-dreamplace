@@ -20,6 +20,8 @@ def make_model(route_gradient):
     model.l_shape_weight_momentum = 0.1
     model.l_shape_weight_min = 1e-12
     model.l_shape_weight_max = 1.0
+    model.l_shape_weight_max_multiplier = 10.0
+    model._l_shape_weight_anchor = None
     model.l_shape_filler_reverse_force = 0.0
     model.l_shape_filler_pseudo_wire_ratio = 0.0
     model.density_weight = torch.tensor([0.2])
@@ -66,3 +68,24 @@ def test_zero_route_gradient_defers_calibration_until_valid_gradient():
     route[1] = 2.0
     torch.testing.assert_close(evaluate(model, torch.tensor([3.0, 4.0])), torch.tensor([3.0, 4.5]))
     assert model._l_shape_weight_initialized
+
+
+def test_relative_weight_cap_is_anchored_to_first_calibration():
+    route = torch.tensor([0.0, 2.0])
+    model = make_model(route)
+    model.l_shape_weight_max = 100.0
+    model.reset_l_shape_weight_state()
+    assert model._l_shape_weight_anchor is None
+
+    evaluate(model, torch.tensor([3.0, 4.0]))
+    assert model._l_shape_weight_anchor == pytest.approx(0.25)
+
+    route[1] = 0.01
+    evaluate(model, torch.tensor([3.0, 4.0]))
+
+    assert model.l_shape_last_target_weight == pytest.approx(50.0)
+    assert model.l_shape_last_weight == pytest.approx(2.5)
+    assert model.l_shape_last_cap_active
+
+    model.reset_l_shape_weight_state()
+    assert model._l_shape_weight_anchor is None

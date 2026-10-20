@@ -1051,6 +1051,10 @@
         "description": "maximum allowed l_shape_routability_weight after adaptive update",
         "default": 1
     },
+    "l_shape_weight_max_multiplier": {
+        "description": "maximum adaptive L-shape weight as a multiple of the first calibrated weight in each calibration epoch; 0 disables the relative cap",
+        "default": 10.0
+    },
     "l_shape_log_verbose": {
         "description": "verbosity for non-timing L-shape/Soft-L diagnostic logs: 0 keeps production logs quiet, 1 adds one-line refresh summaries, 2 enables detailed per-iteration and per-refresh diagnostics",
         "default": 0

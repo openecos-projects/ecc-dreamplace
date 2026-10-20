@@ -106,6 +106,13 @@ def apply_l_shape_gradient(model, pos, obj):
     pos.grad.data.copy_(l_shape_grad)
 
     current_weight = float(model.l_shape_routability_weight.item())
+    weight_max = float(getattr(model, "l_shape_weight_max", 1.0))
+    anchor = getattr(model, "_l_shape_weight_anchor", None)
+    max_multiplier = float(
+        getattr(model, "l_shape_weight_max_multiplier", 10.0)
+    )
+    if anchor is not None and max_multiplier > 0.0:
+        weight_max = min(weight_max, float(anchor) * max_multiplier)
 
     # 自适应调整权重
     # 目标: l_shape_grad_norm * weight ≈ target_ratio * base_grad_norm
@@ -117,8 +124,9 @@ def apply_l_shape_gradient(model, pos, obj):
         )
         target_weight_value = float(target_weight)
         old_weight = current_weight
+        initializing = not model._l_shape_weight_initialized
 
-        if not model._l_shape_weight_initialized:
+        if initializing:
             new_weight = target_weight
             model._l_shape_weight_initialized = True
             if l_shape_log_verbose(model.params) >= 1:
@@ -135,7 +143,12 @@ def apply_l_shape_gradient(model, pos, obj):
         if new_weight > target_weight:
             new_weight = target_weight
             cap_active = True
-        new_weight = max(model.l_shape_weight_min, min(model.l_shape_weight_max, new_weight))
+        if new_weight > weight_max:
+            new_weight = weight_max
+            cap_active = True
+        new_weight = max(model.l_shape_weight_min, min(weight_max, new_weight))
+        if initializing:
+            model._l_shape_weight_anchor = float(new_weight)
         current_weight = float(new_weight)
         model.l_shape_routability_weight.data.fill_(current_weight)
         pos.grad.data.mul_(current_weight)

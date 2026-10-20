@@ -117,10 +117,12 @@ inherit mode always uses the live placement values.
 `timing_coeff_growth_factor` controls the WNS/TNS coefficient multiplier at
 each GP density-weight update. The default `1.01` grows the coefficients;
 `1.0` freezes them, and values between zero and one decay them.
-The multiplier must be positive and finite. Slew/cap weights and the outer norm
-weight retain their own settings. Inherit-mode sizing windows read the resulting
-live coefficients; fixed-mode windows use their configured values. Standalone
-`size_only` sizing, including `diff_sizing` S50, skips this growth schedule.
+The multiplier must be positive and finite, and its cumulative growth is capped
+at 1000 times the placement's starting WNS/TNS coefficients. Slew/cap weights
+and the outer norm weight retain their own settings. Inherit-mode sizing
+windows read the resulting live coefficients; fixed-mode windows use their
+configured values. Standalone `size_only` sizing, including `diff_sizing` S50,
+skips this growth schedule.
 
 `timing_grad_balance_target_ratio` defaults to 0.01 for direct-loss placement.
 At the first active timing step, the timing and wirelength gradient L1 norms
@@ -172,6 +174,7 @@ Relevant configuration knobs include:
 | `route_area_adjust_stop_ratio` | Stop threshold for route-area inflation. |
 | `inflation_density_weight_scale` | Scale on the Xplace-style density-gradient restart ratio after inflation; defaults to `0.001`, while `1.0` uses the ratio directly and `0.1` reproduces the historical DreamPlace factor. |
 | `inflation_filler_consumption_mode` | How routability inflation consumes whitespace: `filler_first` (default) shrinks filler before raising target density, `proportional` shrinks filler and other whitespace together, and `capacity_only` preserves filler until the placement-area limit. |
+| `l_shape_weight_max_multiplier` | Relative cap for the adaptive L-shape weight. Each calibration epoch stores its first applied weight as `w0` and limits later growth to `multiplier * w0`; default `10.0`, while `0` disables the relative cap. |
 
 ## Build
 

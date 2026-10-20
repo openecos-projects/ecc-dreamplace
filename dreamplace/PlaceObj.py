@@ -1212,6 +1212,17 @@ class PlaceObj(nn.Module):
         self.l_shape_weight_max = float(
             getattr(params, "l_shape_weight_max", 1.0)
         )
+        self.l_shape_weight_max_multiplier = float(
+            getattr(params, "l_shape_weight_max_multiplier", 10.0)
+        )
+        if (
+            not math.isfinite(self.l_shape_weight_max_multiplier)
+            or self.l_shape_weight_max_multiplier < 0.0
+        ):
+            raise ValueError(
+                "l_shape_weight_max_multiplier must be a nonnegative finite float"
+            )
+        self._l_shape_weight_anchor = None
         self._l_shape_weight_initialized = False
         self._l_shape_outer_iteration = None
         reset_l_shape_gradient_telemetry(self)
@@ -2361,6 +2372,7 @@ class PlaceObj(nn.Module):
     def reset_l_shape_weight_state(self):
         self.l_shape_routability_weight.data.fill_(self.l_shape_routability_weight_init)
         self._l_shape_weight_initialized = False
+        self._l_shape_weight_anchor = None
         self.l_shape_last_weight = None
         self.l_shape_last_target_weight = None
         self.l_shape_last_weight_candidate = None
@@ -2465,6 +2477,7 @@ class PlaceObj(nn.Module):
     def start_l_shape_weight_controller(self, iteration):
         self.set_l_shape_outer_iteration(iteration)
         self._l_shape_weight_initialized = False
+        self._l_shape_weight_anchor = None
         self.l_shape_routability_weight.data.fill_(self.l_shape_routability_weight_init)
         self.l_shape_last_weight_candidate = None
 

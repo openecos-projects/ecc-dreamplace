@@ -787,6 +787,10 @@
         "description": "maximum fraction of the total whitespace area that routability inflation may add to movable nodes in one area-adjust round",
         "default": 0.1
     },
+    "inflation_density_weight_scale": {
+        "description": "positive scale for the Xplace-style density-weight restart ratio ||grad wirelength||_1 / ||grad density||_1 after each inflation geometry epoch; the default 0.001 keeps the restarted density force small, 1.0 uses the normalized ratio directly, and 0.1 reproduces the historical DreamPlace post-restart scale",
+        "default": 0.001
+    },
     "legalize_before_each_inflation_flag": {
         "description": "whether each ordinary inflation round waits for stop_overflow, legalizes physical cell geometry, runs congestion estimation, and then reapplies cumulative inflation before area adjustment",
         "default": 0

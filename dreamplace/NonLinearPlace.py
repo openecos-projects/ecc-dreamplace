@@ -5960,13 +5960,36 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                         model.inflation_state.num_area_adjust = num_area_adjust
                                     # restart Llambda
                                     model.refresh_after_geometry_change()
-                                    model.initialize_density_weight(
+                                    model.initialize_restart_density_weight(
                                         params, placedb)
-                                    model.density_weight.mul_(
-                                        0.1 / params.density_weight)
                                     model.reset_l_shape_weight_state()
-                                    logging.info("density_weight = %.6E" %
-                                                 (model.density_weight.data))
+                                    if model.density_weight.numel() == 1:
+                                        density_weight_repr = "%.6E" % (
+                                            model.density_weight.detach().cpu().item()
+                                        )
+                                    else:
+                                        density_weight_repr = "[%s]" % ", ".join(
+                                            "%.6E" % value
+                                            for value in model.density_weight.detach()
+                                            .cpu()
+                                            .tolist()
+                                        )
+                                    restart_scale = getattr(
+                                        model,
+                                        "_inflation_density_weight_restart_scale",
+                                        float("nan"),
+                                    )
+                                    logging.info(
+                                        "density restart mode=xplace_normalized "
+                                        "scale=%.6E norm_ratio=%.6E w_restart=%s",
+                                        restart_scale,
+                                        getattr(
+                                            model,
+                                            "_density_weight_grad_norm_ratio",
+                                            float("nan"),
+                                        ),
+                                        density_weight_repr,
+                                    )
                                     # load state to restart the optimizer
                                     optimizer.load_state_dict(initial_state)
                                     # must after loading the state

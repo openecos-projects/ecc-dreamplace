@@ -10398,6 +10398,42 @@ class PlaceObj(nn.Module):
         @param params parameters
         @param placedb placement database
         """
+        return self._initialize_density_weight(
+            params,
+            placedb,
+            density_weight_scale=params.density_weight,
+        )
+
+    def initialize_restart_density_weight(self, params, placedb):
+        """
+        @brief reinitialize density weight after a geometry epoch
+
+        Xplace normalizes a restart directly with
+        ||grad wirelength||_1 / ||grad density||_1. The scale exposes the
+        historical DreamPlace post-restart factor without multiplying and
+        immediately dividing by params.density_weight.
+        """
+        density_weight_scale = getattr(
+            params, "inflation_density_weight_scale", 0.001
+        )
+        try:
+            density_weight_scale = float(density_weight_scale)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "inflation_density_weight_scale must be a positive finite float"
+            ) from None
+        if not math.isfinite(density_weight_scale) or density_weight_scale <= 0.0:
+            raise ValueError(
+                "inflation_density_weight_scale must be a positive finite float"
+            )
+        self._inflation_density_weight_restart_scale = density_weight_scale
+        return self._initialize_density_weight(
+            params,
+            placedb,
+            density_weight_scale=density_weight_scale,
+        )
+
+    def _initialize_density_weight(self, params, placedb, *, density_weight_scale):
         wirelength = self.op_collections.wirelength_op(self.data_collections.pos[0])
         if self.data_collections.pos[0].grad is not None:
             self.data_collections.pos[0].grad.zero_()
@@ -10441,10 +10477,12 @@ class PlaceObj(nn.Module):
                 * density_grad_list[i].norm(p=1)
                 for i in range(density_weight_s.size(0))
             )
-
-            self.density_weight_u *= (
-                params.density_weight * wirelength_grad_norm / density_grad_norm
+            grad_norm_ratio = wirelength_grad_norm / density_grad_norm
+            self._density_weight_grad_norm_ratio = float(
+                grad_norm_ratio.detach().cpu().item()
             )
+
+            self.density_weight_u *= density_weight_scale * grad_norm_ratio
             # set initial step size for density weight update
             self.density_weight_step_size_inc_low = 1.03
             self.density_weight_step_size_inc_high = 1.04
@@ -10472,8 +10510,11 @@ class PlaceObj(nn.Module):
             density_grad_norm = self.data_collections.pos[0].grad.norm(p=1)
 
             grad_norm_ratio = wirelength_grad_norm / density_grad_norm
+            self._density_weight_grad_norm_ratio = float(
+                grad_norm_ratio.detach().cpu().item()
+            )
             self.density_weight = torch.tensor(
-                [params.density_weight * grad_norm_ratio],
+                [density_weight_scale * grad_norm_ratio],
                 dtype=self.data_collections.pos[0].dtype,
                 device=self.data_collections.pos[0].device,
             )

@@ -166,6 +166,7 @@ Relevant configuration knobs include:
 | `max_route_opt_adjust_rate` | Maximum route-driven area inflation rate. |
 | `route_opt_adjust_exponent` | Exponent applied to the route utilization map before inflation. |
 | `route_area_adjust_stop_ratio` | Stop threshold for route-area inflation. |
+| `inflation_density_weight_scale` | Scale on the Xplace-style density-gradient restart ratio after inflation; defaults to `0.001`, while `1.0` uses the ratio directly and `0.1` reproduces the historical DreamPlace factor. |
 
 ## Build
 

@@ -398,6 +398,16 @@ class Params:
             raise ValueError("%s must be finite and non-negative" % name)
         self.inflation_area_budget_ratio = value
 
+    def normalize_inflation_density_weight_scale(self):
+        name = "inflation_density_weight_scale"
+        try:
+            value = float(getattr(self, name, 0.001))
+        except (TypeError, ValueError):
+            raise ValueError("%s must be numeric" % name) from None
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError("%s must be positive and finite" % name)
+        self.inflation_density_weight_scale = value
+
     def normalize_gpugr_area_adjust_congestion_mode(self):
         name = "gpugr_area_adjust_congestion_mode"
         value = getattr(self, name, "max_hv")
@@ -440,6 +450,7 @@ class Params:
         self.normalize_post_legalization_adaptive_padding()
         self.normalize_legalize_before_each_inflation()
         self.normalize_inflation_area_budget_ratio()
+        self.normalize_inflation_density_weight_scale()
         self.normalize_gpugr_area_adjust_congestion_mode()
         self.normalize_l_shape_update_interval()
 

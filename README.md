@@ -167,6 +167,7 @@ Relevant configuration knobs include:
 | `route_opt_adjust_exponent` | Exponent applied to the route utilization map before inflation. |
 | `route_area_adjust_stop_ratio` | Stop threshold for route-area inflation. |
 | `inflation_density_weight_scale` | Scale on the Xplace-style density-gradient restart ratio after inflation; defaults to `0.001`, while `1.0` uses the ratio directly and `0.1` reproduces the historical DreamPlace factor. |
+| `inflation_filler_consumption_mode` | How routability inflation consumes whitespace: `filler_first` (default) shrinks filler before raising target density, `proportional` shrinks filler and other whitespace together, and `capacity_only` preserves filler until the placement-area limit. |
 
 ## Build
 

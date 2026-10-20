@@ -85,6 +85,7 @@ class EnhancedInflationFixedTargetAreaTest(unittest.TestCase):
         total_place_area=200.0,
         total_whitespace_area=140.0,
         inflation_area_budget_ratio=0.1,
+        filler_consumption_mode="proportional",
         params=None,
     ):
         op = adjust_node_area.AdjustNodeArea(
@@ -112,6 +113,7 @@ class EnhancedInflationFixedTargetAreaTest(unittest.TestCase):
             pin_area_adjust_stop_ratio=0.001,
             unit_pin_capacity=1.0,
             params=params,
+            inflation_filler_consumption_mode=filler_consumption_mode,
         )
         return op
 
@@ -186,6 +188,87 @@ class EnhancedInflationFixedTargetAreaTest(unittest.TestCase):
         )
         self.assertAlmostEqual(float(target_density), 0.535714, places=6)
 
+    def test_filler_first_consumes_filler_before_raising_density(self):
+        node_size_x = torch.tensor([5.0, 5.0, 5.0, 5.0])
+        node_size_y = torch.tensor([6.0, 6.0, 4.0, 4.0])
+        target_density = torch.tensor(0.5)
+
+        result = self._run_adjust(
+            self._make_adjust_op(filler_consumption_mode="filler_first"),
+            node_size_x,
+            node_size_y,
+            target_density,
+            route_area=[40.0, 30.0],
+            fixed_target_area=100.0,
+        )
+
+        self.assertEqual(result, (True, True, False))
+        self.assertAlmostEqual(
+            float((node_size_x[:2] * node_size_y[:2]).sum()),
+            70.0,
+            places=5,
+        )
+        self.assertAlmostEqual(
+            float((node_size_x[-2:] * node_size_y[-2:]).sum()),
+            30.0,
+            places=5,
+        )
+        self.assertAlmostEqual(float(target_density), 0.5, places=6)
+
+    def test_filler_first_raises_density_after_filler_is_exhausted(self):
+        node_size_x = torch.tensor([5.0, 5.0, 2.5, 2.5])
+        node_size_y = torch.tensor([9.0, 9.0, 2.0, 2.0])
+        target_density = torch.tensor(0.5)
+
+        result = self._run_adjust(
+            self._make_adjust_op(
+                total_whitespace_area=200.0,
+                inflation_area_budget_ratio=1.0,
+                filler_consumption_mode="filler_first",
+            ),
+            node_size_x,
+            node_size_y,
+            target_density,
+            route_area=[65.0, 45.0],
+            fixed_target_area=100.0,
+        )
+
+        self.assertEqual(result, (True, True, False))
+        self.assertAlmostEqual(
+            float((node_size_x[:2] * node_size_y[:2]).sum()), 110.0, places=5
+        )
+        self.assertAlmostEqual(
+            float((node_size_x[-2:] * node_size_y[-2:]).sum()), 0.0, places=5
+        )
+        self.assertAlmostEqual(float(target_density), 0.55, places=6)
+
+    def test_capacity_only_preserves_filler_until_physical_limit(self):
+        node_size_x = torch.tensor([5.0, 5.0, 5.0, 5.0])
+        node_size_y = torch.tensor([6.0, 6.0, 4.0, 4.0])
+        target_density = torch.tensor(0.5)
+
+        result = self._run_adjust(
+            self._make_adjust_op(filler_consumption_mode="capacity_only"),
+            node_size_x,
+            node_size_y,
+            target_density,
+            route_area=[40.0, 30.0],
+            fixed_target_area=100.0,
+        )
+
+        self.assertEqual(result, (True, True, False))
+        self.assertAlmostEqual(
+            float((node_size_x[:2] * node_size_y[:2]).sum()),
+            70.0,
+            places=5,
+        )
+        self.assertAlmostEqual(
+            float((node_size_x[-2:] * node_size_y[-2:]).sum()),
+            40.0,
+            places=5,
+        )
+        self.assertAlmostEqual(float(target_density), 0.55, places=6)
+
     def test_enhanced_inflation_retains_proportional_filler_reserve(self):
         node_size_x = torch.tensor([5.0, 5.0, 5.0, 5.0])
         node_size_y = torch.tensor([9.0, 9.0, 1.0, 1.0])
@@ -238,7 +321,10 @@ class EnhancedInflationFixedTargetAreaTest(unittest.TestCase):
         target_density = torch.tensor(0.5)
 
         result = self._run_adjust(
-            self._make_adjust_op(inflation_area_budget_ratio=0.05),
+            self._make_adjust_op(
+                inflation_area_budget_ratio=0.05,
+                filler_consumption_mode="capacity_only",
+            ),
             node_size_x,
             node_size_y,
             target_density,
@@ -322,6 +408,10 @@ class EnhancedInflationFixedTargetAreaTest(unittest.TestCase):
             params,
             placedb,
             data_collections,
+        )
+        self.assertEqual(
+            adjust_op._enhanced_adjust_node_area_impl.inflation_filler_consumption_mode,
+            "filler_first",
         )
         adjust_op._enhanced_adjust_node_area_impl.compute_node_area_route = _FixedRouteArea(
             torch.tensor([40.0, 30.0])

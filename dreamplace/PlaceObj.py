@@ -10883,6 +10883,11 @@ class PlaceObj(nn.Module):
             modularity_config=modularity_config,
             params=params,
             virtual_cell_area=virtual_area,
+            inflation_filler_consumption_mode=getattr(
+                params,
+                "inflation_filler_consumption_mode",
+                "filler_first",
+            ),
         )
 
         def build_adjust_node_area_op(

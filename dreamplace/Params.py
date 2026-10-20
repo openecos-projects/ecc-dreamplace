@@ -408,6 +408,19 @@ class Params:
             raise ValueError("%s must be positive and finite" % name)
         self.inflation_density_weight_scale = value
 
+    def normalize_inflation_filler_consumption_mode(self):
+        name = "inflation_filler_consumption_mode"
+        value = getattr(self, name, "filler_first")
+        if not isinstance(value, str):
+            raise ValueError("%s must be a string" % name)
+        value = value.strip().lower()
+        if value not in ("filler_first", "proportional", "capacity_only"):
+            raise ValueError(
+                "%s must be one of: filler_first, proportional, capacity_only"
+                % name
+            )
+        self.inflation_filler_consumption_mode = value
+
     def normalize_gpugr_area_adjust_congestion_mode(self):
         name = "gpugr_area_adjust_congestion_mode"
         value = getattr(self, name, "max_hv")
@@ -451,6 +464,7 @@ class Params:
         self.normalize_legalize_before_each_inflation()
         self.normalize_inflation_area_budget_ratio()
         self.normalize_inflation_density_weight_scale()
+        self.normalize_inflation_filler_consumption_mode()
         self.normalize_gpugr_area_adjust_congestion_mode()
         self.normalize_l_shape_update_interval()
 

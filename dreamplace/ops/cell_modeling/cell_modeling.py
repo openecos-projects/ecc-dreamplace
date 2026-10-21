@@ -583,58 +583,51 @@ class CellModeling(nn.Module):
         elif self.cell_model_schema == PIECEWISE_LINEAR_SCHEMA:
             previous_threads = torch.get_num_threads()
             fit_threads = max(1, self.fit_num_threads)
-            if previous_threads != fit_threads:
-                logging.info(
-                    "CellModeling fit temporarily sets torch threads from %d to %d",
-                    previous_threads,
-                    fit_threads,
-                )
-                torch.set_num_threads(fit_threads)
-            try:
-                self._active_dataset_name = "f_delay"
-                meta = self._dataset_arc_metadata("f_delay")
-                coeff_f_delay = self._fit_dataset(
-                    data_collections.arcs_info.f_delay_luts,
-                    meta["libcell_main_ids"],
-                    meta["arc_offsets"],
-                    meta["sizes"],
-                    meta["vts"],
-                    schema=LINEAR6_SCHEMA,
-                )
-                self._active_dataset_name = "r_delay"
-                meta = self._dataset_arc_metadata("r_delay")
-                coeff_r_delay = self._fit_dataset(
-                    data_collections.arcs_info.r_delay_luts,
-                    meta["libcell_main_ids"],
-                    meta["arc_offsets"],
-                    meta["sizes"],
-                    meta["vts"],
-                    schema=LINEAR6_SCHEMA,
-                )
-                self._active_dataset_name = "f_trans"
-                meta = self._dataset_arc_metadata("f_trans")
-                coeff_f_trans = self._fit_dataset(
-                    data_collections.arcs_info.f_trans_luts,
-                    meta["libcell_main_ids"],
-                    meta["arc_offsets"],
-                    meta["sizes"],
-                    meta["vts"],
-                    schema=LINEAR6_SCHEMA,
-                )
-                self._active_dataset_name = "r_trans"
-                meta = self._dataset_arc_metadata("r_trans")
-                coeff_r_trans = self._fit_dataset(
-                    data_collections.arcs_info.r_trans_luts,
-                    meta["libcell_main_ids"],
-                    meta["arc_offsets"],
-                    meta["sizes"],
-                    meta["vts"],
-                    schema=LINEAR6_SCHEMA,
-                )
-            finally:
-                self._active_dataset_name = "unknown"
+            needs_linear_gradient_backup = (
+                self.piecewise_gradient_mode != NATIVE_PIECEWISE_GRADIENT_MODE
+                or bool(cache_meta["cache_dir"])
+            )
+            piecewise_linear_coeffs = None
+            if needs_linear_gradient_backup:
                 if previous_threads != fit_threads:
-                    torch.set_num_threads(previous_threads)
+                    logging.info(
+                        "CellModeling fit temporarily sets torch threads from %d to %d",
+                        previous_threads,
+                        fit_threads,
+                    )
+                    torch.set_num_threads(fit_threads)
+                try:
+                    fitted_coeffs = {}
+                    for dataset_name in DATASET_SPECS:
+                        self._active_dataset_name = dataset_name
+                        meta = self._dataset_arc_metadata(dataset_name)
+                        luts_info = getattr(
+                            data_collections.arcs_info,
+                            self._dataset_spec(dataset_name)["luts_attr"],
+                        )
+                        fitted_coeffs[dataset_name] = self._fit_dataset(
+                            luts_info,
+                            meta["libcell_main_ids"],
+                            meta["arc_offsets"],
+                            meta["sizes"],
+                            meta["vts"],
+                            schema=LINEAR6_SCHEMA,
+                        )
+                finally:
+                    self._active_dataset_name = "unknown"
+                    if previous_threads != fit_threads:
+                        torch.set_num_threads(previous_threads)
+                piecewise_linear_coeffs = {
+                    f"coeff_{dataset_name}": self._reshape_coeffs(
+                        fitted_coeffs[dataset_name],
+                        schema=LINEAR6_SCHEMA,
+                    )
+                    for dataset_name in DATASET_SPECS
+                }
+            else:
+                logging.info(
+                    "CellModeling native piecewise skips legacy LINEAR6 fits"
+                )
             self.piecewise_state = {}
             for dataset_name in DATASET_SPECS:
                 meta = self._dataset_arc_metadata(dataset_name)
@@ -647,12 +640,7 @@ class CellModeling(nn.Module):
                     max_arc_offset=self.max_arc_offset,
                     vt_order=cache_meta["vt_order"],
                 )
-            self.piecewise_linear_coeffs = {
-                "coeff_f_delay": self._reshape_coeffs(coeff_f_delay, schema=LINEAR6_SCHEMA),
-                "coeff_r_delay": self._reshape_coeffs(coeff_r_delay, schema=LINEAR6_SCHEMA),
-                "coeff_f_trans": self._reshape_coeffs(coeff_f_trans, schema=LINEAR6_SCHEMA),
-                "coeff_r_trans": self._reshape_coeffs(coeff_r_trans, schema=LINEAR6_SCHEMA),
-            }
+            self.piecewise_linear_coeffs = piecewise_linear_coeffs
         else:
             raise ValueError(f"unsupported cell_model_schema: {self.cell_model_schema}")
 
@@ -887,12 +875,12 @@ class CellModeling(nn.Module):
                 self.piecewise_state = {}
                 for dataset_name in DATASET_SPECS:
                     prefix = f"piecewise_{dataset_name}"
-                    self.piecewise_state[dataset_name] = {
+                    self.piecewise_state[dataset_name] = self._finalize_piecewise_state({
                         "size_table": state_dict[f"{prefix}_size_table"].to(self.device),
                         "arc_index_table": state_dict[f"{prefix}_arc_index_table"].to(self.device),
                         "size_count": state_dict[f"{prefix}_size_count"].to(self.device),
                         "vt_available": state_dict[f"{prefix}_vt_available"].to(self.device),
-                    }
+                    })
                 self.piecewise_linear_coeffs = {
                     "coeff_f_delay": state_dict["piecewise_coeff_f_delay"].to(self.device),
                     "coeff_r_delay": state_dict["piecewise_coeff_r_delay"].to(self.device),
@@ -1361,9 +1349,26 @@ class CellModeling(nn.Module):
                 if not torch.any(arc_mask):
                     continue
                 vt_available = state["vt_available"].to(device=mt.device)
-                mt_sub = mt[arc_mask].clamp(max=vt_available.shape[0] - 1)
-                ao_sub = ao[arc_mask].clamp(max=vt_available.shape[1] - 1)
-                support[arc_mask] = vt_available[mt_sub, ao_sub].any(dim=1)
+                local_mt = mt[arc_mask]
+                local_ao = ao[arc_mask]
+                valid_indices = (
+                    (local_mt >= 0)
+                    & (local_mt < vt_available.shape[0])
+                    & (local_ao >= 0)
+                    & (local_ao < vt_available.shape[1])
+                )
+                mt_sub = local_mt.clamp(min=0, max=vt_available.shape[0] - 1)
+                ao_sub = local_ao.clamp(min=0, max=vt_available.shape[1] - 1)
+                if "_vt_available_flat" not in state:
+                    self._finalize_piecewise_state(state)
+                base_indices = (
+                    mt_sub * vt_available.shape[1]
+                    + ao_sub
+                )
+                available = state["_vt_available_flat"].index_select(
+                    0, base_indices
+                ).reshape(-1, vt_available.shape[2])
+                support[arc_mask] = available.any(dim=1) & valid_indices
             return support
 
         return torch.ones_like(mt, dtype=torch.bool, device=mt.device)
@@ -1419,12 +1424,37 @@ class CellModeling(nn.Module):
                 device=self.device,
                 dtype=torch.long,
             )
-        return {
+        return self._finalize_piecewise_state({
             "size_table": size_table,
             "arc_index_table": arc_index_table,
             "size_count": size_count,
             "vt_available": vt_available,
-        }
+        })
+
+    @staticmethod
+    def _finalize_piecewise_state(state):
+        size_table = state["size_table"]
+        state["_size_table_flat"] = size_table.reshape(-1, size_table.shape[-1])
+        arc_index_table = state["arc_index_table"]
+        state["_arc_index_table_flat"] = arc_index_table.reshape(
+            -1, arc_index_table.shape[-1]
+        )
+        state["_size_count_flat"] = state["size_count"].reshape(-1)
+        vt_available = state.get("vt_available")
+        if vt_available is not None:
+            state["_vt_available_flat"] = vt_available.reshape(
+                -1, vt_available.shape[-1]
+            )
+        state["_num_arc_offsets"] = int(size_table.shape[1])
+        state["_num_vt_slots"] = int(size_table.shape[2])
+        return state
+
+    @staticmethod
+    def _piecewise_base_indices(state, mt, ao):
+        return (
+            mt.long() * state["_num_arc_offsets"]
+            + ao.long()
+        ) * state["_num_vt_slots"]
 
     def _analysis_cache_identity(self):
         cache_meta = self.cache_meta or {}
@@ -1778,33 +1808,81 @@ class CellModeling(nn.Module):
         result[valid_mask] = local_result
         return result
 
-    def _piecewise_vt_slots(self, state, mt, ao, vt):
+    def _piecewise_vt_availability(self, state, mt, ao, device):
+        vt_available = state["vt_available"]
+        flat_vt_available = state.get("_vt_available_flat")
+        if flat_vt_available is None:
+            flat_vt_available = vt_available.reshape(-1, vt_available.shape[-1])
+            state["_vt_available_flat"] = flat_vt_available
+        num_arc_offsets = int(vt_available.shape[1])
+        row_indices = mt.long() * num_arc_offsets + ao.long()
+        return flat_vt_available.to(device).index_select(0, row_indices)
+
+    def _piecewise_vt_slots(self, state, mt, ao, vt, vt_available=None):
         device = vt.device
-        vt_available = state["vt_available"].to(device)[mt, ao]
+        if vt_available is None:
+            vt_available = self._piecewise_vt_availability(state, mt, ao, device)
         num_slots = vt_available.shape[1]
-        slot_indices = torch.arange(num_slots, device=device, dtype=torch.long)
         vt_values = self.vt_order_tensor.to(device)
-        low_mask = vt_available & (vt_values.unsqueeze(0) <= vt.unsqueeze(1))
-        high_mask = vt_available & (vt_values.unsqueeze(0) >= vt.unsqueeze(1))
-        low_idx = torch.where(
-            low_mask,
-            slot_indices.unsqueeze(0),
-            torch.full((vt.shape[0], num_slots), -1, device=device, dtype=torch.long),
-        ).max(dim=1).values
-        high_idx = torch.where(
-            high_mask,
-            slot_indices.unsqueeze(0),
-            torch.full((vt.shape[0], num_slots), num_slots, device=device, dtype=torch.long),
-        ).min(dim=1).values
+        if device.type == "cuda":
+            slot_indices = torch.arange(num_slots, device=device, dtype=torch.long)
+            low_mask = vt_available & (vt_values.unsqueeze(0) <= vt.unsqueeze(1))
+            high_mask = vt_available & (vt_values.unsqueeze(0) >= vt.unsqueeze(1))
+            low_idx = torch.where(
+                low_mask,
+                slot_indices.unsqueeze(0),
+                torch.full(
+                    (vt.shape[0], num_slots),
+                    -1,
+                    device=device,
+                    dtype=torch.long,
+                ),
+            ).max(dim=1).values
+            high_idx = torch.where(
+                high_mask,
+                slot_indices.unsqueeze(0),
+                torch.full(
+                    (vt.shape[0], num_slots),
+                    num_slots,
+                    device=device,
+                    dtype=torch.long,
+                ),
+            ).min(dim=1).values
+        else:
+            low_idx = torch.full((vt.shape[0],), -1, device=device, dtype=torch.long)
+            high_idx = torch.full(
+                (vt.shape[0],), num_slots, device=device, dtype=torch.long
+            )
+            for slot in range(num_slots):
+                low_idx = torch.where(
+                    vt_available[:, slot] & (vt_values[slot] <= vt),
+                    slot,
+                    low_idx,
+                )
+                high_slot = num_slots - 1 - slot
+                high_idx = torch.where(
+                    vt_available[:, high_slot] & (vt_values[high_slot] >= vt),
+                    high_slot,
+                    high_idx,
+                )
         high_idx = torch.where(high_idx >= num_slots, low_idx, high_idx)
         low_idx = torch.where(low_idx < 0, high_idx, low_idx)
         return low_idx.clamp(min=0), high_idx.clamp(min=0, max=max(0, num_slots - 1))
 
     def _piecewise_size_interp(self, dataset_name, state, mt, ao, vt_slot, size, input_slew, out_cap):
         device = size.device
-        size_table = state["size_table"].to(device)[mt, ao, vt_slot]
-        arc_index_table = state["arc_index_table"].to(device)[mt, ao, vt_slot]
-        size_count = state["size_count"].to(device)[mt, ao, vt_slot]
+        if "_size_table_flat" not in state:
+            self._finalize_piecewise_state(state)
+        flat_indices = self._piecewise_base_indices(state, mt, ao) + vt_slot.long()
+        size_table = state["_size_table_flat"].to(device).index_select(
+            0, flat_indices
+        )
+        arc_index_table = state["_arc_index_table_flat"].to(device).index_select(
+            0, flat_indices
+        )
+        size_count = state["_size_count_flat"].to(device).index_select(
+            0, flat_indices
+        )
         if cell_modeling_op is not None:
             lookup_state = self._lookup_state_on_device(
                 self._ensure_lut_runtime_lookup_cache(dataset_name),
@@ -1935,32 +2013,66 @@ class CellModeling(nn.Module):
         vt = vt.to(device)
         size = size.to(device)
         out_cap = out_cap.to(device)
-        vt_available = state["vt_available"].to(device)[mt, ao]
+        vt_available = self._piecewise_vt_availability(state, mt, ao, device)
         has_vt_candidates = vt_available.any(dim=1)
-        vt_low, vt_high = self._piecewise_vt_slots(state, mt, ao, vt)
-        value_low = self._piecewise_size_interp(dataset_name, state, mt, ao, vt_low, size, input_slew, out_cap)
+        vt_low, vt_high = self._piecewise_vt_slots(
+            state, mt, ao, vt, vt_available
+        )
         same_vt_slot = vt_low == vt_high
         if torch.all(same_vt_slot):
+            value_low = self._piecewise_size_interp(
+                dataset_name,
+                state,
+                mt,
+                ao,
+                vt_low,
+                size,
+                input_slew,
+                out_cap,
+            )
             return torch.where(has_vt_candidates, torch.nan_to_num(value_low), torch.zeros_like(value_low))
 
-        value_high = value_low.clone()
         diff_mask = ~same_vt_slot
+        all_diff = bool(diff_mask.all().detach().item())
+        diff_indices = None if all_diff else diff_mask.nonzero(as_tuple=True)[0]
         if self._profile_detail_enabled():
             self._profile_increment("piecewise_vt_second_pass_calls")
             self._profile_increment(
                 "piecewise_vt_second_pass_arcs",
                 int(diff_mask.sum().detach().item()),
             )
-        value_high[diff_mask] = self._piecewise_size_interp(
+        # Batch the high-VT subset with the low-VT query so the native
+        # piecewise operator enters one OpenMP region per dataset and level.
+        high_mt = mt if all_diff else mt.index_select(0, diff_indices)
+        high_ao = ao if all_diff else ao.index_select(0, diff_indices)
+        high_vt = vt_high if all_diff else vt_high.index_select(0, diff_indices)
+        high_size = size if all_diff else size.index_select(0, diff_indices)
+        high_slew = (
+            input_slew
+            if all_diff
+            else input_slew.index_select(0, diff_indices)
+        )
+        high_cap = (
+            out_cap
+            if all_diff
+            else out_cap.index_select(0, diff_indices)
+        )
+        combined_value = self._piecewise_size_interp(
             dataset_name,
             state,
-            mt[diff_mask],
-            ao[diff_mask],
-            vt_high[diff_mask],
-            size[diff_mask],
-            input_slew[diff_mask],
-            out_cap[diff_mask],
+            torch.cat((mt, high_mt)),
+            torch.cat((ao, high_ao)),
+            torch.cat((vt_low, high_vt)),
+            torch.cat((size, high_size)),
+            torch.cat((input_slew, high_slew)),
+            torch.cat((out_cap, high_cap)),
         )
+        value_low = combined_value[: size.numel()]
+        if all_diff:
+            value_high = combined_value[size.numel() :]
+        else:
+            value_high = value_low.clone()
+            value_high[diff_mask] = combined_value[size.numel() :]
         vt_values = self.vt_order_tensor.to(device)
         vt_low_value = vt_values[vt_low]
         vt_high_value = vt_values[vt_high]

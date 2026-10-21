@@ -223,6 +223,13 @@ class _PiecewiseSizeFunction(Function):
     def backward(ctx, grad_output):
         tensors = ctx.saved_tensors
         size = tensors[8]
+        # Only materialize the four optional native gradients that autograd requested.
+        gradient_mask = (
+            (1 if ctx.needs_input_grad[8] else 0)
+            | (2 if ctx.needs_input_grad[9] else 0)
+            | (4 if ctx.needs_input_grad[10] else 0)
+            | (8 if ctx.needs_input_grad[5] else 0)
+        )
         if size.is_cuda:
             if cell_modeling_cuda is None:
                 raise RuntimeError("cell_modeling_cuda extension is not available")
@@ -236,6 +243,7 @@ class _PiecewiseSizeFunction(Function):
             grad_output.contiguous(),
             *tensors,
             int(ctx.boundary_mode_id),
+            int(gradient_mask),
         )
         return (
             None,
@@ -243,12 +251,12 @@ class _PiecewiseSizeFunction(Function):
             None,
             None,
             None,
-            grad_lut_values,
+            grad_lut_values if gradient_mask & 8 else None,
             None,
             None,
-            grad_size,
-            grad_slew,
-            grad_cap,
+            grad_size if gradient_mask & 1 else None,
+            grad_slew if gradient_mask & 2 else None,
+            grad_cap if gradient_mask & 4 else None,
             None,
         )
 

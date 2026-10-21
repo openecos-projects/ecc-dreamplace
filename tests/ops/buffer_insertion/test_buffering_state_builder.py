@@ -437,6 +437,51 @@ def test_segment_state_builder_runtime_profile_accounts_common_and_state_work():
     )
 
 
+def test_candidate_state_builder_runtime_profile_accounts_common_and_state_work():
+    from dreamplace.ops.buffer_insertion.buffering_state_builder import (
+        build_buffering_state_for_model,
+    )
+
+    nets, candidates, buffer_library = _fixture()
+    model = SimpleNamespace(
+        data_collections=SimpleNamespace(
+            buffering_nets=nets,
+            buffering_candidate_rows=candidates,
+            buffering_buffer_library=buffer_library,
+            buffer_main_type_index=7,
+            pos=[torch.nn.Parameter(torch.tensor([0.0]))],
+        )
+    )
+
+    result = build_buffering_state_for_model(
+        model,
+        SimpleNamespace(
+            buffering_mode="candidate",
+            buffering_candidate_strategy="discrete_net_gradient",
+            buffering_fixed_bsu_index=1,
+            buffering_runtime_profile=True,
+        ),
+        SimpleNamespace(
+            mode="candidate",
+            max_repeaters_per_segment=3,
+            candidate_strategy="discrete_net_gradient",
+            candidate_drive_type_mode="single_fixed",
+        ),
+    )
+
+    profile = result.metadata["state_build_runtime_profile"]
+    assert result.status == "ok"
+    assert profile["common_inputs_build_ms"] >= profile["common_inputs_accounted_ms"]
+    assert profile["candidate_build_total_ms"] >= profile["candidate_build_accounted_ms"]
+    assert profile["candidate_selection_ms"] >= 0.0
+    assert profile["candidate_state_build_ms"] >= 0.0
+    assert profile["candidate_timing_payload_build_ms"] >= 0.0
+    assert (
+        result.buffer_relaxed_timing_payload["metadata"]["state_build_runtime_profile"]
+        is profile
+    )
+
+
 def test_cuda_segment_state_builder_uses_one_shared_library_size_row():
     from dreamplace.ops.buffer_insertion.buffering_state_builder import (
         build_buffering_state_for_model,

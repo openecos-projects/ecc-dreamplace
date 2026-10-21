@@ -63,6 +63,10 @@
         "description": "external four-buffer drive-strength table used by typed discrete candidate buffering",
         "default": ""
     },
+    "buffering_runtime_profile": {
+        "description": "record detailed candidate state-build and geometry-refresh timings",
+        "default": 0
+    },
     "buffering_max_repeaters_per_segment": {
         "description": "maximum accepted repeaters on one segment",
         "default": 3

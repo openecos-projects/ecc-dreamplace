@@ -63,7 +63,7 @@ def _polyline_coordinate(polyline, normalized_position):
         return None
     lengths = []
     total = 0.0
-    for start, end in zip(points, points[1:]):
+    for start, end in zip(points, points[1:], strict=False):
         length = math.hypot(end[0] - start[0], end[1] - start[1])
         lengths.append(length)
         total += length
@@ -233,7 +233,7 @@ def refresh_candidate_geometry(
     invalidated = []
     remapped_activation = None
     if hasattr(candidate_state, "activation_param"):
-        activation = getattr(candidate_state, "activation_param")
+        activation = candidate_state.activation_param
         if activation is not None:
             remapped_activation = activation.detach().clone()
     for raw_record in records:

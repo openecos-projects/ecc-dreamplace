@@ -35,7 +35,7 @@ def prepare_terminal_request(owner, model, pos, *, iteration, refresh_geometry=T
         # after its last explicit phase; skipping a second rebuild there
         # avoids repacking a partially frozen final topology.
         if refresh_geometry:
-            owner.prepare(model, pos)
+            owner.prepare(model, pos, refresh_records_all=True)
         projection = owner.lane.project(iteration=iteration, final=True)
         if projection.projected_buffer_count != cumulative_count:
             raise RuntimeError("final projection did not preserve every cumulative buffer")

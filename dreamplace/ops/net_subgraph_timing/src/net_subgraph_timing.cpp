@@ -1,4 +1,5 @@
 #include "candidate_backward_cpu.h"
+#include "candidate_maintenance.h"
 #include <torch/extension.h>
 
 #include <cmath>
@@ -2426,4 +2427,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       "select_packed_candidate_inputs",
       &dreamplace::select_packed_candidate_inputs,
       "Select a compact active view from packed candidate tensors (C++ CPU)");
+  m.def(
+      "compute_candidate_dirty_nets",
+      &dreamplace::compute_candidate_dirty_nets,
+      "Map changed placement instances and accepted buffer nets to dirty "
+      "candidate nets (C++ CPU)");
+  m.def(
+      "refresh_candidate_geometry",
+      &dreamplace::refresh_candidate_geometry,
+      "Refresh candidate coordinates and segment geometry in place (C++ CPU)");
 }

@@ -1057,6 +1057,14 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
         )
         gather_started_at = time.perf_counter()
         active_view = self._active_view(active_net_ids)
+        if int(active_view["net_indices_cpu"].numel()) == 0:
+            # The affected-net set can briefly contain a stale or unsupported
+            # identity after a state refresh.  There is no dynamic lane to
+            # evaluate for it, so retain the just-computed static propagation.
+            self.metadata["provider_dispatch_ms"] += (
+                time.perf_counter() - provider_started_at
+            ) * 1000.0
+            return pin_rAAT, pin_fAAT, pin_rtran, pin_ftran
         rise_driver_arrival = self._driver_values(pin_rAAT, active_view=active_view)
         rise_driver_slew = self._driver_values(pin_rtran, active_view=active_view)
         fall_driver_arrival = self._driver_values(pin_fAAT, active_view=active_view)

@@ -11,6 +11,7 @@ add_pytorch_extension(${TARGET_NAME}_cpp
   src/net_subgraph_timing.cpp
   src/segment_count_packer.cpp
   src/candidate_backward_cpu.cpp
+  src/candidate_maintenance.cpp
   EXTRA_INCLUDE_DIRS ${INCLUDE_DIRS}
   EXTRA_LINK_LIBRARIES utility_cxx OpenMP::OpenMP_CXX
   )

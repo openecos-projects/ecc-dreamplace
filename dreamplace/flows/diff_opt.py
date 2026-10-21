@@ -103,10 +103,9 @@ class DiffOptController:
         return _tensor_digest(values)
 
     def _ensure_lane(self, model, pos):
-        # Every buffering phase must rebuild the complete candidate domain.
-        # ``active_only=True`` is appropriate while ordinary GP follows only
-        # retained virtual buffers, but it would permanently exclude nets
-        # that were not selected by an earlier BF phase.
+        # Every buffering phase enables the complete candidate search domain.
+        # The lane reuses its retained domain when the structural topology is
+        # unchanged and only toggles the timing-active view.
         self.owner.prepare(model, pos, active_only=False)
         lane = self.owner.lane
         if lane is None or lane._current_state() is None:
@@ -126,6 +125,28 @@ class DiffOptController:
         self.status = "active"
         for phase_index, spec in enumerate(specs):
             phase_started_at = time.perf_counter()
+            topology_refresh_start = int(
+                getattr(self.owner, "topology_refresh_count", 0)
+            )
+            topology_reuse_start = int(
+                getattr(self.owner, "topology_refresh_reuse_count", 0)
+            )
+            phase_runtime_profile = (
+                {}
+                if bool(getattr(self.params, "buffering_runtime_profile", False))
+                else None
+            )
+
+            def record_phase_stage(
+                name,
+                started_at,
+                runtime_profile=phase_runtime_profile,
+            ):
+                if runtime_profile is not None:
+                    runtime_profile[name] = (
+                        time.perf_counter() - started_at
+                    ) * 1000.0
+
             input_state_digest = self._state_digest()
             with (
                 self.owner.electrical_window(),
@@ -133,27 +154,61 @@ class DiffOptController:
                 self._phase_coefficients(model, spec.coefficients),
             ):
                 if spec.action == "sz":
-                    # S only needs the buffers already retained in the design;
-                    # the next BF phase rebuilds the complete action domain.
+                    # S only needs the buffers already retained in the design.
+                    # The next BF phase enables the complete action domain.
+                    prepare_started_at = time.perf_counter()
                     self.owner.prepare(model, pos, active_only=True)
+                    prepare_runtime_profile = dict(
+                        getattr(self.owner, "last_prepare_runtime_profile", {}) or {}
+                    )
+                    record_phase_stage("prepare_ms", prepare_started_at)
                     from dreamplace.ops.routability.cooptimization_area import SizingWindowGeometry
 
                     geometry = SizingWindowGeometry(self.data, self.placedb, pos)
+                    operation_started_at = time.perf_counter()
                     result = self.owner.run_sizing(model, pos, geometry, self.owner.capacity)
+                    record_phase_stage("operation_ms", operation_started_at)
                 else:
+                    prepare_started_at = time.perf_counter()
                     self._ensure_lane(model, pos)
+                    prepare_runtime_profile = dict(
+                        getattr(self.owner, "last_prepare_runtime_profile", {}) or {}
+                    )
+                    record_phase_stage("prepare_ms", prepare_started_at)
+                    operation_started_at = time.perf_counter()
                     result = self.owner.run_buffering(model, pos, self.owner.capacity)
+                    record_phase_stage("operation_ms", operation_started_at)
             # A final buffering phase is already consumed by the terminal
             # projection below.  Freezing and immediately repacking its
             # candidates adds no state needed by a later phase and can make
             # the native topology packer observe a partially frozen tree.
             # Retain accepted nets only when another explicit phase follows.
             if spec.action == "bf" and phase_index + 1 < len(specs):
+                retain_started_at = time.perf_counter()
                 self.owner.retain_buffered_nets(model)
+                record_phase_stage("retain_ms", retain_started_at)
+            publish_started_at = time.perf_counter()
             geometry_refresh = self.owner.publish_geometry(model)
+            record_phase_stage("publish_geometry_ms", publish_started_at)
             self.geometry_refresh_count += 1
             self.timing_refresh_count += 1
             result = dict(result or {})
+            lane = self.owner.lane
+            summarize = getattr(lane, "summarize", None)
+            if callable(summarize):
+                lane_summary = summarize()
+                result["candidate_state"] = {
+                    key: lane_summary.get(key)
+                    for key in (
+                        "candidate_count",
+                        "net_count",
+                        "state_kind",
+                        "candidate_geometry_refresh",
+                        "candidate_geometry_runtime_profile",
+                        "candidate_geometry_runtime_profile_history",
+                    )
+                    if lane_summary.get(key) is not None
+                }
             if result.get("trace_path"):
                 source = result["trace_path"]
                 directory, name = os.path.split(source)
@@ -178,9 +233,45 @@ class DiffOptController:
                         else "published"
                     ),
                     "geometry_refresh": geometry_refresh,
+                    "topology_refresh": {
+                        "refresh_count": int(
+                            getattr(self.owner, "topology_refresh_count", 0)
+                        )
+                        - topology_refresh_start,
+                        "reuse_count": int(
+                            getattr(self.owner, "topology_refresh_reuse_count", 0)
+                        )
+                        - topology_reuse_start,
+                        "last_state": dict(
+                            getattr(
+                                self.owner,
+                                "last_topology_refresh_state",
+                                {},
+                            )
+                            or {}
+                        ),
+                    },
+                    "prepare_runtime_profile": prepare_runtime_profile,
                     "runtime_ms": (time.perf_counter() - phase_started_at) * 1000.0,
                 }
             )
+            if phase_runtime_profile is not None:
+                accounted_ms = sum(
+                    float(phase_runtime_profile.get(name, 0.0) or 0.0)
+                    for name in (
+                        "prepare_ms",
+                        "operation_ms",
+                        "retain_ms",
+                        "publish_geometry_ms",
+                    )
+                )
+                phase_runtime_profile["total_ms"] = float(result["runtime_ms"])
+                phase_runtime_profile["accounted_ms"] = accounted_ms
+                phase_runtime_profile["unattributed_ms"] = max(
+                    0.0,
+                    float(result["runtime_ms"]) - accounted_ms,
+                )
+                result["phase_runtime_profile"] = phase_runtime_profile
             self.trace.append(result)
             self.phase_count += 1
 
@@ -209,6 +300,12 @@ class DiffOptController:
                 "geometry_refresh_count": int(self.geometry_refresh_count),
                 "timing_refresh_count": int(self.timing_refresh_count),
                 "full_rebuild_count": 0,
+                "topology_refresh_count": int(
+                    getattr(self.owner, "topology_refresh_count", 0)
+                ),
+                "topology_refresh_reuse_count": int(
+                    getattr(self.owner, "topology_refresh_reuse_count", 0)
+                ),
             },
             "runtime_ms": (time.perf_counter() - started_at) * 1000.0,
         }

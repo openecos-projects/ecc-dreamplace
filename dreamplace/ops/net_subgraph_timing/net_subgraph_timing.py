@@ -376,67 +376,84 @@ def net_subgraph_forward_relaxed(
             buffer_delay=buffer_tensors["buffer_delay"],
             buffer_output_slew=buffer_tensors["buffer_output_slew"],
         )
-        candidate_input_slew = _candidate_node_values(
-            coordinate_probe["slew_in"],
-            buffer_state.candidate_node_id,
-        )
-        candidate_output_cap = _candidate_node_values(
-            coordinate_probe["lout"],
-            buffer_state.candidate_node_id,
-        )
-        candidate_output_cap = candidate_output_cap - upstream_retained_cap.to(
-            device=candidate_output_cap.device,
-            dtype=candidate_output_cap.dtype,
-        )
-        updated = buffer_coordinate_callback(
-            buffer_state=buffer_state,
-            candidate_input_slew=candidate_input_slew,
-            candidate_output_cap=candidate_output_cap,
-            per_size_input_cap=per_size_input_cap,
-            per_size_delay=per_size_delay,
-            per_size_output_slew=per_size_output_slew,
-            coordinate_probe=coordinate_probe,
-        )
-        updated = dict(updated or {})
-        per_size_input_cap = updated.get("per_size_input_cap", per_size_input_cap)
-        per_size_delay = updated.get("per_size_delay", per_size_delay)
-        per_size_output_slew = updated.get(
-            "per_size_output_slew",
-            per_size_output_slew,
-        )
-        coordinate_source = str(updated.get("coordinate_source", coordinate_source))
-        direct_keys = (
-            "buffer_input_cap",
-            "buffer_delay",
-            "buffer_output_slew",
-        )
-        if all(key in updated for key in direct_keys):
-            direct_values = {key: updated[key] for key in direct_keys}
-            for key in (
-                "bsu_index",
-                "bsu_index_lo",
-                "bsu_index_hi",
-                "bsu_index_alpha",
-                "bsu_index_status",
-            ):
-                if key in buffer_tensors:
-                    direct_values[key] = buffer_tensors[key]
-            direct_values["bsu_index_status"] = dict(
-                direct_values.get("bsu_index_status", {})
-            )
-            direct_values["bsu_index_status"]["coordinate_source"] = coordinate_source
-            buffer_tensors = retain_upstream_wire_cap(direct_values)
-        else:
-            buffer_tensors = retain_upstream_wire_cap(
-                interpolate(
-                    per_size_input_cap,
-                    per_size_delay,
-                    per_size_output_slew,
-                    coordinate_source,
+        if "slew_in" not in coordinate_probe or "lout" not in coordinate_probe:
+            if int(candidate_node_id.numel()) != 0:
+                missing = sorted(
+                    key
+                    for key in ("slew_in", "lout")
+                    if key not in coordinate_probe
                 )
+                raise RuntimeError(
+                    "coordinate probe omitted required tensors for non-empty "
+                    f"candidates: {missing}"
+                )
+            coordinate_probe = None
+        if coordinate_probe is not None:
+            candidate_input_slew = _candidate_node_values(
+                coordinate_probe["slew_in"],
+                buffer_state.candidate_node_id,
             )
-        buffer_tensors["candidate_input_slew"] = candidate_input_slew
-        buffer_tensors["candidate_output_cap"] = candidate_output_cap
+            candidate_output_cap = _candidate_node_values(
+                coordinate_probe["lout"],
+                buffer_state.candidate_node_id,
+            )
+            candidate_output_cap = candidate_output_cap - upstream_retained_cap.to(
+                device=candidate_output_cap.device,
+                dtype=candidate_output_cap.dtype,
+            )
+            updated = buffer_coordinate_callback(
+                buffer_state=buffer_state,
+                candidate_input_slew=candidate_input_slew,
+                candidate_output_cap=candidate_output_cap,
+                per_size_input_cap=per_size_input_cap,
+                per_size_delay=per_size_delay,
+                per_size_output_slew=per_size_output_slew,
+                coordinate_probe=coordinate_probe,
+            )
+            updated = dict(updated or {})
+            per_size_input_cap = updated.get("per_size_input_cap", per_size_input_cap)
+            per_size_delay = updated.get("per_size_delay", per_size_delay)
+            per_size_output_slew = updated.get(
+                "per_size_output_slew",
+                per_size_output_slew,
+            )
+            coordinate_source = str(
+                updated.get("coordinate_source", coordinate_source)
+            )
+            direct_keys = (
+                "buffer_input_cap",
+                "buffer_delay",
+                "buffer_output_slew",
+            )
+            if all(key in updated for key in direct_keys):
+                direct_values = {key: updated[key] for key in direct_keys}
+                for key in (
+                    "bsu_index",
+                    "bsu_index_lo",
+                    "bsu_index_hi",
+                    "bsu_index_alpha",
+                    "bsu_index_status",
+                ):
+                    if key in buffer_tensors:
+                        direct_values[key] = buffer_tensors[key]
+                direct_values["bsu_index_status"] = dict(
+                    direct_values.get("bsu_index_status", {})
+                )
+                direct_values["bsu_index_status"]["coordinate_source"] = (
+                    coordinate_source
+                )
+                buffer_tensors = retain_upstream_wire_cap(direct_values)
+            else:
+                buffer_tensors = retain_upstream_wire_cap(
+                    interpolate(
+                        per_size_input_cap,
+                        per_size_delay,
+                        per_size_output_slew,
+                        coordinate_source,
+                    )
+                )
+            buffer_tensors["candidate_input_slew"] = candidate_input_slew
+            buffer_tensors["candidate_output_cap"] = candidate_output_cap
 
     result = forward_fn(
         **kwargs,

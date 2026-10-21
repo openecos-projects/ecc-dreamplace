@@ -104,6 +104,13 @@ def test_candidate_native_packer_matches_python_expanded_topology():
     assert prepared["flat_topo_node_id"].tolist() == reference["metadata"][
         "compact_node_to_original"
     ]
+    assert prepared["candidate_parent_node_id"].tolist() == [2, 4]
+    assert prepared["candidate_child_node_id"].tolist() == [4, 1]
+    assert prepared["candidate_tree_node_id"].tolist() == [-1, -1]
+    assert prepared["candidate_is_segment"].tolist() == [1, 1]
+    assert prepared["candidate_split_ratio"].tolist() == pytest.approx(
+        [0.25, 0.5]
+    )
     for key in (
         "edge_resistance",
         "edge_capacitance",
@@ -203,6 +210,12 @@ def _two_net_candidate_payload():
 
 def test_candidate_native_active_view_matches_python_reference():
     payload, state = _two_net_candidate_payload()
+    assert payload["candidate_parent_node_id"].tolist() == [-1, -1]
+    assert payload["candidate_child_node_id"].tolist() == [-1, -1]
+    assert payload["candidate_tree_node_id"].tolist() == [4, 6]
+    assert payload["candidate_synthetic_node_id"].tolist() == [-1, -1]
+    assert payload["candidate_is_segment"].tolist() == [0, 0]
+    assert payload["candidate_split_ratio"].tolist() == [0.0, 0.0]
     native_provider = RelaxedBufferDynamicNetProvider(
         static_payload=payload,
         buffer_state=state,

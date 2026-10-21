@@ -1,15 +1,14 @@
 from types import SimpleNamespace
 
-import torch
-from torch import nn
 import pytest
-
+import torch
+from dreamplace.ops.buffer_insertion.buffering_lane import BufferingOptimizationLane
 from dreamplace.ops.buffer_insertion.candidate_geometry import (
     candidate_key,
     refresh_candidate_geometry,
     remap_candidate_state,
 )
-from dreamplace.ops.buffer_insertion.buffering_lane import BufferingOptimizationLane
+from torch import nn
 
 
 def _segment(candidate_id, ratio=0.5):
@@ -143,12 +142,6 @@ def test_lane_refresh_rebuilds_payload_and_retains_virtual_activation(
         candidate_net_id=torch.tensor([7]),
         activation_param=nn.Parameter(torch.tensor([[0.0, 1.0, 0.0, 0.0]])),
     )
-    new_state = SimpleNamespace(
-        candidate_records=(new_record,),
-        candidate_ids=torch.tensor([2]),
-        candidate_net_id=torch.tensor([7]),
-        activation_param=nn.Parameter(torch.zeros(1, 4)),
-    )
     config = SimpleNamespace(
         mode="candidate",
         candidate_strategy="discrete_net_gradient",
@@ -177,18 +170,36 @@ def test_lane_refresh_rebuilds_payload_and_retains_virtual_activation(
         _relaxed_buffer_dynamic_net_provider=object(),
         _relaxed_buffer_dynamic_net_provider_key=object(),
         _timing_geometry_cache=object(),
+        op_collections=SimpleNamespace(
+            steiner_topo_op=SimpleNamespace(
+                topology_generation=7,
+                frozen_topology_generation=7,
+                frozen_nets=SimpleNamespace(net_ids=(1,)),
+            )
+        ),
         register_buffer_optimization_state=lambda state: None,
     )
     lane.params = SimpleNamespace()
 
-    def fake_build(model, params, config):
+    reused_records = []
+
+    def fake_build(model, params, config, **kwargs):
+        records = tuple(kwargs.get("candidate_records", (new_record,)))
+        reused_records.append(records)
         return SimpleNamespace(
             status="ok",
             reason=None,
-            buffer_optimization_state=new_state,
+            buffer_optimization_state=SimpleNamespace(
+                candidate_records=records,
+                candidate_ids=torch.tensor([2] * len(records)),
+                candidate_net_id=torch.tensor(
+                    [int(record["net_id"]) for record in records]
+                ),
+                activation_param=nn.Parameter(torch.zeros(len(records), 4)),
+            ),
             buffer_relaxed_timing_payload={"metadata": {"state_kind": "candidate"}},
             metadata={},
-            candidate_count=1,
+            candidate_count=len(records),
             net_count=1,
         )
 
@@ -211,13 +222,135 @@ def test_lane_refresh_rebuilds_payload_and_retains_virtual_activation(
 
     assert summary["status"] == "ok"
     assert summary["geometry_generation"] == 1
+    assert summary["candidate_domain_reused"] is True
+    assert candidate_key(reused_records[0][0]) == candidate_key(old_record)
+    assert reused_records[0][0]["x_dbu"] == 250
     assert lane._current_state().candidate_ids.tolist() == [31]
     assert lane._current_state().activation_param.detach().tolist() == [[0.0, 1.0, 0.0, 0.0]]
     assert lane._current_state().candidate_records[0]["x_dbu"] == 250
     assert lane.model._relaxed_buffer_dynamic_net_provider is None
 
 
-def test_active_refresh_compacts_search_and_reexpands_without_changing_timing(
+def test_lane_reuses_full_candidate_records_for_unchanged_topology(monkeypatch):
+    from dreamplace.ops.buffer_insertion.buffering_lane import (
+        BufferingOptimizationLane,
+    )
+
+    records = (
+        {
+            "net_id": 1,
+            "candidate_id": 0,
+            "buffer_main_type_index": 3,
+            "parent_node_id": 10,
+            "child_node_ids": [11],
+            "segment_split_ratio": 0.5,
+            "synthetic_node_id": -1,
+            "x_dbu": 50,
+            "y_dbu": 0,
+        },
+        {
+            "net_id": 1,
+            "candidate_id": 1,
+            "buffer_main_type_index": 3,
+            "parent_node_id": 10,
+            "child_node_ids": [11],
+            "segment_split_ratio": 0.75,
+            "synthetic_node_id": -2,
+            "x_dbu": 75,
+            "y_dbu": 0,
+        },
+    )
+    active_state = SimpleNamespace(
+        candidate_records=records,
+        candidate_ids=torch.tensor([0, 1]),
+        candidate_net_id=torch.tensor([1, 1]),
+        activation_param=torch.nn.Parameter(torch.zeros(2, 2)),
+        timing_active_only=False,
+        is_typed_candidate=True,
+    )
+    active_state.activation_param.data[1, 0] = 1.0
+    payload = {"metadata": {"state_kind": "candidate"}}
+    data = SimpleNamespace(
+        buffering_timing_topology={
+            "topology_generation": 7,
+            "node_x_dbu": torch.tensor([0, 100, 50, 75]),
+            "node_y_dbu": torch.tensor([0, 0, 0, 0]),
+            "net_flat_topo_sort": torch.tensor([0, 1]),
+            "net_flat_topo_sort_start": torch.tensor([0, 2]),
+            "pin_fa": torch.tensor([-1, 0]),
+            "flat_pin_to": torch.tensor([1]),
+            "flat_pin_to_start": torch.tensor([0, 1]),
+        }
+    )
+    lane = BufferingOptimizationLane(
+        SimpleNamespace(mode="candidate"),
+        buffer_optimization_state=active_state,
+        buffer_relaxed_timing_payload=payload,
+        placedb=None,
+    )
+    lane.data_collections = data
+    lane.model = SimpleNamespace(
+        _relaxed_buffer_dynamic_net_provider=object(),
+        _relaxed_buffer_dynamic_net_provider_key=object(),
+        _timing_geometry_cache=object(),
+        register_buffer_optimization_state=lambda state: None,
+    )
+    lane.params = SimpleNamespace(buffering_runtime_profile=True)
+    lane._full_candidate_topology_signature = lane._candidate_topology_signature()
+    lane._full_candidate_geometry_digest = "sha256:cached"
+    lane._full_candidate_refresh_topology_digest = "sha256:topology"
+    lane._full_candidate_candidate_generation = 7
+    observed = {}
+
+    def fake_build(_model, _params, _config, **kwargs):
+        observed["candidate_records"] = kwargs["candidate_records"]
+        new_state = SimpleNamespace(
+            candidate_records=records,
+            candidate_ids=torch.tensor([0, 1]),
+            candidate_net_id=torch.tensor([1, 1]),
+            activation_param=nn.Parameter(torch.zeros(2, 2)),
+            timing_active_only=False,
+            is_typed_candidate=True,
+        )
+        return SimpleNamespace(
+            status="ok",
+            reason=None,
+            buffer_optimization_state=new_state,
+            buffer_relaxed_timing_payload={
+                "metadata": {"state_kind": "candidate"}
+            },
+            candidate_count=len(records),
+            net_count=1,
+            metadata={},
+        )
+
+    monkeypatch.setattr(
+        "dreamplace.ops.buffer_insertion.buffering_state_builder.build_buffering_state_for_model",
+        fake_build,
+    )
+    monkeypatch.setattr(
+        "dreamplace.ops.buffer_insertion.candidate_geometry.refresh_candidate_geometry",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("cached candidate records should skip geometry refresh")
+        ),
+    )
+
+    summary = lane.refresh_candidate_geometry(
+        model=lane.model,
+        params=lane.params,
+        reason="same_topology",
+    )
+
+    assert summary["candidate_records_cache_hit"] is True
+    assert observed["candidate_records"] == records
+    assert lane._current_state().activation_param.detach().tolist() == [
+        [0.0, 0.0],
+        [1.0, 0.0],
+    ]
+    assert lane.model._relaxed_buffer_dynamic_net_provider is None
+
+
+def test_active_refresh_reuses_full_candidate_domain_without_changing_timing(
     tmp_path, monkeypatch
 ):
     from dreamplace.ops.buffer_insertion.buffering_state_builder import (
@@ -304,6 +437,7 @@ def test_active_refresh_compacts_search_and_reexpands_without_changing_timing(
         buffer_relaxed_timing_payload=built.buffer_relaxed_timing_payload,
     )
     lane.data_collections = data
+    lane.attach_state(data)
 
     def timing(state, payload):
         provider = RelaxedBufferDynamicNetProvider(static_payload=payload, buffer_state=state)
@@ -327,21 +461,27 @@ def test_active_refresh_compacts_search_and_reexpands_without_changing_timing(
         rebuild_nets,
     )
     lane.refresh_candidate_geometry(model=model, params=params, active_only=True)
-    compact = lane._current_state()
-    assert [candidate_key(row) for row in compact.candidate_records] == [
-        candidate_key(row) for row in candidates[:3]
+    active_only = lane._current_state()
+    assert [candidate_key(row) for row in active_only.candidate_records] == [
+        candidate_key(row) for row in candidates
     ]
-    assert compact.activation_param.detach().tolist() == [
+    assert active_only.activation_param.detach().tolist() == [
         [0.0, 0.0, 0.0, 0.0],
         [0.0, 0.0, 1.0, 0.0],
         [0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0],
     ]
-    assert compact.candidate_ids.tolist() == [0, 1, 2]
-    after, compact_grad = timing(compact, lane.buffer_relaxed_timing_payload)
+    assert active_only.candidate_ids.tolist() == [0, 1, 2, 3]
+    assert active_only.timing_active_only is True
+    after, active_only_grad = timing(
+        active_only,
+        lane.buffer_relaxed_timing_payload,
+    )
     for key in ("sink_arrival", "sink_slew"):
         torch.testing.assert_close(after[key], before[key])
     torch.testing.assert_close(after["lin"][0], before["lin"][0])
-    torch.testing.assert_close(compact_grad, full_grad[:3])
+    torch.testing.assert_close(active_only_grad, full_grad)
+    assert lane._candidate_state_contains_full_domain is True
 
     lane.refresh_candidate_geometry(model=model, params=params)
     expanded = lane._current_state()
@@ -373,3 +513,127 @@ def test_active_refresh_with_no_accepted_buffers_skips_search_builder(monkeypatc
         model=SimpleNamespace(), params=SimpleNamespace(), active_only=True
     )
     assert result == {"status": "ok", "reason": "no_active_candidates", "candidate_count": 0}
+
+
+def test_lane_updates_only_dirty_candidate_records_without_rebuild(monkeypatch):
+    records = (
+        {
+            "net_id": 1,
+            "candidate_id": 0,
+            "parent_node_id": 0,
+            "child_node_ids": [1],
+            "segment_split_ratio": 0.5,
+            "x_dbu": 0,
+            "y_dbu": 0,
+        },
+        {
+            "net_id": 2,
+            "candidate_id": 1,
+            "parent_node_id": 2,
+            "child_node_ids": [3],
+            "segment_split_ratio": 0.5,
+            "x_dbu": 0,
+            "y_dbu": 0,
+        },
+        {
+            "net_id": 3,
+            "candidate_id": 2,
+            "tree_node_id": 4,
+            "x_dbu": 0,
+            "y_dbu": 0,
+        },
+    )
+    activation = nn.Parameter(torch.zeros(3, 2))
+    with torch.no_grad():
+        activation[1, 1] = 1.0
+    state = SimpleNamespace(
+        candidate_records=records,
+        candidate_ids=torch.tensor([0, 1, 2]),
+        candidate_net_id=torch.tensor([1, 2, 3]),
+        activation_param=activation,
+        timing_active_only=False,
+        is_typed_candidate=True,
+    )
+    payload = {
+        "metadata": {
+            "state_kind": "candidate",
+            "candidate_geometry_generation": 4,
+        },
+        "candidate_net_id": torch.tensor([1, 2, 3]),
+        "candidate_parent_node_id": torch.tensor([0, 2, -1]),
+        "candidate_child_node_id": torch.tensor([1, 3, -1]),
+        "candidate_tree_node_id": torch.tensor([-1, -1, 4]),
+        "candidate_is_segment": torch.tensor([1, 1, 0]),
+        "candidate_split_ratio": torch.tensor(
+            [0.5, 0.5, 0.0],
+            dtype=torch.float64,
+        ),
+    }
+    data = SimpleNamespace(
+        pos=[nn.Parameter(torch.zeros(2))],
+        buffering_timing_topology_dbu=1000.0,
+        buffering_timing_topology={
+            "topology_generation": 7,
+            "dbu": 1000.0,
+            "node_x_dbu": torch.tensor([0.0, 100.0, 0.0, 200.0, 300.0]),
+            "node_y_dbu": torch.tensor([0.0, 0.0, 20.0, 20.0, 0.0]),
+            "net_flat_topo_sort": torch.tensor([0, 1, 2, 3, 4]),
+            "net_flat_topo_sort_start": torch.tensor([0, 2, 4, 5]),
+            "pin_fa": torch.tensor([-1, 0, -1, 2, -1]),
+            "flat_pin_to": torch.tensor([1, 3]),
+            "flat_pin_to_start": torch.tensor([0, 1, 1, 2, 2]),
+        },
+        set_buffer_optimization_state=lambda value: setattr(
+            data,
+            "buffer_optimization_state",
+            value,
+        ),
+    )
+    model = SimpleNamespace(
+        _relaxed_buffer_dynamic_net_provider=object(),
+        _relaxed_buffer_dynamic_net_provider_key=object(),
+        _timing_geometry_cache=object(),
+        register_buffer_optimization_state=lambda _value: None,
+    )
+    lane = BufferingOptimizationLane(
+        SimpleNamespace(mode="candidate"),
+        buffer_optimization_state=state,
+        buffer_relaxed_timing_payload=payload,
+    )
+    lane.data_collections = data
+    lane.model = model
+    lane.params = SimpleNamespace(buffering_runtime_profile=False)
+    lane._full_candidate_records = records
+    lane._full_candidate_structure_signature = lane._candidate_structure_signature()
+    lane._full_candidate_geometry_digest = "sha256:old"
+    lane._full_candidate_refresh_topology_digest = "sha256:topology"
+    lane._full_candidate_candidate_generation = 7
+
+    monkeypatch.setattr(
+        "dreamplace.ops.buffer_insertion.buffering_state_builder.build_buffering_state_for_model",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("dirty-net refresh must not rebuild candidate state")
+        ),
+    )
+
+    summary = lane.refresh_candidate_geometry(
+        model=model,
+        params=lane.params,
+        reason="dirty_net_sizing",
+        active_only=True,
+        dirty_net_ids=[2],
+    )
+
+    assert summary["candidate_state_build_skipped"] is True
+    assert summary["candidate_records_cache_hit"] is True
+    assert lane._current_state().candidate_records[0]["x_dbu"] == 0
+    assert lane._current_state().candidate_records[1]["x_dbu"] == 100
+    assert lane._current_state().candidate_records[1]["y_dbu"] == 20
+    assert lane._current_state().candidate_records[2]["x_dbu"] == 0
+    assert lane._current_state().timing_active_only is True
+    assert lane._current_state().activation_param.detach().tolist() == [
+        [0.0, 0.0],
+        [0.0, 1.0],
+        [0.0, 0.0],
+    ]
+    assert model._relaxed_buffer_dynamic_net_provider is None

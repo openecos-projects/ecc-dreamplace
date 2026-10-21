@@ -300,6 +300,47 @@ def test_relaxed_buffer_provider_consumes_current_driver_timing():
     assert provider.metadata["static_payload_cache_hit_count"] > 0
 
 
+def test_relaxed_buffer_provider_falls_back_when_affected_net_has_no_active_view():
+    provider, _state = _build_provider()
+    provider.update_buffer_state(provider.buffer_state, affected_net_ids={999})
+    pin_rAAT = torch.tensor([0.0, 40.0, -1.0], dtype=torch.float32)
+    pin_fAAT = torch.tensor([0.0, 50.0, -1.0], dtype=torch.float32)
+    pin_rtran = torch.tensor([0.0, 2.0, 0.0], dtype=torch.float32)
+    pin_ftran = torch.tensor([0.0, 3.0, 0.0], dtype=torch.float32)
+    zeros = torch.zeros(3, dtype=torch.float32)
+
+    def static_calculate_net_aat_level(
+        _curnets,
+        pin_rAAT,
+        pin_fAAT,
+        pin_rtran,
+        pin_ftran,
+        *_args,
+    ):
+        return pin_rAAT, pin_fAAT, pin_rtran, pin_ftran
+
+    result = provider.propagate_net_aat_level(
+        net_ids=torch.tensor([999], dtype=torch.long),
+        pin_rAAT=pin_rAAT,
+        pin_fAAT=pin_fAAT,
+        pin_rtran=pin_rtran,
+        pin_ftran=pin_ftran,
+        base_pin_net_delay_rise=zeros,
+        base_pin_net_delay_fall=zeros,
+        base_pin_net_impulse_rise=zeros,
+        base_pin_net_impulse_fall=zeros,
+        static_calculate_net_aat_level=static_calculate_net_aat_level,
+    )
+
+    for actual, expected in zip(
+        result,
+        (pin_rAAT, pin_fAAT, pin_rtran, pin_ftran),
+        strict=True,
+    ):
+        assert actual is expected
+    assert provider.metadata["net_subgraph_forward_relaxed_ms"] == 0.0
+
+
 def test_candidate_driver_cap_overlay_tracks_virtual_buffer_state():
     provider, state = _build_discrete_provider()
     base_rise = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32)

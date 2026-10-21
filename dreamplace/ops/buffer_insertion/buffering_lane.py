@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import torch
 
+from .candidate_state_refresh import CandidateStateRefreshMixin
+
 
 def _json_safe_copy(value, field_name):
     try:
@@ -95,7 +97,7 @@ class BufferCommitRequest:
         }
 
 
-class BufferingOptimizationLane:
+class BufferingOptimizationLane(CandidateStateRefreshMixin):
     """Canonical lifecycle holder for relaxed buffering state."""
 
     shared_typed_candidate_gradients = True
@@ -121,6 +123,22 @@ class BufferingOptimizationLane:
         self.segment_capacity_bundle = None
         self.segment_capacity_controller = None
         self._candidate_gc_restore_required = False
+        self._full_candidate_records = (
+            tuple(buffer_optimization_state.candidate_records)
+            if buffer_optimization_state is not None
+            and hasattr(buffer_optimization_state, "candidate_records")
+            else None
+        )
+        self._full_candidate_topology_signature = None
+        self._full_candidate_structure_signature = None
+        self._full_candidate_geometry_digest = None
+        self._full_candidate_refresh_topology_digest = None
+        self._full_candidate_candidate_generation = None
+        self._last_candidate_incremental_refresh = None
+        self._candidate_state_contains_full_domain = bool(
+            buffer_optimization_state is not None
+            and hasattr(buffer_optimization_state, "candidate_records")
+        )
         self.timing_loss = None
         self._summary = {
             "status": "initialized",
@@ -237,9 +255,27 @@ class BufferingOptimizationLane:
                 self._summary["state_build_metadata"] = dict(build_result.metadata)
             if build_result.status == "ok":
                 self.buffer_optimization_state = build_result.buffer_optimization_state
+                if hasattr(self.buffer_optimization_state, "candidate_records"):
+                    self._full_candidate_records = tuple(
+                        self.buffer_optimization_state.candidate_records
+                    )
+                    self._candidate_state_contains_full_domain = not bool(
+                        getattr(
+                            self.buffer_optimization_state,
+                            "timing_active_only",
+                            False,
+                        )
+                    )
                 self.buffer_relaxed_timing_payload = (
                     build_result.buffer_relaxed_timing_payload
                 )
+                if self._state_kind() == "candidate":
+                    self._full_candidate_topology_signature = (
+                        self._candidate_topology_signature()
+                    )
+                    self._full_candidate_structure_signature = (
+                        self._candidate_structure_signature()
+                    )
                 self._summary["state_source"] = build_result.metadata.get(
                     "state_source",
                     "buffering_state_builder",
@@ -250,6 +286,19 @@ class BufferingOptimizationLane:
         else:
             if runtime_profile is not None:
                 runtime_profile["state_build_ms"] = 0.0
+            if self._state_kind() == "candidate":
+                if self.buffer_optimization_state is not None:
+                    self._full_candidate_records = tuple(
+                        self.buffer_optimization_state.candidate_records
+                    )
+                if self._full_candidate_topology_signature is None:
+                    self._full_candidate_topology_signature = (
+                        self._candidate_topology_signature()
+                    )
+                if self._full_candidate_structure_signature is None:
+                    self._full_candidate_structure_signature = (
+                        self._candidate_structure_signature()
+                    )
         if (
             bool(getattr(self.config, "segment_capacity_enabled", False))
             and self.segment_capacity_controller is None
@@ -360,147 +409,34 @@ class BufferingOptimizationLane:
                         "per_size_output_slew"
                     )
             attached = True
+        if self._state_kind() == "candidate":
+            if (
+                self.buffer_optimization_state is not None
+                and not bool(
+                    getattr(
+                        self.buffer_optimization_state,
+                        "timing_active_only",
+                        False,
+                    )
+                )
+            ):
+                self._full_candidate_records = tuple(
+                    self.buffer_optimization_state.candidate_records
+                )
+                self._candidate_state_contains_full_domain = True
+            if self._full_candidate_topology_signature is None:
+                self._full_candidate_topology_signature = (
+                    self._candidate_topology_signature()
+                )
+            if self._full_candidate_structure_signature is None:
+                self._full_candidate_structure_signature = (
+                    self._candidate_structure_signature()
+                )
         self._summary["state_attached"] = bool(attached)
         self._summary["relaxed_timing_enabled"] = self._has_relaxed_timing_state()
         self._update_state_kind_summary()
         self._sync_params(getattr(self, "params", None))
         return self
-
-    def refresh_candidate_geometry(
-        self,
-        *,
-        model=None,
-        params=None,
-        reason="live_geometry_refresh",
-        active_only=False,
-    ):
-        """Rebuild candidate timing data while retaining virtual actions.
-
-        Candidate activation is remapped by the stable edge/position key.  The
-        rebuilt payload is the only source used by the dynamic provider; old
-        packed coordinates and RC tensors are discarded.
-        """
-
-        state = self._current_state()
-        if state is None or not hasattr(state, "activation_param"):
-            return {"status": "skipped", "reason": "non_candidate_state"}
-        model = model if model is not None else self.model
-        params = params if params is not None else self.params
-        if model is None or params is None:
-            return {"status": "skipped", "reason": "missing_model_or_params"}
-
-        from .candidate_geometry import (
-            refresh_candidate_geometry,
-            remap_candidate_state,
-        )
-        from .buffering_state_builder import build_buffering_state_for_model
-
-        live_topology = dict(
-            getattr(self.data_collections, "buffering_timing_topology", {}) or {}
-        )
-        previous_metadata = dict(
-            (getattr(self, "buffer_relaxed_timing_payload", {}) or {}).get(
-                "metadata", {}
-            )
-            or {}
-        )
-        geometry_generation = int(
-            previous_metadata.get("candidate_geometry_generation", 0) or 0
-        ) + 1
-        build_options = {}
-        old_records = state.candidate_records
-        if active_only:
-            activation = state.activation_param.detach()
-            active = activation > 0 if activation.ndim == 1 else activation.sum(dim=1) > 0
-            rows = torch.nonzero(active).flatten().cpu().tolist()
-            if not rows:
-                return {"status": "ok", "reason": "no_active_candidates", "candidate_count": 0}
-            net_ids = {int(state.candidate_records[index]["net_id"]) for index in rows}
-            # Keep inactive split points on retained nets: removing them changes
-            # the distributed RC slew calculation even when their BU is zero.
-            old_records = tuple(row for row in state.candidate_records if int(row["net_id"]) in net_ids)
-            build_options["net_ids"] = sorted(net_ids)
-        # ``buffering_nets`` is a generation-local RC tree cache.  Once a
-        # live topology has been published, reusing it would repack the new
-        # candidate records against the previous vertex domain.  Force the
-        # state builder through its live-topology adapter for this refresh.
-        if live_topology:
-            for name in ("buffering_nets", "buffer_nets"):
-                if hasattr(self.data_collections, name):
-                    setattr(self.data_collections, name, ())
-        old_refresh = refresh_candidate_geometry(old_records, live_topology)
-        if active_only:
-            build_options["candidate_records"] = old_refresh.candidate_records
-        build_result = build_buffering_state_for_model(model, params, self.config, **build_options)
-        if build_result.status != "ok":
-            raise RuntimeError(
-                "candidate geometry refresh failed to rebuild state: "
-                f"{build_result.reason or build_result.metadata}"
-            )
-        new_state = build_result.buffer_optimization_state
-        new_refresh = refresh_candidate_geometry(
-            new_state,
-            live_topology,
-            candidate_generation=live_topology.get("topology_generation", 0),
-            geometry_generation=geometry_generation,
-        )
-        new_state.candidate_records = new_refresh.candidate_records
-        remap = remap_candidate_state(
-            state,
-            new_state,
-            invalidated_keys=new_refresh.invalidated_candidate_keys,
-        )
-        if remap["new_active_count"] != remap["old_active_count"]:
-            raise RuntimeError(
-                "candidate geometry refresh lost accepted virtual buffers: "
-                f"{remap}"
-            )
-        self.buffer_optimization_state = new_state
-        self.buffer_relaxed_timing_payload = build_result.buffer_relaxed_timing_payload
-        metadata = dict(self.buffer_relaxed_timing_payload.get("metadata", {}) or {})
-        metadata.update(
-            {
-                "candidate_geometry_refresh_reason": str(reason),
-                "candidate_topology_generation": int(
-                    new_refresh.candidate_generation
-                ),
-                "candidate_geometry_generation": int(
-                    new_refresh.geometry_generation
-                ),
-                "candidate_geometry_digest": new_refresh.geometry_digest,
-                "candidate_topology_digest": new_refresh.topology_digest,
-                "candidate_geometry_invalidated_count": len(
-                    new_refresh.invalidated_candidate_keys
-                ),
-                "candidate_geometry_refresh_status": "ok",
-                "candidate_geometry_old_digest": old_refresh.geometry_digest,
-                "candidate_activation_remap": dict(remap),
-                "candidate_state_remap_failed": list(
-                    remap.get("candidate_state_remap_failed", ()) or ()
-                ),
-            }
-        )
-        self.buffer_relaxed_timing_payload["metadata"] = metadata
-        self._summary.update(build_result.metadata)
-        self._summary["candidate_count"] = build_result.candidate_count
-        self._summary["net_count"] = build_result.net_count
-        self.attach_state(self.data_collections)
-        self.register_model_parameters(model)
-        model._relaxed_buffer_dynamic_net_provider = None
-        model._relaxed_buffer_dynamic_net_provider_key = None
-        model._timing_geometry_cache = None
-        self._summary["candidate_geometry_refresh"] = dict(metadata)
-        return {
-            "status": "ok",
-            "reason": str(reason),
-            "candidate_generation": int(new_refresh.candidate_generation),
-            "geometry_generation": int(new_refresh.geometry_generation),
-            "candidate_count": len(new_refresh.candidate_records),
-            "invalidated_candidate_count": len(new_refresh.invalidated_candidate_keys),
-            "geometry_digest": new_refresh.geometry_digest,
-            "topology_digest": new_refresh.topology_digest,
-            "activation_remap": dict(remap),
-        }
 
     def register_model_parameters(self, model):
         if model is not None and hasattr(model, "register_buffer_optimization_state"):

@@ -1395,6 +1395,15 @@ py::dict pack_candidate_topology(
   prepared["driver_pin_id"] = driver_pin_id;
   prepared["candidate_node_id"] = output_candidate_node_id;
   prepared["candidate_net_id"] = output_candidate_net_id;
+  // Keep the canonical source columns alongside the packed node domain. The
+  // incremental geometry refresher can then update only dirty candidate rows
+  // without converting state records back into tensors.
+  prepared["candidate_parent_node_id"] = candidate_parent_node_id;
+  prepared["candidate_child_node_id"] = candidate_child_node_id;
+  prepared["candidate_tree_node_id"] = candidate_tree_node_id;
+  prepared["candidate_synthetic_node_id"] = candidate_synthetic_node_id;
+  prepared["candidate_is_segment"] = candidate_is_segment;
+  prepared["candidate_split_ratio"] = candidate_split_ratio;
   prepared["net_candidate_start"] = net_candidate_start;
   prepared["flat_candidate_by_net"] = flat_candidate_by_net;
 

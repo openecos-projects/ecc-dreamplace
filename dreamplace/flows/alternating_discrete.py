@@ -133,8 +133,20 @@ class AlternatingSizingOwner(InflationS5B1):
     def run(self, model, pos, *, iteration):
         return self.execute_window(model, pos, iteration=iteration)
 
-    def prepare(self, model, pos, *, active_only=True):
-        return super().prepare(model, pos, active_only=active_only)
+    def prepare(
+        self,
+        model,
+        pos,
+        *,
+        active_only=True,
+        refresh_records_all=False,
+    ):
+        return super().prepare(
+            model,
+            pos,
+            active_only=active_only,
+            refresh_records_all=refresh_records_all,
+        )
 
 
 @dataclass(frozen=True)

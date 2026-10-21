@@ -1380,7 +1380,18 @@ def _build_candidate_buffering_state_for_model(
     params,
     config,
     common,
+    runtime_profile=None,
 ):
+    runtime_profile_enabled = bool(
+        getattr(params, "buffering_runtime_profile", False)
+    )
+    if runtime_profile is None and runtime_profile_enabled:
+        runtime_profile = {}
+
+    def record_runtime_stage(name, started_at):
+        _record_runtime_stage(runtime_profile, name, started_at)
+
+    build_started_at = time.perf_counter()
     nets = common["nets"]
     candidates = common["candidates"]
     buffer_library = common["buffer_library"]
@@ -1399,11 +1410,13 @@ def _build_candidate_buffering_state_for_model(
             max_candidates_per_segment=config.max_repeaters_per_segment,
         )
         candidate_source = "generated_from_nets"
+    runtime_stage_started_at = time.perf_counter()
     diagnostics = _input_diagnostics(
         common,
         candidates=candidates,
         include_candidates=True,
     )
+    record_runtime_stage("candidate_input_diagnostics_ms", runtime_stage_started_at)
     if diagnostics["input_diagnostics"]["missing_inputs"]:
         return _build_result_skip(
             mode,
@@ -1414,6 +1427,7 @@ def _build_candidate_buffering_state_for_model(
         )
 
     dtype = torch.float32
+    runtime_stage_started_at = time.perf_counter()
     selected_nets = _bounded_nets(nets, net_cap=None)
     net_ids = [int(net.get("net_id", index)) for index, net in enumerate(selected_nets)]
     valid_candidate_net_ids, candidate_net_filter = _native_candidate_net_filter(
@@ -1429,6 +1443,7 @@ def _build_candidate_buffering_state_for_model(
         net_ids=valid_candidate_net_ids,
         candidate_cap=None,
     )
+    record_runtime_stage("candidate_selection_ms", runtime_stage_started_at)
     if not selected_nets or not selected_candidates:
         return _build_result_skip(mode, "no_supported_candidates")
     selected_candidate_count = len(selected_candidates)
@@ -1441,6 +1456,7 @@ def _build_candidate_buffering_state_for_model(
         getattr(config, "candidate_drive_type_mode", "single_fixed")
         or "single_fixed"
     ).strip()
+    runtime_stage_started_at = time.perf_counter()
     per_size = _per_size_tensors(
         selected_candidates,
         buffer_library,
@@ -1468,6 +1484,8 @@ def _build_candidate_buffering_state_for_model(
             resolve_fixed_buffer_selection(params, config, buffer_library)
         )
     state_device = _buffer_timing_device(model, data_collections)
+    record_runtime_stage("candidate_size_and_policy_build_ms", runtime_stage_started_at)
+    runtime_stage_started_at = time.perf_counter()
     if candidate_strategy == "discrete_net_gradient":
         if candidate_drive_type_mode == "four_strength_table":
             state = build_typed_discrete_candidate_state(
@@ -1509,8 +1527,10 @@ def _build_candidate_buffering_state_for_model(
             dtype=dtype,
             device=state_device,
         )
+    record_runtime_stage("candidate_state_build_ms", runtime_stage_started_at)
     native_packing = None
     native_packing_reason = None
+    runtime_stage_started_at = time.perf_counter()
     try:
         native_packing = build_native_candidate_packing_for_model(
             model,
@@ -1536,6 +1556,8 @@ def _build_candidate_buffering_state_for_model(
             native_packing.get("reason") or "native_candidate_packer_unavailable"
         )
         native_packing = None
+    record_runtime_stage("candidate_native_packing_ms", runtime_stage_started_at)
+    runtime_stage_started_at = time.perf_counter()
     try:
         payload = build_relaxed_buffer_timing_payload(
             selected_nets,
@@ -1582,6 +1604,8 @@ def _build_candidate_buffering_state_for_model(
     finally:
         selected_candidates = None
         candidates = None
+    record_runtime_stage("candidate_timing_payload_build_ms", runtime_stage_started_at)
+    runtime_stage_started_at = time.perf_counter()
     metadata.update(
         {
             "state_kind": "candidate",
@@ -1650,7 +1674,41 @@ def _build_candidate_buffering_state_for_model(
     if native_packing is not None:
         native_metadata = dict(native_packing["metadata"])
         metadata["candidate_native_packer_metadata"] = native_metadata
+        if runtime_profile is not None:
+            for name in (
+                "candidate_input_materialize_ms",
+                "native_pybind_call_ms",
+                "native_total_ms",
+            ):
+                runtime_profile[name] = float(native_metadata.get(name, 0.0) or 0.0)
     payload["metadata"] = metadata
+    record_runtime_stage("candidate_metadata_and_policy_build_ms", runtime_stage_started_at)
+    if runtime_profile is not None:
+        stage_names = (
+            "candidate_input_diagnostics_ms",
+            "candidate_selection_ms",
+            "candidate_size_and_policy_build_ms",
+            "candidate_state_build_ms",
+            "candidate_native_packing_ms",
+            "candidate_timing_payload_build_ms",
+            "candidate_metadata_and_policy_build_ms",
+        )
+        runtime_profile["candidate_build_accounted_ms"] = sum(
+            float(runtime_profile.get(name, 0.0) or 0.0)
+            for name in stage_names
+        )
+        runtime_profile["candidate_build_total_ms"] = (
+            time.perf_counter() - build_started_at
+        ) * 1000.0
+        runtime_profile["candidate_build_unattributed_ms"] = max(
+            0.0,
+            float(runtime_profile["candidate_build_total_ms"])
+            - float(runtime_profile["candidate_build_accounted_ms"]),
+        )
+        runtime_profile["candidate_count"] = int(selected_candidate_count)
+        runtime_profile["candidate_net_count"] = int(selected_net_count)
+        metadata["state_build_runtime_profile"] = runtime_profile
+        payload["metadata"] = metadata
     return BufferingStateBuildResult(
         status="ok",
         mode=mode,
@@ -2038,11 +2096,47 @@ def build_buffering_state_for_model(model, params, config, *, net_ids=None, cand
                 payload_metadata = payload.setdefault("metadata", {})
                 payload_metadata["state_build_runtime_profile"] = runtime_profile
         return result
-    return _build_candidate_buffering_state_for_model(
+    result = _build_candidate_buffering_state_for_model(
         model=model,
         mode=mode,
         data_collections=data_collections,
         params=params,
         config=config,
         common=common,
+        runtime_profile=runtime_profile,
     )
+    if runtime_profile_enabled:
+        runtime_profile["common_inputs_build_ms"] = common_inputs_ms
+        common_stage_names = (
+            "common_existing_nets_lookup_ms",
+            "common_metadata_lookup_ms",
+            "common_pydb_lookup_ms",
+            "common_live_topology_payload_ms",
+            "common_edge_rc_build_ms",
+            "common_pin_cap_build_ms",
+            "common_build_buffering_nets_ms",
+            "common_candidate_rows_lookup_ms",
+            "common_buffer_library_lookup_ms",
+            "common_buffer_main_type_resolve_ms",
+            "common_buffer_library_contract_ms",
+        )
+        common_accounted_ms = sum(
+            float(runtime_profile.get(name, 0.0) or 0.0)
+            for name in common_stage_names
+        )
+        runtime_profile["common_inputs_accounted_ms"] = common_accounted_ms
+        runtime_profile["common_inputs_unattributed_ms"] = max(
+            0.0,
+            float(common_inputs_ms) - common_accounted_ms,
+        )
+        runtime_profile["state_build_total_ms"] = (
+            float(common_inputs_ms)
+            + float(runtime_profile.get("candidate_build_total_ms", 0.0))
+        )
+        result.metadata["state_build_runtime_profile"] = runtime_profile
+        payload = result.buffer_relaxed_timing_payload
+        if isinstance(payload, dict):
+            payload.setdefault("metadata", {})[
+                "state_build_runtime_profile"
+            ] = runtime_profile
+    return result

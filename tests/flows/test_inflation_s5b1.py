@@ -400,6 +400,157 @@ def test_sizing_only_windows_refresh_each_live_position(
     )
 
 
+def test_placement_candidate_prepare_uses_dirty_native_refresh():
+    activation = torch.nn.Parameter(torch.zeros(2, 2))
+    state = SimpleNamespace(
+        activation_param=activation,
+        candidate_net_id=torch.tensor([4, 7]),
+    )
+    observed = {}
+    lane = SimpleNamespace(
+        _current_state=lambda: state,
+        buffer_relaxed_timing_payload={
+            "candidate_net_id": torch.tensor([4, 7]),
+        },
+        refresh_candidate_geometry=lambda **kwargs: (
+            observed.update(kwargs)
+            or {"status": "ok", "reason": "dirty_native_refresh"}
+        ),
+    )
+    owner = InflationS5B1.__new__(InflationS5B1)
+    owner.lane = lane
+    owner.params = SimpleNamespace(flow_kind="placement")
+    owner.placedb = SimpleNamespace(
+        flat_node2pin_map=torch.tensor([0, 1, 2]),
+        flat_node2pin_start_map=torch.tensor([0, 0, 1, 2]),
+        pin2net_map=torch.tensor([4, 7]),
+    )
+    owner.data = SimpleNamespace()
+    owner.ops = SimpleNamespace(
+        steiner_topo_op=SimpleNamespace(
+            frozen_nets=SimpleNamespace(candidate_state=None),
+        )
+    )
+    topology_refreshes = []
+    owner.refresh_topology = topology_refreshes.append
+    owner._pending_dirty_instance_ids = {1}
+    owner._pending_dirty_net_ids = {7}
+    owner._candidate_refresh_in_progress = False
+    model = SimpleNamespace(
+        _timing_geometry_cache=object(),
+        _virtual_cell_density_view=object(),
+    )
+
+    owner._prepare(model, pos=torch.zeros(2), active_only=False)
+
+    assert len(topology_refreshes) == 1
+    torch.testing.assert_close(topology_refreshes[0], torch.zeros(2))
+    assert observed["active_only"] is False
+    assert observed["dirty_net_ids"] == [4, 7]
+    assert observed["refresh_records_all"] is True
+    assert observed["force_rebuild"] is False
+    assert owner._pending_dirty_instance_ids == set()
+    assert owner._pending_dirty_net_ids == set()
+    assert model._timing_geometry_cache is None
+    assert model._virtual_cell_density_view is None
+
+
+def test_placement_candidate_topology_refresh_limits_geometry_to_active_nets():
+    state = SimpleNamespace(
+        activation_param=torch.tensor(
+            [[0.0, 0.0], [1.0, 0.0], [0.0, 0.0]]
+        ),
+        candidate_net_id=torch.tensor([4, 4, 9]),
+    )
+    observed = {}
+    lane = SimpleNamespace(
+        _current_state=lambda: state,
+        refresh_candidate_geometry=lambda **kwargs: (
+            observed.update(kwargs) or {"status": "ok"}
+        ),
+        attach_state=lambda _data: None,
+    )
+    owner = InflationS5B1.__new__(InflationS5B1)
+    owner.lane = lane
+    owner.params = SimpleNamespace(enable_relaxed_buffer_timing=False)
+    owner.data = SimpleNamespace()
+    owner.ops = SimpleNamespace(
+        steiner_topo_op=SimpleNamespace(
+            frozen_nets=SimpleNamespace(candidate_state=None),
+        )
+    )
+    model = SimpleNamespace(
+        _timing_geometry_cache=object(),
+        _virtual_cell_density_view=object(),
+    )
+
+    summary = owner.refresh_candidate_geometry_after_topology(
+        model,
+        reason="placement_topology_changed",
+    )
+
+    assert summary == {"status": "ok"}
+    assert observed["active_only"] is True
+    assert observed["dirty_net_ids"] == [4]
+    assert owner.ops.steiner_topo_op.frozen_nets.candidate_state is state
+    assert owner.params.enable_relaxed_buffer_timing is True
+
+
+def test_placement_candidate_retention_freezes_accepted_nets():
+    position = torch.nn.Parameter(torch.tensor([2.0, 3.0]))
+    state = SimpleNamespace(
+        activation_param=torch.nn.Parameter(
+            torch.tensor([[0.0, 1.0], [0.0, 0.0]])
+        ),
+        candidate_net_id=torch.tensor([7, 8]),
+        timing_active_only=False,
+    )
+    observed = {}
+    lane = SimpleNamespace(
+        _current_state=lambda: state,
+        refresh_candidate_geometry=lambda **kwargs: (
+            observed.update(kwargs) or {"status": "ok"}
+        ),
+        attach_state=lambda _data: None,
+    )
+    frozen = SimpleNamespace(candidate_state=None)
+    freeze_calls = []
+    owner = InflationS5B1.__new__(InflationS5B1)
+    owner.lane = lane
+    owner.params = SimpleNamespace(enable_relaxed_buffer_timing=False)
+    owner.data = SimpleNamespace(pos=[position])
+    owner.ops = SimpleNamespace(
+        steiner_topo_op=SimpleNamespace(
+            freeze_nets=freeze_calls.append,
+            frozen_nets=frozen,
+        )
+    )
+    topology_refreshes = []
+    owner.refresh_topology = topology_refreshes.append
+    owner._pending_dirty_instance_ids = {2}
+    owner._pending_dirty_net_ids = {8}
+    owner._candidate_refresh_in_progress = False
+    model = SimpleNamespace(
+        _timing_geometry_cache=object(),
+        _virtual_cell_density_view=object(),
+    )
+
+    owner._retain_buffered_nets(model)
+
+    assert freeze_calls == [[7]]
+    assert len(topology_refreshes) == 1
+    assert topology_refreshes[0] is position
+    assert observed["active_only"] is False
+    assert observed["dirty_net_ids"] == [7]
+    assert frozen.candidate_state is state
+    assert state.timing_active_only is True
+    assert state.activation_param.requires_grad is False
+    assert state.activation_param.grad is None
+    assert owner.params.enable_relaxed_buffer_timing is True
+    assert owner._pending_dirty_instance_ids == set()
+    assert owner._pending_dirty_net_ids == set()
+
+
 def milestone_owner(tmp_path, monkeypatch):
     """Keep real window publication; substitute the expensive S/B algorithms."""
     owner = InflationS5B1.__new__(InflationS5B1)

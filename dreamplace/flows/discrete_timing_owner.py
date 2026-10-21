@@ -1,18 +1,28 @@
 """Discrete sizing and virtual buffering state shared by timing optimization flows."""
 
 import math
-from contextlib import contextmanager
 
 import torch
 
-from dreamplace.flows.discrete_sizing_state import SizingState
-from dreamplace.flows.discrete_timing_diagnostics import objective_snapshot, phase_metrics
-from dreamplace.flows.timing_opt_config import (
-    DEFAULT_TIMING_OPT_COEFFICIENTS,
-    TIMING_OPT_COEFFICIENT_FIELDS,
+from dreamplace.flows.candidate_refresh import (
+    accepted_candidate_net_ids,
+    prepare_candidate_owner,
+    refresh_owner_candidate_geometry_after_topology,
+    refresh_topology_if_needed,
 )
-from dreamplace.ops.buffer_insertion.buffering_config import build_buffering_config_from_params
-from dreamplace.ops.buffer_insertion.buffering_lane import BufferingOptimizationLane
+from dreamplace.flows.discrete_sizing_state import SizingState
+from dreamplace.flows.discrete_timing_common import (
+    segment_counts,
+    timing_area_fits,
+    timing_electrical_window,
+    timing_sizing_coefficients,
+    transfer_segment_counts,
+    virtual_timing_area,
+)
+from dreamplace.flows.discrete_timing_diagnostics import objective_snapshot, phase_metrics
+from dreamplace.ops.buffer_insertion.buffering_lane import (
+    _tensor_digest,
+)
 from dreamplace.ops.buffer_insertion.discrete_virtual_scheduler import (
     schedule_net_gradient_actions,
     take_transition_prefix,
@@ -53,6 +63,12 @@ class DiscreteTimingOwner:
         self.native_cell_ids = data.inst_cell_id.detach().cpu().clone()
         self.terminal_request = None
         self.terminal_commit_started = False
+        self._topology_geometry_key = None
+        self.topology_refresh_count = 0
+        self.topology_refresh_reuse_count = 0
+        self._pending_dirty_instance_ids = set()
+        self._pending_dirty_net_ids = set()
+        self.last_candidate_dirty_net_summary = {}
         # ``cooptimization_geometry`` is consumed by the native placement
         # write-back path even when routability inflation is disabled.  The
         # legacy PlaceDataCollection initializer only creates these snapshots
@@ -66,57 +82,11 @@ class DiscreteTimingOwner:
             data.original_node_size_y = data.node_size_y.detach().clone()
         placedb.cooptimization_geometry = data
 
-    @contextmanager
     def electrical_window(self):
-        params, data = self.params, self.data
-        size, vt = data.get_continuous_size_parameter(), data.vt_logits
-        mode, lane = params.placement_sizing_mode, params.timing_objective_lane
-        timing_objective_enabled = params.differentiable_timing_obj
-        requires_grad = (
-            size.requires_grad if size is not None else None,
-            vt.requires_grad if vt is not None else None,
-        )
-        params.placement_sizing_mode = "size_only"
-        params.timing_objective_lane = "timing_slew_cap"
-        params.differentiable_timing_obj = 1
-        if size is not None:
-            size.requires_grad_(requires_grad=True)
-        if vt is not None:
-            vt.requires_grad_(requires_grad=True)
-        try:
-            yield
-        finally:
-            params.placement_sizing_mode, params.timing_objective_lane = mode, lane
-            params.differentiable_timing_obj = timing_objective_enabled
-            if size is not None:
-                size.requires_grad_(requires_grad[0])
-                size.grad = None
-            if vt is not None:
-                vt.requires_grad_(requires_grad[1])
-                vt.grad = None
+        return timing_electrical_window(self.params, self.data)
 
-    @contextmanager
     def _sizing_coefficients(self, model):
-        policy = getattr(self.params, "timing_opt_coefficients", DEFAULT_TIMING_OPT_COEFFICIENTS)
-        original = {
-            name: float(getattr(model, field))
-            for name, field in TIMING_OPT_COEFFICIENT_FIELDS.items()
-        }
-        original_weight = float(model.timing_grad_balance_weight)
-        coefficients = original if policy["mode"] == "inherit" else policy
-        try:
-            for name, field in TIMING_OPT_COEFFICIENT_FIELDS.items():
-                setattr(model, field, coefficients[name])
-            model.timing_grad_balance_weight = 1.0 if policy["mode"] == "fixed" else original_weight
-            yield {
-                "mode": policy["mode"],
-                **{name: coefficients[name] for name in TIMING_OPT_COEFFICIENT_FIELDS},
-                "timing_grad_balance_weight": float(model.timing_grad_balance_weight),
-            }
-        finally:
-            for name, field in TIMING_OPT_COEFFICIENT_FIELDS.items():
-                setattr(model, field, original[name])
-            model.timing_grad_balance_weight = original_weight
+        return timing_sizing_coefficients(self.params, model)
 
     def _sync(self, model, summary, geometry):
         result = sync_runtime_cells(
@@ -130,7 +100,14 @@ class DiscreteTimingOwner:
             geometry_window=geometry,
         )
         if self.refresh_candidates_after_sizing:
-            self.prepare(model, geometry.pos, active_only=True)
+            pending = getattr(self, "_pending_dirty_instance_ids", None)
+            if pending is None:
+                pending = self._pending_dirty_instance_ids = set()
+            pending.update(int(value) for value in summary.get("applied_instance_ids", ()) or ())
+            result = dict(result or {})
+            result["candidate_refresh_deferred"] = True
+            result["pending_dirty_instance_count"] = len(pending)
+            return result
         return result
 
     def restore_sizing_state(self, model, best, geometry):
@@ -147,7 +124,10 @@ class DiscreteTimingOwner:
             )
         pins_changed = best.restore_pin_geometry(data, self.placedb)
         if pins_changed and self.refresh_candidates_after_sizing:
-            self.prepare(model, geometry.pos, active_only=True)
+            pending = getattr(self, "_pending_dirty_instance_ids", None)
+            if pending is None:
+                pending = self._pending_dirty_instance_ids = set()
+            pending.update(int(value) for value in changed.detach().cpu().tolist())
         self.oscillation.restore(best.oscillation)
         model._timing_geometry_cache = None
 
@@ -167,164 +147,44 @@ class DiscreteTimingOwner:
         return loss
 
     def virtual_area(self, model, state=None):
-        if self.lane is None and state is None:
-            return 0.0
-        state = self.lane._current_state() if state is None else state
-        if state is None:
-            return 0.0
-        if getattr(state, "is_typed_candidate", False):
-            cell_ids = state.drive_type_cell_ids.to(device=self.data.flat_libcell_width.device)
-            widths = self.data.flat_libcell_width[cell_ids].double()
-            heights = self.data.flat_libcell_height[cell_ids].double()
-            counts = state.activation_param.detach().double().sum(dim=0).to(widths.device)
-            return float(((widths + 2.0 * self.params.cell_padding_x) * heights * counts).sum())
-        width, height = model._segment_virtual_buffer_size()
-        if hasattr(state, "z_param"):
-            count = state.z_param.detach().sum()
-        elif hasattr(state, "activation_param"):
-            count = state.activation_param.detach().sum()
-        else:
-            return 0.0
-        return float(count) * width * height
+        return virtual_timing_area(self, model, state)
 
     def _fits(self, model, capacity):
-        return capture_area(
-            self.data,
-            self.placedb,
-            self.virtual_area(model),
-            capacity=capacity,
-        ).fits()
+        return timing_area_fits(self, model, capacity)
 
     @staticmethod
     def _counts(state):
-        if not hasattr(state, "z_param"):
-            return {}
-        rows = state.positive_segment_indices()
-        return {
-            (int(net), int(parent), int(child)): float(count)
-            for net, parent, child, count in zip(
-                state.segment_net_id[rows].detach().cpu().tolist(),
-                state.parent_node_id[rows].detach().cpu().tolist(),
-                state.child_node_id[rows].detach().cpu().tolist(),
-                state.z_param[rows].detach().cpu().tolist(),
-                strict=True,
-            )
-        }
+        return segment_counts(state)
 
     @staticmethod
     def _transfer_counts(state, counts):
-        if not counts or not hasattr(state, "z_param"):
-            return
-        candidate_keys = torch.stack(
-            (state.segment_net_id, state.parent_node_id, state.child_node_id),
-            dim=1,
-        ).long()
-        query_keys = torch.tensor(list(counts), dtype=torch.long, device=candidate_keys.device)
-        _, inverse = torch.unique(
-            torch.cat((candidate_keys, query_keys)),
-            dim=0,
-            return_inverse=True,
-        )
-        candidate_ids, query_ids = inverse[: state.num_segments], inverse[state.num_segments :]
-        row_by_key = torch.full(
-            (int(inverse.max()) + 1,), -1, dtype=torch.long, device=inverse.device
-        )
-        row_by_key[candidate_ids] = torch.arange(state.num_segments, device=inverse.device)
-        rows = row_by_key[query_ids]
-        if bool((rows < 0).any()):
-            raise RuntimeError("retained buffer segment lost its identity at window preparation")
-        with torch.no_grad():
-            state.z_param[rows] = torch.tensor(
-                list(counts.values()),
-                dtype=state.z_param.dtype,
-                device=state.z_param.device,
-            )
+        return transfer_segment_counts(state, counts)
 
-    def prepare(self, model, pos, *, active_only=False):
-        counts = {} if self.lane is None else self._counts(self.lane._current_state())
-        self._candidate_refresh_in_progress = True
-        try:
-            self.refresh_topology(pos)
-        finally:
-            self._candidate_refresh_in_progress = False
-        existing_state = None if self.lane is None else self.lane._current_state()
-        if existing_state is not None and hasattr(existing_state, "activation_param"):
-            self.lane.retain_candidate_python_state = True
-            refresh_summary = self.lane.refresh_candidate_geometry(
-                model=model,
-                params=self.params,
-                reason="s5b1_live_topology_refresh",
-                active_only=active_only,
-            )
-            if refresh_summary.get("status") != "ok":
-                raise RuntimeError(f"S5B1 candidate state refresh failed: {refresh_summary}")
-            self.data.buffer_retained_candidate_state = refresh_summary
-            if active_only:
-                self.ops.steiner_topo_op.frozen_nets.candidate_state = self.lane._current_state()
-            model._virtual_cell_density_view = None
-            return
-        # The refresh remaps the retained state before fresh B candidates are built.
-        if self.lane is not None:
-            counts = self._counts(self.lane._current_state())
-        self.data.buffer_retained_segment_edges = tuple(counts)
-        resolved_flow_kind = getattr(self.params, "flow_kind", "placement")
-        resolved_flow_kind = getattr(resolved_flow_kind, "value", resolved_flow_kind)
-        # ``diff_opt`` uses the standalone buffering runtime mode while its
-        # model was constructed through the placement path.  Preserve that
-        # mode when rebuilding the lane; mapping every non-joint value to
-        # placement rejects the discrete candidate contract before the
-        # controller can execute its tuple phase.
-        lane_flow_kind = (
-            str(resolved_flow_kind)
-            if str(resolved_flow_kind) in {"buffering", "joint"}
-            else "placement"
+    def prepare(
+        self,
+        model,
+        pos,
+        *,
+        active_only=False,
+        refresh_records_all=False,
+    ):
+        return prepare_candidate_owner(
+            self,
+            model,
+            pos,
+            active_only=active_only,
+            refresh_records_all=refresh_records_all,
+            reason="s5b1_live_topology_refresh",
         )
-        lane = BufferingOptimizationLane(
-            build_buffering_config_from_params(
-                self.params,
-                flow_kind=lane_flow_kind,
-            ),
-            placedb=self.placedb,
-        )
-        lane.prepare(model=model, params=self.params)
-        if hasattr(lane._current_state(), "activation_param"):
-            lane.retain_candidate_python_state = True
-        state = lane._current_state()
-        if state is None:
-            raise RuntimeError(f"S5B1 state construction failed: {lane.summarize()}")
-        self._transfer_counts(state, counts)
-        if hasattr(state, "z_param"):
-            state.z_param.requires_grad_(requires_grad=False)
-            state.bsu_index_param.requires_grad_(requires_grad=False)
-        lane.attach_state(self.data)
-        self.lane = lane
-        model._virtual_cell_density_view = None
 
     def refresh_candidate_geometry_after_topology(self, model, *, reason):
         """Repack retained candidate RC after a live topology publication."""
 
-        if self.lane is None:
-            return {"status": "skipped", "reason": "lane_uninitialized"}
-        state = self.lane._current_state()
-        if state is None or not hasattr(state, "activation_param"):
-            return {"status": "skipped", "reason": "non_candidate_state"}
-        activation = state.activation_param.detach()
-        active = activation > 0 if activation.ndim == 1 else activation.sum(dim=1) > 0
-        if not bool(active.any().item()):
-            return {"status": "ok", "reason": "no_active_candidates", "candidate_count": 0}
-        summary = self.lane.refresh_candidate_geometry(
-            model=model,
-            params=self.params,
+        return refresh_owner_candidate_geometry_after_topology(
+            self,
+            model,
             reason=reason,
-            active_only=True,
         )
-        self.data.buffer_retained_candidate_state = summary
-        self.lane.attach_state(self.data)
-        self.ops.steiner_topo_op.frozen_nets.candidate_state = self.lane._current_state()
-        self.params.enable_relaxed_buffer_timing = True
-        model._virtual_cell_density_view = None
-        model._timing_geometry_cache = None
-        return summary
 
     def run_sizing(self, model, pos, geometry, capacity):
         data = self.data
@@ -461,6 +321,7 @@ class DiscreteTimingOwner:
             )
 
             activation = state.activation_param
+            activation_before = activation.detach().clone()
             requires_grad = activation.requires_grad
             activation.requires_grad_(requires_grad=True)
             try:
@@ -473,15 +334,22 @@ class DiscreteTimingOwner:
             finally:
                 activation.requires_grad_(requires_grad)
             count = int(state.activation_param.detach().sum().cpu().item())
+            accepted_net_ids = accepted_candidate_net_ids(
+                activation_before,
+                state,
+            )
+            pending = getattr(self, "_pending_dirty_net_ids", None)
+            if pending is None:
+                pending = self._pending_dirty_net_ids = set()
+            pending.update(accepted_net_ids)
             terminal = dict(loop_summary.terminal_metrics or {})
             restore = dict(loop_summary.best_restore or {})
-            from dreamplace.ops.buffer_insertion.buffering_lane import _tensor_digest
-
             result = {
                 "initial_loss": float(restore["initial_snapshot"]["loss"]),
                 "final_loss": float(terminal.get("loss", 0.0)),
                 "scheduled": int(loop_summary.iterations),
                 "accepted": count,
+                "accepted_net_ids": accepted_net_ids,
                 "gradient_norm": None,
                 "cumulative_count": count,
                 "trace_path": loop_summary.trace_path,
@@ -557,36 +425,49 @@ class DiscreteTimingOwner:
             net_ids = state.candidate_net_id[active].cpu().tolist()
             if net_ids:
                 topo = self.ops.steiner_topo_op
-                topo.freeze_nets(net_ids)
-                # FrozenNets remaps retained candidate records while the new
-                # Steiner vertex domain is published.  Install the old state
-                # before refreshing so that its node identities are translated
-                # before the payload is rebuilt below.
-                topo.frozen_nets.candidate_state = state
-                # freeze_nets changes the live vertex/index domain.  Publish
-                # that domain before rebuilding the candidate payload; using
-                # the pre-freeze payload leaves compact_node_to_original
-                # pointing at removed Steiner ids after GP restarts.
-                pos = self.data.pos[0]
-                self._candidate_refresh_in_progress = True
-                try:
-                    self.refresh_topology(pos)
-                finally:
-                    self._candidate_refresh_in_progress = False
-                self.lane.refresh_candidate_geometry(
-                    model=model,
-                    params=self.params,
-                    active_only=True,
-                    reason="retain_accepted_candidate_nets",
-                )
-                topo.frozen_nets.candidate_state = self.lane._current_state()
+                if not bool(getattr(topo, "topology_frozen", False)):
+                    topo.freeze_nets(net_ids)
+                    # FrozenNets remaps retained candidate records while the new
+                    # Steiner vertex domain is published.  Install the old state
+                    # before refreshing so that its node identities are
+                    # translated before the payload is rebuilt below.
+                    topo.frozen_nets.candidate_state = state
+                    # freeze_nets changes the live vertex/index domain.  Publish
+                    # that domain before rebuilding the candidate payload; using
+                    # the pre-freeze payload leaves compact_node_to_original
+                    # pointing at removed Steiner ids after GP restarts.
+                    pos = self.data.pos[0]
+                    self._candidate_refresh_in_progress = True
+                    try:
+                        refresh_topology_if_needed(self, pos, force=True)
+                    finally:
+                        self._candidate_refresh_in_progress = False
+                    self.lane.refresh_candidate_geometry(
+                        model=model,
+                        params=self.params,
+                        # Keep the complete candidate search domain after the
+                        # accepted buffers are frozen. Ordinary GP still
+                        # evaluates only accepted nets through
+                        # timing_active_only below.
+                        active_only=False,
+                        reason="retain_accepted_candidate_nets",
+                        dirty_net_ids=net_ids,
+                    )
+                    topo.frozen_nets.candidate_state = self.lane._current_state()
+                # A frozen topology is the diff-opt contract: accepted actions
+                # are virtual activation changes, not a new vertex domain.
+                # Re-freezing here would change the structure signature and
+                # force the exact candidate-state rebuild this path avoids.
             retained_activation = self.lane._current_state().activation_param
             retained_activation.requires_grad_(requires_grad=False)
             retained_activation.grad = None
+            self.lane._current_state().timing_active_only = True
             self.lane.attach_state(self.data)
             self.params.enable_relaxed_buffer_timing = True
             model._virtual_cell_density_view = None
             model._timing_geometry_cache = None
+            self._pending_dirty_instance_ids = set()
+            self._pending_dirty_net_ids = set()
             return
         if not hasattr(state, "z_param"):
             return

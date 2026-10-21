@@ -25,6 +25,36 @@ from .sparse_reporting import (
 )
 
 
+class _SparseStageProfiler:
+    def __init__(self, timing):
+        self.timing = timing
+        self.stage_runtime_ms = {}
+        self.started_at = (
+            timing._sync_profile_clock()
+            if timing.timing_propagation_profile
+            else None
+        )
+
+    def mark(self, name):
+        if self.started_at is None:
+            return
+        now = self.timing._sync_profile_clock()
+        self.stage_runtime_ms[name] = (now - self.started_at) * 1000.0
+        self.started_at = now
+
+    @property
+    def enabled(self):
+        return self.started_at is not None
+
+    def add(self, name, started_at):
+        if started_at is None:
+            return
+        elapsed_ms = (self.timing._sync_profile_clock() - started_at) * 1000.0
+        self.stage_runtime_ms[name] = (
+            float(self.stage_runtime_ms.get(name, 0.0)) + elapsed_ms
+        )
+
+
 class SparseTimingRuntime:
     def __init__(self, timing):
         self.timing = timing
@@ -196,6 +226,18 @@ class SparseTimingRuntime:
         result = query(None, cell_surrogate)
         return result.index_copy(0, clocks, query(clocks, clk2q_surrogate))
 
+    def _profiled_cell_updates(self, level, lanes, caps):
+        started_at = self.timing._sync_profile_clock()
+        result = self._cell_updates(level, lanes, caps)
+        self._active_stage_profiler.add("cell_update_ms", started_at)
+        return result
+
+    def _profiled_net_updates(self, level, lanes, delays, impulses):
+        started_at = self.timing._sync_profile_clock()
+        result = self.net_provider(level, lanes, delays, impulses)
+        self._active_stage_profiler.add("net_update_ms", started_at)
+        return result
+
     def _check_values(self, lanes):
         timing, model = self.timing, self.schedule
         dynamic = self._dynamic_checks
@@ -225,7 +267,9 @@ class SparseTimingRuntime:
     ):
         timing, model = self.timing, self.schedule
         started = timing._sync_profile_clock()
+        profiler = _SparseStageProfiler(timing)
         self._bind_masters()
+        profiler.mark("bind_masters_ms")
         self._surrogate_flags = surrogate_flags
         self._tables = _tables(timing)
         snapshot_requested = bool(timing._critical_path_snapshot_requested)
@@ -236,25 +280,41 @@ class SparseTimingRuntime:
             raise RuntimeError("critical path snapshot was captured more than once")
         trace = [] if self._need_delays else None
         arrival_plan, initial_arrivals = self._arrival_selection()
+        profiler.mark("arrival_selection_ms")
         self.net_provider.bind(dynamic_net_provider)
+        profiler.mark("net_provider_bind_ms")
         if dynamic_net_provider is not None:
             dynamic_net_provider.begin_critical_path_net_delay_snapshot(
                 base_pin_net_delay_rise=delays[0],
                 base_pin_net_delay_fall=delays[1],
             )
-        lanes = model.propagate(
-            (),
-            caps,
-            delays,
-            impulses,
-            smooth=timing.timing_aggregation_mode == "smooth",
-            tau_ps=timing.timing_aggregation_tau_ps,
-            cell_updates=self._cell_updates,
-            net_updates=self.net_provider,
-            trace=trace,
-            arrival_plan=arrival_plan,
-            initial_arrivals=initial_arrivals,
-        )
+        profiler.mark("dynamic_snapshot_ms")
+        self._active_stage_profiler = profiler if profiler.enabled else None
+        try:
+            lanes = model.propagate(
+                (),
+                caps,
+                delays,
+                impulses,
+                smooth=timing.timing_aggregation_mode == "smooth",
+                tau_ps=timing.timing_aggregation_tau_ps,
+                cell_updates=(
+                    self._profiled_cell_updates
+                    if profiler.enabled
+                    else self._cell_updates
+                ),
+                net_updates=(
+                    self._profiled_net_updates
+                    if profiler.enabled
+                    else self.net_provider
+                ),
+                trace=trace,
+                arrival_plan=arrival_plan,
+                initial_arrivals=initial_arrivals,
+            )
+        finally:
+            self._active_stage_profiler = None
+        profiler.mark("schedule_propagate_ms")
         timing.virtual_buffer_drv = (
             None
             if dynamic_net_provider is None
@@ -265,7 +325,9 @@ class SparseTimingRuntime:
                 base_pin_net_delay_rise=delays[0],
                 base_pin_net_delay_fall=delays[1],
             )
+        profiler.mark("dynamic_provider_ms")
         result = model.reduce_endpoints(lanes, self._check_values(lanes))
+        profiler.mark("endpoint_reduce_ms")
         self.last_result = result
         if snapshot_requested:
             detached = replace(
@@ -284,15 +346,18 @@ class SparseTimingRuntime:
                 self._master_version,
                 self.view.semantic_digest,
             )
+        profiler.mark("snapshot_ms")
         full_rat = not timing._skip_full_rat_propagation_in_fast_loop()
         state_required = (
             propagate_required(timing, model, result, trace) if full_rat else None
         )
+        profiler.mark("required_propagation_ms")
         arrivals, required, slack = physical_projection(
             timing, model, result, state_required
         )
         slews = physical_slew(model, result.lanes, timing.num_pins)
         cell_delays = physical_cell_delays(timing, trace) if full_rat else (None,) * 4
+        profiler.mark("physical_projection_ms")
         timing.last_endpoint_slack_tensor = result.endpoint_slack
         timing.last_endpoint_ids_tensor = result.endpoint_pins.detach()
         timing.last_fast_loop_skipped_full_rat = not full_rat
@@ -301,6 +366,7 @@ class SparseTimingRuntime:
         )
         timing._refresh_traversal_pruning_state(iteration=timing.timing_forward_count)
         timing.timing_forward_count += 1
+        profiler.mark("pruning_state_ms")
         timing._store_forward_state(
             pin_rAAT=arrivals[0],
             pin_fAAT=arrivals[1],
@@ -323,6 +389,7 @@ class SparseTimingRuntime:
             cell_arc_ff_delays=cell_delays[3],
             capture_critical_path=False,
         )
+        profiler.mark("forward_state_store_ms")
         contract = timing._build_device_contract(
             {
                 "state_rise_aat": lanes[0],
@@ -333,9 +400,10 @@ class SparseTimingRuntime:
             scope="sparse_forward",
         )
         timing._assert_device_contract(contract)
+        profiler.mark("device_contract_ms")
         timing.last_profile_payload = timing._build_profile_payload(
             total_runtime_ms=(timing._sync_profile_clock() - started) * 1000,
-            stage_runtime_ms={},
+            stage_runtime_ms=profiler.stage_runtime_ms,
             surrogate_mode=surrogate_mode,
             device_contract=contract,
             dynamic_provider_metadata=None

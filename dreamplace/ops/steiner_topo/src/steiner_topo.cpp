@@ -7,6 +7,7 @@
 
 #include "directional_ufs.h"
 #include "flute.hpp"
+#include "utility/src/pybind_path.h"
 #include "utility/src/torch.h"
 #include <algorithm>
 #include <cmath>
@@ -29,15 +30,18 @@ DREAMPLACE_BEGIN_NAMESPACE
 
 namespace {
 
-void loadFluteLut(const std::string &powv_file,
-                  const std::string &post_file) {
+void loadFluteLut(const std::filesystem::path &powv_file,
+                  const std::filesystem::path &post_file) {
+  // flute consumes plain strings; convert once for the checks and the load.
+  const std::string powv_text = powv_file.string();
+  const std::string post_text = post_file.string();
   TORCH_CHECK(std::filesystem::is_regular_file(powv_file),
-              "Flute POWV LUT file does not exist: ", powv_file);
+              "Flute POWV LUT file does not exist: ", powv_text);
   TORCH_CHECK(std::filesystem::is_regular_file(post_file),
-              "Flute POST LUT file does not exist: ", post_file);
+              "Flute POST LUT file does not exist: ", post_text);
   static std::once_flag load_lut_once;
   std::call_once(load_lut_once, [&] {
-    flute::readLUT(powv_file.c_str(), post_file.c_str());
+    flute::readLUT(powv_text.c_str(), post_text.c_str());
   });
 }
 
@@ -651,8 +655,8 @@ at::Tensor convertVecToTens(const std::vector<T>& vec, const at::TensorOptions& 
 std::vector<at::Tensor> build_tree(at::Tensor pos, at::Tensor flat_netpin,
                                    at::Tensor netpin_start,
                                    int ignore_net_degree,
-                                   const std::string &powv_file,
-                                   const std::string &post_file,
+                                   const std::filesystem::path &powv_file,
+                                   const std::filesystem::path &post_file,
                                    bool deterministic_flag,
                                    const std::vector<int>& frozen_net_ids,
                                    const std::vector<at::Tensor>& previous_cache) {

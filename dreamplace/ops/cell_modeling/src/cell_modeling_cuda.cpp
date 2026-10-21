@@ -78,6 +78,7 @@ int cellModelingPiecewiseSizeBackwardCudaLauncher(
     int64_t cap_stride,
     int64_t value_stride,
     int64_t lut_boundary_mode,
+    int64_t gradient_mask,
     T* grad_size,
     T* grad_slew,
     T* grad_cap,
@@ -212,7 +213,7 @@ at::Tensor cell_modeling_piecewise_size_forward(
   CHECK_CONTIGUOUS(input_slew);
   CHECK_FLAT_CUDA(out_cap);
   CHECK_CONTIGUOUS(out_cap);
-  auto output = at::zeros_like(size);
+  auto output = at::empty_like(size);
   DREAMPLACE_DISPATCH_FLOATING_TYPES(size, "cellModelingPiecewiseSizeForwardCudaLauncher", [&] {
     cellModelingPiecewiseSizeForwardCudaLauncher<scalar_t>(
         DREAMPLACE_TENSOR_DATA_PTR(size_table, scalar_t),
@@ -251,13 +252,15 @@ std::vector<at::Tensor> cell_modeling_piecewise_size_backward(
     at::Tensor size,
     at::Tensor input_slew,
     at::Tensor out_cap,
-    int64_t lut_boundary_mode) {
+    int64_t lut_boundary_mode,
+    int64_t gradient_mask) {
   CHECK_FLAT_CUDA(grad_output);
   CHECK_CONTIGUOUS(grad_output);
-  auto grad_size = at::zeros_like(size);
-  auto grad_slew = at::zeros_like(input_slew);
-  auto grad_cap = at::zeros_like(out_cap);
-  auto grad_lut_values = at::zeros_like(lut_values);
+  auto empty_grad = at::empty({0}, grad_output.options());
+  auto grad_size = gradient_mask & 1 ? at::zeros_like(size) : empty_grad;
+  auto grad_slew = gradient_mask & 2 ? at::zeros_like(input_slew) : empty_grad;
+  auto grad_cap = gradient_mask & 4 ? at::zeros_like(out_cap) : empty_grad;
+  auto grad_lut_values = gradient_mask & 8 ? at::zeros_like(lut_values) : empty_grad;
   DREAMPLACE_DISPATCH_FLOATING_TYPES(size, "cellModelingPiecewiseSizeBackwardCudaLauncher", [&] {
     cellModelingPiecewiseSizeBackwardCudaLauncher<scalar_t>(
         DREAMPLACE_TENSOR_DATA_PTR(grad_output, scalar_t),
@@ -279,10 +282,11 @@ std::vector<at::Tensor> cell_modeling_piecewise_size_backward(
         cap_tables.size(1),
         lut_values.size(1),
         lut_boundary_mode,
-        DREAMPLACE_TENSOR_DATA_PTR(grad_size, scalar_t),
-        DREAMPLACE_TENSOR_DATA_PTR(grad_slew, scalar_t),
-        DREAMPLACE_TENSOR_DATA_PTR(grad_cap, scalar_t),
-        DREAMPLACE_TENSOR_DATA_PTR(grad_lut_values, scalar_t));
+        gradient_mask,
+        (gradient_mask & 1) ? DREAMPLACE_TENSOR_DATA_PTR(grad_size, scalar_t) : nullptr,
+        (gradient_mask & 2) ? DREAMPLACE_TENSOR_DATA_PTR(grad_slew, scalar_t) : nullptr,
+        (gradient_mask & 4) ? DREAMPLACE_TENSOR_DATA_PTR(grad_cap, scalar_t) : nullptr,
+        (gradient_mask & 8) ? DREAMPLACE_TENSOR_DATA_PTR(grad_lut_values, scalar_t) : nullptr);
   });
   return {grad_size, grad_slew, grad_cap, grad_lut_values};
 }

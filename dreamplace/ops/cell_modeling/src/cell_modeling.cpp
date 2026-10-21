@@ -305,6 +305,7 @@ void piecewise_size_backward_cpu_kernel(
     int64_t value_stride,
     int num_threads,
     int64_t lut_boundary_mode,
+    int64_t gradient_mask,
     T* grad_size,
     T* grad_slew,
     T* grad_cap,
@@ -338,9 +339,13 @@ void piecewise_size_backward_cpu_kernel(
       T value, dslew, dcap, weights[4];
       int64_t corners[4];
       eval_arc(arc, &value, &dslew, &dcap, weights, corners);
-      grad_slew[i] = g * dslew;
-      grad_cap[i] = g * dcap;
-      if (arc >= 0 && arc < num_arcs) {
+      if (gradient_mask & 2) {
+        grad_slew[i] = g * dslew;
+      }
+      if (gradient_mask & 4) {
+        grad_cap[i] = g * dcap;
+      }
+      if ((gradient_mask & 8) && arc >= 0 && arc < num_arcs) {
         for (int k = 0; k < 4; ++k) {
 #pragma omp atomic
           grad_lut_values[arc * value_stride + corners[k]] += g * weights[k];
@@ -377,9 +382,13 @@ void piecewise_size_backward_cpu_kernel(
     T denom = size_high - size_low;
     if (!std::isfinite(size_low) || !std::isfinite(size_high) || !std::isfinite(denom) ||
         std::abs(denom) < T(1e-12)) {
-      grad_slew[i] = g * dslew_low;
-      grad_cap[i] = g * dcap_low;
-      if (arc_low >= 0 && arc_low < num_arcs) {
+      if (gradient_mask & 2) {
+        grad_slew[i] = g * dslew_low;
+      }
+      if (gradient_mask & 4) {
+        grad_cap[i] = g * dcap_low;
+      }
+      if ((gradient_mask & 8) && arc_low >= 0 && arc_low < num_arcs) {
         for (int k = 0; k < 4; ++k) {
 #pragma omp atomic
           grad_lut_values[arc_low * value_stride + corners_low[k]] += g * weights_low[k];
@@ -389,16 +398,22 @@ void piecewise_size_backward_cpu_kernel(
     }
     T factor = (size_clamped - size_low) / denom;
     bool inside = size[i] >= size_min && size[i] <= size_max;
-    grad_size[i] = inside ? g * (value_high - value_low) / denom : T(0);
-    grad_slew[i] = g * ((T(1) - factor) * dslew_low + factor * dslew_high);
-    grad_cap[i] = g * ((T(1) - factor) * dcap_low + factor * dcap_high);
-    if (arc_low >= 0 && arc_low < num_arcs) {
+    if (gradient_mask & 1) {
+      grad_size[i] = inside ? g * (value_high - value_low) / denom : T(0);
+    }
+    if (gradient_mask & 2) {
+      grad_slew[i] = g * ((T(1) - factor) * dslew_low + factor * dslew_high);
+    }
+    if (gradient_mask & 4) {
+      grad_cap[i] = g * ((T(1) - factor) * dcap_low + factor * dcap_high);
+    }
+    if ((gradient_mask & 8) && arc_low >= 0 && arc_low < num_arcs) {
       for (int k = 0; k < 4; ++k) {
 #pragma omp atomic
         grad_lut_values[arc_low * value_stride + corners_low[k]] += g * (T(1) - factor) * weights_low[k];
       }
     }
-    if (arc_high >= 0 && arc_high < num_arcs) {
+    if ((gradient_mask & 8) && arc_high >= 0 && arc_high < num_arcs) {
       for (int k = 0; k < 4; ++k) {
 #pragma omp atomic
         grad_lut_values[arc_high * value_stride + corners_high[k]] += g * factor * weights_high[k];
@@ -544,7 +559,7 @@ at::Tensor cell_modeling_piecewise_size_forward(
   CHECK_CONTIGUOUS(input_slew);
   CHECK_FLAT_CPU(out_cap);
   CHECK_CONTIGUOUS(out_cap);
-  auto output = at::zeros_like(size);
+  auto output = at::empty_like(size);
   DREAMPLACE_DISPATCH_FLOATING_TYPES(size, "cell_modeling_piecewise_size_forward", [&] {
     piecewise_size_forward_cpu_kernel<scalar_t>(
         DREAMPLACE_TENSOR_DATA_PTR(size_table, scalar_t),
@@ -584,13 +599,15 @@ std::vector<at::Tensor> cell_modeling_piecewise_size_backward(
     at::Tensor size,
     at::Tensor input_slew,
     at::Tensor out_cap,
-    int64_t lut_boundary_mode) {
+    int64_t lut_boundary_mode,
+    int64_t gradient_mask) {
   CHECK_FLAT_CPU(grad_output);
   CHECK_CONTIGUOUS(grad_output);
-  auto grad_size = at::zeros_like(size);
-  auto grad_slew = at::zeros_like(input_slew);
-  auto grad_cap = at::zeros_like(out_cap);
-  auto grad_lut_values = at::zeros_like(lut_values);
+  auto empty_grad = at::empty({0}, grad_output.options());
+  auto grad_size = gradient_mask & 1 ? at::zeros_like(size) : empty_grad;
+  auto grad_slew = gradient_mask & 2 ? at::zeros_like(input_slew) : empty_grad;
+  auto grad_cap = gradient_mask & 4 ? at::zeros_like(out_cap) : empty_grad;
+  auto grad_lut_values = gradient_mask & 8 ? at::zeros_like(lut_values) : empty_grad;
   DREAMPLACE_DISPATCH_FLOATING_TYPES(size, "cell_modeling_piecewise_size_backward", [&] {
     piecewise_size_backward_cpu_kernel<scalar_t>(
         DREAMPLACE_TENSOR_DATA_PTR(grad_output, scalar_t),
@@ -613,10 +630,11 @@ std::vector<at::Tensor> cell_modeling_piecewise_size_backward(
         lut_values.size(1),
         at::get_num_threads(),
         lut_boundary_mode,
-        DREAMPLACE_TENSOR_DATA_PTR(grad_size, scalar_t),
-        DREAMPLACE_TENSOR_DATA_PTR(grad_slew, scalar_t),
-        DREAMPLACE_TENSOR_DATA_PTR(grad_cap, scalar_t),
-        DREAMPLACE_TENSOR_DATA_PTR(grad_lut_values, scalar_t));
+        gradient_mask,
+        (gradient_mask & 1) ? DREAMPLACE_TENSOR_DATA_PTR(grad_size, scalar_t) : nullptr,
+        (gradient_mask & 2) ? DREAMPLACE_TENSOR_DATA_PTR(grad_slew, scalar_t) : nullptr,
+        (gradient_mask & 4) ? DREAMPLACE_TENSOR_DATA_PTR(grad_cap, scalar_t) : nullptr,
+        (gradient_mask & 8) ? DREAMPLACE_TENSOR_DATA_PTR(grad_lut_values, scalar_t) : nullptr);
   });
   return {grad_size, grad_slew, grad_cap, grad_lut_values};
 }

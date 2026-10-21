@@ -76,6 +76,33 @@ class CellModelingErrorAnalysisTest(unittest.TestCase):
         self.assertEqual(len(report["topk_rows"]), 2)
         self.assertEqual(len(report["all_rows"]), 2)
 
+    def test_native_piecewise_without_cache_skips_legacy_linear_fits(self):
+        data = self._build_data_collections(None)
+        with mock.patch.object(
+            CellModeling,
+            "_fit_dataset",
+            side_effect=AssertionError("native piecewise must not fit LINEAR6"),
+        ):
+            model = CellModeling(data)
+
+        self.assertIsNone(model.piecewise_linear_coeffs)
+        size = torch.tensor([2.0], dtype=torch.float32, requires_grad=True)
+        vt = torch.tensor([1.0], dtype=torch.float32, requires_grad=True)
+        output = model(
+            torch.tensor([0], dtype=torch.long),
+            torch.tensor([0], dtype=torch.long),
+            vt,
+            size,
+            torch.tensor([0.1], dtype=torch.float32),
+            torch.tensor([1.0], dtype=torch.float32),
+            arc_types=torch.tensor([0], dtype=torch.long),
+        )
+        output.sum().backward()
+
+        self.assertTrue(torch.isfinite(output).all())
+        self.assertTrue(torch.isfinite(size.grad).all())
+        self.assertTrue(vt.grad is None or torch.isfinite(vt.grad).all())
+
     def test_piecewise_schema_beats_linear_on_intermediate_size_vt_query(self):
         luts = SimpleNamespace(
             flat_luts_values=torch.tensor([1.0, 3.0, 11.0, 13.0], dtype=torch.float32),
@@ -761,8 +788,8 @@ class CellModelingPiecewiseFastPathTest(unittest.TestCase):
         }
         call_counter = {"count": 0}
 
-        def fake_vt_slots(self, state, mt, ao, vt):
-            del self, state, mt, ao, vt
+        def fake_vt_slots(self, state, mt, ao, vt, vt_available=None):
+            del self, state, mt, ao, vt, vt_available
             zeros = torch.zeros(2, dtype=torch.long)
             return zeros, zeros
 
@@ -786,6 +813,58 @@ class CellModelingPiecewiseFastPathTest(unittest.TestCase):
 
         self.assertEqual(call_counter["count"], 1)
         self.assertTrue(torch.allclose(result, torch.tensor([7.0, 9.0], dtype=torch.float32)))
+
+    def test_piecewise_forward_batches_same_and_adjacent_vt_slots(self):
+        model = CellModeling.__new__(CellModeling)
+        nn.Module.__init__(model)
+        model.device = torch.device("cpu")
+        model.vt_order_tensor = torch.tensor([0.0, 10.0], dtype=torch.float32)
+        model.piecewise_state = {
+            "f_delay": {
+                "size_table": torch.zeros((1, 1, 2, 1), dtype=torch.float32),
+                "vt_available": torch.ones((1, 1, 2), dtype=torch.bool),
+            }
+        }
+        seen_vt_slots = []
+
+        def fake_vt_slots(self, state, mt, ao, vt, vt_available=None):
+            del self, state, mt, ao, vt, vt_available
+            return (
+                torch.tensor([0, 0], dtype=torch.long),
+                torch.tensor([0, 1], dtype=torch.long),
+            )
+
+        def fake_size_interp(
+            self,
+            dataset_name,
+            state,
+            mt,
+            ao,
+            vt_slot,
+            size,
+            input_slew,
+            out_cap,
+        ):
+            del self, dataset_name, state, mt, ao, input_slew, out_cap
+            seen_vt_slots.append(vt_slot.clone())
+            return size * 10.0 + vt_slot
+
+        model._piecewise_vt_slots = types.MethodType(fake_vt_slots, model)
+        model._piecewise_size_interp = types.MethodType(fake_size_interp, model)
+
+        result = model._piecewise_forward_dataset(
+            "f_delay",
+            torch.tensor([0, 0], dtype=torch.long),
+            torch.tensor([0, 0], dtype=torch.long),
+            torch.tensor([0.0, 5.0], dtype=torch.float32),
+            torch.tensor([1.0, 2.0], dtype=torch.float32),
+            torch.tensor([0.1, 0.2], dtype=torch.float32),
+            torch.tensor([0.3, 0.4], dtype=torch.float32),
+        )
+
+        self.assertEqual(len(seen_vt_slots), 1)
+        self.assertTrue(torch.equal(seen_vt_slots[0], torch.tensor([0, 0, 1])))
+        self.assertTrue(torch.allclose(result, torch.tensor([10.0, 20.5])))
 
 
 if __name__ == "__main__":

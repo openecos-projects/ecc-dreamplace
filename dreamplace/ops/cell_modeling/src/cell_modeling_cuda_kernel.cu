@@ -319,6 +319,7 @@ __global__ void cellModelingPiecewiseSizeBackwardKernel(
     int64_t cap_stride,
     int64_t value_stride,
     int64_t lut_boundary_mode,
+    int64_t gradient_mask,
     T* grad_size,
     T* grad_slew,
     T* grad_cap,
@@ -354,9 +355,13 @@ __global__ void cellModelingPiecewiseSizeBackwardKernel(
     T value, dslew, dcap, weights[4];
     int64_t corners[4];
     eval_arc(arc, &value, &dslew, &dcap, weights, corners);
-    grad_slew[i] = g * dslew;
-    grad_cap[i] = g * dcap;
-    if (arc >= 0 && arc < num_arcs) {
+    if (gradient_mask & 2) {
+      grad_slew[i] = g * dslew;
+    }
+    if (gradient_mask & 4) {
+      grad_cap[i] = g * dcap;
+    }
+    if ((gradient_mask & 8) && arc >= 0 && arc < num_arcs) {
       for (int k = 0; k < 4; ++k) {
         atomicAdd(grad_lut_values + arc * value_stride + corners[k], g * weights[k]);
       }
@@ -392,9 +397,13 @@ __global__ void cellModelingPiecewiseSizeBackwardKernel(
   T denom = size_high - size_low;
   if (!isfinite((double)size_low) || !isfinite((double)size_high) || !isfinite((double)denom) ||
       fabs((double)denom) < 1e-12) {
-    grad_slew[i] = g * dslew_low;
-    grad_cap[i] = g * dcap_low;
-    if (arc_low >= 0 && arc_low < num_arcs) {
+    if (gradient_mask & 2) {
+      grad_slew[i] = g * dslew_low;
+    }
+    if (gradient_mask & 4) {
+      grad_cap[i] = g * dcap_low;
+    }
+    if ((gradient_mask & 8) && arc_low >= 0 && arc_low < num_arcs) {
       for (int k = 0; k < 4; ++k) {
         atomicAdd(grad_lut_values + arc_low * value_stride + corners_low[k], g * weights_low[k]);
       }
@@ -403,16 +412,22 @@ __global__ void cellModelingPiecewiseSizeBackwardKernel(
   }
   T factor = (size_clamped - size_low) / denom;
   bool inside = size[i] >= size_min && size[i] <= size_max;
-  grad_size[i] = inside ? g * (value_high - value_low) / denom : T(0);
-  grad_slew[i] = g * ((T(1) - factor) * dslew_low + factor * dslew_high);
-  grad_cap[i] = g * ((T(1) - factor) * dcap_low + factor * dcap_high);
-  if (arc_low >= 0 && arc_low < num_arcs) {
+  if (gradient_mask & 1) {
+    grad_size[i] = inside ? g * (value_high - value_low) / denom : T(0);
+  }
+  if (gradient_mask & 2) {
+    grad_slew[i] = g * ((T(1) - factor) * dslew_low + factor * dslew_high);
+  }
+  if (gradient_mask & 4) {
+    grad_cap[i] = g * ((T(1) - factor) * dcap_low + factor * dcap_high);
+  }
+  if ((gradient_mask & 8) && arc_low >= 0 && arc_low < num_arcs) {
     for (int k = 0; k < 4; ++k) {
       atomicAdd(grad_lut_values + arc_low * value_stride + corners_low[k],
                 g * (T(1) - factor) * weights_low[k]);
     }
   }
-  if (arc_high >= 0 && arc_high < num_arcs) {
+  if ((gradient_mask & 8) && arc_high >= 0 && arc_high < num_arcs) {
     for (int k = 0; k < 4; ++k) {
       atomicAdd(grad_lut_values + arc_high * value_stride + corners_high[k],
                 g * factor * weights_high[k]);
@@ -518,6 +533,7 @@ int cellModelingPiecewiseSizeBackwardCudaLauncher(
     int64_t cap_stride,
     int64_t value_stride,
     int64_t lut_boundary_mode,
+    int64_t gradient_mask,
     T* grad_size,
     T* grad_slew,
     T* grad_cap,
@@ -527,8 +543,8 @@ int cellModelingPiecewiseSizeBackwardCudaLauncher(
   cellModelingPiecewiseSizeBackwardKernel<T><<<block_count, thread_count>>>(
       grad_output, size_table, arc_table, size_count, trans_tables, cap_tables,
       lut_values, trans_dims, cap_dims, size, slew, cap, num_items, max_sizes,
-      num_arcs, trans_stride, cap_stride, value_stride, lut_boundary_mode, grad_size,
-      grad_slew, grad_cap, grad_lut_values);
+      num_arcs, trans_stride, cap_stride, value_stride, lut_boundary_mode,
+      gradient_mask, grad_size, grad_slew, grad_cap, grad_lut_values);
   return 0;
 }
 
@@ -559,7 +575,8 @@ int cellModelingPiecewiseSizeBackwardCudaLauncher(
       const int64_t* trans_dims, const int64_t* cap_dims, const type* size,      \
       const type* slew, const type* cap, int64_t num_items, int64_t max_sizes,   \
       int64_t num_arcs, int64_t trans_stride, int64_t cap_stride,                \
-      int64_t value_stride, int64_t lut_boundary_mode, type* grad_size,          \
+      int64_t value_stride, int64_t lut_boundary_mode, int64_t gradient_mask,    \
+      type* grad_size,                                                           \
       type* grad_slew, type* grad_cap, type* grad_lut_values);
 
 REGISTER_KERNEL_LAUNCHER(float);

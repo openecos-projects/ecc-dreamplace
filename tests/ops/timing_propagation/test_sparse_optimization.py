@@ -35,6 +35,28 @@ def test_production_forward_uses_sparse_objective_and_rc_gradients(native_device
     assert timing.last_profile_payload["mode"] == "sparse"
 
 
+def test_sparse_profile_reports_forward_stage_runtime(native_device):
+    timing = production_timing(native_device)
+    timing.timing_propagation_profile = True
+    values = inputs(native_device)
+    timing(
+        rise_fall(values[2:4]),
+        rise_fall(values[4:]),
+        rise_fall(values[:2]),
+        surrogate_mode="lut_only",
+    )
+    stages = timing.last_profile_payload["stage_runtime_ms"]
+    assert {
+        "bind_masters_ms",
+        "schedule_propagate_ms",
+        "cell_update_ms",
+        "net_update_ms",
+        "endpoint_reduce_ms",
+        "physical_projection_ms",
+        "forward_state_store_ms",
+    } <= stages.keys()
+
+
 def test_production_sparse_uses_existing_size_vt_model(native_device):
     timing = production_timing(native_device)
     size = torch.ones(4, device=native_device, dtype=torch.float64, requires_grad=True)

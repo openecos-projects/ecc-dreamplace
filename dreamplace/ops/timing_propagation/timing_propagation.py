@@ -2944,7 +2944,19 @@ class TimingPropagation(nn.Module):
         return state
 
     def _vt_scalar(self, vt_var):
-        vt_codes = torch.arange(vt_var.shape[1], device=vt_var.device, dtype=vt_var.dtype)
+        vt_codes = getattr(self, "_surrogate_vt_codes", None)
+        if (
+            vt_codes is None
+            or vt_codes.shape[0] != vt_var.shape[1]
+            or vt_codes.device != vt_var.device
+            or vt_codes.dtype != vt_var.dtype
+        ):
+            vt_codes = torch.arange(
+                vt_var.shape[1],
+                device=vt_var.device,
+                dtype=vt_var.dtype,
+            )
+            self._surrogate_vt_codes = vt_codes
         return torch.sum(vt_var * vt_codes.unsqueeze(0), dim=1)
 
     def _surrogate_entry(self, node_ids, pin_slew, pin_net_caps, lib_arc_idxs, arc_type):
@@ -2983,7 +2995,7 @@ class TimingPropagation(nn.Module):
         pin_ids = node_ids.long()
         if self.pin2node_map is None:
             return None
-        node_ids = self.pin2node_map[pin_ids].long()
+        node_ids = self.pin2node_map.index_select(0, pin_ids).long()
         if profile_enabled:
             profile_now = self._sync_profile_clock(pin_slew.device)
             self._record_local_cell_aat_profile_value(
@@ -3007,12 +3019,12 @@ class TimingPropagation(nn.Module):
 
         size_var = surrogate_state["size_var"]
         vt_var = surrogate_state["vt_var"]
-        main_ids = self.inst_main_id[node_ids].long()
+        main_ids = self.inst_main_id.index_select(0, node_ids).long()
         arc_types = arc_types.long()
         valid_main_id_mask = main_ids >= 0
         sizeable_mask = torch.ones_like(valid_main_id_mask, dtype=torch.bool)
         if self.inst_is_sizeable is not None:
-            sizeable_mask = self.inst_is_sizeable[node_ids].bool()
+            sizeable_mask = self.inst_is_sizeable.index_select(0, node_ids).bool()
         fixed_non_sizeable_mask = torch.zeros_like(valid_main_id_mask, dtype=torch.bool)
         inst_size_init = surrogate_state.get("inst_size_init")
         inst_vt_init = surrogate_state.get("inst_vt_init")
@@ -3073,21 +3085,36 @@ class TimingPropagation(nn.Module):
                     int(pin_slew.numel()),
                 )
             return valid_mask, torch.zeros_like(pin_slew), False
-        surrogate_values = torch.zeros_like(pin_slew)
-        size_values = size_var[node_ids]
-        vt_values = vt_var[node_ids]
+        size_values = size_var.index_select(0, node_ids)
+        vt_values = vt_var.index_select(0, node_ids)
         if torch.any(fixed_non_sizeable_mask):
             size_values = size_values.clone()
             vt_values = vt_values.clone()
-            size_values[fixed_non_sizeable_mask] = inst_size_init[node_ids][
-                fixed_non_sizeable_mask
-            ].detach()
-            vt_values[fixed_non_sizeable_mask] = inst_vt_init[node_ids][
-                fixed_non_sizeable_mask
-            ].detach()
-        vt_scalar = self._vt_scalar(vt_values[valid_mask])
-        arc_offsets = lib_arc_idxs[valid_mask].long()
-        selected_arc_types = arc_types[valid_mask]
+            size_values[fixed_non_sizeable_mask] = inst_size_init.index_select(
+                0, node_ids
+            )[fixed_non_sizeable_mask].detach()
+            vt_values[fixed_non_sizeable_mask] = inst_vt_init.index_select(
+                0, node_ids
+            )[fixed_non_sizeable_mask].detach()
+
+        valid_indices = None
+        if bool(valid_mask.all().detach().item()):
+            active_main_ids = main_ids
+            active_arc_idxs = lib_arc_idxs.long()
+            active_arc_types = arc_types
+            active_size_values = size_values
+            active_vt_values = vt_values
+        else:
+            valid_indices = torch.nonzero(valid_mask, as_tuple=False).squeeze(1)
+            active_main_ids = main_ids.index_select(0, valid_indices)
+            active_arc_idxs = lib_arc_idxs.index_select(0, valid_indices).long()
+            active_arc_types = arc_types.index_select(0, valid_indices)
+            active_size_values = size_values.index_select(0, valid_indices)
+            active_vt_values = vt_values.index_select(0, valid_indices)
+
+        vt_scalar = self._vt_scalar(active_vt_values)
+        arc_offsets = active_arc_idxs
+        selected_arc_types = active_arc_types
         if self.lib_arc_offsets is not None:
             arc_offsets = self.lib_arc_offsets[arc_offsets].long()
         skip_support_check = (
@@ -3104,13 +3131,14 @@ class TimingPropagation(nn.Module):
             support_mask = None
         elif hasattr(self.cell_modeling_op, "supports_arc_types"):
             support_mask = self.cell_modeling_op.supports_arc_types(
-                main_ids[valid_mask],
+                active_main_ids,
                 arc_offsets,
                 selected_arc_types,
             )
         else:
             support_mask = None
         if support_mask is not None:
+            all_supported = bool(support_mask.all().detach().item())
             if profile_enabled:
                 support_missing_count = int(
                     torch.count_nonzero(~support_mask).detach().cpu().item()
@@ -3120,32 +3148,45 @@ class TimingPropagation(nn.Module):
                     "surrogate_support_missing_count",
                     support_missing_count,
                 )
-            if profile_enabled and torch.any(~support_mask):
+            if profile_enabled and not all_supported:
                 self._record_local_surrogate_unsupported_keys(
                     profile,
-                    main_ids[valid_mask][~support_mask],
+                    active_main_ids[~support_mask],
                     arc_offsets[~support_mask],
                     selected_arc_types[~support_mask],
                 )
-            valid_indices = torch.nonzero(valid_mask, as_tuple=False).squeeze(1)
-            valid_mask = valid_mask.clone()
-            valid_mask[valid_indices] = support_mask
-            arc_offsets = arc_offsets[support_mask]
-            vt_scalar = vt_scalar[support_mask]
-            selected_arc_types = selected_arc_types[support_mask]
-            if not torch.any(valid_mask):
-                if profile_enabled:
-                    self._record_local_cell_aat_profile_count(
-                        profile,
-                        "surrogate_candidate_count",
-                        int(pin_slew.numel()),
-                    )
-                    self._record_local_cell_aat_profile_count(
-                        profile,
-                        "surrogate_unsupported_count",
-                        int(pin_slew.numel()),
-                    )
-                return valid_mask, surrogate_values, False
+            if not all_supported:
+                support_indices = torch.nonzero(
+                    support_mask, as_tuple=False
+                ).squeeze(1)
+                if valid_indices is None:
+                    valid_indices = support_indices
+                else:
+                    valid_indices = valid_indices.index_select(0, support_indices)
+                valid_mask = torch.zeros_like(valid_mask)
+                valid_mask.index_fill_(0, valid_indices, True)
+                active_main_ids = active_main_ids.index_select(0, support_indices)
+                active_size_values = active_size_values.index_select(
+                    0, support_indices
+                )
+                arc_offsets = arc_offsets.index_select(0, support_indices)
+                vt_scalar = vt_scalar.index_select(0, support_indices)
+                selected_arc_types = selected_arc_types.index_select(
+                    0, support_indices
+                )
+                if valid_indices.numel() == 0:
+                    if profile_enabled:
+                        self._record_local_cell_aat_profile_count(
+                            profile,
+                            "surrogate_candidate_count",
+                            int(pin_slew.numel()),
+                        )
+                        self._record_local_cell_aat_profile_count(
+                            profile,
+                            "surrogate_unsupported_count",
+                            int(pin_slew.numel()),
+                        )
+                    return valid_mask, torch.zeros_like(pin_slew), False
         if profile_enabled:
             supported_count = int(torch.count_nonzero(valid_mask).detach().cpu().item())
             candidate_count = int(pin_slew.numel())
@@ -3173,13 +3214,18 @@ class TimingPropagation(nn.Module):
             )
             profile_timer = profile_now
 
+        active_slew = self._surrogate_slew_input_tensor(pin_slew)
+        active_cap = self._surrogate_cap_input_tensor(pin_net_caps)
+        if valid_indices is not None:
+            active_slew = active_slew.index_select(0, valid_indices)
+            active_cap = active_cap.index_select(0, valid_indices)
         cell_model_values = self.cell_modeling_op(
-            main_ids[valid_mask],
+            active_main_ids,
             arc_offsets,
             vt_scalar,
-            size_values[valid_mask],
-            self._surrogate_slew_input_tensor(pin_slew)[valid_mask],
-            self._surrogate_cap_input_tensor(pin_net_caps)[valid_mask],
+            active_size_values,
+            active_slew,
+            active_cap,
             selected_arc_types,
         )
         if profile_enabled:
@@ -3191,7 +3237,11 @@ class TimingPropagation(nn.Module):
             )
             profile_timer = profile_now
 
-        surrogate_values[valid_mask] = cell_model_values
+        if valid_indices is None:
+            surrogate_values = cell_model_values
+        else:
+            surrogate_values = torch.zeros_like(pin_slew)
+            surrogate_values.index_copy_(0, valid_indices, cell_model_values)
         if profile_enabled:
             profile_now = self._sync_profile_clock(pin_slew.device)
             self._record_local_cell_aat_profile_value(

@@ -33,6 +33,20 @@ from dreamplace.flows.timing_opt_config import (
 )
 
 
+def _normalize_pathlike(value):
+    """
+    @brief normalize scalar path-like values to plain strings
+
+    Keeps Params state JSON-serializable for toJson/dump and compatible
+    with the std::string C++ options in place_io. os.fsdecode guarantees
+    str even when __fspath__ returns bytes. Container values (including
+    lists of paths) are preserved as-is.
+    """
+    if isinstance(value, os.PathLike):
+        return os.fsdecode(value)
+    return value
+
+
 class Params:
     """
     @brief Parameter class
@@ -43,6 +57,12 @@ class Params:
         @brief initialization
         """
         pass
+
+    def __setattr__(self, key, value):
+        """
+        @brief normalize path-like parameter values to str on assignment
+        """
+        super().__setattr__(key, _normalize_pathlike(value))
 
     def printWelcome(self):
         """
@@ -448,7 +468,7 @@ class Params:
         @brief load from json
         """
         for key, value in data.items():
-            self.__dict__[key] = value
+            self.__dict__[key] = _normalize_pathlike(value)
         self.apply_l_shape_routability_preset()
         self.normalize_params()
 
@@ -515,7 +535,7 @@ class Params:
         for key, value in (
             (k.lstrip("--"), v) for k, v in (arg.split("=") for arg in args)
         ):
-            self.__dict__[key] = value
+            self.__dict__[key] = _normalize_pathlike(value)
         self.apply_l_shape_routability_preset()
         self.normalize_params()
 

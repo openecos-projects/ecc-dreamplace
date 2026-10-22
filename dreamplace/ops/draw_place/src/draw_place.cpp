@@ -23,6 +23,7 @@
 #include <sstream>
 
 #include "draw_place/src/draw_place.h"
+#include "utility/src/pybind_path.h"
 #include "utility/src/torch.h"
 
 DREAMPLACE_BEGIN_NAMESPACE
@@ -52,11 +53,16 @@ int draw_place_forward(at::Tensor pos, at::Tensor node_size_x,
                        double xl, double yl, double xh, double yh,
                        double site_width, double row_height, double bin_size_x,
                        double bin_size_y, int num_movable_nodes,
-                       int num_filler_nodes, const std::string& filename,
+                       int num_filler_nodes,
+                       const std::filesystem::path& filename,
                        bool show_fillers) {
   CHECK_FLAT_CPU(pos);
   CHECK_EVEN(pos);
   CHECK_CONTIGUOUS(pos);
+
+  // The drawing backend consumes plain strings; convert once. A path
+  // (str, bytes or os.PathLike) crosses the binding, never a str.
+  const std::string filename_text = filename.string();
 
   int num_nodes = pos.numel() / 2;
 
@@ -72,7 +78,7 @@ int draw_place_forward(at::Tensor pos, at::Tensor node_size_x,
         DREAMPLACE_TENSOR_DATA_PTR(pin_offset_y, scalar_t),
         DREAMPLACE_TENSOR_DATA_PTR(pin2node_map, int), num_nodes,
         num_movable_nodes, num_filler_nodes, pin2node_map.numel(), xl, yl, xh,
-        yh, site_width, row_height, bin_size_x, bin_size_y, filename,
+        yh, site_width, row_height, bin_size_x, bin_size_y, filename_text,
         show_fillers);
   });
 
@@ -83,5 +89,23 @@ DREAMPLACE_END_NAMESPACE
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward", &DREAMPLACE_NAMESPACE::draw_place_forward,
-        "Draw place forward");
+        "Draw place forward",
+        pybind11::arg("pos"),
+        pybind11::arg("node_size_x"),
+        pybind11::arg("node_size_y"),
+        pybind11::arg("pin_offset_x"),
+        pybind11::arg("pin_offset_y"),
+        pybind11::arg("pin2node_map"),
+        pybind11::arg("xl"),
+        pybind11::arg("yl"),
+        pybind11::arg("xh"),
+        pybind11::arg("yh"),
+        pybind11::arg("site_width"),
+        pybind11::arg("row_height"),
+        pybind11::arg("bin_size_x"),
+        pybind11::arg("bin_size_y"),
+        pybind11::arg("num_movable_nodes"),
+        pybind11::arg("num_filler_nodes"),
+        pybind11::arg("filename"),
+        pybind11::arg("show_fillers"));
 }

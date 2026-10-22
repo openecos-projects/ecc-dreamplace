@@ -1,4 +1,10 @@
+#include <algorithm>
+#include <filesystem>
+#include <string>
+#include <vector>
+
 #include "openroad_place_io_impl_bridge.h"
+#include "utility/src/pybind_path.h"
 
 namespace dreamplace {
 namespace placeio_openroad {
@@ -179,3 +185,175 @@ void bridgeImplWriteDef(const std::shared_ptr<void>& impl, const std::string& fi
 }  // namespace internal
 }  // namespace placeio_openroad
 }  // namespace dreamplace
+
+// Copy of the pybind glue retained from the argv-based interface. The live
+// bindings are registered in openroad_place_io.cpp; the entry points below are
+// kept in sync with it (path-typed forward/write) so a future revival cannot
+// resurrect the removed argv interface. parseFlagValues/parseFlagInt have no
+// caller since that change and stay only as part of the retained copy.
+namespace {
+
+using dreamplace::placeio_openroad::OpenRoadPlaceIOBridge;
+using dreamplace::placeio_openroad::PyPlaceDB;
+
+std::vector<std::string> pathTexts(const std::vector<std::filesystem::path>& paths)
+{
+  std::vector<std::string> texts;
+  texts.reserve(paths.size());
+  for (const auto& path : paths) {
+    texts.push_back(path.string());
+  }
+  return texts;
+}
+
+std::vector<std::string> parseFlagValues(const py::list& args, const std::string& flag)
+{
+  std::vector<std::string> values;
+  const auto arg_count = py::len(args);
+  for (py::ssize_t i = 0; i < arg_count; ++i) {
+    if (py::cast<std::string>(args[i]) == flag && i + 1 < arg_count) {
+      values.push_back(py::cast<std::string>(args[i + 1]));
+    }
+  }
+  return values;
+}
+
+int parseFlagInt(const py::list& args, const std::string& flag, int default_value)
+{
+  const auto values = parseFlagValues(args, flag);
+  if (values.empty()) {
+    return default_value;
+  }
+  try {
+    return std::max(1, std::stoi(values.back()));
+  } catch (const std::exception&) {
+    return default_value;
+  }
+}
+
+using BridgePtr = std::shared_ptr<OpenRoadPlaceIOBridge>;
+
+BridgePtr forward(const std::filesystem::path& def_input,
+                  const std::vector<std::filesystem::path>& lef_input,
+                  const std::vector<std::filesystem::path>& lib_input,
+                  const std::filesystem::path& sdc_input,
+                  const std::vector<std::string>& vt_suffixes,
+                  int num_threads)
+{
+  if (def_input.empty()) {
+    throw std::runtime_error("placeio_openroad requires exactly one DEF input");
+  }
+  return std::make_shared<OpenRoadPlaceIOBridge>(
+      pathTexts(lef_input),
+      def_input.string(),
+      pathTexts(lib_input),
+      sdc_input.string(),
+      vt_suffixes,
+      std::max(1, num_threads));
+}
+
+PyPlaceDB pydb(const BridgePtr& bridge)
+{
+  if (bridge == nullptr) {
+    throw std::runtime_error("placeio_openroad bridge is null");
+  }
+  return bridge->exportPyDBView();
+}
+
+void apply(const BridgePtr& bridge, const py::object& node_x, const py::object& node_y)
+{
+  if (bridge == nullptr) {
+    throw std::runtime_error("placeio_openroad bridge is null");
+  }
+  bridge->syncToOpenRoad(node_x, node_y);
+}
+
+py::dict apply_sizing(const BridgePtr& bridge,
+                      const py::object& inst_cell_ids,
+                      const py::object& cell_master_names)
+{
+  if (bridge == nullptr) {
+    throw std::runtime_error("placeio_openroad bridge is null");
+  }
+  return bridge->applySizing(inst_cell_ids, cell_master_names);
+}
+
+py::dict query_diff_guided_batch_timing_metrics(const BridgePtr& bridge)
+{
+  if (bridge == nullptr) {
+    throw std::runtime_error("placeio_openroad bridge is null");
+  }
+  return bridge->queryDiffGuidedBatchTimingMetrics();
+}
+
+py::dict query_diff_guided_batch_timing_samples(const BridgePtr& bridge,
+                                                const py::dict& sample_request)
+{
+  if (bridge == nullptr) {
+    throw std::runtime_error("placeio_openroad bridge is null");
+  }
+  return bridge->queryDiffGuidedBatchTimingSamples(sample_request);
+}
+
+py::dict query_diff_guided_batch_dynamic_conflict_signature(const BridgePtr& bridge,
+                                                            const py::dict& config)
+{
+  if (bridge == nullptr) {
+    throw std::runtime_error("placeio_openroad bridge is null");
+  }
+  return bridge->queryDiffGuidedBatchDynamicConflictSignature(config);
+}
+
+py::dict evaluate_diff_guided_batch_actions(const BridgePtr& bridge,
+                                            const std::vector<py::dict>& actions,
+                                            const py::dict& config)
+{
+  if (bridge == nullptr) {
+    throw std::runtime_error("placeio_openroad bridge is null");
+  }
+  return bridge->evaluateDiffGuidedBatchActions(actions, config);
+}
+
+py::dict apply_diff_guided_batch_transaction(const BridgePtr& bridge,
+                                             const std::vector<py::dict>& action_results,
+                                             const py::dict& config)
+{
+  if (bridge == nullptr) {
+    throw std::runtime_error("placeio_openroad bridge is null");
+  }
+  return bridge->applyDiffGuidedBatchTransaction(action_results, config);
+}
+
+py::dict run_diff_guided_batch_loop(const BridgePtr& bridge,
+                                    const std::vector<py::dict>& seed_queue,
+                                    const py::dict& conflict_precompute,
+                                    const py::dict& config)
+{
+  if (bridge == nullptr) {
+    throw std::runtime_error("placeio_openroad bridge is null");
+  }
+  return bridge->runDiffGuidedBatchLoop(seed_queue, conflict_precompute, config);
+}
+
+py::dict run_diff_guided_batch_loop_compact(const BridgePtr& bridge,
+                                            const py::dict& action_buffers,
+                                            const py::dict& conflict_precompute,
+                                            const py::dict& config)
+{
+  if (bridge == nullptr) {
+    throw std::runtime_error("placeio_openroad bridge is null");
+  }
+  return bridge->runDiffGuidedBatchLoopCompact(action_buffers, conflict_precompute, config);
+}
+
+void write(const BridgePtr& bridge,
+           const std::filesystem::path& filename,
+           int,
+           const py::object& node_x,
+           const py::object& node_y)
+{
+  apply(bridge, node_x, node_y);
+  bridge->writeDef(filename.string());
+}
+
+}  // namespace

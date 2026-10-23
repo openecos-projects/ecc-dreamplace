@@ -1,7 +1,10 @@
-"""Initial and terminal routing for frozen-GR standalone sizing/STA.
+"""Initial routing for frozen-GR standalone sizing/STA.
 
-The optimizer references one immutable snapshot. Only this module invokes the
-router; the terminal invocation parses the committed DEF into a new router DB.
+The optimizer references one immutable snapshot. Only ``prepare_gr_sizing``
+invokes the router. Terminal evaluation rebuilds a PyDB on the committed DEF
+and reuses that snapshot with pin remapping — a second GPUGR pass does not
+fit on typical CI runners after the optimization-lane route has already
+reserved ~5 GiB of CPU routing scratch.
 """
 
 import copy
@@ -141,40 +144,11 @@ def prepare_gr_sizing(params, placedb):
     placedb.gr_sizing = GRSizingSession(op, report, mapping.pin_names)
 
 
-def finalize_gr_sizing(engine, result):
-    """Evaluate the final legal native output using a fresh PyDB and GR parse."""
-    if result["status"] != "ok":
-        return result
-    params = engine.params
-    session = engine.placedb.gr_sizing
-    output_dir = Path(params.result_dir) / "gr_parasitics"
-    final_def, final_verilog = output_dir / "final.def", output_dir / "final.v"
-    engine.write_back(str(final_def))
-    engine.write_verilog(str(final_verilog))
-    from dreamplace.flows.flow_config import apply_flow_defaults
-
-    final_params = copy.deepcopy(params)
-    final_params.flow_kind = "sta"
-    final_params.def_input = str(final_def)
-    final_params.verilog_input = str(final_verilog)
-    final_params.result_dir = str(output_dir / "terminal_sta")
-    final_params.design_inputs["def"] = str(final_def)
-    final_params.design_inputs["verilog"] = str(final_verilog)
-    # A materialized S50 config can carry an explicit dynamics flag that was
-    # changed by warmup. Normalize the read-only lane before generic validation.
-    from dreamplace.flows.gr_sizing_config import configure_gr_sizing
-
-    configure_gr_sizing(final_params)
-    apply_flow_defaults(final_params)
-    terminal = type(engine)(final_params)
-    terminal.setup_rawdb(engine.data_manager)
-    terminal_result = terminal.run_sta_only()
-    terminal_session = terminal.placedb.gr_sizing
-    timing = terminal.metrics["timing_stage_summary"]["sta"]
-    # Use the fresh native master/arc state for both LUT reports, remapping
-    # physical pin IDs by name. Share the frozen graph; do not reroute again.
+def _remap_session(session: GRSizingSession, placedb) -> GRSizingSession:
+    """Reuse an optimization-lane GR snapshot on a fresh PyDB pin order."""
+    terminal_names = _names(placedb.pin_names)
     order = torch.tensor(
-        [session.pin_names[name] for name in _names(terminal.placedb.pin_names)],
+        [session.pin_names[name] for name in terminal_names],
         dtype=torch.int64,
     )
     tree = session.op.snapshot
@@ -191,11 +165,75 @@ def finalize_gr_sizing(engine, result):
             valid_vertex_ids=pin_vertex[valid_ids],
         )
     )
+    report = {
+        **session.report,
+        "router_calls": 0,
+        "reused_optimization_lane_route": True,
+    }
+    pin_names = dict(zip(terminal_names, range(len(terminal_names)), strict=True))
+    return GRSizingSession(frozen_op, report, pin_names)
+
+
+def finalize_gr_sizing(engine, result):
+    """Evaluate the final legal native output using a fresh PyDB.
+
+    Does **not** invoke GPUGR again. After the optimization-lane route,
+    another CPU maze on standard GitHub-hosted runners fails with
+    ``insufficient CPU routing memory budget`` (reserved ≈ 4.9 GiB exceeds
+    80% of MemAvailable ≈ 5.8 GiB). Terminal STA reuses the frozen snapshot
+    with pin remapping — the same graph this function already used for LUT
+    timing reports.
+    """
+    if result["status"] != "ok":
+        return result
+    params = engine.params
+    session = engine.placedb.gr_sizing
+    output_dir = Path(params.result_dir) / "gr_parasitics"
+    final_def, final_verilog = output_dir / "final.def", output_dir / "final.v"
+    engine.write_back(str(final_def))
+    engine.write_verilog(str(final_verilog))
+    from dreamplace.flows.flow_config import apply_flow_defaults
+    from dreamplace.flows.gr_sizing_config import configure_gr_sizing
+    import dreamplace.NonLinearPlace as NonLinearPlace
+
+    final_params = copy.deepcopy(params)
+    final_params.flow_kind = "sta"
+    final_params.def_input = str(final_def)
+    final_params.verilog_input = str(final_verilog)
+    final_params.result_dir = str(output_dir / "terminal_sta")
+    final_params.design_inputs["def"] = str(final_def)
+    final_params.design_inputs["verilog"] = str(final_verilog)
+    # A materialized S50 config can carry an explicit dynamics flag that was
+    # changed by warmup. Normalize the read-only lane before generic validation.
+    configure_gr_sizing(final_params)
+    apply_flow_defaults(final_params)
+
+    # Skip setup_placedb → prepare_gr_sizing (second GPUGR). Build the PyDB
+    # under placement RC mode, then attach the remapped GR session.
+    final_params.timing_rc_mode = "placement"
+    terminal = type(engine)(final_params)
+    terminal.setup_rawdb(engine.data_manager)
+    terminal.setup_placedb()
+    terminal_session = _remap_session(session, terminal.placedb)
+    terminal.placedb.gr_sizing = terminal_session
+    final_params.timing_rc_mode = "gr"
+    terminal.params.timing_rc_mode = "gr"
+
+    terminal.placer = NonLinearPlace.NonLinearPlace(
+        final_params, terminal.placedb, None
+    )
+    _, _, metrics = terminal.placer.run_sta_only(final_params, terminal.placedb)
+    terminal.metrics = metrics
+    terminal_result = {"status": "ok"}
+    timing = metrics["timing_stage_summary"]["sta"]
+
     model = terminal.placer.last_global_place_model
-    model.op_collections.elmore_delay_op = frozen_op
+    model.op_collections.elmore_delay_op = terminal_session.op
     try:
         with torch.no_grad():
-            wns, tns, _, _ = model.timing_obj(terminal.placer.pos[0], surrogate_mode="lut_only")
+            wns, tns, _, _ = model.timing_obj(
+                terminal.placer.pos[0], surrogate_mode="lut_only"
+            )
         timing_op = model.op_collections.timing_propagation_op
         frozen_timing = {
             "wns": float(wns),

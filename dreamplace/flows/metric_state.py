@@ -159,6 +159,40 @@ def metric_to_record(metric):
         "wns": scalar_or_none(metric.wns),
         "tns": scalar_or_none(metric.tns),
         "timing_objective": scalar_or_none(metric.timing_objective),
+        "timing_grad_ratio": scalar_or_none(
+            getattr(metric, "timing_grad_ratio", None)
+        ),
+        "timing_grad_raw_ratio": scalar_or_none(
+            getattr(metric, "timing_grad_raw_ratio", None)
+        ),
+        "timing_grad_weight": scalar_or_none(
+            getattr(metric, "timing_grad_weight", None)
+        ),
+        "timing_grad_target_ratio": scalar_or_none(
+            getattr(metric, "timing_grad_target_ratio", None)
+        ),
+        "l_shape_grad_ratio": scalar_or_none(
+            getattr(metric, "l_shape_grad_ratio", None)
+        ),
+        "l_shape_target_ratio": scalar_or_none(
+            getattr(metric, "l_shape_target_ratio", None)
+        ),
+        "l_shape_weight": scalar_or_none(
+            getattr(metric, "l_shape_weight", None)
+        ),
+        "l_shape_base_grad_norm": scalar_or_none(
+            getattr(metric, "l_shape_base_grad_norm", None)
+        ),
+        "l_shape_wirelength_grad_norm": scalar_or_none(
+            getattr(metric, "l_shape_wirelength_grad_norm", None)
+        ),
+        "l_shape_grad_raw_norm": scalar_or_none(
+            getattr(metric, "l_shape_grad_raw_norm", None)
+        ),
+        "l_shape_grad_norm": scalar_or_none(
+            getattr(metric, "l_shape_grad_norm", None)
+        ),
+        "l_shape_cap_active": getattr(metric, "l_shape_cap_active", None),
         "slew_violation": scalar_or_none(metric.slew_violation),
         "cap_violation": scalar_or_none(metric.cap_violation),
         "leakage": scalar_or_none(metric.leakage),

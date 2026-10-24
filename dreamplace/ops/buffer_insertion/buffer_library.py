@@ -652,8 +652,18 @@ def build_buffer_library_from_metadata(metadata, contract_artifact):
     legal_cell_ids = [int(cell_id) for cell_id in contract_artifact.get("legal_cell_ids", [])]
     legal_master_names = [str(name) for name in contract_artifact.get("legal_master_names", [])]
     legal_size_values = [float(value) for value in contract_artifact.get("legal_size_values", [])]
+    legal_main_type_indices = [
+        int(value)
+        for value in contract_artifact.get("buffer_main_type_indices", [])
+    ]
+    if not legal_main_type_indices:
+        legal_main_type_indices = [
+            int(contract_artifact.get("buffer_main_type_index", -1))
+        ] * len(legal_cell_ids)
     if not legal_cell_ids:
         raise ValueError("buffer legal cell table is empty")
+    if len(legal_main_type_indices) != len(legal_cell_ids):
+        raise ValueError("buffer main type table does not match legal cell table")
 
     library = {}
     delay_source_counts = {}
@@ -684,6 +694,7 @@ def build_buffer_library_from_metadata(metadata, contract_artifact):
         delay_source_counts[delay_source] = delay_source_counts.get(delay_source, 0) + 1
         library[int(bsu)] = {
             "cell_id": int(cell_id),
+            "buffer_main_type_index": int(legal_main_type_indices[bsu]),
             "master_name": master_name,
             "legal_size_value": float(size_value),
             "input_cap": input_cap,

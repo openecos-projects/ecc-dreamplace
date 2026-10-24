@@ -5,7 +5,9 @@ from .buffering_inner_loop import BufferingInnerLoopSummary, run_buffering_inner
 from .discrete_candidate_buffer_runner import run_discrete_candidate_buffer_scheduler
 from .discrete_candidate_scheduler import (
     DiscreteCandidateTransition,
+    TypedDiscreteCandidateTransition,
     schedule_candidate_gradient_actions,
+    schedule_typed_candidate_gradient_actions,
 )
 from .discrete_virtual_buffer_runner import run_discrete_virtual_buffer_scheduler
 from .discrete_virtual_scheduler import (
@@ -21,7 +23,22 @@ from .buffering_state_builder import (
     build_buffering_state_for_model,
 )
 from .candidates import sample_buffer_candidates
+from .candidate_geometry import (
+    CandidateRefreshResult,
+    candidate_key,
+    refresh_candidate_geometry,
+    remap_candidate_state,
+    typed_action_key,
+)
 from .contract import BufferFamilyContract, BufferFamilyLegalTable
+from .drive_type_table import (
+    DRIVE_TYPE_TABLE_SCHEMA,
+    EXPECTED_DRIVE_TYPE_MASTERS,
+    DriveTypeEntry,
+    DriveTypeTable,
+    load_drive_type_table,
+    write_case_drive_type_table,
+)
 from .coordinate_backend import (
     build_coordinate_backend_contract,
     summarize_coordinate_action_readiness,
@@ -29,8 +46,10 @@ from .coordinate_backend import (
 from .optimization_state import (
     BufferOptimizationState,
     DiscreteCandidateState,
+    TypedDiscreteCandidateState,
     build_buffer_optimization_state,
     build_discrete_candidate_state,
+    build_typed_discrete_candidate_state,
     interpolate_buffer_values_by_bsu_index,
     project_buffer_optimization_state,
 )
@@ -67,9 +86,16 @@ __all__ = [
     "BufferingOptimizationLane",
     "BufferingProjectionResult",
     "BufferingStateBuildResult",
+    "CandidateRefreshResult",
+    "DRIVE_TYPE_TABLE_SCHEMA",
+    "EXPECTED_DRIVE_TYPE_MASTERS",
+    "DriveTypeEntry",
+    "DriveTypeTable",
     "DiscreteVirtualSchedulerTransition",
     "DiscreteCandidateState",
+    "TypedDiscreteCandidateState",
     "DiscreteCandidateTransition",
+    "TypedDiscreteCandidateTransition",
     "SegmentCountState",
     "VirtualCellDensityOp",
     "SegmentCapacityBundle",
@@ -78,9 +104,13 @@ __all__ = [
     "build_buffer_library_from_metadata",
     "build_buffer_optimization_state",
     "build_discrete_candidate_state",
+    "build_typed_discrete_candidate_state",
     "build_buffer_surrogate",
+    "load_drive_type_table",
+    "write_case_drive_type_table",
     "build_buffering_config_from_params",
     "build_buffering_state_for_model",
+    "candidate_key",
     "build_segment_capacity_bundle_for_model",
     "build_segment_capacity_controller",
     "capacity_grid_from_base_map",
@@ -93,6 +123,8 @@ __all__ = [
     "interpolate_buffer_values_by_bsu_index",
     "project_buffer_optimization_state",
     "project_buffering_lane_state",
+    "refresh_candidate_geometry",
+    "remap_candidate_state",
     "project_segment_count_state_to_candidates",
     "refresh_buffering_runtime_state",
     "run_discrete_virtual_buffer_scheduler",
@@ -100,7 +132,9 @@ __all__ = [
     "run_buffering_inner_loop",
     "schedule_net_gradient_actions",
     "schedule_candidate_gradient_actions",
+    "schedule_typed_candidate_gradient_actions",
     "sample_buffer_candidates",
+    "typed_action_key",
     "segment_count_projection_to_virtual_state",
     "summarize_coordinate_action_readiness",
 ]

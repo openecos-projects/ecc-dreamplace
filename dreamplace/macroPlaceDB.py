@@ -4626,6 +4626,7 @@ class MacroPlaceDB(object):
         self.dbu = float(pydb.dbu)
         
         if params.with_sta:
+            self.sparse_timing_view = getattr(self.rawdb, "sparse_timing_view", None)
             self.start_points = np.array(pydb.start_points, dtype=np.int32)
             self.end_points = np.array(pydb.end_points, dtype=np.int32)
             from dreamplace.ops.placeio_ecc.timing_schema import read_qualification_arrays
@@ -4940,6 +4941,10 @@ class MacroPlaceDB(object):
 
         self.cell_id_2_libpin_id_start = np.array(
             pydb.cell_id_2_libpin_id_start, dtype=np.int32)
+        self.flat_lib_pin_names = self._pydb_names_as_str_list(
+            pydb,
+            "flat_lib_pin_names",
+        )
         self.pin_2_libpin_offset = np.array(
             pydb.pin_2_libpin_offset, dtype=np.int32)
         if not hasattr(pydb, "flat_lib_pin_offset_x") or not hasattr(pydb, "flat_lib_pin_offset_y"):

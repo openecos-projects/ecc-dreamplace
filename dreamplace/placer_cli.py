@@ -100,6 +100,11 @@ def _add_buffering_public_args(parser):
         ),
     )
     parser.add_argument("--buffering-fixed-bsu-index", type=_nonnegative_int)
+    parser.add_argument(
+        "--buffering-candidate-drive-type-mode",
+        choices=("single_fixed", "four_strength_table"),
+    )
+    parser.add_argument("--buffering-candidate-drive-strength-table")
     parser.add_argument("--buffering-discrete-count-proximal-lambda", type=float)
     parser.add_argument(
         "--buffering-route-b-selection-fraction",
@@ -197,6 +202,7 @@ def build_arg_parser():
             "proximal_alternating_v1",
             "staged_smoke_v1",
             "segment_count_direct_joint_v1",
+            "discrete_alternating_sizing_buffering_v1",
         ),
         help="Compact joint optimization profile.",
     )
@@ -408,6 +414,8 @@ def _load_params_json(path):
             "buffering_mode",
             "buffering_fixed_buffer_master",
             "buffering_fixed_bsu_index",
+            "buffering_candidate_drive_type_mode",
+            "buffering_candidate_drive_strength_table",
             "continuous_size_dynamics_mode",
             "sizing_parameterization",
             "real_size_learning_rate",
@@ -664,6 +672,13 @@ _BUFFERING_VALUE_OVERRIDES = (
     ("joint_segment_sizing_enabled", int),
     ("joint_segment_route_b_enabled", int),
     ("joint_segment_virtual_density_enabled", int),
+    ("joint_alternating_outer_rounds", int),
+    ("joint_alternating_sizing_rounds", int),
+    ("joint_alternating_sizing_shared_budget", int),
+    ("joint_alternating_sizing_shared_budget_percent", float),
+    ("joint_alternating_buffering_rounds", int),
+    ("joint_alternating_buffering_selection_fraction", float),
+    ("joint_alternating_buffer_commit_each_round", int),
 )
 
 
@@ -671,6 +686,8 @@ _BUFFERING_STRING_OVERRIDES = (
     ("buffering_mode", str),
     ("buffering_output_dir", str),
     ("buffering_fixed_buffer_master", str),
+    ("buffering_candidate_drive_type_mode", str),
+    ("buffering_candidate_drive_strength_table", str),
     ("buffering_segment_strategy", str),
     ("buffering_candidate_strategy", str),
     ("buffering_segment_driver_cap_mode", str),

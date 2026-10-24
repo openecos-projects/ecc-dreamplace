@@ -306,6 +306,8 @@ def _path_edge_rc_summary(path_node_ids, edge_rc):
 class SegmentCountDynamicNetProvider(DynamicNetProvider):
     """TimingPropagation provider for segment-count relaxed buffering."""
 
+    supports_sparse_timing = True
+
     def __init__(
         self,
         *,
@@ -2605,12 +2607,14 @@ class SegmentCountDynamicNetProvider(DynamicNetProvider):
         if current_pin.shape != zero_pin.shape or not torch.equal(current_pin, zero_pin):
             raise RuntimeError("segment-count cap residual driver ordering changed")
         valid_pin = (current_pin >= 0) & (current_pin < int(pin_net_cap.numel()))
-        base = torch.zeros_like(current_cap, device=pin_net_cap.device)
+        # The static timing state may have higher precision than the segment
+        # model. Preserve it, including perturbations smaller than float32 ULP.
+        base = pin_net_cap.new_zeros(current_cap.shape)
         base[valid_pin] = pin_net_cap.index_select(0, current_pin[valid_pin]).to(base)
         current_cap = current_cap.to(device=pin_net_cap.device, dtype=base.dtype)
         zero_cap = zero_cap.to(device=pin_net_cap.device, dtype=base.dtype)
         finite = torch.isfinite(current_cap) & torch.isfinite(zero_cap)
-        residual_cap = torch.where(finite, base + current_cap - zero_cap, base)
+        residual_cap = torch.where(finite, base + (current_cap - zero_cap), base)
         result = dict(cap_result)
         result["driver_pin_id"] = current_pin
         result["driver_net_cap"] = residual_cap
@@ -2639,14 +2643,8 @@ class SegmentCountDynamicNetProvider(DynamicNetProvider):
         if current_pin.shape != zero_pin.shape or not torch.equal(current_pin, zero_pin):
             raise RuntimeError("segment-count timing residual sink ordering changed")
         valid = (current_pin >= 0) & (current_pin < int(static_pin_aat.numel()))
-        base_arrival = torch.zeros_like(
-            result["sink_arrival"],
-            device=static_pin_aat.device,
-        )
-        base_slew = torch.zeros_like(
-            result["sink_slew"],
-            device=static_pin_slew.device,
-        )
+        base_arrival = static_pin_aat.new_zeros(result["sink_arrival"].shape)
+        base_slew = static_pin_slew.new_zeros(result["sink_slew"].shape)
         base_arrival[valid] = static_pin_aat.index_select(0, current_pin[valid]).to(
             base_arrival
         )
@@ -2663,14 +2661,14 @@ class SegmentCountDynamicNetProvider(DynamicNetProvider):
         residual["sink_node_id"] = current_pin
         residual["sink_arrival"] = torch.where(
             arrival_finite,
-            base_arrival + current_arrival - zero_arrival,
+            base_arrival + (current_arrival - zero_arrival),
             base_arrival,
         )
         residual["sink_slew"] = torch.where(
             slew_finite,
             # Residual calibration can otherwise produce negative transitions,
             # which are not valid inputs to downstream Liberty timing tables.
-            torch.clamp_min(base_slew + current_slew - zero_slew, 0.0),
+            torch.clamp_min(base_slew + (current_slew - zero_slew), 0.0),
             base_slew,
         )
         self.metadata["sink_timing_residual_baseline"] = (

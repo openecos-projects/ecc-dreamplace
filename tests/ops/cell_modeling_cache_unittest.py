@@ -208,6 +208,69 @@ class CellModelingCacheTest(unittest.TestCase):
             torch.tensor([True, True, False, True, False], dtype=torch.bool),
         ))
 
+    def test_piecewise_support_rejects_invalid_indices(self):
+        model = CellModeling.__new__(CellModeling)
+        model.cell_model_schema = "main_id_arc_offset_piecewise_linear"
+        state = model._finalize_piecewise_state(
+            {
+                "size_table": torch.ones((1, 1, 1, 1), dtype=torch.float32),
+                "arc_index_table": torch.zeros((1, 1, 1, 1), dtype=torch.long),
+                "size_count": torch.ones((1, 1, 1), dtype=torch.long),
+                "vt_available": torch.ones((1, 1, 1), dtype=torch.bool),
+            }
+        )
+        model.piecewise_state = {"f_delay": state}
+
+        support = model.supports_arc_types(
+            torch.tensor([0, -1, 1], dtype=torch.long),
+            torch.tensor([0, 0, 0], dtype=torch.long),
+            torch.tensor([0, 0, 0], dtype=torch.long),
+        )
+
+        self.assertTrue(
+            torch.equal(
+                support,
+                torch.tensor([True, False, False], dtype=torch.bool),
+            )
+        )
+
+    def test_piecewise_support_indexes_multiple_vt_slots(self):
+        model = CellModeling.__new__(CellModeling)
+        model.cell_model_schema = "main_id_arc_offset_piecewise_linear"
+        vt_available = torch.zeros((2, 3, 2), dtype=torch.bool)
+        vt_available[1, 2, 1] = True
+        state = model._finalize_piecewise_state(
+            {
+                "size_table": torch.ones((2, 3, 2, 1), dtype=torch.float32),
+                "arc_index_table": torch.zeros((2, 3, 2, 1), dtype=torch.long),
+                "size_count": vt_available.long(),
+                "vt_available": vt_available,
+            }
+        )
+        model.piecewise_state = {"f_delay": state}
+        model.vt_order_tensor = torch.tensor([0.0, 10.0])
+
+        support = model.supports_arc_types(
+            torch.tensor([1, 1, 1, 0, -1], dtype=torch.long),
+            torch.tensor([2, 2, 1, 2, 2], dtype=torch.long),
+            torch.tensor([0, 1, 0, 0, 0], dtype=torch.long),
+        )
+        vt_low, vt_high = model._piecewise_vt_slots(
+            state,
+            torch.tensor([1, 0], dtype=torch.long),
+            torch.tensor([2, 2], dtype=torch.long),
+            torch.tensor([7.0, 7.0]),
+        )
+
+        self.assertTrue(
+            torch.equal(
+                support,
+                torch.tensor([True, False, False, False, False], dtype=torch.bool),
+            )
+        )
+        self.assertTrue(torch.equal(vt_low, torch.tensor([1, 0])))
+        self.assertTrue(torch.equal(vt_high, torch.tensor([1, 0])))
+
 
 if __name__ == "__main__":
     unittest.main()

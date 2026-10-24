@@ -7,7 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from dreamplace.flows.discrete_timing_diagnostics import phase_metrics
 from dreamplace.flows.inflation_s5b1 import InflationS5B1
+from dreamplace.flows.timing_opt_schedule import TimingOptWindowSchedule
 from dreamplace.ops.routability.cooptimization_area import SizingWindowGeometry
 
 
@@ -115,6 +117,41 @@ def test_nesterov_gp_keeps_discrete_window_parameters_outside_optimizer(inflatio
     assert torch.equal(placer.vt_params[0], torch.zeros(1, 3))
 
 
+def test_typed_virtual_area_uses_each_selected_master_and_padding():
+    state = SimpleNamespace(
+        is_typed_candidate=True,
+        activation_param=torch.tensor([[1., 0., 0., 0.], [0., 0., 0., 1.], [0., 0., 0., 0.]]),
+        drive_type_cell_ids=torch.tensor([0, 1, 2, 3]),
+    )
+    owner = InflationS5B1.__new__(InflationS5B1)
+    owner.lane = SimpleNamespace(_current_state=lambda: state)
+    owner.params = SimpleNamespace(cell_padding_x=0.2)
+    owner.data = SimpleNamespace(
+        flat_libcell_width=torch.tensor([1., 2., 3., 4.]),
+        flat_libcell_height=torch.tensor([2., 2., 2., 3.]),
+    )
+    model = SimpleNamespace(_segment_virtual_buffer_size=lambda: (1.4, 2.))
+
+    assert owner.virtual_area(model) == pytest.approx(16.0)
+
+
+def test_phase_metrics_keep_unweighted_reporting_units():
+    assert phase_metrics(
+        {
+            "wns": -1200.0,
+            "tns": -450000.0,
+            "total_slew_violation": 12.5,
+            "total_cap_violation": 37.0,
+        }
+    ) == {
+        "wns_ns": -1.2,
+        "tns_ns": -450.0,
+        "total_slew_violation_ns": 12.5,
+        "total_cap_violation_ff": 37.0,
+    }
+    assert phase_metrics({"cap_violation": 0.25})["total_cap_violation_ff"] == 250.0
+
+
 class PolynomialWindow(InflationS5B1):
     # A real Taylor move overshoots the minimum on round 2. Only the electrical
     # and master-sync boundaries are substituted; the production selector,
@@ -148,7 +185,7 @@ def polynomial_window_inputs():
     )
     data.get_continuous_size_parameter = lambda: data.real_size
     data.sizing_parameterization = "real_size"
-    params = SimpleNamespace(timing_opt_sizing_rounds=2,
+    params = SimpleNamespace(timing_opt_sizing_rounds=2, timing_opt_max_windows=2,
                              discrete_gradient_topk_shared_budget_percent=1.,
                              placement_sizing_mode="place_only", timing_objective_lane="timing_only",
                              differentiable_timing_obj=0,
@@ -211,7 +248,7 @@ def test_window_coefficients_control_real_loss_and_gradient_and_restore_gp(
     before = window_weight_state(model)
     with torch.no_grad():
         data.real_size.fill_(2.)
-    with owner._electrical_window(), owner._sizing_coefficients(model) as effective:
+    with owner.electrical_window(), owner._sizing_coefficients(model) as effective:
         loss = InflationS5B1._loss(owner, model, torch.tensor([10., 20.]))
         gradient = torch.autograd.grad(loss, data.real_size)[0]
         assert (float(loss.detach()), float(gradient.detach())) == pytest.approx(
@@ -284,7 +321,7 @@ def test_fixed_coefficients_restore_on_sizing_failure(
         }
         raise RuntimeError("sizing probe failure")
 
-    monkeypatch.setattr(owner, "_sizing", fail)
+    monkeypatch.setattr(owner, "run_sizing", fail)
     with pytest.raises(RuntimeError, match="sizing probe failure"):
         owner.run(model, torch.tensor([10., 20.]), iteration=10)
     assert window_weight_state(model) == before
@@ -315,7 +352,7 @@ def test_restore_best_master_parameter_center_and_oscillation(
     pos = torch.tensor([10., 20.])
     geometry = SizingWindowGeometry(data, db, pos)
     model = SimpleNamespace(_timing_geometry_cache=None)
-    summary = owner._sizing(model, pos, geometry, capacity)
+    summary = owner.run_sizing(model, pos, geometry, capacity)
     assert summary['best_round'] == best_round
     assert len(summary['rounds']) == 2
     assert summary['rounds'][-1]['loss'] > summary['rounds'][0]['loss']
@@ -338,7 +375,7 @@ def test_sizing_only_windows_refresh_each_live_position(
         assert params.differentiable_timing_obj == 1
         return original_loss(model, pos)
     monkeypatch.setattr(owner, "_loss", electrical_loss)
-    for method in ("_prepare", "_buffering", "_retain_buffered_nets"):
+    for method in ("prepare", "run_buffering", "retain_buffered_nets"):
         monkeypatch.setattr(owner, method, lambda *args: pytest.fail("S5-only entered buffering"))
     model = timing_window_model
     pos = torch.tensor([10., 20.])
@@ -363,15 +400,165 @@ def test_sizing_only_windows_refresh_each_live_position(
     )
 
 
+def test_placement_candidate_prepare_uses_dirty_native_refresh():
+    activation = torch.nn.Parameter(torch.zeros(2, 2))
+    state = SimpleNamespace(
+        activation_param=activation,
+        candidate_net_id=torch.tensor([4, 7]),
+    )
+    observed = {}
+    lane = SimpleNamespace(
+        _current_state=lambda: state,
+        buffer_relaxed_timing_payload={
+            "candidate_net_id": torch.tensor([4, 7]),
+        },
+        refresh_candidate_geometry=lambda **kwargs: (
+            observed.update(kwargs)
+            or {"status": "ok", "reason": "dirty_native_refresh"}
+        ),
+    )
+    owner = InflationS5B1.__new__(InflationS5B1)
+    owner.lane = lane
+    owner.params = SimpleNamespace(flow_kind="placement")
+    owner.placedb = SimpleNamespace(
+        flat_node2pin_map=torch.tensor([0, 1, 2]),
+        flat_node2pin_start_map=torch.tensor([0, 0, 1, 2]),
+        pin2net_map=torch.tensor([4, 7]),
+    )
+    owner.data = SimpleNamespace()
+    owner.ops = SimpleNamespace(
+        steiner_topo_op=SimpleNamespace(
+            frozen_nets=SimpleNamespace(candidate_state=None),
+        )
+    )
+    topology_refreshes = []
+    owner.refresh_topology = topology_refreshes.append
+    owner._pending_dirty_instance_ids = {1}
+    owner._pending_dirty_net_ids = {7}
+    owner._candidate_refresh_in_progress = False
+    model = SimpleNamespace(
+        _timing_geometry_cache=object(),
+        _virtual_cell_density_view=object(),
+    )
+
+    owner._prepare(model, pos=torch.zeros(2), active_only=False)
+
+    assert len(topology_refreshes) == 1
+    torch.testing.assert_close(topology_refreshes[0], torch.zeros(2))
+    assert observed["active_only"] is False
+    assert observed["dirty_net_ids"] == [4, 7]
+    assert observed["refresh_records_all"] is True
+    assert observed["force_rebuild"] is False
+    assert owner._pending_dirty_instance_ids == set()
+    assert owner._pending_dirty_net_ids == set()
+    assert model._timing_geometry_cache is None
+    assert model._virtual_cell_density_view is None
+
+
+def test_placement_candidate_topology_refresh_limits_geometry_to_active_nets():
+    state = SimpleNamespace(
+        activation_param=torch.tensor(
+            [[0.0, 0.0], [1.0, 0.0], [0.0, 0.0]]
+        ),
+        candidate_net_id=torch.tensor([4, 4, 9]),
+    )
+    observed = {}
+    lane = SimpleNamespace(
+        _current_state=lambda: state,
+        refresh_candidate_geometry=lambda **kwargs: (
+            observed.update(kwargs) or {"status": "ok"}
+        ),
+        attach_state=lambda _data: None,
+    )
+    owner = InflationS5B1.__new__(InflationS5B1)
+    owner.lane = lane
+    owner.params = SimpleNamespace(enable_relaxed_buffer_timing=False)
+    owner.data = SimpleNamespace()
+    owner.ops = SimpleNamespace(
+        steiner_topo_op=SimpleNamespace(
+            frozen_nets=SimpleNamespace(candidate_state=None),
+        )
+    )
+    model = SimpleNamespace(
+        _timing_geometry_cache=object(),
+        _virtual_cell_density_view=object(),
+    )
+
+    summary = owner.refresh_candidate_geometry_after_topology(
+        model,
+        reason="placement_topology_changed",
+    )
+
+    assert summary == {"status": "ok"}
+    assert observed["active_only"] is True
+    assert observed["dirty_net_ids"] == [4]
+    assert owner.ops.steiner_topo_op.frozen_nets.candidate_state is state
+    assert owner.params.enable_relaxed_buffer_timing is True
+
+
+def test_placement_candidate_retention_freezes_accepted_nets():
+    position = torch.nn.Parameter(torch.tensor([2.0, 3.0]))
+    state = SimpleNamespace(
+        activation_param=torch.nn.Parameter(
+            torch.tensor([[0.0, 1.0], [0.0, 0.0]])
+        ),
+        candidate_net_id=torch.tensor([7, 8]),
+        timing_active_only=False,
+    )
+    observed = {}
+    lane = SimpleNamespace(
+        _current_state=lambda: state,
+        refresh_candidate_geometry=lambda **kwargs: (
+            observed.update(kwargs) or {"status": "ok"}
+        ),
+        attach_state=lambda _data: None,
+    )
+    frozen = SimpleNamespace(candidate_state=None)
+    freeze_calls = []
+    owner = InflationS5B1.__new__(InflationS5B1)
+    owner.lane = lane
+    owner.params = SimpleNamespace(enable_relaxed_buffer_timing=False)
+    owner.data = SimpleNamespace(pos=[position])
+    owner.ops = SimpleNamespace(
+        steiner_topo_op=SimpleNamespace(
+            freeze_nets=freeze_calls.append,
+            frozen_nets=frozen,
+        )
+    )
+    topology_refreshes = []
+    owner.refresh_topology = topology_refreshes.append
+    owner._pending_dirty_instance_ids = {2}
+    owner._pending_dirty_net_ids = {8}
+    owner._candidate_refresh_in_progress = False
+    model = SimpleNamespace(
+        _timing_geometry_cache=object(),
+        _virtual_cell_density_view=object(),
+    )
+
+    owner._retain_buffered_nets(model)
+
+    assert freeze_calls == [[7]]
+    assert len(topology_refreshes) == 1
+    assert topology_refreshes[0] is position
+    assert observed["active_only"] is False
+    assert observed["dirty_net_ids"] == [7]
+    assert frozen.candidate_state is state
+    assert state.timing_active_only is True
+    assert state.activation_param.requires_grad is False
+    assert state.activation_param.grad is None
+    assert owner.params.enable_relaxed_buffer_timing is True
+    assert owner._pending_dirty_instance_ids == set()
+    assert owner._pending_dirty_net_ids == set()
+
+
 def milestone_owner(tmp_path, monkeypatch):
     """Keep real window publication; substitute the expensive S/B algorithms."""
     owner = InflationS5B1.__new__(InflationS5B1)
     owner.params = SimpleNamespace(
         timing_opt_max_windows=5, result_dir=str(tmp_path), design_name=lambda: "case",
     )
-    owner.milestones = (.30, .25, .20, .15, .10)
-    owner.pending_milestones = list(owner.milestones)
-    owner.window_count, owner.attempts, owner.summaries = 0, set(), []
+    owner.schedule = TimingOptWindowSchedule((.30, .25, .20, .15, .10), 5)
+    owner.summaries = []
     owner.capacity = 100.
     owner.placedb = SimpleNamespace(
         num_movable_nodes=1, num_filler_nodes=1, total_movable_node_area=1.,
@@ -383,7 +570,7 @@ def milestone_owner(tmp_path, monkeypatch):
         sorted_node_map=torch.tensor([0], dtype=torch.int32),
     )
     monkeypatch.setattr(owner, "virtual_area", lambda model: 0.)
-    monkeypatch.setattr(owner, "_sync_native_sizing", lambda: {"synced": True})
+    monkeypatch.setattr(owner, "sync_native_sizing", lambda: {"synced": True})
 
     def electrical_window(model, pos, *, iteration):
         # Change a real footprint to exercise filler/area/cache publication.
@@ -439,10 +626,10 @@ def test_milestones_survive_rebounds_stage_restart_and_skipped_thresholds(tmp_pa
         pos.grad = torch.ones_like(pos)
         optimizer.step()
         metric.overflow = torch.tensor([overflow], dtype=torch.float64)
-        previous_count = owner.window_count
+        previous_count = owner.schedule.window_count
         owner.before_step(model, pos, optimizer, metric, {}, iteration=iteration, stage=stage)
         assert owner.before_inflation(model, pos, iteration=iteration, stage=stage) is None
-        if owner.window_count != previous_count:
+        if owner.schedule.window_count != previous_count:
             group = optimizer.param_groups[0]
             assert all(group[field] == [] for field in ("g_k", "obj_k", "a_k", "alpha_k", "g_k_1"))
             torch.testing.assert_close(group["u_k"][0], pos)
@@ -451,7 +638,7 @@ def test_milestones_survive_rebounds_stage_restart_and_skipped_thresholds(tmp_pa
     assert [(item["trigger"]["threshold"], item["iteration"], item["stage"])
             for item in owner.summaries] == [(.30, 2, 0), (.25, 4, 1), (.20, 4, 1),
                                            (.15, 6, 2), (.10, 6, 2)]
-    assert owner.pending_milestones == [] and owner.window_count == 5
+    assert owner.schedule.pending_milestones == [] and owner.schedule.window_count == 5
     assert len(evaluations) == 3
     assert refreshes == ["route", "geometry"] * 5
     saved = json.loads((tmp_path / "case_inflation_s5b1.json").read_text())
@@ -464,7 +651,7 @@ def test_milestones_survive_rebounds_stage_restart_and_skipped_thresholds(tmp_pa
 
 def test_legacy_inflation_windows_keep_attempt_deduplication(tmp_path, monkeypatch):
     owner = milestone_owner(tmp_path, monkeypatch)
-    owner.milestones, owner.pending_milestones = (), []
+    owner.schedule = TimingOptWindowSchedule((), 5)
     model = SimpleNamespace(
         objective_scale=1., inflation_state=SimpleNamespace(target_area=None),
         refresh_routability_operators=lambda: None, refresh_after_geometry_change=lambda: None,
@@ -473,6 +660,93 @@ def test_legacy_inflation_windows_keep_attempt_deduplication(tmp_path, monkeypat
     for iteration in range(7):
         owner.before_inflation(model, pos, iteration=iteration, stage=0)
         assert owner.before_inflation(model, pos, iteration=iteration, stage=0) is None
-    assert owner.window_count == 5
+    assert owner.schedule.window_count == 5
     assert [summary["iteration"] for summary in owner.summaries] == list(range(5))
-    assert all("trigger" not in summary for summary in owner.summaries)
+    assert [summary["trigger"] for summary in owner.summaries] == [
+        {"mode": "inflation", "iteration": iteration, "stage": 0} for iteration in range(5)
+    ]
+
+
+def test_timing_only_milestone_window_accepts_absent_inflation_state(tmp_path, monkeypatch):
+    from dreamplace.NesterovAcceleratedGradientOptimizer import (
+        NesterovAcceleratedGradientOptimizer,
+    )
+
+    owner = milestone_owner(tmp_path, monkeypatch)
+    model = SimpleNamespace(
+        objective_scale=1.,
+        refresh_routability_operators=lambda: None,
+        refresh_after_geometry_change=lambda: None,
+    )
+    pos = torch.nn.Parameter(torch.tensor([2.0, 3.0, 4.0, 5.0]))
+
+    def objective_and_gradient(value):
+        objective = value.square().sum()
+        return objective, torch.autograd.grad(objective, value)[0]
+
+    optimizer = NesterovAcceleratedGradientOptimizer(
+        [pos],
+        lr=0.01,
+        obj_and_grad_fn=objective_and_gradient,
+        constraint_fn=lambda value: value,
+        use_bb=False,
+    )
+    metric = SimpleNamespace(overflow=torch.tensor([0.29]), evaluate=lambda *args: None)
+    pos.grad = torch.ones_like(pos)
+    optimizer.step()
+    owner.before_step(model, pos, optimizer, metric, {}, iteration=1, stage=0)
+    assert owner.schedule.window_count == 1
+    assert owner.summaries[0]["trigger"]["threshold"] == 0.30
+
+
+def test_placement_window_sizing_delegates_to_lut_action_owner():
+    owner = InflationS5B1.__new__(InflationS5B1)
+    calls = []
+    delegate = SimpleNamespace(
+        _pending_dirty_instance_ids={7, 9},
+        _pending_dirty_net_ids={3},
+    )
+
+    def run_sizing(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"rounds": [{"round": 1}, {"round": 2}]}
+
+    delegate.run_sizing = run_sizing
+    owner._lut_action_owner = delegate
+    owner._pending_dirty_instance_ids = {1}
+    owner._pending_dirty_net_ids = set()
+    owner.round_index = 0
+
+    result = owner.run_sizing(
+        "model",
+        "pos",
+        "geometry",
+        "capacity",
+        action_mask=[True, False, True, False],
+    )
+
+    assert result == {"rounds": [{"round": 1}, {"round": 2}]}
+    assert calls == [
+        (
+            ("model", "pos", "geometry", "capacity"),
+            {"action_mask": [True, False, True, False]},
+        )
+    ]
+    assert owner._pending_dirty_instance_ids == {1, 7, 9}
+    assert owner._pending_dirty_net_ids == {3}
+    assert owner.round_index == 2
+    assert delegate._pending_dirty_instance_ids == set()
+    assert delegate._pending_dirty_net_ids == set()
+
+
+def test_legacy_placement_window_sizing_rejects_action_mask():
+    owner = InflationS5B1.__new__(InflationS5B1)
+    owner._lut_action_owner = None
+    with pytest.raises(ValueError, match="timing_action_gradient_mode=lut_action"):
+        owner.run_sizing(
+            "model",
+            "pos",
+            "geometry",
+            "capacity",
+            action_mask=[True, False, True, False],
+        )

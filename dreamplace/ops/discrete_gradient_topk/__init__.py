@@ -12,6 +12,7 @@ from .quad_gradient_topk import (
     ACTION_NAMES,
     QuadCandidateTable,
     apply_discrete_quad_gradient_topk_update,
+    apply_quad_gradient_from_action_scores,
     apply_quad_gradient_from_data_collections,
     build_quad_candidate_table,
 )
@@ -29,6 +30,7 @@ __all__ = [
     "ACTION_NAMES",
     "QuadCandidateTable",
     "apply_discrete_quad_gradient_topk_update",
+    "apply_quad_gradient_from_action_scores",
     "apply_quad_gradient_from_data_collections",
     "build_quad_candidate_table",
     "DiscreteVtCommit",

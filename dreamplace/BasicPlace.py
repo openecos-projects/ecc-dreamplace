@@ -594,6 +594,7 @@ class PlaceDataCollection(object):
             )
 
             if params.with_sta:
+                self.sparse_timing_view = getattr(placedb, "sparse_timing_view", None)
                 # diff timing opt
                 self.inrdelays = torch.from_numpy(
                     placedb.inrdelays
@@ -772,6 +773,10 @@ class PlaceDataCollection(object):
 
                 self.cell_id_2_libpin_id_start = torch.from_numpy(
                     placedb.cell_id_2_libpin_id_start).to(device)
+                lib_pin_names = getattr(placedb, "flat_lib_pin_names", None)
+                self.flat_lib_pin_names = (
+                    None if not lib_pin_names else tuple(lib_pin_names)
+                )
                 self.pin_2_libpin_offset = torch.from_numpy(
                     placedb.pin_2_libpin_offset).to(device)
                 self.flat_lib_pin_offset_x = torch.from_numpy(

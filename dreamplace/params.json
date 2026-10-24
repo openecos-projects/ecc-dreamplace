@@ -13,7 +13,7 @@
     },
     "timing_objective_lane": {
         "description": "timing objective terms, timing_only | timing_slew_cap",
-        "default": "timing_only"
+        "default": "timing_slew_cap"
     },
     "timing_aggregation_mode": {
         "description": "AAT/RAT aggregation: hard max/min or smooth LSE; endpoint WNS/TNS retain hard reductions",
@@ -26,6 +26,10 @@
     "timing_metric_scope": {
         "description": "max timing checks used by placement WNS/TNS: setup_only or setup_plus_recovery",
         "default": "setup_plus_recovery"
+    },
+    "timing_propagation_device": {
+        "description": "TimingPropagation device: inherit the placement device, or explicitly use cpu/cuda",
+        "default": "inherit"
     },
     "placement_sizing_mode": {
         "description": "placement optimization lane, place_only | size_only | joint",
@@ -50,6 +54,18 @@
     "buffering_fixed_bsu_index": {
         "description": "optional fixed buffer index resolved from the legal buffer table",
         "default": null
+    },
+    "buffering_candidate_drive_type_mode": {
+        "description": "candidate discrete buffer type selection, single_fixed | four_strength_table",
+        "default": "single_fixed"
+    },
+    "buffering_candidate_drive_strength_table": {
+        "description": "external four-buffer drive-strength table used by typed discrete candidate buffering",
+        "default": ""
+    },
+    "buffering_runtime_profile": {
+        "description": "record detailed candidate state-build and geometry-refresh timings",
+        "default": 0
     },
     "buffering_max_repeaters_per_segment": {
         "description": "maximum accepted repeaters on one segment",
@@ -113,7 +129,7 @@
     },
     "l_shape_grad_target_ratio_max": {
         "description": "maximum adaptive routability gradient target ratio",
-        "default": 0.1
+        "default": 0.2
     },
     "buffering_continuous_steps": {
         "description": "number of steps in the standalone buffering optimizer",
@@ -147,6 +163,46 @@
         "description": "optional canonical profile for joint optimization",
         "default": ""
     },
+    "joint_alternating_outer_rounds": {
+        "description": "outer rounds for the discrete alternating sizing/buffering profile",
+        "default": 5
+    },
+    "joint_alternating_sizing_rounds": {
+        "description": "discrete sizing rounds before each candidate buffering round",
+        "default": 5
+    },
+    "joint_alternating_sizing_shared_budget": {
+        "description": "use one shared sizing action budget per discrete sizing round",
+        "default": 1
+    },
+    "joint_alternating_sizing_shared_budget_percent": {
+        "description": "shared sizing budget percentage for the alternating profile",
+        "default": 1.0
+    },
+    "joint_alternating_sizing_action_policy": {
+        "description": "sizing action reduction policy for the alternating profile",
+        "default": "quad_shared_budget_all_legal"
+    },
+    "joint_alternating_buffering_rounds": {
+        "description": "candidate buffering rounds after each sizing block",
+        "default": 1
+    },
+    "joint_alternating_buffering_selection_fraction": {
+        "description": "fraction of eligible nets selected by each candidate buffering round",
+        "default": 0.001
+    },
+    "joint_alternating_buffering_mode": {
+        "description": "buffering backend for the alternating profile",
+        "default": "candidate"
+    },
+    "joint_alternating_buffer_commit_each_round": {
+        "description": "whether to physically commit virtual buffers after every alternating round",
+        "default": 0
+    },
+    "joint_alternating_buffer_commit_policy": {
+        "description": "physical buffer commit policy for the alternating profile",
+        "default": "final_only"
+    },
     "place_io_engine": {
         "description": "physical database backend used by DREAMPlace",
         "default": "ieda"
@@ -162,6 +218,66 @@
     "timing_surrogate_mode": {
         "description": "cell timing evaluation mode, auto | mixed | lut_only | surrogate_only",
         "default": "auto"
+    },
+    "timing_action_gradient_mode": {
+        "description": "discrete sizing gradient mode, off | lut_action",
+        "default": "lut_action"
+    },
+    "timing_action_score_objective": {
+        "description": "objective differentiated for the local action score, loss (weighted objective) | tns | wns",
+        "default": "loss"
+    },
+    "timing_action_load_delta": {
+        "description": "legacy diagnostic option; must be 0 because index derivatives query target LUTs at the base-point load",
+        "default": 0
+    },
+    "timing_action_pin_cap_gradient": {
+        "description": "carry the target cell input pin cap into the beta probe so the upstream driver load follows the action; 0 removes the load-feedback term for A/B debugging",
+        "default": 1
+    },
+    "timing_action_drive_load_feedback": {
+        "description": "add paper Eq. (7): the sized cell input pin cap delta raises the fanin driver LUT load, carried by the cell load Jacobian in the same backward",
+        "default": 1
+    },
+    "timing_action_tns_margin_ps": {
+        "description": "slack margin in ps for the tns action score; endpoints within the margin keep a unit TNS slope so near-critical regressions are visible",
+        "default": 0.0
+    },
+    "timing_action_trial_candidates": {
+        "description": "debug only: number of local top candidates measured by an actual one-action TNS trial; 0 means twice the shared budget",
+        "default": 0
+    },
+    "timing_action_trial_probe": {
+        "description": "debug only: number of trial candidates that record no-op/restore metrics and explicit beta forwards at 0, 0.001, 0.01, 0.1, 1 for finite-difference validation",
+        "default": 0
+    },
+    "timing_action_trial_reachability": {
+        "description": "debug only: count endpoints reachable from each trial cell's output pin",
+        "default": 0
+    },
+    "timing_action_trial_stratified": {
+        "description": "take the trial shortlist evenly across the four actions instead of the global top-k",
+        "default": 0
+    },
+    "timing_action_trial_record_only": {
+        "description": "debug only: record exact one-action TNS/WNS trials for a shortlist; selection always uses the local scores",
+        "default": 0
+    },
+    "timing_action_trial_sample": {
+        "description": "debug only: draw this many valid instances per action uniformly in addition to the top-k shortlist",
+        "default": 0
+    },
+    "timing_action_trial_top_per_action": {
+        "description": "debug only: take this many lowest local-score valid instances per action before the uniform sample",
+        "default": 0
+    },
+    "timing_action_trial_seed": {
+        "description": "deterministic seed for timing_action_trial_sample",
+        "default": 0
+    },
+    "timing_zero_buffer_static_net_fast_path": {
+        "description": "skip the dynamic candidate-buffer net AAT lane when every candidate buffer activation is exactly zero; the static RC lane is used instead",
+        "default": 0
     },
     "diff_timing_driven_placement": {
         "description": "enable differentiable timing in the placement flow",
@@ -242,11 +358,15 @@
     },
     "timing_grad_balance_target_ratio": {
         "description": "initial target ratio rho between weighted timing-gradient and wirelength-gradient L1 norms; 0 disables automatic timing-gradient balancing",
-        "default": 0.2
+        "default": 0.01
+    },
+    "timing_grad_balance_reset_on_restart": {
+        "description": "reset and reinitialize the timing-gradient balance weight after each inflation/GP restart; 0 preserves the current weight",
+        "default": 1
     },
     "timing_coeff_growth_factor": {
         "description": "positive finite multiplier applied to WNS/TNS coefficients at each GP density-weight update; 1 disables growth; size_only skips this schedule",
-        "default": 1.0
+        "default": 1.01
     },
     "sizing_parameterization": {
         "description": "continuous sizing coordinate, logits | real_size",
@@ -457,7 +577,13 @@
     },
     "timing_opt_coefficients": {
         "description": "GP sizing-window coefficient policy: mode=inherit uses live placement values; mode=fixed requires wns, tns, slew and cap during S rounds only, with outer timing weight 1; placement weights are restored on exit",
-        "default": {"mode": "fixed", "wns": 500.0, "tns": 5.0, "cap": 1.0, "slew": 1.0}
+        "default": {
+            "mode": "fixed",
+            "wns": 500.0,
+            "tns": 5.0,
+            "cap": 1.0,
+            "slew": 1.0
+        }
     },
     "two_stage_density_scaler": {
         "description": "scale density weight after the macro placement stage",
@@ -465,7 +591,7 @@
     },
     "max_num_area_adjust": {
         "description": "maximum times to adjust node area",
-        "default": 3
+        "default": 5
     },
     "adjust_nctugr_area_flag": {
         "description": "legacy compatibility key; when enabled use the ECC/iRT EGR congestion map for area adjustment (NCTUgr is not invoked)",
@@ -735,6 +861,14 @@
         "description": "maximum fraction of the total whitespace area that routability inflation may add to movable nodes in one area-adjust round",
         "default": 0.1
     },
+    "inflation_density_weight_scale": {
+        "description": "positive scale for the Xplace-style density-weight restart ratio ||grad wirelength||_1 / ||grad density||_1 after each inflation geometry epoch; the default 0.001 keeps the restarted density force small, 1.0 uses the normalized ratio directly, and 0.1 reproduces the historical DreamPlace post-restart scale",
+        "default": 0.001
+    },
+    "inflation_filler_consumption_mode": {
+        "description": "filler area consumed by routability inflation: filler_first subtracts the inflation area from filler before raising target density, proportional shrinks filler and non-filler whitespace together, capacity_only preserves the legacy behavior of shrinking filler only at the placement-area limit",
+        "default": "filler_first"
+    },
     "legalize_before_each_inflation_flag": {
         "description": "whether each ordinary inflation round waits for stop_overflow, legalizes physical cell geometry, runs congestion estimation, and then reapplies cumulative inflation before area adjustment",
         "default": 0
@@ -766,6 +900,14 @@
     "timing_rc_mode": {
         "default": "placement",
         "description": "timing parasitics, placement | gr; gr requires native ECC CPU sizing or STA"
+    },
+    "diff_sizing_timing_rc_mode": {
+        "default": "gr",
+        "description": "standalone diff_sizing timing RC source; placement | gr"
+    },
+    "diff_sizing_optimization_flows": {
+        "default": null,
+        "description": "ordered standalone diff_sizing phases [action, rounds, [wns, tns, slew, cap], selection_percent]; null keeps one quad phase"
     },
     "cell_model_schema": {
         "default": "main_id_arc_offset_piecewise_linear",
@@ -952,7 +1094,7 @@
         "default": 0
     },
     "l_shape_grad_target_ratio": {
-        "description": "target ratio between weighted preconditioned L-shape gradient norm and preconditioned base wirelength+density gradient norm",
+        "description": "target ratio between raw L-shape gradient norm and raw wirelength gradient norm before the shared preconditioner; the printed L-shape ratio uses this same definition",
         "default": 0.2
     },
     "l_shape_overflow_threshold": {
@@ -986,6 +1128,10 @@
     "l_shape_weight_max": {
         "description": "maximum allowed l_shape_routability_weight after adaptive update",
         "default": 1
+    },
+    "l_shape_weight_max_multiplier": {
+        "description": "maximum adaptive L-shape weight as a multiple of the first calibrated weight in each calibration epoch; 0 disables the relative cap",
+        "default": 10.0
     },
     "l_shape_log_verbose": {
         "description": "verbosity for non-timing L-shape/Soft-L diagnostic logs: 0 keeps production logs quiet, 1 adds one-line refresh summaries, 2 enables detailed per-iteration and per-refresh diagnostics",

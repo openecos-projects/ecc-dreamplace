@@ -7,6 +7,7 @@ router; the terminal invocation parses the committed DEF into a new router DB.
 import copy
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -29,6 +30,82 @@ def _names(values):
 def _file_hash(path):
     with open(path, "rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+_SDC_GET_PORTS = re.compile(r"\[get_ports\b(.*?)\]", flags=re.IGNORECASE | re.DOTALL)
+_SDC_SET = re.compile(r"^\s*set\s+([A-Za-z_]\w*)\s+(.+?)\s*$", flags=re.IGNORECASE)
+_SDC_CLOCK = re.compile(
+    r"\b(?:create_clock|create_generated_clock)\b(.*?)(?:;|\n|$)",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_SDC_VARIABLE = re.compile(r"\$([A-Za-z_]\w*)")
+
+
+def _sdc_words(value):
+    return [
+        word.strip('{}"')
+        for word in value.strip().strip("{}").split()
+        if word.strip('{}"') and not word.startswith("-")
+    ]
+
+
+def _sdc_clock_port_names(params):
+    """Return top-level ports used as SDC clock sources.
+
+    Some native DB inputs do not mark a top-level clock net as ``is_clock``
+    even though the SDC creates a clock on that port.  GR has no access point
+    for those IO pins, so they must be excluded before packing route trees.
+    """
+    inputs = dict(getattr(params, "design_inputs", {}) or {})
+    sdc_path = inputs.get("sdc") or getattr(params, "sdc", "")
+    if not sdc_path:
+        return set()
+    try:
+        text = Path(str(sdc_path)).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return set()
+    text = text.replace("\\\n", " ")
+    text = "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+    variables = {}
+    port_variables = set()
+    for line in text.splitlines():
+        match = _SDC_SET.match(line)
+        if match is None:
+            continue
+        name, value = match.groups()
+        ports = _SDC_GET_PORTS.search(value)
+        variables[name] = _sdc_words(ports.group(1) if ports else value)
+        if ports:
+            port_variables.add(name)
+
+    def resolve(name, seen=frozenset()):
+        if name in seen:
+            return set()
+        result = set()
+        for word in variables.get(name, ()):
+            if word.startswith("$"):
+                result.update(resolve(word[1:], seen | {name}))
+            else:
+                result.add(word)
+        return result
+
+    def collect(expression):
+        result = set()
+        for body in _SDC_GET_PORTS.findall(expression):
+            for word in _sdc_words(body):
+                if word.startswith("$"):
+                    result.update(resolve(word[1:]))
+                else:
+                    result.add(word)
+        for name in _SDC_VARIABLE.findall(expression):
+            if name in port_variables:
+                result.update(resolve(name))
+        return result
+
+    names = set()
+    for match in _SDC_CLOCK.finditer(text):
+        names.update(collect(match.group(1)))
+    return names
 
 
 @dataclass
@@ -64,10 +141,20 @@ def prepare_gr_sizing(params, placedb):
     routing_seconds = time.perf_counter() - started
     pack = routed["timing_route_pack"]
     pin_names, net_names = _names(placedb.pin_names), _names(placedb.net_names)
+    pin_name_to_id = dict(zip(pin_names, range(len(pin_names)), strict=True))
     if len(set(pin_names)) != len(pin_names) or len(set(net_names)) != len(net_names):
         raise ValueError("GR timing requires unique physical pin and net names")
     eligible = torch.ones(len(net_names), dtype=torch.bool)
     excluded = sorted(clock_net_ids(placedb))
+    pin_to_net = torch.as_tensor(placedb.pin2net_map, dtype=torch.long)
+    for port_name in _sdc_clock_port_names(params):
+        pin_id = pin_name_to_id.get(port_name)
+        if pin_id is None or pin_id < 0 or pin_id >= pin_to_net.numel():
+            continue
+        net_id = int(pin_to_net[pin_id].item())
+        if 0 <= net_id < len(net_names):
+            excluded.append(net_id)
+    excluded = sorted(set(excluded))
     eligible[excluded] = False
     mapping = PinMapping(
         dict(zip(pin_names, range(len(pin_names)), strict=True)),

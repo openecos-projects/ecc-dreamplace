@@ -100,7 +100,8 @@ class AdjustNodeArea(nn.Module):
         unit_pin_capacity=0.0,
         modularity_config=None,
         params=None,
-        virtual_cell_area=0.0):
+        virtual_cell_area=0.0,
+        inflation_filler_consumption_mode="filler_first"):
         super(AdjustNodeArea, self).__init__()
         self.flat_node2pin_start_map = flat_node2pin_start_map
         self.flat_node2pin_map = flat_node2pin_map
@@ -128,6 +129,18 @@ class AdjustNodeArea(nn.Module):
         ):
             raise ValueError(
                 "inflation_area_budget_ratio must be finite and non-negative"
+            )
+        self.inflation_filler_consumption_mode = str(
+            inflation_filler_consumption_mode or "filler_first"
+        ).strip().lower()
+        if self.inflation_filler_consumption_mode not in {
+            "filler_first",
+            "proportional",
+            "capacity_only",
+        }:
+            raise ValueError(
+                "inflation_filler_consumption_mode must be one of: "
+                "filler_first, proportional, capacity_only"
             )
 
         # stop ratio
@@ -164,6 +177,36 @@ class AdjustNodeArea(nn.Module):
         self.modularity_enabled = bool(self.modularity_config.get("enabled", False))
         self.params = params or self.modularity_config.get("params")
         self.last_modularity_summary = None
+
+    @staticmethod
+    def _scale_filler_nodes(
+        pos,
+        node_size_x_filler,
+        node_size_y_filler,
+        area_ratio,
+    ):
+        """Scale every filler's area by a common factor while preserving centers."""
+        filler_count = int(node_size_x_filler.numel())
+        if filler_count == 0:
+            return
+        linear_ratio = torch.clamp(area_ratio, min=0.0, max=1.0).sqrt()
+        if torch.isclose(
+            linear_ratio,
+            linear_ratio.new_tensor(1.0),
+        ).item():
+            return
+        num_nodes = int(pos.numel() // 2)
+        filler_begin = num_nodes - filler_count
+        pos.data[filler_begin:num_nodes] += node_size_x_filler * 0.5
+        pos.data[num_nodes + filler_begin:num_nodes * 2] += (
+            node_size_y_filler * 0.5
+        )
+        node_size_x_filler *= linear_ratio
+        node_size_y_filler *= linear_ratio
+        pos.data[filler_begin:num_nodes] -= node_size_x_filler * 0.5
+        pos.data[num_nodes + filler_begin:num_nodes * 2] -= (
+            node_size_y_filler * 0.5
+        )
 
     def _maybe_plot_inflation_cells(
         self,
@@ -881,78 +924,88 @@ class AdjustNodeArea(nn.Module):
             pos.data[num_nodes:num_nodes +
                      self.num_movable_nodes] -= node_size_y_movable * 0.5
 
-            # finally scale the filler instance areas to match the active area budget
-            # all the filler nodes share the same deflation ratio, filler_nodes_ratio is a scalar
-            # we keep the centers the same
-            if fixed_target_area_tensor is not None:
-                if self.num_filler_nodes > 0 and old_filler_area_sum > 0:
-                    # Enhanced inflation consumes filler and out-of-target
-                    # whitespace at the same rate instead of exhausting filler first.
-                    old_whitespace_area_sum = F.relu(remaining_area_budget)
+            # Consume inflation area according to the configured filler policy.
+            # All fillers share one scale factor and keep their centers fixed.
+            new_filler_area_sum = old_filler_area_sum
+            filler_nodes_ratio = old_filler_area_sum.new_tensor(1.0)
+            if self.num_filler_nodes > 0 and old_filler_area_sum > 0:
+                target_total_area = old_movable_area_sum + old_filler_area_sum
+                if fixed_target_area_tensor is not None:
+                    target_total_area = torch.minimum(
+                        target_total_area,
+                        fixed_target_area_tensor,
+                    )
+                max_filler_area = torch.clamp(
+                    torch.as_tensor(
+                        self.total_place_area,
+                        device=new_movable_area_sum.device,
+                        dtype=new_movable_area_sum.dtype,
+                    )
+                    - new_movable_area_sum
+                    - self.virtual_cell_area,
+                    min=0.0,
+                )
+                if self.inflation_filler_consumption_mode == "filler_first":
+                    new_filler_area_sum = torch.clamp(
+                        target_total_area - new_movable_area_sum,
+                        min=0.0,
+                    )
+                    logger.info(
+                        "filler-first inflation consumption: target total area %.3E, "
+                        "area increment %.3E is removed from filler before target "
+                        "density can rise",
+                        target_total_area,
+                        area_increment_sum,
+                    )
+                elif self.inflation_filler_consumption_mode == "proportional":
+                    old_whitespace_area_sum = torch.clamp(
+                        remaining_area_budget,
+                        min=0.0,
+                    )
                     whitespace_consumption_ratio = torch.clamp(
-                        area_increment_sum / old_whitespace_area_sum,
+                        area_increment_sum
+                        / torch.clamp_min(old_whitespace_area_sum, 1e-12),
                         min=0.0,
                         max=1.0,
                     )
                     new_filler_area_sum = old_filler_area_sum * (
                         1.0 - whitespace_consumption_ratio
                     )
-                    filler_nodes_ratio = new_filler_area_sum / old_filler_area_sum
-                    old_non_filler_whitespace_area_sum = F.relu(
-                        old_whitespace_area_sum - old_filler_area_sum
+                    old_non_filler_whitespace_area_sum = torch.clamp(
+                        old_whitespace_area_sum - old_filler_area_sum,
+                        min=0.0,
                     )
                     logger.info(
                         "proportional whitespace consumption: ratio %g, "
-                        "filler %.3E -> %.3E, non-filler whitespace %.3E -> %.3E"
-                        % (
-                            whitespace_consumption_ratio,
-                            old_filler_area_sum,
-                            new_filler_area_sum,
-                            old_non_filler_whitespace_area_sum,
-                            old_non_filler_whitespace_area_sum
-                            * (1.0 - whitespace_consumption_ratio),
-                        )
+                        "filler %.3E -> %.3E, non-filler whitespace %.3E -> %.3E",
+                        whitespace_consumption_ratio,
+                        old_filler_area_sum,
+                        new_filler_area_sum,
+                        old_non_filler_whitespace_area_sum,
+                        old_non_filler_whitespace_area_sum
+                        * (1.0 - whitespace_consumption_ratio),
                     )
-                    logger.info("inflation ratio for filler nodes: %g" %
-                                (filler_nodes_ratio))
-                    filler_nodes_ratio.sqrt_()
-                    # convert positions to centers
-                    pos.data[num_nodes - self.num_filler_nodes:
-                             num_nodes] += node_size_x_filler * 0.5
-                    pos.data[-self.num_filler_nodes:] += node_size_y_filler * 0.5
-                    # scale size
-                    node_size_x_filler *= filler_nodes_ratio
-                    node_size_y_filler *= filler_nodes_ratio
-                    # convert back to lower left corners
-                    pos.data[num_nodes - self.num_filler_nodes:
-                             num_nodes] -= node_size_x_filler * 0.5
-                    pos.data[-self.num_filler_nodes:] -= node_size_y_filler * 0.5
-                else:
-                    new_filler_area_sum = old_filler_area_sum
-            elif (
-                self.num_filler_nodes > 0
-                and old_filler_area_sum > 0
-                and new_movable_area_sum + self.virtual_cell_area + old_filler_area_sum > self.total_place_area
-            ):
-                new_filler_area_sum = F.relu(self.total_place_area -
-                                             new_movable_area_sum - self.virtual_cell_area)
-                filler_nodes_ratio = new_filler_area_sum / old_filler_area_sum
-                logger.info("inflation ratio for filler nodes: %g" %
-                            (filler_nodes_ratio))
-                filler_nodes_ratio.sqrt_()
-                # convert positions to centers
-                pos.data[num_nodes - self.num_filler_nodes:
-                         num_nodes] += node_size_x_filler * 0.5
-                pos.data[-self.num_filler_nodes:] += node_size_y_filler * 0.5
-                # scale size
-                node_size_x_filler *= filler_nodes_ratio
-                node_size_y_filler *= filler_nodes_ratio
-                # convert back to lower left corners
-                pos.data[num_nodes - self.num_filler_nodes:
-                         num_nodes] -= node_size_x_filler * 0.5
-                pos.data[-self.num_filler_nodes:] -= node_size_y_filler * 0.5
-            else:
-                new_filler_area_sum = old_filler_area_sum
+                new_filler_area_sum = torch.minimum(
+                    new_filler_area_sum,
+                    max_filler_area,
+                )
+                filler_nodes_ratio = (
+                    new_filler_area_sum / old_filler_area_sum
+                )
+                logger.info(
+                    "filler consumption mode=%s: filler %.3E -> %.3E, "
+                    "inflation ratio for filler nodes: %g",
+                    self.inflation_filler_consumption_mode,
+                    old_filler_area_sum,
+                    new_filler_area_sum,
+                    filler_nodes_ratio,
+                )
+                self._scale_filler_nodes(
+                    pos,
+                    node_size_x_filler,
+                    node_size_y_filler,
+                    filler_nodes_ratio,
+                )
 
             logger.info(
                 "old total movable nodes area %.3E, filler area %.3E, total movable + filler area %.3E, total_place_area %.3E"

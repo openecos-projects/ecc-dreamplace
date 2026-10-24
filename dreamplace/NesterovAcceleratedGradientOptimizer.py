@@ -129,6 +129,28 @@ class NesterovAcceleratedGradientOptimizer(Optimizer):
     def __setstate__(self, state):
         super(NesterovAcceleratedGradientOptimizer, self).__setstate__(state)
 
+    def refresh_objective_state(self, *, reason):
+        """Update cached gradients for the current objective, retaining momentum."""
+        relative_changes = []
+        for group in self.param_groups:
+            for index, position in enumerate(group["v_k"]):
+                if not group["g_k"]:
+                    continue
+                objective, gradient = self.obj_and_grad_fn(position)
+                previous = group["g_k"][index]
+                relative_change = (
+                    (gradient.detach() - previous).norm()
+                    / previous.norm().clamp(min=1e-12)
+                )
+                relative_changes.append(float(relative_change.item()))
+                previous.copy_(gradient.detach())
+                group["obj_k"][index].copy_(objective.detach())
+                group["obj_eval_count"] += 1
+        return {
+            "reason": str(reason),
+            "relative_gradient_changes": relative_changes,
+        }
+
     def step(self, closure=None):
         if self.use_bb:
             self.step_bb(closure)

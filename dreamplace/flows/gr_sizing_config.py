@@ -8,6 +8,10 @@ def configure_gr_sizing(params):
     if mode not in {"placement", "gr"}:
         raise ValueError("timing_rc_mode must be placement or gr")
     params.timing_rc_mode = mode
+    terminal_gr_sta_enabled = getattr(params, "diff_sizing_terminal_gr_sta_enabled", 0)
+    if terminal_gr_sta_enabled not in (0, 1, False, True):
+        raise ValueError("diff_sizing_terminal_gr_sta_enabled must be 0 or 1")
+    params.diff_sizing_terminal_gr_sta_enabled = int(bool(terminal_gr_sta_enabled))
     if mode == "placement":
         return
     if getattr(params, "place_io_engine", "ieda") != "ecc" or params.gpu:
@@ -77,7 +81,28 @@ def configure_gr_sizing(params):
     ):
         raise ValueError("diff_sizing_continuous_steps must be an integer in [0, 1000]")
     params.diff_sizing_continuous_steps = continuous_steps
-    if continuous_steps == 0:
+    action_mode = str(
+        getattr(params, "timing_action_gradient_mode", "lut_action")
+        or "lut_action"
+    )
+    if action_mode not in {"off", "lut_action"}:
+        raise ValueError(
+            "timing_action_gradient_mode must be one of: off, lut_action"
+        )
+    if action_mode == "lut_action":
+        if continuous_steps != 0:
+            raise ValueError(
+                "lut_action standalone diff_sizing requires "
+                "diff_sizing_continuous_steps=0"
+            )
+        # The action path commits one legal master per selected instance.  It
+        # owns real-size coordinates directly; logits would make the owner
+        # write physical sizes into a logits tensor.
+        params.sizing_parameterization = "real_size"
+        params.real_size_execution_mode = "continuous_only"
+        params.real_size_warmup_steps = 0
+        params.continuous_size_dynamics_mode = "none"
+    elif continuous_steps == 0:
         params.sizing_parameterization = "logits"
         params.real_size_execution_mode = "continuous_only"
         params.real_size_warmup_steps = 0

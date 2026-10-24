@@ -16,6 +16,7 @@ from dreamplace.ops.buffer_insertion.discrete_virtual_scheduler import (
 
 
 SEGMENT_DIRECT_JOINT_PROFILE = "segment_count_direct_joint_v1"
+DISCRETE_ALTERNATING_PROFILE = "discrete_alternating_sizing_buffering_v1"
 SEGMENT_DIRECT_JOINT_MILESTONES = (0.30, 0.25, 0.20, 0.15, 0.10)
 SEGMENT_ACTION_CALIBRATION_SAMPLE_COUNT = 8
 SEGMENT_OVERFLOW_MILESTONE_SCHEDULE = "overflow_milestones"
@@ -779,6 +780,13 @@ class JointCoordinator:
         )
 
     @property
+    def is_discrete_alternating(self):
+        return (
+            str(getattr(self.params, "joint_quality_profile", "") or "")
+            == DISCRETE_ALTERNATING_PROFILE
+        )
+
+    @property
     def overflow_gate(self):
         gate = float(getattr(self.params, "joint_buffer_overflow_gate", 0.2))
         if getattr(self.params, "_timing_topology_enable_overflow_threshold_explicit", False):
@@ -828,7 +836,7 @@ class JointCoordinator:
             return False
 
     def should_commit_buffers(self, iteration, overflow):
-        if self.is_segment_direct_joint:
+        if self.is_segment_direct_joint or self.is_discrete_alternating:
             return False
         period = self.commit_period
         return (
@@ -897,7 +905,7 @@ class JointCoordinator:
                     "joint_activation": "always",
                 }
             )
-        if sizing_params and not self.is_segment_direct_joint:
+        if sizing_params and not self.is_segment_direct_joint and not self.is_discrete_alternating:
             groups.append(
                 {
                     "params": list(sizing_params),
@@ -907,7 +915,11 @@ class JointCoordinator:
                 }
             )
         buffer_params = []
-        if self.buffering_lane is not None and not self.is_segment_direct_joint:
+        if (
+            self.buffering_lane is not None
+            and not self.is_segment_direct_joint
+            and not self.is_discrete_alternating
+        ):
             buffer_params = list(self.buffering_lane.optimizer_parameters())
         if buffer_params:
             groups.append(

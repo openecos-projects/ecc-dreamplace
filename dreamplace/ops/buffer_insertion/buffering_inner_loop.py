@@ -23,6 +23,7 @@ class BufferingInnerLoopSummary:
     terminal_reason: str = "completed"
     trace_path: str = ""
     trace_sha256: str = ""
+    best_restore: dict = field(default_factory=dict)
 
 
 def _should_project(lane, iteration, project_interval):

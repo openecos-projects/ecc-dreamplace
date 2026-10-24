@@ -1390,7 +1390,10 @@ class SizingModeTest(unittest.TestCase):
 
     def test_fast_loop_reuse_zero_slew_aux_skips_slew_limit_query(self):
         obj = PlaceObj.__new__(PlaceObj)
-        obj.params = SimpleNamespace(production_fast_loop=True)
+        obj.params = SimpleNamespace(
+            production_fast_loop=True,
+            timing_objective_lane="timing_only",
+        )
         timing_op = SimpleNamespace(
             last_total_slew_violation=0.0,
             last_total_slew_violation_tensor=torch.tensor(0.0, requires_grad=True),
@@ -1407,7 +1410,10 @@ class SizingModeTest(unittest.TestCase):
 
     def test_fast_loop_reuse_zero_slew_aux_is_default_unless_disabled_by_env(self):
         obj = PlaceObj.__new__(PlaceObj)
-        obj.params = SimpleNamespace(production_fast_loop=True)
+        obj.params = SimpleNamespace(
+            production_fast_loop=True,
+            timing_objective_lane="timing_only",
+        )
         timing_op = SimpleNamespace(last_total_slew_violation=0.0)
 
         with mock.patch.dict(os.environ, {}, clear=True):

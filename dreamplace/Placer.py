@@ -2946,8 +2946,21 @@ class PlacementEngine:
         # self.placedb = PlaceDB(engine_data_ieda)
         # self.placedb.init_db(params)
         print('init db done')
+        if (
+            bool(getattr(self.params, "diff_opt_enabled", False))
+        ):
+            return self.run_diff_opt()
         if getattr(self.params, "flow_kind", None) == FlowKind.STA.value:
             return self.run_sta_only()
+        if (
+            getattr(self.params, "flow_kind", None) == FlowKind.SIZING.value
+            and str(
+                getattr(self.params, "timing_action_gradient_mode", "lut_action")
+                or "lut_action"
+            )
+            == "lut_action"
+        ):
+            return self.run_diff_sizing()
         if self._is_joint_staged_smoke_v1():
             return self._run_joint_staged_smoke_v1()
         tt = time.time()
@@ -2984,6 +2997,21 @@ class PlacementEngine:
             if placement_debug.get("status") == "failed":
                 self.last_run_result = placement_debug
                 return self.last_run_result
+
+            alternating = self.placer.alternating_discrete
+            if alternating is not None:
+                from dreamplace.flows.committed_topology import (
+                    MaterializationAreaPolicy, finalize_discrete_window,
+                )
+
+                result = finalize_discrete_window(
+                    self, alternating.owner,
+                    artifact_stem="discrete_alternating_sizing_buffering",
+                    area_policy=MaterializationAreaPolicy.CAPACITY,
+                )
+                alternating.last_finalize_result = result
+                alternating._write_summary(status="completed")
+                return result
             if bool(getattr(self.params, "timing_opt_enabled", False)):
                 from dreamplace.flows.committed_topology import finalize_inflation_s5b1
 
@@ -3183,12 +3211,37 @@ class PlacementEngine:
         final_ppa.update(other_metrics)
         logging.info(f"Final PPA: {final_ppa}")
 
-        if self.params.timing_rc_mode == "gr":
+        if self.params.timing_rc_mode == "gr" and not (
+            self.params.flow_kind == FlowKind.SIZING.value
+            and not bool(getattr(self.params, "diff_sizing_terminal_gr_sta_enabled", 0))
+        ):
             from dreamplace.flows.gr_sizing import finalize_gr_sizing
 
             final_ppa = finalize_gr_sizing(self, final_ppa)
+        elif self.params.timing_rc_mode == "gr":
+            logging.info(
+                "Skipping diff-sizing terminal GR/RRR+STA; "
+                "diff_sizing_terminal_gr_sta_enabled=0"
+            )
+            final_ppa["gr_sizing"] = {
+                "status": "skipped",
+                "reason": "diff_sizing_terminal_gr_sta_disabled",
+                "terminal_gr_sta_enabled": False,
+            }
         self.last_run_result = final_ppa
         return final_ppa
+
+    def run_diff_opt(self):
+        """Execute the standalone placement-parasitic timing flow."""
+        from dreamplace.flows.diff_opt import run_diff_opt
+
+        return run_diff_opt(self)
+
+    def run_diff_sizing(self):
+        """Execute standalone GR sizing with the opt-in action gradient."""
+        from dreamplace.flows.diff_sizing import run_diff_sizing
+
+        return run_diff_sizing(self)
 
 
 def main(argv=None, output_stream=None):

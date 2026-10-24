@@ -487,6 +487,13 @@ def test_joint_coordinator_commit_period_requires_open_overflow_gate():
     assert coordinator.should_commit_buffers(100, 0.1)
 
 
+def test_alternating_profile_owns_commit_until_its_terminal_boundary():
+    params = _params()
+    params.joint_quality_profile = "discrete_alternating_sizing_buffering_v1"
+    coordinator = JointCoordinator(params, buffering_lane=FakeBufferingLane())
+    assert [coordinator.should_commit_buffers(step, .1) for step in (100, 500, 3000)] == [False, False, False]
+
+
 def test_joint_coordinator_uses_explicit_timing_topology_gate_for_forced_smoke():
     params = _params()
     params._timing_topology_enable_overflow_threshold_explicit = True

@@ -51,13 +51,15 @@ def test_real_branch_wire_via_rc_units_and_driver_root(snapshot_inputs):
     assert torch.count_nonzero(tree.edge_resistance == 0) == 1
 
 
-def test_prepare_rejects_missing_attachment_and_missing_via_rc(snapshot_inputs):
+def test_missing_attachment_falls_back_and_missing_via_rc_is_rejected(snapshot_inputs):
     route, rc, mapping, identity = snapshot_inputs
     incomplete = dict(route)
     incomplete["pin_vertex"] = route["pin_vertex"].copy()
     incomplete["pin_vertex"][1] = -1
-    with pytest.raises(RuntimeError, match="missing pin attachment"):
-        prepare_snapshot(incomplete, rc, mapping, identity)
+    tree = prepare_snapshot(incomplete, rc, mapping, identity, dtype=torch.float64)
+    assert tree.filtered_net_count == 1
+    assert tree.model_report["filtered_missing_pin_access_net_count"] == 1
+    assert tree.valid_pin_ids.numel() == 0
     invalid = replace(rc, via_resistance=np.array([2.5, np.nan]))
     with pytest.raises(RuntimeError, match="missing/ambiguous via resistance"):
         prepare_snapshot(route, invalid, mapping, identity)

@@ -30,6 +30,10 @@ from dreamplace.flows import timing_iteration, joint_iteration, placement_topolo
 from dreamplace.flows import segment_buffer_gradient, segment_joint_terminal, joint_commit_control
 from dreamplace.flows import sizing_dynamics, discrete_sizing_step, segment_sizing_frame
 from dreamplace.flows.inflation_s5b1 import InflationS5B1
+from dreamplace.flows.alternating_discrete import (
+    AlternatingDiscreteController,
+    PROFILE as DISCRETE_ALTERNATING_PROFILE,
+)
 
 if sys.version_info[0] < 3:
     import cPickle as pickle
@@ -334,6 +338,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         self._egr_padding_state = None
         self._routability_controller = None
         self._routability_model = None
+        self.alternating_discrete = None
 
     def _apply_egr_padding(self, params, placedb):
         if not getattr(params, "egr_padding_flag", 0):
@@ -474,6 +479,17 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
     def _project_real_size_after_optimizer_step(self, params):
         data_collections = getattr(self, "data_collections", None)
+        if str(getattr(params, "joint_quality_profile", "") or "") == (
+            DISCRETE_ALTERNATING_PROFILE
+        ):
+            return {
+                "applied": False,
+                "reason": "discrete_window_owned",
+                "lower_clamped_count": 0,
+                "upper_clamped_count": 0,
+                "fixed_instance_count": 0,
+                "max_projection_delta": 0.0,
+            }
         if not self._real_size_enabled(params) or data_collections is None:
             return None
         projector = getattr(data_collections, "project_continuous_size", None)
@@ -1009,7 +1025,10 @@ class NonLinearPlace(BasicPlace.BasicPlace):
     def _write_timing_objective_terms_artifact(self, params, model):
         payload = dict(getattr(model, "last_timing_objective_terms", {}) or {})
         model_params = getattr(model, "params", params)
-        payload.setdefault("lane", getattr(model_params, "timing_objective_lane", "timing_only"))
+        payload.setdefault(
+            "lane",
+            getattr(model_params, "timing_objective_lane", "timing_slew_cap"),
+        )
         payload.setdefault("enabled_terms", ["timing"])
         payload.setdefault(
             "units",
@@ -1494,6 +1513,22 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         self._timing_grad_balance_state = copy.deepcopy(state)
         return copy.deepcopy(state)
 
+    def _reset_timing_grad_balance_for_restart(self, model, params, *, iteration):
+        if not bool(
+            getattr(params, "timing_grad_balance_reset_on_restart", True)
+        ):
+            return None
+        state = model.reset_timing_grad_balance(reason="inflation_restart")
+        self._timing_grad_balance_state = None
+        logging.info(
+            "timing grad balance reset at iteration=%d reason=inflation_restart "
+            "target_ratio=%.6g status=%s",
+            int(iteration),
+            float(state.get("target_ratio", 0.0)),
+            state.get("status"),
+        )
+        return state
+
     def _diff_tdp_net_weight_artifact_path(self, params):
         return os.path.join(
             params.result_dir,
@@ -1748,15 +1783,33 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             new_y,
             update_kind=update_kind,
         )
-        self._live_timing_topology_initialized = True
-        return topology
+        return self._after_live_timing_topology_published(topology)
 
     def _refresh_live_timing_topology(self, pos):
         topology = refresh_live_timing_topology(
             self._timing_topology_context(),
             pos,
         )
+        return self._after_live_timing_topology_published(topology)
+
+    def _after_live_timing_topology_published(self, topology):
         self._live_timing_topology_initialized = True
+        if self.alternating_discrete is not None:
+            self.alternating_discrete.refresh_live_geometry(
+                self.last_global_place_model,
+                self.pos[0],
+                iteration=self.alternating_discrete.placement_step_count,
+            )
+        owner = getattr(self, "inflation_s5b1", None)
+        if (
+            owner is not None
+            and self.last_global_place_model is not None
+            and not bool(getattr(owner, "_candidate_refresh_in_progress", False))
+        ):
+            owner.refresh_candidate_geometry_after_topology(
+                self.last_global_place_model,
+                reason="timing_topology_refresh",
+            )
         return topology
 
     def _freeze_live_timing_topology(self, pos):
@@ -2517,6 +2570,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             discrete_actions_owned=(
                 self._segment_direct_joint_enabled()
                 or bool(getattr(params, "timing_opt_enabled", False))
+                or str(getattr(params, "joint_quality_profile", "") or "")
+                == DISCRETE_ALTERNATING_PROFILE
             ),
             sync_runtime_cells=self._sync_discrete_gradient_topk_runtime_cells,
             sizing_mode=self._placement_sizing_mode,
@@ -3429,7 +3484,14 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 for stage in stages
                 if str(stage.get("optimizer", "")).lower() != "adam"
             ]
-            if unsupported_optimizers and mode in ("size_only", "joint"):
+            discrete_alternating = str(
+                getattr(params, "joint_quality_profile", "") or ""
+            ) == DISCRETE_ALTERNATING_PROFILE
+            if (
+                unsupported_optimizers
+                and mode in ("size_only", "joint")
+                and not discrete_alternating
+            ):
                 raise ValueError(
                     "real_size parameterization requires Adam; found optimizers="
                     + ",".join(unsupported_optimizers)
@@ -4017,9 +4079,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     from dreamplace.flows.joint_coordinator import JointCoordinator
 
                     previous_lane = getattr(self, "last_buffering_lane", None)
-                    reuse_segment_lane = (
+                    reuse_buffering_lane = (
                         str(getattr(params, "joint_quality_profile", "") or "")
-                        == "segment_count_direct_joint_v1"
+                        in {"segment_count_direct_joint_v1", DISCRETE_ALTERNATING_PROFILE}
                         and previous_lane is not None
                         and getattr(previous_lane, "data_collections", None)
                         is getattr(model, "data_collections", None)
@@ -4028,7 +4090,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     )
                     buffering_lane = (
                         previous_lane
-                        if reuse_segment_lane
+                        if reuse_buffering_lane
                         else self._build_buffering_lane(params)
                     )
                     self.joint_coordinator = JointCoordinator(
@@ -4048,6 +4110,23 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         self.last_buffering_lane_summary = buffering_lane.summarize()
                     elif buffering_lane is not None:
                         self.last_buffering_lane = buffering_lane
+                    if (
+                        str(getattr(params, "joint_quality_profile", "") or "")
+                        == DISCRETE_ALTERNATING_PROFILE
+                    ):
+                        if self.alternating_discrete is None:
+                            self.alternating_discrete = AlternatingDiscreteController(
+                                params,
+                                placedb,
+                                self.data_collections,
+                                self.op_collections,
+                                self._refresh_live_timing_topology,
+                                lane=buffering_lane,
+                            )
+                        cooptimization = self.alternating_discrete
+                        self.last_alternating_discrete_summary = (
+                            self.alternating_discrete.summarize()
+                        )
                 buffering_inner_loop_summary = self._maybe_run_buffering_inner_loop(
                     params,
                     model,
@@ -4232,7 +4311,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     "hpwl": self.op_collections.hpwl_op,
                     "overflow": self.op_collections.density_overflow_op,
                 }
-                if cooptimization is not None:
+                if cooptimization is not None or self.alternating_discrete is not None:
                     eval_ops["overflow"] = model.combined_density_overflow
                 # [DISABLED] route_overflow and pin_overflow computation disabled
                 # if params.routability_opt_flag:
@@ -4960,6 +5039,15 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         "real_size_masked_gradient_count",
                         int(masked_size_grad_count),
                     )
+                    if (
+                        self.alternating_discrete is not None
+                        and optimizer_name.lower() == "nesterov"
+                    ):
+                        refresh = optimizer.refresh_objective_state(
+                            reason="alternating_gp_objective"
+                        )
+                        if iteration % 30 == 0:
+                            logging.info("Nesterov objective refresh: %s", refresh)
                     if model.update_mask is not None:
                         pos_bk = pos.data.clone()
                         if hasattr(model, "set_l_shape_outer_iteration"):
@@ -5011,6 +5099,15 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     if pending_request is not None:
                         pending_joint_topology_commit_result = pending_request
                         return cur_metric
+                    if self.alternating_discrete is not None:
+                        self.alternating_discrete.after_placement_step(
+                            model,
+                            pos,
+                            iteration=iteration,
+                        )
+                        self.last_alternating_discrete_summary = (
+                            self.alternating_discrete.summarize()
+                        )
                     profile_add("optimizer_parameter_update_ms", _profile_t)
 
                     _profile_t = profile_now()
@@ -5295,7 +5392,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 stop_placement_reason = None
                 last_perturb_iter = -min_perturb_interval
                 perturb_counter = 0
-                joint_no_sizing_full_budget = bool(
+                full_placement_budget = bool(
                     str(getattr(params, "flow_kind", "") or "").lower()
                     == "joint"
                     and str(
@@ -5306,9 +5403,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         getattr(params, "joint_segment_sizing_enabled", True)
                     )
                 )
-                if joint_no_sizing_full_budget:
+                if full_placement_budget:
                     logging.info(
-                        "joint no-sizing placement budget: disable Lsub early stop"
+                        "full placement budget: disable convergence early stops"
                     )
 
                 for Lgamma_step in range(model.Lgamma_iteration):
@@ -5475,7 +5572,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             iteration += 1
                             # stopping criteria
                             if (
-                                not joint_no_sizing_full_budget
+                                not full_placement_budget
                                 and Lsub_stop_criterion(
                                     Lgamma_step,
                                     Llambda_density_weight_step,
@@ -5491,14 +5588,14 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         if pending_joint_topology_commit_result is not None or (
                             stop_placement == 1
                             and (
-                                not joint_no_sizing_full_budget
+                                not full_placement_budget
                                 or fatal_no_sizing_stop
                             )
                         ):
                             break
-                        if stop_placement == 1 and joint_no_sizing_full_budget:
+                        if stop_placement == 1 and full_placement_budget:
                             logging.info(
-                                "joint no-sizing placement budget: ignoring non-fatal stop signal reason=%s",
+                                "full placement budget: ignoring non-fatal stop signal reason=%s",
                                 stop_placement_reason,
                             )
                         Llambda_flat_iteration += 1
@@ -5527,12 +5624,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 Llambda_metrics[-1][-1].overflow,
                             )
                         )
-                        if not joint_no_sizing_full_budget and llambda_should_stop and not defer_stop_for_inflation:
+                        if not full_placement_budget and llambda_should_stop and not defer_stop_for_inflation:
                             break
                         if pending_joint_topology_commit_result is not None or (
                             stop_placement == 1
                             and (
-                                not joint_no_sizing_full_budget
+                                not full_placement_budget
                                 or stop_placement_reason
                                 in {"gradient_nan", "nonfinite_metric"}
                             )
@@ -5552,6 +5649,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     cooptimization.before_inflation(
                                         model, model.data_collections.pos[0],
                                         iteration=iteration, stage=cur_stage,
+                                        optimizer=optimizer,
                                     )
                                 routability_controller.before_area_adjust(
                                     model=model,
@@ -5881,13 +5979,41 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                         model.inflation_state.num_area_adjust = num_area_adjust
                                     # restart Llambda
                                     model.refresh_after_geometry_change()
-                                    model.initialize_density_weight(
+                                    model.initialize_restart_density_weight(
                                         params, placedb)
-                                    model.density_weight.mul_(
-                                        0.1 / params.density_weight)
+                                    self._reset_timing_grad_balance_for_restart(
+                                        model,
+                                        params,
+                                        iteration=iteration,
+                                    )
                                     model.reset_l_shape_weight_state()
-                                    logging.info("density_weight = %.6E" %
-                                                 (model.density_weight.data))
+                                    if model.density_weight.numel() == 1:
+                                        density_weight_repr = "%.6E" % (
+                                            model.density_weight.detach().cpu().item()
+                                        )
+                                    else:
+                                        density_weight_repr = "[%s]" % ", ".join(
+                                            "%.6E" % value
+                                            for value in model.density_weight.detach()
+                                            .cpu()
+                                            .tolist()
+                                        )
+                                    restart_scale = getattr(
+                                        model,
+                                        "_inflation_density_weight_restart_scale",
+                                        float("nan"),
+                                    )
+                                    logging.info(
+                                        "density restart mode=xplace_normalized "
+                                        "scale=%.6E norm_ratio=%.6E w_restart=%s",
+                                        restart_scale,
+                                        getattr(
+                                            model,
+                                            "_density_weight_grad_norm_ratio",
+                                            float("nan"),
+                                        ),
+                                        density_weight_repr,
+                                    )
                                     # load state to restart the optimizer
                                     optimizer.load_state_dict(initial_state)
                                     # must after loading the state
@@ -5931,7 +6057,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     if pending_joint_topology_commit_result is not None or (
                         stop_placement == 1
                         and (
-                            not joint_no_sizing_full_budget
+                            not full_placement_budget
                             or stop_placement_reason
                             in {"gradient_nan", "nonfinite_metric"}
                         )
@@ -5949,14 +6075,14 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             Llambda_metrics[-1][-1].overflow)
                     if (
                         (
-                            not joint_no_sizing_full_budget
+                            not full_placement_budget
                             and not inflation_applied_this_gamma
                             and Lgamma_stop_criterion(Lgamma_step, Lgamma_metrics)
                         )
                         or (
                             stop_placement == 1
                             and (
-                                not joint_no_sizing_full_budget
+                                not full_placement_budget
                                 or stop_placement_reason
                                 in {"gradient_nan", "nonfinite_metric"}
                             )
@@ -6314,6 +6440,27 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     skipped_legalization_reason="skip_legalization_significant_overflow",
                 )
                 return float("inf"), float("inf"), processed_metrics
+
+            if self.alternating_discrete is not None:
+                commit_result = self.alternating_discrete.finalize(
+                    model,
+                    self.pos[0],
+                    iteration=iteration,
+                )
+                self.last_buffer_commit_request = (
+                    self.alternating_discrete.owner.terminal_request
+                )
+                self.last_buffering_lane = self.alternating_discrete.owner.lane
+                self.last_alternating_discrete_summary = (
+                    self.alternating_discrete.summarize()
+                )
+                return self._safe_stop_after_joint_buffer_request(
+                    params,
+                    iteration=iteration,
+                    place_stage_metrics=place_stage_metrics,
+                    processed_metrics=processed_metrics,
+                    commit_result=commit_result,
+                )
 
             if cooptimization is not None:
                 commit_result = cooptimization.prepare_terminal_request(

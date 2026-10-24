@@ -257,6 +257,14 @@ def build_commit_action_candidates(
                 int(value) for value in list(entry.get("child_node_ids", []) or [])
             ],
             "bsu": bsu,
+            # Typed candidate buffering keeps the drive type separate from
+            # its family-local BSU index. Preserve that identity in the
+            # compact action so projection validation and the native commit
+            # path observe the same selected type.
+            "drive_type_id": int(entry.get("drive_type_id", bsu)),
+            "drive_type_master_name": str(
+                entry.get("drive_type_master_name", buffer_master_name)
+            ),
             "bsu_selection_mode": str(entry.get("bsu_selection_mode", "fixed_bsu")),
             "bsu_candidate_count": int(entry.get("bsu_candidate_count", 1) or 1),
             "bsu_candidate_evaluations": [
@@ -448,6 +456,19 @@ def build_commit_action_candidates(
             ),
             "debug_for_realization_smoke": bool(entry.get("debug_for_realization_smoke", False)),
         }
+        # The native buffer transaction treats these segment fields as optional
+        # and uses its defaults when they are absent. Do not serialize Python
+        # ``None`` for an optional scalar: pybind11 sees the key as present and
+        # attempts to cast it to an integer/double before native preflight.
+        for optional_key in (
+            "segment_tree_depth",
+            "segment_parent_node_id",
+            "segment_child_node_id",
+            "segment_split_ratio",
+        ):
+            if action.get(optional_key) is None:
+                action.pop(optional_key, None)
+        _copy_optional_provenance(action, entry)
         _copy_optional_provenance(action, entry)
         if entry.get("debug_reason"):
             action["debug_reason"] = str(entry.get("debug_reason"))

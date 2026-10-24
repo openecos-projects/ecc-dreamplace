@@ -1168,6 +1168,13 @@ py::dict pack_candidate_topology(
   std::vector<int64_t> candidate_local_node(static_cast<size_t>(candidate_count), -1);
   std::unordered_set<int64_t> valid_net_set;
   for (int64_t net_id = 0; net_id < input_net_count; ++net_id) {
+    // Candidate payloads are used only for nets that have candidate actions.
+    // Packing every valid design net here leaves unrelated topology vertices
+    // in the live RC domain and makes a retained candidate payload depend on
+    // stale generations of those nets.
+    if (specs_by_net.find(net_id) == specs_by_net.end()) {
+      continue;
+    }
     const NetPlan original = build_net_plan(in, net_id);
     if (!original.valid()) {
       continue;
@@ -1226,6 +1233,20 @@ py::dict pack_candidate_topology(
   at::Tensor driver_slew = at::zeros({static_cast<int64_t>(expanded_plans.size())}, value_options);
   at::Tensor output_candidate_node_id = at::empty({candidate_count}, long_options);
   at::Tensor output_candidate_net_id = at::empty({candidate_count}, long_options);
+  at::Tensor net_candidate_start = at::empty(
+      {static_cast<int64_t>(expanded_plans.size()) + 1}, long_options);
+  at::Tensor flat_candidate_by_net = at::empty({candidate_count}, long_options);
+  auto* candidate_start_ptr = net_candidate_start.data_ptr<int64_t>();
+  auto* candidate_rows_ptr = flat_candidate_by_net.data_ptr<int64_t>();
+  int64_t candidate_offset = 0;
+  for (size_t net = 0; net < valid_input_net_ids.size(); ++net) {
+    candidate_start_ptr[net] = candidate_offset;
+    for (const CandidateSpec& spec : specs_by_net.at(valid_input_net_ids[net])) {
+      candidate_rows_ptr[candidate_offset++] = spec.index;
+    }
+  }
+  candidate_start_ptr[valid_input_net_ids.size()] = candidate_offset;
+  TORCH_CHECK(candidate_offset == candidate_count, "candidate CSR omitted input rows");
 
   auto* net_ids_ptr = net_ids.data_ptr<int64_t>();
   auto* net_topo_start_ptr = net_topo_start.data_ptr<int64_t>();
@@ -1374,6 +1395,17 @@ py::dict pack_candidate_topology(
   prepared["driver_pin_id"] = driver_pin_id;
   prepared["candidate_node_id"] = output_candidate_node_id;
   prepared["candidate_net_id"] = output_candidate_net_id;
+  // Keep the canonical source columns alongside the packed node domain. The
+  // incremental geometry refresher can then update only dirty candidate rows
+  // without converting state records back into tensors.
+  prepared["candidate_parent_node_id"] = candidate_parent_node_id;
+  prepared["candidate_child_node_id"] = candidate_child_node_id;
+  prepared["candidate_tree_node_id"] = candidate_tree_node_id;
+  prepared["candidate_synthetic_node_id"] = candidate_synthetic_node_id;
+  prepared["candidate_is_segment"] = candidate_is_segment;
+  prepared["candidate_split_ratio"] = candidate_split_ratio;
+  prepared["net_candidate_start"] = net_candidate_start;
+  prepared["flat_candidate_by_net"] = flat_candidate_by_net;
 
   py::dict metadata;
   std::vector<int64_t> compact_node_to_original;
@@ -1912,20 +1944,45 @@ py::dict select_packed_candidate_inputs(
   }
   std::vector<int64_t> source_candidate_index;
   std::vector<int64_t> local_candidate_node;
-  source_candidate_index.reserve(static_cast<size_t>(candidate_net.size()));
-  local_candidate_node.reserve(static_cast<size_t>(candidate_net.size()));
-  for (int64_t index = 0; index < candidate_net.size(); ++index) {
-    const auto selected_it = selected_position_by_net.find(candidate_net[index]);
-    if (selected_it == selected_position_by_net.end()) {
-      continue;
+  const bool indexed_candidates = prepared_timing_inputs.contains("net_candidate_start") &&
+      prepared_timing_inputs.contains("flat_candidate_by_net");
+  if (indexed_candidates) {
+    const at::Tensor candidate_start_tensor = required(prepared_timing_inputs, "net_candidate_start");
+    const at::Tensor candidate_rows_tensor = required(prepared_timing_inputs, "flat_candidate_by_net");
+    const IntegerView candidate_start(candidate_start_tensor, "candidate.net_candidate_start");
+    const IntegerView candidate_rows(candidate_rows_tensor, "candidate.flat_candidate_by_net");
+    TORCH_CHECK(candidate_start.size() == net_ids.size() + 1 &&
+                candidate_rows.size() == candidate_net.size(), "candidate CSR size mismatch");
+    for (const SelectedNet& item : selected_nets) {
+      const int64_t begin = candidate_start[item.source_position];
+      const int64_t end = candidate_start[item.source_position + 1];
+      TORCH_CHECK(begin >= 0 && end >= begin && end <= candidate_rows.size(),
+                  "candidate CSR range is invalid");
+      for (int64_t pos = begin; pos < end; ++pos) {
+        const int64_t row = candidate_rows[pos];
+        TORCH_CHECK(row >= 0 && row < candidate_net.size() && candidate_net[row] == item.net_id,
+                    "candidate CSR row does not belong to its net");
+        source_candidate_index.push_back(row);
+      }
     }
+    // Input rows may interleave nets. Preserve their original order, which is
+    // also the activation/gradient row order, after selecting CSR ranges.
+    std::sort(source_candidate_index.begin(), source_candidate_index.end());
+  } else {
+    for (int64_t row = 0; row < candidate_net.size(); ++row) {
+      if (selected_position_by_net.find(candidate_net[row]) != selected_position_by_net.end()) {
+        source_candidate_index.push_back(row);
+      }
+    }
+  }
+  local_candidate_node.reserve(source_candidate_index.size());
+  for (const int64_t index : source_candidate_index) {
     const SelectedNet& item =
-        selected_nets[static_cast<size_t>(selected_it->second)];
+        selected_nets[static_cast<size_t>(selected_position_by_net.at(candidate_net[index]))];
     const int64_t source_node = candidate_node[index];
     TORCH_CHECK(
         source_node >= item.node_begin && source_node < item.node_end,
         "candidate node is outside its packed net range");
-    source_candidate_index.push_back(index);
     local_candidate_node.push_back(
         item.local_node_base + source_node - item.node_begin);
   }
@@ -2019,6 +2076,7 @@ py::dict select_packed_candidate_inputs(
   metadata["edge_count"] = total_edges;
   metadata["sink_count"] = total_sinks;
   metadata["candidate_count"] = static_cast<int64_t>(source_candidate_index.size());
+  metadata["candidate_selector_indexed"] = indexed_candidates;
   metadata["native_active_view_match_count_ms"] = match_ms;
   metadata["native_active_view_prefix_sum_ms"] = prefix_sum_ms;
   metadata["native_active_view_allocate_ms"] = allocate_ms;
@@ -2029,6 +2087,7 @@ py::dict select_packed_candidate_inputs(
   result["net_ids"] = output_index(local_net_ids);
   result["net_indices_cpu"] = net_index;
   result["candidate_indices_cpu"] = candidate_index;
+  result["node_indices_cpu"] = node_index;
   result["sink_indices_cpu"] = sink_index;
   result["static"] = static_view;
   result["candidate_node_id_cpu"] = output_index(local_candidate_node);

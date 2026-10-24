@@ -3,6 +3,8 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
+from .buffer_interpolation import interpolate_buffer_values_by_bsu_index
+
 
 def _candidate_int(candidate, key, *, fallback_key=None, fallback_keys=None):
     value = candidate.get(key)
@@ -41,6 +43,13 @@ class CandidateStateView:
 
     def bsu_index(self):
         return self.bsu_index_tensor
+
+
+@dataclass
+class TypedCandidateStateView(CandidateStateView):
+    activation_param: torch.Tensor
+    drive_type_bsu_index: torch.Tensor
+    _shared_gradient_probe: bool = True
 
 
 @dataclass
@@ -157,6 +166,175 @@ class DiscreteCandidateState:
             legal_buffer_count=int(self.legal_buffer_count),
             buffer_main_type_index=int(self.buffer_main_type_index),
         )
+
+
+@dataclass
+class TypedDiscreteCandidateState:
+    """Discrete candidate state with one-hot drive-type actions per position.
+
+    ``activation_param`` has shape ``[candidate_count, drive_type_count]``.
+    The timing provider still sees one candidate row per physical position;
+    ``candidate_bu`` collapses the one-hot row and ``bsu_index`` selects the
+    corresponding legal family index.  During typed gradient probing,
+    ``_gradient_drive_type`` temporarily assigns the requested type only to
+    inactive positions, while retaining already accepted types.
+    """
+
+    candidate_ids: torch.Tensor
+    candidate_node_id: torch.Tensor
+    candidate_net_id: torch.Tensor
+    candidate_net_index: torch.Tensor
+    net_ids: torch.Tensor
+    activation_param: nn.Parameter
+    drive_type_bsu_index: torch.Tensor
+    drive_type_ids: torch.Tensor
+    drive_type_master_names: tuple
+    drive_type_cell_ids: torch.Tensor
+    legal_buffer_count: int
+    buffer_main_type_index: int
+    candidate_records: tuple
+    drive_type_table_metadata: dict
+    _gradient_drive_type: int | None = None
+    _shared_gradient_probe: bool = False
+    timing_active_only: bool = False
+
+    def timing_affected_net_ids(self):
+        """Between probes, let ordinary RC own nets without accepted buffers."""
+        if (not self.timing_active_only or self._gradient_drive_type is not None
+                or self._shared_gradient_probe):
+            return None
+        return tuple(sorted(set(
+            self.candidate_net_id[self._active_mask()].detach().cpu().tolist()
+        )))
+
+    @property
+    def is_typed_candidate(self):
+        return True
+
+    @property
+    def fixed_bsu_index(self):
+        return None
+
+    @property
+    def drive_type_count(self):
+        return int(self.activation_param.shape[1])
+
+    def _active_mask(self):
+        return self.activation_param.detach().sum(dim=1) > 0.0
+
+    def _selected_drive_type(self):
+        return torch.argmax(self.activation_param.detach(), dim=1)
+
+    def _bsu_for_types(self, type_ids):
+        return self.drive_type_bsu_index.to(device=type_ids.device).index_select(
+            0,
+            type_ids.to(dtype=torch.long),
+        )
+
+    def candidate_bu(self):
+        return self._candidate_bu(self.activation_param)
+
+    def _candidate_bu(self, activation):
+        if self._gradient_drive_type is None:
+            return activation.sum(dim=1)
+        active = activation.detach().sum(dim=1) > 0.0
+        typed = activation[:, int(self._gradient_drive_type)]
+        return torch.where(active, activation.sum(dim=1), typed)
+
+    def relaxed_bu(self):
+        return self.candidate_bu()
+
+    def bsu_index(self):
+        return self._bsu_index(self.activation_param)
+
+    def _bsu_index(self, activation):
+        selected_types = torch.argmax(activation.detach(), dim=1)
+        selected_bsu = self._bsu_for_types(selected_types).to(
+            dtype=activation.dtype,
+        )
+        if self._gradient_drive_type is None:
+            return selected_bsu
+        active = activation.detach().sum(dim=1) > 0.0
+        typed_bsu = self.drive_type_bsu_index.to(
+            device=selected_bsu.device,
+            dtype=selected_bsu.dtype,
+        )[int(self._gradient_drive_type)]
+        return torch.where(active, selected_bsu, typed_bsu.expand_as(selected_bsu))
+
+    def set_gradient_drive_type(self, drive_type_id):
+        drive_type_id = int(drive_type_id)
+        if not 0 <= drive_type_id < self.drive_type_count:
+            raise ValueError("drive_type_id is outside typed candidate state")
+        self._gradient_drive_type = drive_type_id
+        self._shared_gradient_probe = False
+        return self
+
+    def begin_shared_gradient_probe(self):
+        self._gradient_drive_type = None
+        self._shared_gradient_probe = True
+        return self
+
+    def clear_gradient_drive_type(self):
+        self._gradient_drive_type = None
+        self._shared_gradient_probe = False
+        return self
+
+    def selected_drive_type(self):
+        return self._selected_drive_type()
+
+    def validate_binary_(self):
+        activation = self.activation_param.detach()
+        if activation.ndim != 2:
+            raise ValueError("typed candidate activation must be two-dimensional")
+        if activation.shape[0] != self.candidate_ids.numel():
+            raise ValueError("typed candidate activation candidate dimension mismatch")
+        if activation.shape[1] != self.drive_type_count:
+            raise ValueError("typed candidate activation type dimension mismatch")
+        if not bool(torch.isfinite(activation).all()):
+            raise ValueError("typed candidate activation must be finite")
+        if not bool((activation == torch.round(activation)).all()):
+            raise ValueError("typed candidate activation must be binary")
+        if not bool(((activation >= 0.0) & (activation <= 1.0)).all()):
+            raise ValueError("typed candidate activation must lie in [0, 1]")
+        if not bool((activation.sum(dim=1) <= 1.0).all()):
+            raise ValueError("typed candidate activation violates position one-hot")
+        if self.drive_type_bsu_index.numel() != self.drive_type_count:
+            raise ValueError("typed candidate BSU table length mismatch")
+        if not bool(
+            ((self.drive_type_bsu_index >= 0)
+             & (self.drive_type_bsu_index < self.legal_buffer_count)).all()
+        ):
+            raise ValueError("typed candidate BSU table contains an invalid index")
+        return self
+
+    def slice_candidates(self, indices, *, candidate_node_id, device):
+        # Active-view indices are packed on CPU, while typed activations may
+        # live on CUDA.  Advanced indexing must use the activation device;
+        # the previous CPU index tensor made CUDA candidate windows fail as
+        # soon as an existing typed buffer was included in the cap overlay.
+        index = indices.to(device=self.activation_param.device, dtype=torch.long)
+        activation = self.activation_param.index_select(0, index)
+        candidate_bu = self._candidate_bu(activation).to(device=device)
+        bsu_index = self._bsu_index(activation).to(device=device)
+        view = CandidateStateView(
+            candidate_ids=_index_select_to(self.candidate_ids, index, device),
+            candidate_node_id=candidate_node_id.to(
+                device=device,
+                dtype=self.candidate_node_id.dtype,
+            ),
+            candidate_net_id=_index_select_to(self.candidate_net_id, index, device),
+            candidate_bu_tensor=candidate_bu,
+            bsu_index_tensor=bsu_index,
+            legal_buffer_count=int(self.legal_buffer_count),
+            buffer_main_type_index=int(self.buffer_main_type_index),
+        )
+        if self._shared_gradient_probe:
+            return TypedCandidateStateView(
+                **vars(view),
+                activation_param=activation.to(device=device),
+                drive_type_bsu_index=self.drive_type_bsu_index.to(device=device),
+            )
+        return view
 
 
 def _capture_optional_tensor(tensor):
@@ -424,107 +602,113 @@ def build_discrete_candidate_state(
     return state.validate_binary_()
 
 
-def _validate_per_size_tensor(name, value, *, bsu_index):
-    if not torch.is_tensor(value):
-        value = torch.as_tensor(value, dtype=bsu_index.dtype, device=bsu_index.device)
-    value = value.to(device=bsu_index.device, dtype=bsu_index.dtype)
-    if value.ndim != 2:
-        raise ValueError(f"{name} must have shape [num_candidates, legal_buffer_count]")
-    if value.shape[0] != bsu_index.numel():
-        raise ValueError(f"{name} candidate dimension does not match bsu_index")
-    if value.shape[1] < 2:
-        raise ValueError(f"{name} must contain at least two legal buffer sizes")
-    if not torch.isfinite(value).all():
-        raise ValueError(f"{name} contains non-finite values")
-    return value
-
-
-def _clamp_status(raw_index, clipped_index, legal_buffer_count, coordinate_source):
-    low = bool(torch.any(raw_index < 0.0).detach().cpu().item())
-    high = bool(torch.any(raw_index > float(legal_buffer_count - 1)).detach().cpu().item())
-    if low and high:
-        clamp = "mixed"
-    elif low:
-        clamp = "low"
-    elif high:
-        clamp = "high"
-    else:
-        clamp = "none"
-    return {
-        "coordinate_source": str(coordinate_source),
-        "clamped": bool(low or high),
-        "clamp": clamp,
-        "axis_min": 0.0,
-        "axis_max": float(legal_buffer_count - 1),
-        "raw_min": float(raw_index.detach().min().cpu().item()) if raw_index.numel() else None,
-        "raw_max": float(raw_index.detach().max().cpu().item()) if raw_index.numel() else None,
-        "clipped_min": float(clipped_index.detach().min().cpu().item()) if clipped_index.numel() else None,
-        "clipped_max": float(clipped_index.detach().max().cpu().item()) if clipped_index.numel() else None,
-    }
-
-
-def interpolate_buffer_values_by_bsu_index(
-    bsu_index,
+def build_typed_discrete_candidate_state(
+    candidates,
     *,
-    per_size_input_cap,
-    per_size_delay,
-    per_size_output_slew,
-    coordinate_source="current_relaxed",
+    buffer_main_type_index,
+    legal_buffer_count,
+    drive_type_table,
+    dtype=torch.float32,
+    device=None,
 ):
-    if not torch.is_tensor(bsu_index):
-        bsu_index = torch.as_tensor(bsu_index, dtype=torch.float32)
-    if bsu_index.ndim != 1:
-        raise ValueError("bsu_index must have shape [num_candidates]")
+    """Build a position-by-drive-type one-hot candidate state."""
 
-    per_size_input_cap = _validate_per_size_tensor(
-        "per_size_input_cap",
-        per_size_input_cap,
-        bsu_index=bsu_index,
+    candidates = list(candidates or [])
+    buffer_main_type_index = int(buffer_main_type_index)
+    legal_buffer_count = int(legal_buffer_count)
+    entries = tuple(getattr(drive_type_table, "entries", ()) or ())
+    if len(entries) != 4:
+        raise ValueError("typed discrete candidate buffering requires four drive types")
+    if legal_buffer_count < 2:
+        raise ValueError("legal_buffer_count must be at least 2")
+
+    candidate_ids = []
+    candidate_node_ids = []
+    candidate_net_ids = []
+    records = []
+    for candidate in candidates:
+        candidate_family = _candidate_int(candidate, "buffer_main_type_index")
+        if candidate_family != buffer_main_type_index:
+            raise ValueError(
+                "candidate buffer_main_type_index does not match requested "
+                f"buffer_main_type_index: {candidate_family} != {buffer_main_type_index}"
+            )
+        has_coordinate = (
+            candidate.get("x_dbu") is not None
+            and candidate.get("y_dbu") is not None
+        ) or (
+            candidate.get("candidate_location_x") is not None
+            and candidate.get("candidate_location_y") is not None
+        )
+        if not has_coordinate:
+            raise ValueError("candidate is missing coordinate payload")
+        candidate_ids.append(_candidate_int(candidate, "candidate_id"))
+        candidate_node_ids.append(
+            _candidate_int(
+                candidate,
+                "candidate_node_id",
+                fallback_key="tree_node_id",
+                fallback_keys=("synthetic_node_id",),
+            )
+        )
+        candidate_net_ids.append(_candidate_int(candidate, "net_id"))
+        records.append(candidate)
+
+    if len(set(candidate_ids)) != len(candidate_ids):
+        raise ValueError("candidate_ids must be unique")
+    net_ids = sorted(set(candidate_net_ids))
+    net_index_by_id = {net_id: index for index, net_id in enumerate(net_ids)}
+    candidate_net_index = [net_index_by_id[net_id] for net_id in candidate_net_ids]
+    tensor_device = torch.device(device) if device is not None else None
+    num_candidates = len(candidate_ids)
+    activation_param = nn.Parameter(
+        torch.zeros(
+            (num_candidates, len(entries)),
+            dtype=dtype,
+            device=tensor_device,
+        )
     )
-    per_size_delay = _validate_per_size_tensor(
-        "per_size_delay",
-        per_size_delay,
-        bsu_index=bsu_index,
-    )
-    per_size_output_slew = _validate_per_size_tensor(
-        "per_size_output_slew",
-        per_size_output_slew,
-        bsu_index=bsu_index,
-    )
-    legal_buffer_count = int(per_size_delay.shape[1])
-    for name, value in (
-        ("per_size_input_cap", per_size_input_cap),
-        ("per_size_output_slew", per_size_output_slew),
-    ):
-        if int(value.shape[1]) != legal_buffer_count:
-            raise ValueError(f"{name} legal-size dimension does not match per_size_delay")
-
-    raw_index = bsu_index
-    clipped_index = torch.clamp(raw_index, 0.0, float(legal_buffer_count - 1))
-    lo_index = torch.floor(clipped_index).to(dtype=torch.long)
-    hi_index = torch.ceil(clipped_index).to(dtype=torch.long)
-    alpha = clipped_index - lo_index.to(dtype=clipped_index.dtype)
-
-    def interpolate(table):
-        lo = torch.gather(table, 1, lo_index.view(-1, 1)).view(-1)
-        hi = torch.gather(table, 1, hi_index.view(-1, 1)).view(-1)
-        return (1.0 - alpha) * lo + alpha * hi
-
-    return {
-        "buffer_input_cap": interpolate(per_size_input_cap),
-        "buffer_delay": interpolate(per_size_delay),
-        "buffer_output_slew": interpolate(per_size_output_slew),
-        "bsu_index": clipped_index,
-        "bsu_index_lo": lo_index,
-        "bsu_index_hi": hi_index,
-        "bsu_index_alpha": alpha,
-        "bsu_index_status": _clamp_status(
-            raw_index,
-            clipped_index,
-            legal_buffer_count,
-            coordinate_source,
+    state = TypedDiscreteCandidateState(
+        candidate_ids=torch.tensor(candidate_ids, dtype=torch.long, device=tensor_device),
+        candidate_node_id=torch.tensor(
+            candidate_node_ids,
+            dtype=torch.long,
+            device=tensor_device,
         ),
-    }
+        candidate_net_id=torch.tensor(
+            candidate_net_ids,
+            dtype=torch.long,
+            device=tensor_device,
+        ),
+        candidate_net_index=torch.tensor(
+            candidate_net_index,
+            dtype=torch.long,
+            device=tensor_device,
+        ),
+        net_ids=torch.tensor(net_ids, dtype=torch.long, device=tensor_device),
+        activation_param=activation_param,
+        drive_type_bsu_index=torch.tensor(
+            [int(entry.bsu_index) for entry in entries],
+            dtype=torch.long,
+            device=tensor_device,
+        ),
+        drive_type_ids=torch.arange(
+            len(entries),
+            dtype=torch.long,
+            device=tensor_device,
+        ),
+        drive_type_master_names=tuple(str(entry.master_name) for entry in entries),
+        drive_type_cell_ids=torch.tensor(
+            [int(entry.cell_id) for entry in entries],
+            dtype=torch.long,
+            device=tensor_device,
+        ),
+        legal_buffer_count=legal_buffer_count,
+        buffer_main_type_index=buffer_main_type_index,
+        candidate_records=records,
+        drive_type_table_metadata=drive_type_table.to_metadata(),
+    )
+    return state.validate_binary_()
 
 
 def _candidate_has_coordinate(candidate):
@@ -600,4 +784,50 @@ def project_discrete_candidate_state(state):
         candidate["bsu_selection_mode"] = "fixed_discrete_candidate"
         candidate["bsu_index_value"] = float(state.fixed_bsu_index)
         virtual_state.insert(candidate, bsu=int(state.fixed_bsu_index))
+    return virtual_state
+
+
+def project_typed_discrete_candidate_state(state):
+    """Project typed one-hot candidate actions to physical virtual entries."""
+
+    from dreamplace.ops.physical_action import VirtualBufferState
+
+    state.validate_binary_()
+    active_rows = torch.nonzero(
+        state.activation_param.detach().sum(dim=1) == 1.0,
+        as_tuple=False,
+    ).flatten()
+    if int(active_rows.numel()) > 1:
+        order = torch.argsort(
+            state.candidate_ids.index_select(0, active_rows),
+            stable=True,
+        )
+        active_rows = active_rows[order]
+    selected_types = state.selected_drive_type().detach()
+    virtual_state = VirtualBufferState()
+    for row in active_rows.detach().cpu().tolist():
+        candidate = dict(state.candidate_records[row])
+        if not _candidate_has_coordinate(candidate):
+            raise ValueError("selected buffer candidate is missing coordinate payload")
+        drive_type_id = int(selected_types[row].detach().cpu().item())
+        drive_type = state.drive_type_table_metadata["masters"][drive_type_id]
+        bsu = int(state.drive_type_bsu_index[drive_type_id].detach().cpu().item())
+        candidate.update(
+            {
+                "buffer_projection_score": 1.0,
+                "bsu_selection_mode": "drive_type_table",
+                "bsu_index_value": float(bsu),
+                "drive_type_id": drive_type_id,
+                "drive_type_master_name": str(drive_type["master_name"]),
+                "drive_type_cell_id": int(drive_type["cell_id"]),
+                "drive_type_main_type_index": int(
+                    drive_type.get(
+                        "buffer_main_type_index",
+                        state.buffer_main_type_index,
+                    )
+                ),
+                "candidate_action_id": int(row * state.drive_type_count + drive_type_id),
+            }
+        )
+        virtual_state.insert(candidate, bsu=bsu)
     return virtual_state

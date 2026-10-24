@@ -225,7 +225,7 @@ EffectiveLocalWeight effectiveLocalDeltaSlewPenaltyWeight(const py::dict& config
 {
   const double explicit_weight = localDeltaSlewPenaltyWeight(config);
   const bool align_global = localObjectiveAlignGlobal(config);
-  const std::string lane = pyStringOrDefault(config, "timing_objective_lane", "timing_only");
+  const std::string lane = pyStringOrDefault(config, "timing_objective_lane", "timing_slew_cap");
   const double global_weight = std::max(0.0, pyDoubleOrDefault(config, "timing_slew_weight", 1.0));
   if (align_global && explicit_weight <= 0.0 && laneContains(lane, "slew")) {
     return {global_weight, "timing_objective_lane_default"};
@@ -237,7 +237,7 @@ EffectiveLocalWeight effectiveLocalDeltaCapPenaltyWeight(const py::dict& config)
 {
   const double explicit_weight = localDeltaCapPenaltyWeight(config);
   const bool align_global = localObjectiveAlignGlobal(config);
-  const std::string lane = pyStringOrDefault(config, "timing_objective_lane", "timing_only");
+  const std::string lane = pyStringOrDefault(config, "timing_objective_lane", "timing_slew_cap");
   const double global_weight = std::max(0.0, pyDoubleOrDefault(config, "timing_cap_weight", 1.0));
   if (align_global && explicit_weight <= 0.0 && laneContains(lane, "cap")) {
     return {global_weight, "timing_objective_lane_default"};

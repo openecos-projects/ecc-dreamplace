@@ -63,7 +63,7 @@ TIMING_OBJECTIVE_DEFAULTS = (
     ("with_sta", 1),
     ("timing_eval_flag", 1),
     ("timing_surrogate_mode", "lut_only"),
-    ("timing_objective_lane", "timing_only"),
+    ("timing_objective_lane", "timing_slew_cap"),
     ("critical_endpoint_pruning_mode", "off"),
     ("production_fast_loop", True),
     ("timing_lut_2d_native_op", "auto"),

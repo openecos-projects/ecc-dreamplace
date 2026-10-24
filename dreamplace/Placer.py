@@ -2952,6 +2952,15 @@ class PlacementEngine:
             return self.run_diff_opt()
         if getattr(self.params, "flow_kind", None) == FlowKind.STA.value:
             return self.run_sta_only()
+        if (
+            getattr(self.params, "flow_kind", None) == FlowKind.SIZING.value
+            and str(
+                getattr(self.params, "timing_action_gradient_mode", "lut_action")
+                or "lut_action"
+            )
+            == "lut_action"
+        ):
+            return self.run_diff_sizing()
         if self._is_joint_staged_smoke_v1():
             return self._run_joint_staged_smoke_v1()
         tt = time.time()
@@ -3227,6 +3236,12 @@ class PlacementEngine:
         from dreamplace.flows.diff_opt import run_diff_opt
 
         return run_diff_opt(self)
+
+    def run_diff_sizing(self):
+        """Execute standalone GR sizing with the opt-in action gradient."""
+        from dreamplace.flows.diff_sizing import run_diff_sizing
+
+        return run_diff_sizing(self)
 
 
 def main(argv=None, output_stream=None):

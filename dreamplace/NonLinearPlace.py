@@ -1025,7 +1025,10 @@ class NonLinearPlace(BasicPlace.BasicPlace):
     def _write_timing_objective_terms_artifact(self, params, model):
         payload = dict(getattr(model, "last_timing_objective_terms", {}) or {})
         model_params = getattr(model, "params", params)
-        payload.setdefault("lane", getattr(model_params, "timing_objective_lane", "timing_only"))
+        payload.setdefault(
+            "lane",
+            getattr(model_params, "timing_objective_lane", "timing_slew_cap"),
+        )
         payload.setdefault("enabled_terms", ["timing"])
         payload.setdefault(
             "units",

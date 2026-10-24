@@ -26,6 +26,7 @@ from dreamplace.flows.discrete_timing_common import (
     transfer_segment_counts,
     virtual_timing_area,
 )
+from dreamplace.flows.discrete_timing_owner import DiscreteTimingOwner
 from dreamplace.flows.timing_opt_schedule import TimingOptWindowSchedule
 from dreamplace.ops.buffer_insertion.buffering_config import build_buffering_config_from_params
 from dreamplace.ops.buffer_insertion.buffering_lane import BufferingOptimizationLane
@@ -79,6 +80,25 @@ class InflationS5B1:
         self.refresh_topology = refresh_topology
         self.window_limit = window_limit
         self.refresh_candidates_after_sizing = bool(refresh_candidates_after_sizing)
+        self.action_mode = str(
+            getattr(params, "timing_action_gradient_mode", "off") or "off"
+        )
+        if self.action_mode not in ("off", "lut_action"):
+            raise ValueError(
+                "timing_action_gradient_mode must be one of: off, lut_action"
+            )
+        self._lut_action_owner = (
+            DiscreteTimingOwner(
+                params,
+                placedb,
+                data,
+                ops,
+                refresh_topology,
+                refresh_candidates_after_sizing=True,
+            )
+            if self.action_mode == "lut_action"
+            else None
+        )
         self.oscillation = CellOscillationState()
         self.candidates = build_quad_candidate_table(
             data.flat_libcell_info, data.flat_libcell_leakage
@@ -319,8 +339,32 @@ class InflationS5B1:
             "rounds": rounds,
         }
 
-    def run_sizing(self, model, pos, geometry, capacity):
-        return self._sizing(model, pos, geometry, capacity)
+    def run_sizing(self, model, pos, geometry, capacity, *, action_mask=None):
+        if self._lut_action_owner is None:
+            if action_mask is not None:
+                raise ValueError(
+                    "sizing action masks require timing_action_gradient_mode=lut_action"
+                )
+            return self._sizing(model, pos, geometry, capacity)
+        result = self._lut_action_owner.run_sizing(
+            model,
+            pos,
+            geometry,
+            capacity,
+            action_mask=action_mask,
+        )
+        pending_instances = getattr(
+            self._lut_action_owner, "_pending_dirty_instance_ids", set()
+        )
+        if pending_instances:
+            self._pending_dirty_instance_ids.update(pending_instances)
+            pending_instances.clear()
+        pending_nets = getattr(self._lut_action_owner, "_pending_dirty_net_ids", set())
+        if pending_nets:
+            self._pending_dirty_net_ids.update(pending_nets)
+            pending_nets.clear()
+        self.round_index += len(result.get("rounds", ()) or ())
+        return result
 
     def _buffering(self, model, pos, capacity):
         state = self.lane._current_state()

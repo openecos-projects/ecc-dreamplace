@@ -149,6 +149,128 @@ def _select_shared_budget(scores, valid, sizeable, percent):
     return selected, budget
 
 
+def _native_quad_selection(
+    scores,
+    valid,
+    sizeable,
+    blocked,
+    *,
+    shared_budget_percent,
+    size_up_percent,
+    size_down_percent,
+    vt_percent,
+):
+    """Run the deterministic CPU selection loop in the compiled operator.
+
+    The operator is intentionally optional.  CUDA tensors and environments
+    without the rebuilt extension use the tensor implementation below; this
+    keeps correctness and importability independent of the native build.
+    """
+
+    if scores.device.type != "cpu" or scores.dtype not in (torch.float32, torch.float64):
+        return None
+    try:
+        from . import quad_gradient_topk_cpp
+    except (ImportError, OSError):
+        return None
+    blocked_arg = (
+        torch.empty(0, dtype=torch.bool, device=scores.device)
+        if blocked is None
+        else blocked.to(device=scores.device, dtype=torch.bool)
+    )
+    result = quad_gradient_topk_cpp.select_quad_actions(
+        scores.contiguous(),
+        valid.to(device=scores.device, dtype=torch.bool).contiguous(),
+        sizeable.to(device=scores.device, dtype=torch.bool).contiguous(),
+        blocked_arg.contiguous(),
+        -1.0 if shared_budget_percent is None else float(shared_budget_percent),
+        float(size_up_percent),
+        float(size_down_percent),
+        float(vt_percent),
+    )
+    selected, baseline_selected, budget = result
+    return selected, baseline_selected, int(budget.item()), "cpp"
+
+
+def _select_quad_actions(
+    scores,
+    valid,
+    sizeable,
+    *,
+    shared_budget_percent,
+    blocked_instances,
+    size_up_percent,
+    size_down_percent,
+    vt_percent,
+):
+    native = _native_quad_selection(
+        scores,
+        valid,
+        sizeable,
+        blocked_instances,
+        shared_budget_percent=shared_budget_percent,
+        size_up_percent=size_up_percent,
+        size_down_percent=size_down_percent,
+        vt_percent=vt_percent,
+    )
+    if native is not None:
+        selected, baseline_selected, native_budget, backend = native
+        return selected, (
+            None if shared_budget_percent is None else native_budget
+        ), baseline_selected, backend
+
+    if shared_budget_percent is None:
+        selected = _select_direction(scores, valid, SIZE_UP, size_up_percent)
+        selected |= _select_direction(scores, valid, SIZE_DOWN, size_down_percent)
+        selected |= _select_vt(scores, valid, vt_percent)
+        return selected, None, None, "tensor"
+
+    percent = float(shared_budget_percent)
+    if blocked_instances is not None:
+        baseline_selected, _ = _select_shared_budget(
+            scores, valid, sizeable, percent
+        )
+        blocked = blocked_instances.to(device=valid.device, dtype=torch.bool)
+        if blocked.shape != sizeable.shape:
+            raise ValueError("blocked_instances must match instance shape")
+        valid = valid & ~blocked.unsqueeze(1)
+    else:
+        baseline_selected = None
+    selected, budget = _select_shared_budget(scores, valid, sizeable, percent)
+    return selected, budget, baseline_selected, "tensor"
+
+
+
+def _action_score_stats(scores, valid):
+    """Per-action score distribution for calibration artifacts."""
+
+    stats = {}
+    finite = valid & torch.isfinite(scores)
+    for action_index, action_name in enumerate(ACTION_NAMES):
+        action_mask = finite[:, action_index]
+        values = scores[action_mask, action_index]
+        if int(values.numel()) == 0:
+            stats[action_name] = {
+                "valid_count": 0,
+                "negative_count": 0,
+                "min": None,
+                "median": None,
+                "max": None,
+                "mean": None,
+            }
+            continue
+        stats[action_name] = {
+            "valid_count": int(values.numel()),
+            "negative_count": int((values < 0.0).sum().item()),
+            "min": float(values.min().item()),
+            "median": float(values.median().item()),
+            "max": float(values.max().item()),
+            "mean": float(values.mean().item()),
+        }
+    return stats
+
+
+
 def _target_vt_logits(vt_ids, num_vts, *, dtype, device, eps):
     logits = torch.full(
         (int(vt_ids.numel()), num_vts),
@@ -271,34 +393,35 @@ def apply_discrete_quad_gradient_topk_update(
     scores[:, VT_SLOWDOWN : VT_SPEEDUP + 1] = vt_target_grad - probability_baseline.unsqueeze(1)
     scores = torch.where(valid, scores, torch.full_like(scores, float("inf")))
 
-    if shared_budget_percent is None:
-        selected = _select_direction(scores, valid, SIZE_UP, size_up_percent)
-        selected |= _select_direction(scores, valid, SIZE_DOWN, size_down_percent)
-        selected |= _select_vt(scores, valid, vt_percent)
-        budget = None
+    selection_valid = valid.clone()
+    if shared_budget_percent is not None and blocked_instances is not None:
+        blocked = blocked_instances.to(device=valid.device, dtype=torch.bool)
+        if blocked.shape != sizeable.shape:
+            raise ValueError("blocked_instances must match instance shape")
+        num_blocked = int(blocked.sum().item())
+        num_prevented_moves = int(
+            (valid[blocked] & (scores[blocked] < 0)).any(dim=1).sum().item()
+        )
+        valid &= ~blocked.unsqueeze(1)
+    else:
+        blocked = None
         num_blocked = 0
         num_prevented_moves = 0
-        num_replacement_actions = 0
-    else:
-        percent = float(shared_budget_percent)
-        if blocked_instances is not None:
-            baseline_selected, _ = _select_shared_budget(scores, valid, sizeable, percent)
-            blocked = blocked_instances.to(device=valid.device, dtype=torch.bool)
-            if blocked.shape != sizeable.shape:
-                raise ValueError("blocked_instances must match instance shape")
-            num_blocked = int(blocked.sum().item())
-            num_prevented_moves = int(
-                (valid[blocked] & (scores[blocked] < 0)).any(dim=1).sum().item()
-            )
-            valid &= ~blocked.unsqueeze(1)
-        else:
-            num_blocked = 0
-            num_prevented_moves = 0
-        selected, budget = _select_shared_budget(scores, valid, sizeable, percent)
-        num_replacement_actions = (
-            int((selected.any(dim=1) & ~baseline_selected.any(dim=1)).sum().item())
-            if blocked_instances is not None else 0
-        )
+    selected, budget, baseline_selected, selection_backend = _select_quad_actions(
+        scores,
+        selection_valid,
+        sizeable,
+        shared_budget_percent=shared_budget_percent,
+        blocked_instances=blocked,
+        size_up_percent=size_up_percent,
+        size_down_percent=size_down_percent,
+        vt_percent=vt_percent,
+    )
+    num_replacement_actions = (
+        int((selected.any(dim=1) & ~baseline_selected.any(dim=1)).sum().item())
+        if shared_budget_percent is not None and blocked is not None
+        else 0
+    )
 
     selected_scores = torch.where(selected, scores, torch.full_like(scores, float("inf")))
     best_scores, best_actions = torch.min(selected_scores, dim=1)
@@ -364,6 +487,7 @@ def apply_discrete_quad_gradient_topk_update(
     }
     finite_candidates = valid & torch.isfinite(scores)
     improving_candidates = finite_candidates & (scores < 0.0)
+    score_stats = _action_score_stats(scores, valid)
     summary = {
         "enabled": True,
         "mode": "discrete_gradient_topk",
@@ -392,6 +516,7 @@ def apply_discrete_quad_gradient_topk_update(
         "num_changed_instances": int(changed_rows.numel()),
         "num_candidate_moves": int(torch.count_nonzero(finite_candidates).item()),
         "num_improving_candidates": int(torch.count_nonzero(improving_candidates).item()),
+        "action_score_stats": score_stats,
         "applied_instance_ids": applied_instance_ids,
         "applied_cell_ids": applied_cell_ids,
         "applied_sizes": applied_sizes,
@@ -402,7 +527,7 @@ def apply_discrete_quad_gradient_topk_update(
         "candidate_table_cache_mode": cache_mode,
         "ranking": {
             "mode": "quad_gradient_taylor",
-            "selection_backend": "tensor",
+            "selection_backend": selection_backend,
             "score_coordinate": "real_size_and_vt_probability",
             "delta_value_name": "delta_real_size_or_vt_onehot",
             "direction_coordinate": "size_and_vt_axes",
@@ -520,3 +645,278 @@ def apply_quad_gradient_from_data_collections(
         candidate_table=candidate_table,
         size_parameterization=size_parameterization,
     )
+
+
+def apply_quad_gradient_from_action_scores(
+    *,
+    action_scores,
+    valid_instances,
+    data_collections,
+    size_logits,
+    vt_logits,
+    candidate_table,
+    shared_budget_percent=None,
+    blocked_instances=None,
+    size_up_percent=0.0,
+    size_down_percent=0.0,
+    vt_percent=0.0,
+    eps=1.0e-6,
+    size_parameterization="real_size",
+):
+    """Commit one legal neighbor from ``dL/dbeta`` action scores.
+
+    Unlike the continuous quad-gradient entry point, the score is already the
+    predicted objective delta.  No size-delta multiplication is applied.
+    """
+
+    required = {
+        "inst_cell_id": getattr(data_collections, "inst_cell_id", None),
+        "inst_is_sizeable": getattr(data_collections, "inst_is_sizeable", None),
+        "flat_libcell_info": getattr(data_collections, "flat_libcell_info", None),
+    }
+    missing = [name for name, value in required.items() if value is None]
+    if missing:
+        raise RuntimeError(
+            "lut_action top-k requires missing tensors: " + ", ".join(missing)
+        )
+    if action_scores.shape != valid_instances.shape:
+        raise ValueError("action_scores must match valid_instances")
+    if int(action_scores.shape[1]) != len(ACTION_NAMES):
+        raise ValueError("action_scores must have four columns")
+
+    num_instances = int(action_scores.shape[0])
+    current_cells = data_collections.inst_cell_id.to(
+        device=action_scores.device
+    ).long()
+    sizeable = data_collections.inst_is_sizeable.to(
+        device=action_scores.device
+    ).bool()
+    valid_current = (current_cells >= 0) & (
+        current_cells < int(data_collections.flat_libcell_info.shape[0])
+    )
+    if bool(torch.any(sizeable & ~valid_current)):
+        raise ValueError(
+            "lut_action top-k requires a valid current cell id for every sizeable instance"
+        )
+    safe_current = current_cells.clamp(min=0)
+    targets = candidate_table.target_cell_ids.to(
+        device=action_scores.device
+    )[safe_current]
+    # Selection filters, including cooldown, must not change graph legality.
+    valid = valid_instances.to(device=action_scores.device, dtype=torch.bool).clone()
+    valid &= sizeable.unsqueeze(1)
+    valid &= valid_current.unsqueeze(1)
+    valid &= targets >= 0
+    scores = torch.where(
+        valid & torch.isfinite(action_scores),
+        action_scores,
+        torch.full_like(action_scores, float("inf")),
+    )
+
+    selection_valid = valid.clone()
+    if shared_budget_percent is not None and blocked_instances is not None:
+        blocked = blocked_instances.to(
+            device=valid.device,
+            dtype=torch.bool,
+        )
+        if blocked.shape != sizeable.shape:
+            raise ValueError("blocked_instances must match instance shape")
+        num_blocked = int(blocked.sum().item())
+        num_prevented_moves = int(
+            (valid[blocked] & (scores[blocked] < 0)).any(dim=1).sum().item()
+        )
+        valid &= ~blocked.unsqueeze(1)
+    else:
+        blocked = None
+        num_blocked = 0
+        num_prevented_moves = 0
+    selected, budget, baseline_selected, selection_backend = _select_quad_actions(
+        scores,
+        selection_valid,
+        sizeable,
+        shared_budget_percent=shared_budget_percent,
+        blocked_instances=blocked,
+        size_up_percent=size_up_percent,
+        size_down_percent=size_down_percent,
+        vt_percent=vt_percent,
+    )
+    num_replacement_actions = (
+        int((selected.any(dim=1) & ~baseline_selected.any(dim=1)).sum().item())
+        if shared_budget_percent is not None and blocked is not None
+        else 0
+    )
+
+    selected_scores = torch.where(
+        selected,
+        scores,
+        torch.full_like(scores, float("inf")),
+    )
+    best_scores, best_actions = torch.min(selected_scores, dim=1)
+    changed = torch.isfinite(best_scores)
+    changed_rows = torch.nonzero(changed, as_tuple=False).flatten()
+    changed_actions = best_actions[changed_rows]
+    changed_targets = targets[changed_rows, changed_actions]
+    changed_sizes = data_collections.flat_libcell_info[
+        changed_targets, 2
+    ].to(dtype=size_logits.dtype)
+    changed_vts = data_collections.flat_libcell_info[
+        changed_targets, 3
+    ].long()
+
+    next_size = size_logits.detach().clone()
+    next_vt = vt_logits.detach().clone()
+    if int(changed_rows.numel()) > 0:
+        next_size[changed_rows] = (
+            changed_sizes
+            if size_parameterization == "real_size"
+            else sizes_to_logits(
+                changed_sizes,
+                data_collections.inst_size_lower[changed_rows].to(
+                    device=size_logits.device,
+                    dtype=size_logits.dtype,
+                ),
+                data_collections.inst_size_upper[changed_rows].to(
+                    device=size_logits.device,
+                    dtype=size_logits.dtype,
+                ),
+                eps,
+            )
+        )
+        next_vt[changed_rows] = _target_vt_logits(
+            changed_vts,
+            int(vt_logits.shape[1]),
+            dtype=vt_logits.dtype,
+            device=vt_logits.device,
+            eps=eps,
+        )
+
+    action_names = [
+        ACTION_NAMES[int(action)] for action in changed_actions.detach().cpu().tolist()
+    ]
+    applied_instance_ids = [
+        int(value) for value in changed_rows.detach().cpu().tolist()
+    ]
+    applied_cell_ids = [
+        int(value) for value in changed_targets.detach().cpu().tolist()
+    ]
+    applied_sizes = [float(value) for value in changed_sizes.detach().cpu().tolist()]
+    applied_vts = [int(value) for value in changed_vts.detach().cpu().tolist()]
+    applied_scores = [
+        float(value) for value in best_scores[changed].detach().cpu().tolist()
+    ]
+    selected_items = [
+        {
+            "instance_id": inst_id,
+            "target_cell_id": cell_id,
+            "target_size": size,
+            "target_vt": vt,
+            "action": action,
+            "predicted_delta_obj": score,
+            "predicted_improvement": -score,
+        }
+        for inst_id, cell_id, size, vt, action, score in zip(
+            applied_instance_ids,
+            applied_cell_ids,
+            applied_sizes,
+            applied_vts,
+            action_names,
+            applied_scores,
+            strict=True,
+        )
+    ]
+    action_counts = {
+        action: sum(name == action for name in action_names)
+        for action in ACTION_NAMES
+    }
+    finite_candidates = valid & torch.isfinite(scores)
+    improving_candidates = finite_candidates & (scores < 0.0)
+    score_stats = _action_score_stats(scores, valid)
+    summary = {
+        "enabled": True,
+        "mode": "lut_action_gradient_topk",
+        "ranking_mode": "lut_action_delta",
+        "preserve_vt": False,
+        "step_mode": "direct_one_step",
+        "up_percent": float(size_up_percent),
+        "down_percent": float(size_down_percent),
+        "vt_percent": float(vt_percent),
+        "selection_policy": (
+            "shared_cell_budget"
+            if budget is not None
+            else "per_direction_percent"
+        ),
+        "shared_budget_percent": (
+            None if budget is None else float(shared_budget_percent)
+        ),
+        "shared_budget_cells": budget,
+        "num_blocked_instances": num_blocked,
+        "num_prevented_moves": num_prevented_moves,
+        "num_replacement_actions": num_replacement_actions,
+        "num_sizeable_instances": int(torch.count_nonzero(sizeable).item()),
+        "num_up_selected": action_counts["size_up"],
+        "num_down_selected": action_counts["size_down"],
+        "num_up_applied": action_counts["size_up"],
+        "num_down_applied": action_counts["size_down"],
+        "num_vt_selected": action_counts["vt_slowdown"] + action_counts["vt_speedup"],
+        "num_vt_applied": action_counts["vt_slowdown"] + action_counts["vt_speedup"],
+        "num_vt_slowdown_applied": action_counts["vt_slowdown"],
+        "num_vt_speedup_applied": action_counts["vt_speedup"],
+        "action_counts": dict(action_counts),
+        "num_changed_instances": int(changed_rows.numel()),
+        "num_candidate_moves": int(torch.count_nonzero(finite_candidates).item()),
+        "num_improving_candidates": int(
+            torch.count_nonzero(improving_candidates).item()
+        ),
+        "action_score_stats": score_stats,
+        "applied_instance_ids": applied_instance_ids,
+        "applied_cell_ids": applied_cell_ids,
+        "applied_sizes": applied_sizes,
+        "applied_vts": applied_vts,
+        "applied_actions": action_names,
+        "applied_legal_index_deltas": [
+            1 if action in ("size_up", "vt_speedup") else -1
+            for action in action_names
+        ],
+        "selected_scores": selected_items,
+        "candidate_table_cache_mode": "cached",
+        "ranking": {
+            "mode": "lut_action_delta",
+            "selection_backend": selection_backend,
+            "score_coordinate": "loss_delta",
+            "delta_value_name": "beta_predicted_loss_delta",
+            "direction_coordinate": "size_and_vt_axes",
+            "num_candidate_moves": int(
+                torch.count_nonzero(finite_candidates).item()
+            ),
+            "num_improving_candidates": int(
+                torch.count_nonzero(improving_candidates).item()
+            ),
+            "num_non_improving_selected": 0,
+            "predicted_delta_obj_min": (
+                float(scores[finite_candidates].min().item())
+                if bool(torch.any(finite_candidates).item())
+                else None
+            ),
+            "predicted_delta_obj_mean": (
+                float(scores[finite_candidates].mean().item())
+                if bool(torch.any(finite_candidates).item())
+                else None
+            ),
+            "predicted_delta_obj_max": (
+                float(scores[finite_candidates].max().item())
+                if bool(torch.any(finite_candidates).item())
+                else None
+            ),
+        },
+        "step": {
+            "direct_step_num_instances": int(changed_rows.numel()),
+            "mean_abs_legal_index_delta": 1.0 if int(changed_rows.numel()) else 0.0,
+            "max_abs_legal_index_delta": 1 if int(changed_rows.numel()) else 0,
+        },
+        "size": {
+            "mean_after": float(next_size.double().mean().item())
+            if num_instances
+            else None,
+        },
+    }
+    return next_size, next_vt, summary

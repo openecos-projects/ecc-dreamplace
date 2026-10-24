@@ -125,7 +125,7 @@
     },
     "l_shape_grad_target_ratio_max": {
         "description": "maximum adaptive routability gradient target ratio",
-        "default": 0.1
+        "default": 0.2
     },
     "buffering_continuous_steps": {
         "description": "number of steps in the standalone buffering optimizer",
@@ -1016,7 +1016,7 @@
         "default": 0
     },
     "l_shape_grad_target_ratio": {
-        "description": "target ratio between weighted preconditioned L-shape gradient norm and preconditioned base wirelength+density gradient norm",
+        "description": "target ratio between raw L-shape gradient norm and raw wirelength gradient norm before the shared preconditioner; the printed L-shape ratio uses this same definition",
         "default": 0.2
     },
     "l_shape_overflow_threshold": {

@@ -3,7 +3,9 @@ from types import SimpleNamespace
 
 import torch
 
+from dreamplace.EvalMetrics import EvalMetrics
 from dreamplace.NonLinearPlace import NonLinearPlace
+from dreamplace.flows import metric_state
 
 
 def _metric(value):
@@ -13,6 +15,29 @@ def _metric(value):
         overflow=torch.tensor(0.3),
         max_density=torch.tensor(1.2),
     )
+
+
+def test_metric_record_includes_l_shape_raw_wirelength_gradient():
+    metric = EvalMetrics(1)
+    metric.l_shape_grad_ratio = 0.2
+    metric.l_shape_target_ratio = 0.2
+    metric.l_shape_weight = 3.0e-12
+    metric.l_shape_base_grad_norm = 100.0
+    metric.l_shape_wirelength_grad_norm = 80.0
+    metric.l_shape_grad_raw_norm = 2.0e12
+    metric.l_shape_grad_norm = 2.0e12
+    metric.l_shape_cap_active = True
+
+    record = metric_state.metric_to_record(metric)
+
+    assert record["l_shape_grad_ratio"] == 0.2
+    assert record["l_shape_target_ratio"] == 0.2
+    assert record["l_shape_weight"] == 3.0e-12
+    assert record["l_shape_base_grad_norm"] == 100.0
+    assert record["l_shape_wirelength_grad_norm"] == 80.0
+    assert record["l_shape_grad_raw_norm"] == 2.0e12
+    assert record["l_shape_grad_norm"] == 2.0e12
+    assert record["l_shape_cap_active"] is True
 
 
 def test_processed_metrics_preserve_complete_history_after_early_stop_frame():

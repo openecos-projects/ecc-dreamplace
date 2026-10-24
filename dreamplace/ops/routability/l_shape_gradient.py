@@ -1,7 +1,9 @@
 """Combine the native L-shape component with the placement gradient.
 
 The route component shares the base precondition step and owns its adaptive
-weight and telemetry. Timing backward remains in PlaceObj.
+weight and telemetry. Its ratio controller compares the raw L-shape gradient
+with the raw wirelength gradient, before the shared preconditioner; timing
+backward remains in PlaceObj.
 """
 
 import logging
@@ -11,7 +13,7 @@ import torch
 from .profile_timing import l_shape_log_verbose, profile_scope
 
 
-def apply_l_shape_gradient(model, pos, obj):
+def apply_l_shape_gradient(model, pos, obj, wirelength_grad_raw=None):
     # 保存 wirelength + density 的 raw 梯度，后面与 L-shape 梯度共享 precondition
     current_iteration = model._l_shape_outer_iteration
     debug_hash_op = (
@@ -20,6 +22,11 @@ def apply_l_shape_gradient(model, pos, obj):
         else None
     )
     base_grad_raw = pos.grad.data.clone()
+    wirelength_grad_norm_value = None
+    if wirelength_grad_raw is not None:
+        wirelength_grad_norm_value = float(
+            wirelength_grad_raw.detach().float().norm(p=2).item()
+        )
     if debug_hash_op is not None:
         debug_hash_op.log_debug_hash(
             "place_obj.base_grad_raw",
@@ -89,6 +96,11 @@ def apply_l_shape_gradient(model, pos, obj):
     l_shape_grad_norm = l_shape_grad.norm(p=2)
     base_grad_norm_value = float(base_grad_norm.item())
     l_shape_grad_norm_value = float(l_shape_grad_norm.item())
+    reference_grad_norm_value = (
+        wirelength_grad_norm_value
+        if wirelength_grad_norm_value is not None
+        else base_grad_norm_value
+    )
     if debug_hash_op is not None:
         debug_hash_op.log_debug_hash(
             "place_obj.base_grad_preconditioned",
@@ -115,11 +127,14 @@ def apply_l_shape_gradient(model, pos, obj):
         weight_max = min(weight_max, float(anchor) * max_multiplier)
 
     # 自适应调整权重
-    # 目标: l_shape_grad_norm * weight ≈ target_ratio * base_grad_norm
-    if l_shape_grad_norm_value > 1e-10 and base_grad_norm_value > 1e-10:
+    # 目标: raw l_shape_grad_norm * weight ≈ target_ratio * raw wirelength_grad_norm
+    if (
+        l_shape_grad_raw_norm_value > 1e-10
+        and reference_grad_norm_value > 1e-10
+    ):
         target_weight = model._compute_l_shape_target_weight(
-            base_grad_norm_value,
-            l_shape_grad_norm_value,
+            reference_grad_norm_value,
+            l_shape_grad_raw_norm_value,
             model.l_shape_grad_target_ratio,
         )
         target_weight_value = float(target_weight)
@@ -132,7 +147,8 @@ def apply_l_shape_gradient(model, pos, obj):
             if l_shape_log_verbose(model.params) >= 1:
                 logging.info(
                     f"L-shape weight auto-initialized: {new_weight:.4e} "
-                    f"(base_grad={base_grad_norm_value:.4e}, l_shape_grad={l_shape_grad_norm_value:.4e})"
+                f"(wirelength_grad={reference_grad_norm_value:.4e}, "
+                f"l_shape_grad={l_shape_grad_raw_norm_value:.4e})"
                 )
         else:
             new_weight = (
@@ -168,8 +184,15 @@ def apply_l_shape_gradient(model, pos, obj):
     l_shape_weighted = l_shape_cost * model.l_shape_routability_weight.item()
     current_weight = float(model.l_shape_routability_weight.item())
     grad_ratio_value = None
-    if l_shape_grad_norm_value > 1e-10 and base_grad_norm_value > 1e-10:
-        grad_ratio_value = current_weight * l_shape_grad_norm_value / (base_grad_norm_value + 1e-12)
+    if (
+        l_shape_grad_raw_norm_value > 1e-10
+        and reference_grad_norm_value > 1e-10
+    ):
+        grad_ratio_value = (
+            current_weight
+            * l_shape_grad_raw_norm_value
+            / (reference_grad_norm_value + 1e-12)
+        )
     obj = obj + l_shape_weighted
     # Filler reverse force: push fillers toward congested areas
     # using the L-shape Poisson field (bilinear interpolation on field_map)
@@ -346,6 +369,7 @@ def apply_l_shape_gradient(model, pos, obj):
     model.l_shape_last_weight_candidate = weight_candidate_value
     model.l_shape_last_cap_active = bool(cap_active)
     model.l_shape_last_base_grad_norm = base_grad_norm_value
+    model.l_shape_last_wirelength_grad_norm = wirelength_grad_norm_value
     model.l_shape_last_grad_raw_norm = l_shape_grad_raw_norm_value
     model.l_shape_last_grad_norm = l_shape_grad_norm_value
     model.l_shape_last_grad_ratio = grad_ratio_value

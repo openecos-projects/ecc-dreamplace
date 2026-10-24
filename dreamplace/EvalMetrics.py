@@ -96,6 +96,7 @@ class EvalMetrics(object):
         self.l_shape_weight_candidate = None
         self.l_shape_cap_active = None
         self.l_shape_base_grad_norm = None
+        self.l_shape_wirelength_grad_norm = None
         self.l_shape_grad_raw_norm = None
         self.l_shape_grad_norm = None
         self.l_shape_grad_ratio = None
@@ -256,6 +257,10 @@ class EvalMetrics(object):
                 content += ", LWCapAct %d" % (1 if self.l_shape_cap_active else 0)
             if self.l_shape_base_grad_norm is not None:
                 content += ", LBaseGrad %.6E" % (self.l_shape_base_grad_norm)
+            if self.l_shape_wirelength_grad_norm is not None:
+                content += ", LWLGrad %.6E" % (
+                    self.l_shape_wirelength_grad_norm
+                )
             if self.l_shape_grad_norm is not None:
                 content += ", LGrad %.6E" % (self.l_shape_grad_norm)
             if self.l_shape_grad_raw_norm is not None:

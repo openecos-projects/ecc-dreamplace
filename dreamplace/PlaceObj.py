@@ -1186,7 +1186,7 @@ class PlaceObj(nn.Module):
             dtype=self.data_collections.pos[0].dtype,
             device=self.data_collections.pos[0].device,
         )
-        # 目标：L-shape梯度范数占density梯度范数的比例
+        # 目标：precondition 前，L-shape 梯度范数占 wirelength 梯度范数的比例
         l_shape_grad_target_ratio = float(
             getattr(params, "l_shape_grad_target_ratio", 0.2)
         )
@@ -2378,6 +2378,7 @@ class PlaceObj(nn.Module):
         self.l_shape_last_weight_candidate = None
         self.l_shape_last_cap_active = None
         self.l_shape_last_base_grad_norm = None
+        self.l_shape_last_wirelength_grad_norm = None
         self.l_shape_last_grad_raw_norm = None
         self.l_shape_last_grad_norm = None
         self.l_shape_last_grad_ratio = None
@@ -9112,10 +9113,24 @@ class PlaceObj(nn.Module):
             backward_component_profile = self._timing_backward_component_profile()
 
         stage_start = time.perf_counter()
+        wirelength_grad_raw = None
         if self._use_targeted_sizing_backward():
             backward_mode = "targeted_sizing_autograd_grad"
             backward_grad_param_count = self._targeted_sizing_backward(obj)
         else:
+            if (
+                self.use_l_shape_routability
+                and self.l_shape_routability_op is not None
+                and getattr(self, "wirelength", None) is not None
+                and self.wirelength.requires_grad
+            ):
+                wirelength_grad_raw = torch.autograd.grad(
+                    self.wirelength,
+                    pos,
+                    retain_graph=True,
+                    create_graph=False,
+                    allow_unused=True,
+                )[0]
             obj.backward()
         # Do not reuse an autograd-connected Steiner graph across optimizer
         # evaluations; the next objective call must build a fresh graph.
@@ -9205,7 +9220,12 @@ class PlaceObj(nn.Module):
         
         # ========== L形Routability梯度 ==========
         if l_shape_active:
-            obj = apply_l_shape_gradient(self, pos, obj)
+            obj = apply_l_shape_gradient(
+                self,
+                pos,
+                obj,
+                wirelength_grad_raw=wirelength_grad_raw,
+            )
             
         # ==========================================
         

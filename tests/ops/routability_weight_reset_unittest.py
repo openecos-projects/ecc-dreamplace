@@ -37,11 +37,16 @@ def make_model(route_gradient):
     return model
 
 
-def evaluate(model, base_gradient):
+def evaluate(model, base_gradient, wirelength_gradient=None):
     pos = torch.ones(2, requires_grad=True)
     base = (pos * base_gradient).sum()
     base.backward()
-    apply_l_shape_gradient(model, pos, base)
+    apply_l_shape_gradient(
+        model,
+        pos,
+        base,
+        wirelength_grad_raw=wirelength_gradient,
+    )
     return pos.grad
 
 
@@ -89,3 +94,20 @@ def test_relative_weight_cap_is_anchored_to_first_calibration():
 
     model.reset_l_shape_weight_state()
     assert model._l_shape_weight_anchor is None
+
+
+def test_ratio_uses_raw_wirelength_gradient_when_provided():
+    model = make_model(torch.tensor([0.0, 2.0]))
+    model.l_shape_grad_target_ratio = 0.1
+    model.reset_l_shape_weight_state()
+
+    result = evaluate(
+        model,
+        torch.tensor([3.0, 4.0]),
+        wirelength_gradient=torch.tensor([1.0, 0.0]),
+    )
+
+    assert model.l_shape_last_target_weight == pytest.approx(0.05)
+    assert model.l_shape_last_weight == pytest.approx(0.05)
+    assert model.l_shape_last_grad_ratio == pytest.approx(0.1)
+    torch.testing.assert_close(result, torch.tensor([3.0, 4.1]))

@@ -378,6 +378,31 @@ def test_candidate_driver_cap_overlay_preserves_bu_gradient():
     assert float(state.bu_logits.grad[0]) < 0.0
 
 
+def test_candidate_cap_overlay_preserves_live_double_cap_perturbations():
+    provider, _state = _build_discrete_provider()
+    x = torch.tensor([0.0, 1.0, 2.0], dtype=torch.float64)
+    load = torch.tensor([0.0, 0.0, 0.043438451234], dtype=torch.float64, requires_grad=True)
+
+    def evaluate(caps):
+        provider.bind_live_geometry(
+            new_x=x, new_y=torch.zeros_like(x),
+            r_unit=1.0, c_unit=0.0, scale_factor=1.0, dbu=1.0,
+            topology_epoch=0, forward_id=1,
+            pin_capacitance_by_sense={"base": caps},
+        )
+        try:
+            rise, _fall = provider.apply_dynamic_net_cap_overlay(
+                pin_net_cap_rise=torch.zeros_like(caps),
+                pin_net_cap_fall=torch.zeros_like(caps),
+            )
+            return rise[1]
+        finally:
+            provider.release_live_geometry(forward_id=1)
+
+    torch.testing.assert_close(evaluate(load), load[2], atol=0, rtol=0)
+    assert torch.autograd.gradcheck(evaluate, (load,), eps=1e-9, atol=1e-7, rtol=1e-7)
+
+
 def test_relaxed_buffer_provider_scopes_forward_to_active_net():
     provider, state = _build_two_net_provider()
     pin_rAAT = torch.tensor([0.0, 40.0, -1.0, 80.0, -1.0], dtype=torch.float32)

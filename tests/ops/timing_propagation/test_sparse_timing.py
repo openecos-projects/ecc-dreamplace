@@ -33,6 +33,39 @@ def test_domains_share_rc_but_keep_arrivals_and_count_endpoint_once(
     )
 
 
+def test_endpoint_lse_is_used_by_sparse_tns_reduction(native_device):
+    hard = schedule(native_device)
+    smooth = schedule(native_device)
+    smooth.aggregation_mode = "smooth"
+    smooth.aggregation_tau_ps = 2.0
+    values = inputs(native_device)
+
+    hard_lanes = hard.propagate((), values[:2], values[2:4], values[4:])
+    smooth_lanes = smooth.propagate((), values[:2], values[2:4], values[4:])
+    hard_result = hard.reduce_endpoints(
+        hard_lanes,
+        torch.zeros(4, device=native_device, dtype=torch.float64),
+    )
+    smooth_result = smooth.reduce_endpoints(
+        smooth_lanes,
+        torch.zeros(4, device=native_device, dtype=torch.float64),
+    )
+
+    torch.testing.assert_close(
+        hard_result.endpoint_slack,
+        torch.tensor([-3.0], device=native_device, dtype=torch.float64),
+    )
+    expected = -2.0 * torch.logsumexp(
+        -hard_result.check_slack / 2.0,
+        dim=0,
+    )
+    torch.testing.assert_close(
+        smooth_result.endpoint_slack,
+        expected.reshape_as(smooth_result.endpoint_slack),
+    )
+    assert float(smooth_result.tns.detach()) < float(hard_result.tns.detach())
+
+
 def test_false_path_excludes_timing_gradient_but_preserves_electrical_slew(
     native_device,
 ):

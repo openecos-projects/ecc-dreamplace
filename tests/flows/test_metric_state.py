@@ -32,6 +32,70 @@ def test_metric_record_includes_l_shape_raw_wirelength_gradient():
 
     assert record["l_shape_grad_ratio"] == 0.2
     assert record["l_shape_target_ratio"] == 0.2
+def _record_metric(**overrides):
+    values = {
+        "iteration": 1,
+        "detailed_step": None,
+        "objective": None,
+        "wirelength": None,
+        "density": None,
+        "density_weight": None,
+        "hpwl": None,
+        "overflow": None,
+        "max_density": None,
+        "gamma": None,
+        "wns": None,
+        "tns": None,
+        "timing_objective": None,
+        "slew_violation": None,
+        "cap_violation": None,
+        "leakage": None,
+        "eval_time": None,
+        "size_min": None,
+        "size_mean": None,
+        "size_max": None,
+        "vt_class_proportions": None,
+        "timing_grad_ratio": None,
+        "timing_grad_raw_ratio": None,
+        "timing_grad_weight": None,
+        "timing_grad_target_ratio": None,
+        "l_shape_grad_ratio": None,
+        "l_shape_target_ratio": None,
+        "l_shape_weight": None,
+        "l_shape_base_grad_norm": None,
+        "l_shape_wirelength_grad_norm": None,
+        "l_shape_grad_raw_norm": None,
+        "l_shape_grad_norm": None,
+        "l_shape_cap_active": None,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_metric_record_includes_l_shape_and_timing_gradient_ratios():
+    record = metric_state.metric_to_record(
+        _record_metric(
+            timing_grad_ratio=0.1,
+            timing_grad_raw_ratio=2.5,
+            timing_grad_weight=0.04,
+            timing_grad_target_ratio=0.1,
+            l_shape_grad_ratio=0.1,
+            l_shape_target_ratio=0.1,
+            l_shape_weight=3.0e-12,
+            l_shape_base_grad_norm=100.0,
+            l_shape_wirelength_grad_norm=80.0,
+            l_shape_grad_raw_norm=2.0e12,
+            l_shape_grad_norm=2.0e12,
+            l_shape_cap_active=True,
+        )
+    )
+
+    assert record["timing_grad_ratio"] == 0.1
+    assert record["timing_grad_raw_ratio"] == 2.5
+    assert record["timing_grad_weight"] == 0.04
+    assert record["timing_grad_target_ratio"] == 0.1
+    assert record["l_shape_grad_ratio"] == 0.1
+    assert record["l_shape_target_ratio"] == 0.1
     assert record["l_shape_weight"] == 3.0e-12
     assert record["l_shape_base_grad_norm"] == 100.0
     assert record["l_shape_wirelength_grad_norm"] == 80.0

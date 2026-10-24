@@ -67,6 +67,23 @@ def test_timing_grad_balance_defers_zero_timing_gradient():
     assert result["weight_applied"] == 1.0
 
 
+def test_timing_metric_snapshot_exposes_gradient_balance_ratio():
+    model = _model()
+    model.timing_grad_balance_summary = {
+        "timing_to_wirelength_grad_ratio": 2.5,
+        "weighted_timing_to_wirelength_grad_ratio": 0.1,
+        "weight_applied": 0.04,
+        "target_ratio": 0.1,
+    }
+
+    snapshot = model.timing_metric_snapshot()
+
+    assert snapshot["timing_grad_raw_ratio"] == pytest.approx(2.5)
+    assert snapshot["timing_grad_ratio"] == pytest.approx(0.1)
+    assert snapshot["timing_grad_weight"] == pytest.approx(0.04)
+    assert snapshot["timing_grad_target_ratio"] == pytest.approx(0.1)
+
+
 def test_timing_outer_weight_scales_composite_wns_tns_term():
     model = _model()
     model.timing_grad_balance_weight = 2.0

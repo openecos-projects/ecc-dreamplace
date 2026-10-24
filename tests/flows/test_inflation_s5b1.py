@@ -697,3 +697,56 @@ def test_timing_only_milestone_window_accepts_absent_inflation_state(tmp_path, m
     owner.before_step(model, pos, optimizer, metric, {}, iteration=1, stage=0)
     assert owner.schedule.window_count == 1
     assert owner.summaries[0]["trigger"]["threshold"] == 0.30
+
+
+def test_placement_window_sizing_delegates_to_lut_action_owner():
+    owner = InflationS5B1.__new__(InflationS5B1)
+    calls = []
+    delegate = SimpleNamespace(
+        _pending_dirty_instance_ids={7, 9},
+        _pending_dirty_net_ids={3},
+    )
+
+    def run_sizing(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"rounds": [{"round": 1}, {"round": 2}]}
+
+    delegate.run_sizing = run_sizing
+    owner._lut_action_owner = delegate
+    owner._pending_dirty_instance_ids = {1}
+    owner._pending_dirty_net_ids = set()
+    owner.round_index = 0
+
+    result = owner.run_sizing(
+        "model",
+        "pos",
+        "geometry",
+        "capacity",
+        action_mask=[True, False, True, False],
+    )
+
+    assert result == {"rounds": [{"round": 1}, {"round": 2}]}
+    assert calls == [
+        (
+            ("model", "pos", "geometry", "capacity"),
+            {"action_mask": [True, False, True, False]},
+        )
+    ]
+    assert owner._pending_dirty_instance_ids == {1, 7, 9}
+    assert owner._pending_dirty_net_ids == {3}
+    assert owner.round_index == 2
+    assert delegate._pending_dirty_instance_ids == set()
+    assert delegate._pending_dirty_net_ids == set()
+
+
+def test_legacy_placement_window_sizing_rejects_action_mask():
+    owner = InflationS5B1.__new__(InflationS5B1)
+    owner._lut_action_owner = None
+    with pytest.raises(ValueError, match="timing_action_gradient_mode=lut_action"):
+        owner.run_sizing(
+            "model",
+            "pos",
+            "geometry",
+            "capacity",
+            action_mask=[True, False, True, False],
+        )

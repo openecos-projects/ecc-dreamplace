@@ -49,6 +49,7 @@ add_subdirectory(cell_modeling)
 add_subdirectory(diff_guided_batch)
 add_subdirectory(size_interpolated_pin)
 add_subdirectory(routability)
+add_subdirectory(discrete_gradient_topk)
 
 # GPUGR wrapper and its built-in Xplace backend (the native extensions are
 # built from thirdparty/xplace by thirdparty/build_xplace_gpugr.sh).

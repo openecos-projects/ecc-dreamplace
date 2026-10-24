@@ -49,6 +49,11 @@ class _TimingLanes(Function):
 
 def try_timing_lanes_native(timing, index, destinations, sources):
     native = lut_entry_2d_op._select_module(destinations[0])
+    if str(getattr(timing, "timing_aggregation_mode", "hard")) == "avesmooth":
+        # The native lanes operator only knows hard/smooth (LSE).  AveSmooth
+        # needs the near-max gradient mask, which is implemented by the
+        # Python _AveScatterMax autograd function in scatter_timing_max.
+        return None
     if (
         destinations[0].is_cuda
         and not torch.are_deterministic_algorithms_enabled()

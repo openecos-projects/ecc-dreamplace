@@ -159,6 +159,18 @@ def metric_to_record(metric):
         "wns": scalar_or_none(metric.wns),
         "tns": scalar_or_none(metric.tns),
         "timing_objective": scalar_or_none(metric.timing_objective),
+        "timing_grad_ratio": scalar_or_none(
+            getattr(metric, "timing_grad_ratio", None)
+        ),
+        "timing_grad_raw_ratio": scalar_or_none(
+            getattr(metric, "timing_grad_raw_ratio", None)
+        ),
+        "timing_grad_weight": scalar_or_none(
+            getattr(metric, "timing_grad_weight", None)
+        ),
+        "timing_grad_target_ratio": scalar_or_none(
+            getattr(metric, "timing_grad_target_ratio", None)
+        ),
         "l_shape_grad_ratio": scalar_or_none(
             getattr(metric, "l_shape_grad_ratio", None)
         ),

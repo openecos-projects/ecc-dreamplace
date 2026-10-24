@@ -331,6 +331,8 @@ std::vector<at::Tensor> hard_scatter_backward_cuda(at::Tensor, at::Tensor, at::T
     at::Tensor, at::Tensor, at::Tensor, at::Tensor, bool);
 std::vector<at::Tensor> cell_aat_forward_cuda(at::Tensor, at::Tensor, at::Tensor, at::Tensor,
     at::Tensor, at::Tensor, at::Tensor, std::vector<at::Tensor>, bool, double);
+at::Tensor cell_aat_values_cuda(at::Tensor, at::Tensor, at::Tensor, at::Tensor,
+    at::Tensor, at::Tensor, at::Tensor, std::vector<at::Tensor>, bool, double);
 std::vector<at::Tensor> cell_aat_backward_cuda(at::Tensor, at::Tensor, at::Tensor, int64_t,
                                            std::vector<at::Tensor>);
 std::vector<at::Tensor> net_aat_forward_cuda(at::Tensor, at::Tensor, at::Tensor, at::Tensor,
@@ -356,6 +358,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("hard_scatter_backward", &hard_scatter_backward_cuda, "Slew max first-order adjoints (CUDA)");
   m.def("buffer_indexed_forward", &buffer_lut_indexed_cuda, "Indexed buffer LUT query with 1D extrapolation (CUDA)");
   m.def("cell_aat_forward", &cell_aat_forward_cuda, "Fixed-master cell AAT forward (CUDA)");
+  m.def("cell_aat_values", &cell_aat_values_cuda, "Fixed-master cell AAT values (CUDA)");
   m.def("cell_aat_backward", &cell_aat_backward_cuda, "Fixed-master cell AAT backward (CUDA)",
         pybind11::arg("arcs"), pybind11::arg("jac"), pybind11::arg("gradient"), pybind11::arg("pins"),
         pybind11::arg("groups") = std::vector<at::Tensor>{});

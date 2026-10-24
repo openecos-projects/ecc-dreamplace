@@ -101,6 +101,10 @@ class EvalMetrics(object):
         self.l_shape_grad_norm = None
         self.l_shape_grad_ratio = None
         self.l_shape_target_ratio = None
+        self.timing_grad_ratio = None
+        self.timing_grad_raw_ratio = None
+        self.timing_grad_weight = None
+        self.timing_grad_target_ratio = None
         self.l_shape_overflow = None
         self.l_shape_overflow_ratio = None
         self.l_shape_overflow_ema = None
@@ -381,6 +385,16 @@ class EvalMetrics(object):
             content += ", TNS %.6E" % (self.tns)
         if self.timing_objective is not None:
             content += ", TimingObj %.6E" % (self.timing_objective)
+        if self.timing_grad_ratio is not None:
+            content += ", TGradRatio %.4f" % (self.timing_grad_ratio)
+        if self.timing_grad_raw_ratio is not None:
+            content += ", TGradRawRatio %.4f" % (self.timing_grad_raw_ratio)
+        if self.timing_grad_weight is not None:
+            content += ", TGradWeight %.4E" % (self.timing_grad_weight)
+        if self.timing_grad_target_ratio is not None:
+            content += ", TGradTargetRatio %.4f" % (
+                self.timing_grad_target_ratio
+            )
         if self.size_min is not None and self.size_mean is not None and self.size_max is not None:
             content += ", Size[min/mean/max]=%.6E/%.6E/%.6E" % (
                 self.size_min,

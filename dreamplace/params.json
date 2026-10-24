@@ -13,7 +13,7 @@
     },
     "timing_objective_lane": {
         "description": "timing objective terms, timing_only | timing_slew_cap",
-        "default": "timing_only"
+        "default": "timing_slew_cap"
     },
     "timing_aggregation_mode": {
         "description": "AAT/RAT aggregation: hard max/min or smooth LSE; endpoint WNS/TNS retain hard reductions",
@@ -218,6 +218,66 @@
     "timing_surrogate_mode": {
         "description": "cell timing evaluation mode, auto | mixed | lut_only | surrogate_only",
         "default": "auto"
+    },
+    "timing_action_gradient_mode": {
+        "description": "discrete sizing gradient mode, off | lut_action",
+        "default": "lut_action"
+    },
+    "timing_action_score_objective": {
+        "description": "objective differentiated for the local action score, loss (weighted objective) | tns | wns",
+        "default": "loss"
+    },
+    "timing_action_load_delta": {
+        "description": "legacy diagnostic option; must be 0 because index derivatives query target LUTs at the base-point load",
+        "default": 0
+    },
+    "timing_action_pin_cap_gradient": {
+        "description": "carry the target cell input pin cap into the beta probe so the upstream driver load follows the action; 0 removes the load-feedback term for A/B debugging",
+        "default": 1
+    },
+    "timing_action_drive_load_feedback": {
+        "description": "add paper Eq. (7): the sized cell input pin cap delta raises the fanin driver LUT load, carried by the cell load Jacobian in the same backward",
+        "default": 1
+    },
+    "timing_action_tns_margin_ps": {
+        "description": "slack margin in ps for the tns action score; endpoints within the margin keep a unit TNS slope so near-critical regressions are visible",
+        "default": 0.0
+    },
+    "timing_action_trial_candidates": {
+        "description": "debug only: number of local top candidates measured by an actual one-action TNS trial; 0 means twice the shared budget",
+        "default": 0
+    },
+    "timing_action_trial_probe": {
+        "description": "debug only: number of trial candidates that record no-op/restore metrics and explicit beta forwards at 0, 0.001, 0.01, 0.1, 1 for finite-difference validation",
+        "default": 0
+    },
+    "timing_action_trial_reachability": {
+        "description": "debug only: count endpoints reachable from each trial cell's output pin",
+        "default": 0
+    },
+    "timing_action_trial_stratified": {
+        "description": "take the trial shortlist evenly across the four actions instead of the global top-k",
+        "default": 0
+    },
+    "timing_action_trial_record_only": {
+        "description": "debug only: record exact one-action TNS/WNS trials for a shortlist; selection always uses the local scores",
+        "default": 0
+    },
+    "timing_action_trial_sample": {
+        "description": "debug only: draw this many valid instances per action uniformly in addition to the top-k shortlist",
+        "default": 0
+    },
+    "timing_action_trial_top_per_action": {
+        "description": "debug only: take this many lowest local-score valid instances per action before the uniform sample",
+        "default": 0
+    },
+    "timing_action_trial_seed": {
+        "description": "deterministic seed for timing_action_trial_sample",
+        "default": 0
+    },
+    "timing_zero_buffer_static_net_fast_path": {
+        "description": "skip the dynamic candidate-buffer net AAT lane when every candidate buffer activation is exactly zero; the static RC lane is used instead",
+        "default": 0
     },
     "diff_timing_driven_placement": {
         "description": "enable differentiable timing in the placement flow",
@@ -517,7 +577,13 @@
     },
     "timing_opt_coefficients": {
         "description": "GP sizing-window coefficient policy: mode=inherit uses live placement values; mode=fixed requires wns, tns, slew and cap during S rounds only, with outer timing weight 1; placement weights are restored on exit",
-        "default": {"mode": "fixed", "wns": 500.0, "tns": 5.0, "cap": 1.0, "slew": 1.0}
+        "default": {
+            "mode": "fixed",
+            "wns": 500.0,
+            "tns": 5.0,
+            "cap": 1.0,
+            "slew": 1.0
+        }
     },
     "two_stage_density_scaler": {
         "description": "scale density weight after the macro placement stage",
@@ -525,7 +591,7 @@
     },
     "max_num_area_adjust": {
         "description": "maximum times to adjust node area",
-        "default": 3
+        "default": 5
     },
     "adjust_nctugr_area_flag": {
         "description": "legacy compatibility key; when enabled use the ECC/iRT EGR congestion map for area adjustment (NCTUgr is not invoked)",
@@ -834,6 +900,14 @@
     "timing_rc_mode": {
         "default": "placement",
         "description": "timing parasitics, placement | gr; gr requires native ECC CPU sizing or STA"
+    },
+    "diff_sizing_timing_rc_mode": {
+        "default": "gr",
+        "description": "standalone diff_sizing timing RC source; placement | gr"
+    },
+    "diff_sizing_optimization_flows": {
+        "default": null,
+        "description": "ordered standalone diff_sizing phases [action, rounds, [wns, tns, slew, cap], selection_percent]; null keeps one quad phase"
     },
     "cell_model_schema": {
         "default": "main_id_arc_offset_piecewise_linear",

@@ -52,11 +52,25 @@ class SparseTimingTrace:
 
 
 class SparseTimingSchedule:
-    def __init__(self, view, base_cell_arcs, *, device, dtype, check_mask=None):
+    def __init__(
+        self,
+        view,
+        base_cell_arcs,
+        *,
+        device,
+        dtype,
+        check_mask=None,
+        aggregation_mode="hard",
+        aggregation_tau_ps=2.0,
+    ):
         view.require_supported()
         arrays = view.arrays
         self.dtype = dtype
         self.device = torch.device(device)
+        self.aggregation_mode = str(aggregation_mode or "hard")
+        self.aggregation_tau_ps = float(aggregation_tau_ps)
+        if self.aggregation_tau_ps <= 0.0:
+            raise ValueError("sparse endpoint aggregation tau must be positive")
         self.state_pin = torch.as_tensor(arrays["state_pin"], device=device)
         self.state_slew_group = torch.as_tensor(
             arrays["state_slew_group"], device=device
@@ -360,12 +374,29 @@ class SparseTimingSchedule:
             self.check_state, self.check_transition
         ]
         slack = required[self.legal] - arrivals
-        maximum_violation = scatter_slew_max(
-            slack.new_full((self.endpoint_pins.numel(),), -2e8),
-            self.check_to_endpoint,
-            -slack,
-            include_self=True,
-        )
+        if self.aggregation_mode == "smooth":
+            endpoint_ids = self.check_to_endpoint.long()
+            maximum = slack.new_full((self.endpoint_pins.numel(),), -torch.inf)
+            maximum.scatter_reduce_(
+                0,
+                endpoint_ids,
+                -slack,
+                reduce="amax",
+                include_self=False,
+            )
+            shifted = torch.exp(
+                (-slack - maximum[endpoint_ids]) / self.aggregation_tau_ps
+            )
+            total = slack.new_zeros(self.endpoint_pins.numel())
+            total.index_add_(0, endpoint_ids, shifted)
+            maximum_violation = maximum + self.aggregation_tau_ps * torch.log(total)
+        else:
+            maximum_violation = scatter_slew_max(
+                slack.new_full((self.endpoint_pins.numel(),), -2e8),
+                self.check_to_endpoint,
+                -slack,
+                include_self=True,
+            )
         endpoint_slack = -maximum_violation
         zero = lanes[0].sum() * 0
         wns = (

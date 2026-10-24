@@ -63,8 +63,17 @@ def _tables(timing):
     return tensors
 
 
-def try_cell_aat_native(timing, arcs, pins, *, use_surrogate, need_delay_updates):
+def try_cell_aat_native(
+    timing,
+    arcs,
+    pins,
+    *,
+    use_surrogate,
+    need_delay_updates,
+    global_arc_rows=None,
+):
     native = lut_entry_2d_op._select_module(pins[0])
+    action_context = getattr(timing, "_active_discrete_action_context", None)
     if (
         pins[0].dtype not in (torch.float32, torch.float64)
         or use_surrogate
@@ -72,9 +81,18 @@ def try_cell_aat_native(timing, arcs, pins, *, use_surrogate, need_delay_updates
         or not timing._use_lut_2d_native_op_for_tensor(pins[0])
         or not hasattr(native, "cell_aat_forward")
     ):
+        if action_context is not None:
+            raise RuntimeError(
+                "lut_action requires the fixed-master native cell LUT path"
+            )
         return None
     tables = _tables(timing)
     if tables is None:
+        if action_context is not None:
+            raise RuntimeError(
+                "lut_action requires raw 2D LUT tables; cached coefficient "
+                "tables are not supported by the action path"
+            )
         return None
     from .timing_propagation import (
         SMOOTH_MAX_ALPHA,
@@ -85,13 +103,64 @@ def try_cell_aat_native(timing, arcs, pins, *, use_surrogate, need_delay_updates
 
     # RC caps can include appended Steiner nodes; cell arcs index design pins.
     cell_pins = (*pins[:4], *(cap[: pins[0].numel()] for cap in pins[4:]))
-    updates = _CellAat.apply(
-        arcs,
-        *cell_pins,
-        tables,
-        SMOOTH_MAX_ENABLED and not _force_hard_pairwise_max_enabled(),
-        SMOOTH_MAX_ALPHA,
-    )
+    if action_context is not None:
+        if global_arc_rows is None:
+            raise RuntimeError(
+                "lut_action requires global arc rows for the scalar LUT path"
+            )
+        from .action_cell_aat import apply_action_cell_aat
+
+        global_arc_rows = global_arc_rows.to(device=arcs.device, dtype=torch.long)
+        updates = apply_action_cell_aat(
+            arcs,
+            cell_pins,
+            tables,
+            SMOOTH_MAX_ENABLED and not _force_hard_pairwise_max_enabled(),
+            SMOOTH_MAX_ALPHA,
+            target_arc_ids=action_context.target_arc_ids.index_select(
+                0, global_arc_rows
+            ),
+            target_senses=action_context.target_senses.index_select(
+                0, global_arc_rows
+            ),
+            valid_arcs=action_context.valid_arcs.index_select(0, global_arc_rows),
+            inst_ids=action_context.inst_ids.index_select(0, global_arc_rows),
+            beta=action_context.beta,
+            context=action_context,
+            global_rows=global_arc_rows,
+            cap_delta_r=(
+                action_context.output_rcap_delta.index_select(0, global_arc_rows)
+                if action_context.output_rcap_delta is not None
+                else None
+            ),
+            cap_delta_f=(
+                action_context.output_fcap_delta.index_select(0, global_arc_rows)
+                if action_context.output_fcap_delta is not None
+                else None
+            ),
+            need_delays=bool(need_delay_updates),
+            defer_target_queries=True,
+        )
+    else:
+        smooth = SMOOTH_MAX_ENABLED and not _force_hard_pairwise_max_enabled()
+        if not torch.is_grad_enabled() and hasattr(native, "cell_aat_values"):
+            # Value-only pass (exact action trials, diagnostics): skip the
+            # 8x6 LUT Jacobian that _CellAat would materialize for backward.
+            updates = native.cell_aat_values(
+                arcs.long().contiguous(),
+                *(pin.contiguous() for pin in cell_pins),
+                tables,
+                smooth,
+                SMOOTH_MAX_ALPHA,
+            )
+        else:
+            updates = _CellAat.apply(
+                arcs,
+                *cell_pins,
+                tables,
+                smooth,
+                SMOOTH_MAX_ALPHA,
+            )
     outputs = arcs[:, 1]
     lanes = try_timing_lanes_native(
         timing, outputs, pins[:4], tuple(updates[:, i] for i in range(4))

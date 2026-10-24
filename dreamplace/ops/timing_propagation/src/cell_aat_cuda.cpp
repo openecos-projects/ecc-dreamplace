@@ -11,6 +11,11 @@ void cellAatForwardLauncher(const int64_t*, int, int, int,
     TimingLutTable<scalar_t>, TimingLutTable<scalar_t>, TimingLutTable<scalar_t>, TimingLutTable<scalar_t>,
     scalar_t*, scalar_t*, bool, scalar_t, cudaStream_t);
 template <typename scalar_t>
+void cellAatValuesLauncher(const int64_t*, int, int, int,
+    const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*,
+    TimingLutTable<scalar_t>, TimingLutTable<scalar_t>, TimingLutTable<scalar_t>, TimingLutTable<scalar_t>,
+    scalar_t*, bool, scalar_t, cudaStream_t);
+template <typename scalar_t>
 void cellAatBackwardLauncher(const int64_t*, int, const scalar_t*, const scalar_t*,
     scalar_t*, scalar_t*, scalar_t*, scalar_t*, scalar_t*, scalar_t*, int, cudaStream_t);
 template <typename scalar_t>
@@ -62,6 +67,34 @@ std::vector<at::Tensor> cell_aat_forward_cuda(
         updates.data_ptr<scalar_t>(), jac.data_ptr<scalar_t>(), smooth, scalar_t(alpha), stream);
   });
   return {updates, jac};
+}
+
+at::Tensor cell_aat_values_cuda(
+    at::Tensor arcs, at::Tensor ra, at::Tensor fa, at::Tensor rs, at::Tensor fs,
+    at::Tensor rc, at::Tensor fc, std::vector<at::Tensor> tables, bool smooth, double alpha) {
+  requireTensor(arcs, ra, at::kLong);
+  TORCH_CHECK(arcs.dim() == 2 && arcs.size(1) >= 5, "cell AAT arcs need at least five columns");
+  for (const auto& pin : {ra, fa, rs, fs, rc, fc}) {
+    requireTensor(pin, ra, ra.scalar_type());
+    TORCH_CHECK(pin.dim() == 1 && pin.sizes() == ra.sizes(), "cell AAT pin shape mismatch");
+  }
+  TORCH_CHECK(tables.size() == 20 && alpha > 0, "cell AAT LUT/temperature mismatch");
+  for (int i = 0; i < 20; ++i) {
+    requireTensor(tables[i], ra, i % 5 < 3 ? ra.scalar_type() : at::kLong);
+    TORCH_CHECK(tables[i].dim() == (i % 5 < 3 ? 2 : 1), "cell AAT LUT shape mismatch");
+    TORCH_CHECK(tables[i].size(0) == tables[i - i % 5].size(0), "cell AAT LUT row mismatch");
+  }
+  const c10::cuda::CUDAGuard guard(ra.device());
+  auto updates = fullyWrittenCudaTensor({arcs.size(0), 8}, ra.options());
+  const auto stream = c10::cuda::getCurrentCUDAStream(ra.get_device()).stream();
+  AT_DISPATCH_FLOATING_TYPES(ra.scalar_type(), "cellAatValues", [&] {
+    cellAatValuesLauncher<scalar_t>(arcs.data_ptr<int64_t>(), arcs.size(1), arcs.size(0), ra.numel(),
+        ra.data_ptr<scalar_t>(), fa.data_ptr<scalar_t>(), rs.data_ptr<scalar_t>(), fs.data_ptr<scalar_t>(),
+        rc.data_ptr<scalar_t>(), fc.data_ptr<scalar_t>(), table<scalar_t>(tables, 0),
+        table<scalar_t>(tables, 5), table<scalar_t>(tables, 10), table<scalar_t>(tables, 15),
+        updates.data_ptr<scalar_t>(), smooth, scalar_t(alpha), stream);
+  });
+  return updates;
 }
 
 std::vector<at::Tensor> cell_aat_backward_cuda(

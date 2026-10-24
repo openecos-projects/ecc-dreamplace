@@ -116,19 +116,17 @@ def calculate_recovery_rat(timing, pin_rRAT, pin_fRAT, pin_rtran, pin_ftran, sca
     capture_r = pin_rRAT[endpoint_pins] + native_check_r
     capture_f = pin_fRAT[endpoint_pins] + native_check_f
 
-    live_check_r = timing.lut_entry_vectorized(
-        lib_cells,
-        clock_r_slew,
-        pin_rtran[endpoint_pins],
-        lib_arcs,
-        timing.arcs_info.r_check_luts,
+    from .action_check_lut import action_check_values
+
+    check_rows = torch.nonzero(recovery).flatten()
+    context = getattr(timing, "_active_discrete_action_context", None)
+    live_check_r = action_check_values(
+        timing, context, check_rows, torch.zeros_like(check_rows),
+        clock_r_slew, pin_rtran[endpoint_pins],
     )
-    live_check_f = timing.lut_entry_vectorized(
-        lib_cells,
-        clock_f_slew,
-        pin_ftran[endpoint_pins],
-        lib_arcs,
-        timing.arcs_info.f_check_luts,
+    live_check_f = action_check_values(
+        timing, context, check_rows, torch.ones_like(check_rows),
+        clock_f_slew, pin_ftran[endpoint_pins],
     )
     candidates = (capture_r - live_check_r, capture_f - live_check_f)
     valid = (

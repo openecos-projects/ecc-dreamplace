@@ -4941,6 +4941,10 @@ class MacroPlaceDB(object):
 
         self.cell_id_2_libpin_id_start = np.array(
             pydb.cell_id_2_libpin_id_start, dtype=np.int32)
+        self.flat_lib_pin_names = self._pydb_names_as_str_list(
+            pydb,
+            "flat_lib_pin_names",
+        )
         self.pin_2_libpin_offset = np.array(
             pydb.pin_2_libpin_offset, dtype=np.int32)
         if not hasattr(pydb, "flat_lib_pin_offset_x") or not hasattr(pydb, "flat_lib_pin_offset_y"):

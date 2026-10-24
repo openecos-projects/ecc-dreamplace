@@ -16,6 +16,15 @@ std::vector<at::Tensor> hard_scatter_backward_cpu(at::Tensor, at::Tensor, at::Te
     at::Tensor, at::Tensor, at::Tensor, at::Tensor, bool);
 std::vector<at::Tensor> cell_aat_forward_cpu(at::Tensor, at::Tensor, at::Tensor, at::Tensor,
     at::Tensor, at::Tensor, at::Tensor, std::vector<at::Tensor>, bool, double);
+at::Tensor cell_aat_values_cpu(at::Tensor, at::Tensor, at::Tensor, at::Tensor,
+    at::Tensor, at::Tensor, at::Tensor, std::vector<at::Tensor>, bool, double);
+std::vector<at::Tensor> cell_aat_action_values_cpu(at::Tensor, at::Tensor, at::Tensor,
+    at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
+    at::Tensor, std::vector<at::Tensor>, bool, bool, double);
+std::vector<at::Tensor> cell_aat_action_backward_cpu(at::Tensor, at::Tensor, at::Tensor,
+    at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
+    at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
+    std::vector<at::Tensor>, int64_t, bool, double);
 std::vector<at::Tensor> cell_aat_backward_cpu(at::Tensor, at::Tensor, at::Tensor, int64_t,
                                            std::vector<at::Tensor>);
 std::vector<at::Tensor> net_aat_forward_cpu(at::Tensor, at::Tensor, at::Tensor, at::Tensor,
@@ -42,6 +51,11 @@ inline void registerTimingCpu(pybind11::module_& m) {
   m.def("hard_scatter_backward", &hard_scatter_backward_cpu, "Slew max first-order adjoints (CPU)");
   m.def("buffer_indexed_forward", &buffer_lut_indexed_cpu, "Indexed buffer LUT query with 1D extrapolation (CPU)");
   m.def("cell_aat_forward", &cell_aat_forward_cpu, "Fixed-master cell AAT forward (CPU)");
+  m.def("cell_aat_values", &cell_aat_values_cpu, "Fixed-master cell AAT values (CPU)");
+  m.def("cell_aat_action_values", &cell_aat_action_values_cpu,
+        "Fixed-master current plus four discrete target cell AAT values (CPU)");
+  m.def("cell_aat_action_backward", &cell_aat_action_backward_cpu,
+        "Fixed-master four discrete target cell AAT beta gradient (CPU)");
   m.def("cell_aat_backward", &cell_aat_backward_cpu, "Fixed-master cell AAT backward (CPU)",
         pybind11::arg("arcs"), pybind11::arg("jac"), pybind11::arg("gradient"), pybind11::arg("pins"),
         pybind11::arg("groups") = std::vector<at::Tensor>{});

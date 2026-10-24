@@ -1234,7 +1234,7 @@ class PlaceObj(nn.Module):
             warmup_size_interpolated_pin_native_cache(self.data_collections)
 
     def _timing_objective_lane(self):
-        return getattr(self.params, "timing_objective_lane", "timing_only")
+        return getattr(self.params, "timing_objective_lane", "timing_slew_cap")
 
     def _timing_objective_lane_enabled_terms(self):
         lane = self._timing_objective_lane()
@@ -1340,6 +1340,8 @@ class PlaceObj(nn.Module):
         return torch.tensor(0.0, dtype=torch.float32)
 
     def _timing_rc_cap_input_tensor(self, pin_cap_tensor):
+        if getattr(self, "_active_discrete_action_context", None) is not None:
+            return pin_cap_tensor
         if not self._production_fast_loop_enabled():
             return pin_cap_tensor
         if "cap" in self._timing_objective_lane_enabled_terms():
@@ -3101,6 +3103,179 @@ class PlaceObj(nn.Module):
         pin_fcap_base[sizeable_mask] = sized_pin_fcap
         return pin_cap_base, pin_rcap_base, pin_fcap_base
 
+    def _timing_action_mode(self):
+        context = getattr(self, "_active_discrete_action_context", None)
+        if context is not None:
+            return "lut_action"
+        params = getattr(self, "params", None)
+        mode = getattr(params, "timing_action_gradient_mode", "off")
+        return str(mode or "off")
+
+    def _action_target_pin_ids(self, data_collections, context, action_index):
+        pin2node = data_collections.pin2node_map.long()
+        offsets = data_collections.pin_2_libpin_offset.long()
+        safe_nodes = pin2node.clamp(
+            min=0,
+            max=max(int(context.target_cell_ids.shape[0]) - 1, 0),
+        )
+        target_cells = context.target_cell_ids[safe_nodes, action_index].long()
+        starts = data_collections.cell_id_2_libpin_id_start.long()
+        safe_cells = target_cells.clamp(
+            min=0,
+            max=max(int(starts.numel()) - 2, 0),
+        )
+        target_ids = starts[safe_cells] + offsets
+        valid = (pin2node >= 0) & (offsets >= 0) & (target_cells >= 0)
+        valid &= target_cells + 1 < int(starts.numel())
+        valid &= (target_ids >= 0) & (target_ids < starts[safe_cells + 1])
+        valid &= context.valid_instances[safe_nodes, action_index]
+        return target_ids, valid
+
+    def _invalidate_action_instances(
+        self,
+        context,
+        data_collections,
+        action_index,
+        invalid_pins,
+    ):
+        if not bool(invalid_pins.any()):
+            return
+        pin2node = data_collections.pin2node_map.long()
+        nodes = pin2node[invalid_pins]
+        nodes = nodes[
+            (nodes >= 0) & (nodes < int(context.valid_instances.shape[0]))
+        ]
+        if nodes.numel():
+            context.valid_instances[nodes, action_index] = False
+
+    def _apply_discrete_action_pin_caps(
+        self,
+        pin_cap_base,
+        pin_rcap_base,
+        pin_fcap_base,
+        data_collections,
+    ):
+        context = getattr(self, "_active_discrete_action_context", None)
+        if context is None:
+            return pin_cap_base, pin_rcap_base, pin_fcap_base
+        if not int(getattr(self.params, "timing_action_pin_cap_gradient", 1)):
+            return pin_cap_base, pin_rcap_base, pin_fcap_base
+        current_cap, current_rcap, current_fcap = (
+            pin_cap_base, pin_rcap_base, pin_fcap_base
+        )
+        pin2node = data_collections.pin2node_map.long()
+        safe_nodes = pin2node.clamp(
+            min=0,
+            max=max(int(context.beta.shape[0]) - 1, 0),
+        )
+        for action_index, name in enumerate(context.action_names):
+            target_ids, valid = self._action_target_pin_ids(
+                data_collections, context, action_index
+            )
+            safe_target_ids = target_ids.clamp(
+                min=0,
+                max=max(int(data_collections.flat_lib_pin_cap.numel()) - 1, 0),
+            )
+            target_cap = data_collections.flat_lib_pin_cap[safe_target_ids]
+            target_rcap = data_collections.flat_lib_pin_rcap[safe_target_ids]
+            target_fcap = data_collections.flat_lib_pin_fcap[safe_target_ids]
+            in_bounds = (
+                valid
+                & (target_ids >= 0)
+                & (target_ids < int(data_collections.flat_lib_pin_cap.numel()))
+                & (target_ids < int(data_collections.flat_lib_pin_rcap.numel()))
+                & (target_ids < int(data_collections.flat_lib_pin_fcap.numel()))
+            )
+            finite = (
+                torch.isfinite(target_cap)
+                & torch.isfinite(target_rcap)
+                & torch.isfinite(target_fcap)
+            )
+            self._invalidate_action_instances(
+                context,
+                data_collections,
+                action_index,
+                in_bounds & ~finite,
+            )
+            valid = in_bounds & finite
+            delta_cap = target_cap - current_cap
+            delta_rcap = target_rcap - current_rcap
+            delta_fcap = target_fcap - current_fcap
+            weight = context.beta[safe_nodes, action_index] * valid.to(
+                context.beta.dtype
+            )
+            pin_cap_base = pin_cap_base + weight * torch.nan_to_num(delta_cap)
+            pin_rcap_base = pin_rcap_base + weight * torch.nan_to_num(delta_rcap)
+            pin_fcap_base = pin_fcap_base + weight * torch.nan_to_num(delta_fcap)
+        return pin_cap_base, pin_rcap_base, pin_fcap_base
+
+    def _apply_discrete_action_limits(self, slew_limits, cap_limits, data_collections):
+        context = getattr(self, "_active_discrete_action_context", None)
+        if context is None:
+            return slew_limits, cap_limits
+        pin2node = data_collections.pin2node_map.long()
+        safe_nodes = pin2node.clamp(
+            min=0,
+            max=max(int(context.beta.shape[0]) - 1, 0),
+        )
+        if slew_limits is not None:
+            result = slew_limits
+            for action_index in range(len(context.action_names)):
+                target_ids, valid = self._action_target_pin_ids(
+                    data_collections, context, action_index
+                )
+                safe = target_ids.clamp(
+                    min=0,
+                    max=max(int(data_collections.flat_lib_pin_slew_limit.numel()) - 1, 0),
+                )
+                target = data_collections.flat_lib_pin_slew_limit[safe]
+                in_bounds = valid & (
+                    target_ids < int(data_collections.flat_lib_pin_slew_limit.numel())
+                )
+                finite = torch.isfinite(target)
+                self._invalidate_action_instances(
+                    context,
+                    data_collections,
+                    action_index,
+                    in_bounds & ~finite,
+                )
+                valid = in_bounds & finite
+                delta = target - slew_limits
+                weight = context.beta[safe_nodes, action_index] * valid.to(
+                    context.beta.dtype
+                )
+                result = result + weight * torch.nan_to_num(delta)
+            slew_limits = result
+        if cap_limits is not None:
+            result = cap_limits
+            for action_index in range(len(context.action_names)):
+                target_ids, valid = self._action_target_pin_ids(
+                    data_collections, context, action_index
+                )
+                safe = target_ids.clamp(
+                    min=0,
+                    max=max(int(data_collections.flat_lib_pin_cap_limit.numel()) - 1, 0),
+                )
+                target = data_collections.flat_lib_pin_cap_limit[safe]
+                in_bounds = valid & (
+                    target_ids < int(data_collections.flat_lib_pin_cap_limit.numel())
+                )
+                finite = torch.isfinite(target)
+                self._invalidate_action_instances(
+                    context,
+                    data_collections,
+                    action_index,
+                    in_bounds & ~finite,
+                )
+                valid = in_bounds & finite
+                delta = target - cap_limits
+                weight = context.beta[safe_nodes, action_index] * valid.to(
+                    context.beta.dtype
+                )
+                result = result + weight * torch.nan_to_num(delta)
+            cap_limits = result
+        return slew_limits, cap_limits
+
     def pin_caps_op(self, inst_libcell_offset, data_collections):
         (
             self.pin2libpin_flat_ids,
@@ -3115,6 +3290,14 @@ class PlaceObj(nn.Module):
         raw_pin_fcap_base = pin_fcap_base.clone() if enable_pin_cap_weight_debug else None
         pin_cap_base, pin_rcap_base, pin_fcap_base = self._apply_sizing_driven_pin_caps(
             pin_cap_base, pin_rcap_base, pin_fcap_base, data_collections
+        )
+        pin_cap_base, pin_rcap_base, pin_fcap_base = (
+            self._apply_discrete_action_pin_caps(
+                pin_cap_base,
+                pin_rcap_base,
+                pin_fcap_base,
+                data_collections,
+            )
         )
         debug_target_pins = (
             {"FE_DBTC149_n_2224:A"} if enable_pin_cap_weight_debug else set()
@@ -3157,6 +3340,42 @@ class PlaceObj(nn.Module):
         pin_fcap_base[data_collections.end_points] += data_collections.outcaps
         return pin_cap_base, pin_rcap_base, pin_fcap_base
 
+    def _discrete_action_leakage_tensor(self, context=None):
+        cell_leakage = getattr(self.data_collections, "flat_libcell_leakage", None)
+        if cell_leakage is None:
+            return None
+        current_cells = self.data_collections.inst_cell_id.long()
+        safe_current = current_cells.clamp(
+            min=0,
+            max=max(int(cell_leakage.numel()) - 1, 0),
+        )
+        valid_current = (current_cells >= 0) & (
+            current_cells < int(cell_leakage.numel())
+        )
+        base = torch.where(
+            valid_current,
+            cell_leakage[safe_current].to(dtype=cell_leakage.dtype),
+            torch.zeros_like(cell_leakage[safe_current]),
+        )
+        if context is None:
+            return base.clamp(min=0.0).sum()
+        leakage = base
+        for action_index in range(len(context.action_names)):
+            target_cells = context.target_cell_ids[:, action_index].long()
+            safe_target = target_cells.clamp(
+                min=0,
+                max=max(int(cell_leakage.numel()) - 1, 0),
+            )
+            target = cell_leakage[safe_target].to(dtype=base.dtype)
+            valid = context.valid_instances[:, action_index]
+            delta = torch.where(
+                valid,
+                target - base,
+                torch.zeros_like(target),
+            )
+            leakage = leakage + context.beta[:, action_index] * torch.nan_to_num(delta)
+        return leakage.clamp(min=0.0).sum()
+
     def get_total_leakage_tensor(self):
         cell_leakage = getattr(self.data_collections, "flat_libcell_leakage", None)
         if cell_leakage is None:
@@ -3164,6 +3383,16 @@ class PlaceObj(nn.Module):
             if initial_leakage is None:
                 return None
             return initial_leakage.float().clamp(min=0.0).sum()
+        if getattr(self, "_active_discrete_action_context", None) is not None:
+            result = self._discrete_action_leakage_tensor(
+                self._active_discrete_action_context
+            )
+            if result is not None:
+                return result
+        elif self._timing_action_mode() == "lut_action":
+            result = self._discrete_action_leakage_tensor(None)
+            if result is not None:
+                return result
 
         size_var = self.data_collections.get_size_var()
         vt_var = self.data_collections.get_vt_var()
@@ -3283,6 +3512,20 @@ class PlaceObj(nn.Module):
         }
         for field_name in ("wns", "tns", "ws", "ts"):
             snapshot[field_name] = self._timing_metric_to_float(getattr(self, field_name, None))
+
+        balance = getattr(self, "timing_grad_balance_summary", None) or {}
+        snapshot["timing_grad_ratio"] = self._timing_metric_to_float(
+            balance.get("weighted_timing_to_wirelength_grad_ratio")
+        )
+        snapshot["timing_grad_raw_ratio"] = self._timing_metric_to_float(
+            balance.get("timing_to_wirelength_grad_ratio")
+        )
+        snapshot["timing_grad_weight"] = self._timing_metric_to_float(
+            balance.get("weight_applied")
+        )
+        snapshot["timing_grad_target_ratio"] = self._timing_metric_to_float(
+            balance.get("target_ratio")
+        )
 
         timing_op = getattr(self.op_collections, "timing_propagation_op", None)
         if timing_op is None:
@@ -5737,6 +5980,9 @@ class PlaceObj(nn.Module):
             if candidate_activation.is_cuda
             else "native_explicit_autograd"
         )
+        allow_zero_buffer_static_net = bool(
+            getattr(self.params, "timing_zero_buffer_static_net_fast_path", 0)
+        )
         provider_cache_key = (
             "candidate",
             id(payload),
@@ -5744,6 +5990,7 @@ class PlaceObj(nn.Module):
             str(candidate_activation.device),
             str(candidate_activation.dtype),
             candidate_forward_backend,
+            allow_zero_buffer_static_net,
         )
         cached_provider = getattr(self, "_relaxed_buffer_dynamic_net_provider", None)
         if (
@@ -5805,6 +6052,7 @@ class PlaceObj(nn.Module):
             buffer_device_lut=buffer_device_lut,
             forward_backend=candidate_forward_backend,
             affected_net_ids=affected_net_ids,
+            allow_zero_buffer_static_net=allow_zero_buffer_static_net,
         )
         provider.metadata["provider_reused"] = False
         self._relaxed_buffer_dynamic_net_provider = provider
@@ -5817,7 +6065,38 @@ class PlaceObj(nn.Module):
             data_collections.buffer_relaxed_timing_payload = payload
         return provider
 
-    def timing_obj(self, pos, surrogate_mode=None):
+    def timing_obj(self, pos, surrogate_mode=None, discrete_action_context=None):
+        """Evaluate timing while keeping an optional action probe scoped."""
+
+        try:
+            return self._timing_obj_impl(
+                pos,
+                surrogate_mode=surrogate_mode,
+                discrete_action_context=discrete_action_context,
+            )
+        finally:
+            # The action context is consumed by the timing graph, the
+            # pin-cap/limit channels, and leakage.  Keep it alive for the
+            # whole implementation call and clear it even on failure.
+            self._active_discrete_action_context = None
+            op_collections = getattr(self, "op_collections", None)
+            timing_op = (
+                None
+                if op_collections is None
+                else getattr(op_collections, "timing_propagation_op", None)
+            )
+            if timing_op is not None:
+                timing_op._active_discrete_action_context = None
+                sparse_runtime = getattr(timing_op, "_sparse_runtime", None)
+                if sparse_runtime is not None:
+                    sparse_runtime.timing._active_discrete_action_context = None
+
+    def _timing_obj_impl(
+        self,
+        pos,
+        surrogate_mode=None,
+        discrete_action_context=None,
+    ):
         """
         @brief Compute objective and perform detailed timing analysis for debugging.
         @param pos locations of cells
@@ -5825,6 +6104,9 @@ class PlaceObj(nn.Module):
             - mixed/auto/default: clk2q uses LUT, later cell arcs use surrogate when available
             - lut_only: all timing arc evaluations use LUT
             - surrogate_only: all timing arc evaluations use surrogate when available
+        @param discrete_action_context optional zero-valued four-action probe.
+            Presence activates the opt-in LUT action path; absence leaves the
+            ordinary fixed-master behavior unchanged.
         @return objective value
         """
         # ==============================================================================
@@ -5840,6 +6122,7 @@ class PlaceObj(nn.Module):
         profile_record = {
             "iteration": profile_iteration,
             "surrogate_mode": surrogate_mode,
+            "discrete_action_context": discrete_action_context is not None,
             "production_fast_loop": self._production_fast_loop_enabled(),
             "timing_obj_profile_interval": self._timing_obj_profile_interval(),
             "timing_artifact_write_enabled": bool(timing_artifact_enabled),
@@ -5891,7 +6174,19 @@ class PlaceObj(nn.Module):
             surrogate_mode = getattr(self.params, "timing_surrogate_mode", None)
             profile_record["surrogate_mode"] = surrogate_mode
         self._active_timing_surrogate_mode = surrogate_mode
+        self._active_discrete_action_context = discrete_action_context
         timing_op = self.op_collections.timing_propagation_op
+        timing_op._active_discrete_action_context = discrete_action_context
+        sparse_runtime = getattr(timing_op, "_sparse_runtime", None)
+        if sparse_runtime is not None:
+            sparse_runtime.timing._active_discrete_action_context = (
+                discrete_action_context
+            )
+        timing_op._lut_action_placeobj_debug = {
+            "placeobj_id": id(self),
+            "timing_id": id(timing_op),
+            "context_requested": discrete_action_context is not None,
+        }
         previous_log_top_violations = getattr(timing_op, "log_top_violations", True)
         previous_log_stage_progress = getattr(timing_op, "log_stage_progress", True)
         previous_log_violation_shape_mismatch = getattr(
@@ -6037,6 +6332,13 @@ class PlaceObj(nn.Module):
                         "unsupported relaxed_buffer_timing_integration_mode: "
                         f"{integration_mode}"
                     )
+            if (
+                discrete_action_context is not None
+                and int(getattr(self.params, "timing_action_pin_cap_gradient", 1))
+            ):
+                # These pin caps were Elmore inputs, so delay, impulse and
+                # driver load already carry d/dbeta. Do not add that cap again.
+                discrete_action_context.rc_includes_action_cap = True
             timing_kwargs = {
                 "surrogate_mode": surrogate_mode,
                 "dynamic_net_arc_inputs": dynamic_net_arc_inputs,
@@ -6083,6 +6385,12 @@ class PlaceObj(nn.Module):
                         forward_id=live_geometry_forward_id,
                     )
             _profile_add("timing_propagation_ms", profile_stage_start)
+            if discrete_action_context is not None:
+                from dreamplace.ops.timing_propagation.action_cell_aat import (
+                    refresh_action_valid_instances,
+                )
+
+                refresh_action_valid_instances(discrete_action_context)
             write_crash_stage_marker(
                 "timing_obj_timing_propagation_forward",
                 "done",
@@ -6134,7 +6442,16 @@ class PlaceObj(nn.Module):
         profile_record["zero_slew_aux_reuse"]["applied"] = bool(reuse_zero_slew_aux)
         if timing_profile_enabled:
             self.data_collections._size_interpolated_pin_profile_enabled = True
-        if reuse_zero_slew_aux:
+        if self._current_timing_surrogate_mode() == "lut_only":
+            # A legal master owns exact limits. Soft VT probabilities belong
+            # to the surrogate; beta supplies the action interpolation below.
+            slew_limits = (
+                None
+                if reuse_zero_slew_aux
+                else self.data_collections.flat_lib_pin_slew_limit[self.pin2libpin_flat_ids]
+            )
+            cap_limits = self.data_collections.flat_lib_pin_cap_limit[self.pin2libpin_flat_ids]
+        elif reuse_zero_slew_aux:
             cap_limits = compute_size_interpolated_pin_properties(
                 self.data_collections,
                 [self.data_collections.flat_lib_pin_cap_limit],
@@ -6159,6 +6476,11 @@ class PlaceObj(nn.Module):
                 ]
         if cap_limits is None:
             cap_limits = self.data_collections.flat_lib_pin_cap_limit[self.pin2libpin_flat_ids]
+        slew_limits, cap_limits = self._apply_discrete_action_limits(
+            slew_limits,
+            cap_limits,
+            self.data_collections,
+        )
         _profile_add("slew_cap_limit_ms", profile_stage_start)
         if timing_profile_enabled:
             profile_record["size_interpolated_pin_profile"] = dict(

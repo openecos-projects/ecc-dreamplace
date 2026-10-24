@@ -281,7 +281,7 @@ def net_subgraph_forward_relaxed(
                 "bsu_index_status": {"coordinate_source": source},
             }
         return interpolate_buffer_values_by_bsu_index(
-            buffer_state.bsu_index(),
+            buffer_state.bsu_index().to(input_cap),
             per_size_input_cap=input_cap,
             per_size_delay=delay,
             per_size_output_slew=output_slew,
@@ -296,7 +296,7 @@ def net_subgraph_forward_relaxed(
         buffer_state.activation_param
         if getattr(buffer_state, "_shared_gradient_probe", False)
         else buffer_state.candidate_bu()
-    )
+    ).to(kwargs["node_capacitance"])
     upstream_retained_cap = _candidate_upstream_retained_cap(
         edge_capacitance=kwargs.get("edge_capacitance"),
         pin_fa=kwargs["pin_fa"],

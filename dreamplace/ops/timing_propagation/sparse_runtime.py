@@ -72,7 +72,13 @@ class SparseTimingRuntime:
             )
         base = timing.flat_inst_arcs_by_level.detach().cpu().numpy()
         self.schedule = SparseTimingSchedule(
-            view, base, device=timing.device, dtype=timing.dtype, check_mask=check_mask
+            view,
+            base,
+            device=timing.device,
+            dtype=timing.dtype,
+            check_mask=check_mask,
+            aggregation_mode=timing.timing_aggregation_mode,
+            aggregation_tau_ps=timing.timing_aggregation_tau_ps,
         )
         self._dynamic_checks = torch.nonzero(
             self.schedule.legal & (self.schedule.check_index[:, 2] >= 0)
@@ -186,14 +192,64 @@ class SparseTimingRuntime:
             SMOOTH_MAX_ENABLED,
             _force_hard_pairwise_max_enabled,
         )
+        from .action_cell_aat import apply_action_cell_aat
 
         timing = self.timing
         arcs = self._cell_arcs[id(level)]
         clk2q_surrogate, cell_surrogate = self._surrogate_flags
+        action_context = getattr(timing, "_active_discrete_action_context", None)
+        timing._lut_action_runtime_debug = {
+            "timing_id": id(timing),
+            "runtime_id": id(self),
+            "context_seen": action_context is not None,
+            "need_delays": bool(self._need_delays),
+        }
 
         def query(rows, use_surrogate):
             selected = arcs if rows is None else arcs[rows]
+            global_rows = (
+                level.base_cells
+                if rows is None
+                else level.base_cells.index_select(0, rows.to(level.base_cells.device))
+            )
             if not use_surrogate and self._tables is not None:
+                if action_context is not None:
+                    return apply_action_cell_aat(
+                        selected,
+                        (*lanes, *caps),
+                        self._tables,
+                        SMOOTH_MAX_ENABLED and not _force_hard_pairwise_max_enabled(),
+                        SMOOTH_MAX_ALPHA,
+                        target_arc_ids=action_context.target_arc_ids.index_select(
+                            0, global_rows
+                        ),
+                        target_senses=action_context.target_senses.index_select(
+                            0, global_rows
+                        ),
+                        valid_arcs=action_context.valid_arcs.index_select(
+                            0, global_rows
+                        ),
+                        inst_ids=action_context.inst_ids.index_select(0, global_rows),
+                        beta=action_context.beta,
+                        context=action_context,
+                        global_rows=global_rows,
+                        cap_delta_r=(
+                            action_context.output_rcap_delta.index_select(
+                                0, global_rows
+                            )
+                            if action_context.output_rcap_delta is not None
+                            else None
+                        ),
+                        cap_delta_f=(
+                            action_context.output_fcap_delta.index_select(
+                                0, global_rows
+                            )
+                            if action_context.output_fcap_delta is not None
+                            else None
+                        ),
+                        need_delays=bool(self._need_delays),
+                        defer_target_queries=True,
+                    )
                 return _CellAat.apply(
                     selected,
                     *lanes,
@@ -201,6 +257,11 @@ class SparseTimingRuntime:
                     self._tables,
                     SMOOTH_MAX_ENABLED and not _force_hard_pairwise_max_enabled(),
                     SMOOTH_MAX_ALPHA,
+                )
+            if action_context is not None:
+                raise RuntimeError(
+                    "lut_action requires the fixed-master native cell LUT path; "
+                    "surrogate target queries are not supported"
                 )
             result = query_cell_aat_updates(
                 timing,
@@ -245,14 +306,14 @@ class SparseTimingRuntime:
         if not dynamic.numel():
             return checks
         indices = model.check_index[dynamic]
-        arcs = timing.endpoints_timing_check_arcs[indices[:, 2]]
         slew = torch.stack(lanes[2:], dim=1)[indices[:, 0], indices[:, 3]]
         clock_slew = model.check_values[dynamic, 2]
-        values = tuple(
-            timing.lut_entry_vectorized(arcs[:, 2], clock_slew, slew, arcs[:, 3], info)
-            for info in (timing.arcs_info.r_check_luts, timing.arcs_info.f_check_luts)
+        from .action_check_lut import action_check_values
+
+        checks[dynamic] = action_check_values(
+            timing, getattr(timing, "_active_discrete_action_context", None),
+            indices[:, 2], indices[:, 3], clock_slew, slew,
         )
-        checks[dynamic] = torch.where(indices[:, 3] == 0, *values)
         return checks
 
     def forward(
@@ -290,6 +351,8 @@ class SparseTimingRuntime:
             )
         profiler.mark("dynamic_snapshot_ms")
         self._active_stage_profiler = profiler if profiler.enabled else None
+        action_context = getattr(timing, "_active_discrete_action_context", None)
+        model.discrete_action_context = action_context
         try:
             lanes = model.propagate(
                 (),
@@ -314,6 +377,7 @@ class SparseTimingRuntime:
             )
         finally:
             self._active_stage_profiler = None
+            model.discrete_action_context = None
         profiler.mark("schedule_propagate_ms")
         timing.virtual_buffer_drv = (
             None
@@ -419,5 +483,10 @@ class SparseTimingRuntime:
             }
         )
         wns, tns, worst = endpoint_metrics(result.endpoint_slack, caps[0].sum() * 0)
+        action_context = getattr(timing, "_active_discrete_action_context", None)
+        if action_context is not None:
+            from .action_cell_aat import refresh_action_valid_instances
+
+            refresh_action_valid_instances(action_context)
         timing._end_forward_runtime_state()
         return wns, tns, worst, 0

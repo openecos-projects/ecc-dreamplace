@@ -19,6 +19,17 @@ __global__ void cellForward(
 }
 
 template <typename scalar_t>
+__global__ void cellValues(
+    const int64_t* arcs, int columns, int count, int pins,
+    const scalar_t* ra, const scalar_t* fa, const scalar_t* rs, const scalar_t* fs,
+    const scalar_t* rc, const scalar_t* fc, TimingLutTable<scalar_t> rd,
+    TimingLutTable<scalar_t> fd, TimingLutTable<scalar_t> rt, TimingLutTable<scalar_t> ft,
+    scalar_t* updates, bool smooth, scalar_t alpha) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < count) cellValueRow<scalar_t>(i, arcs, columns, count, pins, ra, fa, rs, fs, rc, fc, rd, fd, rt, ft, updates, smooth, alpha);
+}
+
+template <typename scalar_t>
 __global__ void cellBackward(
     const int64_t* arcs, int columns, const scalar_t* jac, const scalar_t* gradient,
     scalar_t* ra, scalar_t* fa, scalar_t* rs, scalar_t* fs, scalar_t* rc, scalar_t* fc,
@@ -62,6 +73,20 @@ void cellAatForwardLauncher(
 }
 
 template <typename scalar_t>
+void cellAatValuesLauncher(
+    const int64_t* arcs, int columns, int count, int pins,
+    const scalar_t* ra, const scalar_t* fa, const scalar_t* rs, const scalar_t* fs,
+    const scalar_t* rc, const scalar_t* fc, TimingLutTable<scalar_t> rd,
+    TimingLutTable<scalar_t> fd, TimingLutTable<scalar_t> rt, TimingLutTable<scalar_t> ft,
+    scalar_t* updates, bool smooth, scalar_t alpha, cudaStream_t stream) {
+  if (count == 0) return;
+  cellValues<scalar_t><<<(count + 127) / 128, 128, 0, stream>>>(
+      arcs, columns, count, pins, ra, fa, rs, fs, rc, fc, rd, fd, rt, ft,
+      updates, smooth, alpha);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+template <typename scalar_t>
 void cellAatBackwardLauncher(
     const int64_t* arcs, int columns, const scalar_t* jac, const scalar_t* gradient,
     scalar_t* ra, scalar_t* fa, scalar_t* rs, scalar_t* fs, scalar_t* rc, scalar_t* fc,
@@ -91,6 +116,10 @@ void cellAatGroupedBackwardLauncher(
       const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*, \
       TimingLutTable<scalar_t>, TimingLutTable<scalar_t>, TimingLutTable<scalar_t>, TimingLutTable<scalar_t>, \
       scalar_t*, scalar_t*, bool, scalar_t, cudaStream_t); \
+  template void cellAatValuesLauncher<scalar_t>(const int64_t*, int, int, int, \
+      const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*, \
+      TimingLutTable<scalar_t>, TimingLutTable<scalar_t>, TimingLutTable<scalar_t>, TimingLutTable<scalar_t>, \
+      scalar_t*, bool, scalar_t, cudaStream_t); \
   template void cellAatBackwardLauncher<scalar_t>(const int64_t*, int, const scalar_t*, const scalar_t*, \
       scalar_t*, scalar_t*, scalar_t*, scalar_t*, scalar_t*, scalar_t*, int, cudaStream_t); \
   template void cellAatGroupedBackwardLauncher<scalar_t>(const int64_t*, const int64_t*, \

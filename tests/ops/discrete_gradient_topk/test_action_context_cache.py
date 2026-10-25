@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
-
 from dreamplace.ops.discrete_gradient_topk.quad_gradient_topk import (
     ACTION_NAMES,
     QuadCandidateTable,
@@ -97,3 +97,59 @@ def test_context_cache_reuses_detached_tables_without_sharing_mutable_masks():
     assert third.mapping_summary["cache_hit"] is False
     assert third.mapping_summary["output_buffer_reused"] is True
     assert not torch.equal(third.target_cell_ids, second.target_cell_ids)
+
+
+def test_context_validation_covers_drive_load_index_devices():
+    data = _data()
+    candidates = QuadCandidateTable(
+        target_cell_ids=torch.tensor(
+            [[1, -1, 2, -1], [-1, 0, 3, 2], [3, -1, -1, 0], [-1, 2, -1, 1]]
+        )
+    )
+    context = build_discrete_action_context(
+        data,
+        candidates,
+        action_names=ACTION_NAMES,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+        drive_load_feedback=True,
+    )
+    context.drive_load_node = torch.empty(1, dtype=torch.long, device="meta")
+
+    with pytest.raises(ValueError, match="drive_load_node device mismatch"):
+        context.validate(device=torch.device("cpu"), dtype=torch.float32)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_context_moves_cpu_metadata_indices_to_runtime_cuda_device():
+    data = _data()
+    candidates = QuadCandidateTable(
+        target_cell_ids=torch.tensor(
+            [[1, -1, 2, -1], [-1, 0, 3, 2], [3, -1, -1, 0], [-1, 2, -1, 1]]
+        )
+    )
+    context = build_discrete_action_context(
+        data,
+        candidates,
+        action_names=ACTION_NAMES,
+        dtype=torch.float32,
+        device=torch.device("cuda"),
+        drive_load_feedback=True,
+    )
+
+    for name in (
+        "beta",
+        "target_arc_ids",
+        "target_senses",
+        "valid_arcs",
+        "inst_ids",
+        "drive_load_rcap",
+        "drive_load_fcap",
+        "drive_load_node",
+        "drive_load_pin_net",
+        "drive_load_driver_mask",
+    ):
+        assert getattr(context, name).device.type == "cuda"
+
+    cap = torch.zeros(4, device="cuda", dtype=torch.float32)
+    context.apply_drive_load(cap, cap.clone())

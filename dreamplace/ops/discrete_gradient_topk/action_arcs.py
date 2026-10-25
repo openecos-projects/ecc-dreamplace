@@ -188,6 +188,7 @@ def build_action_arc_table(
     pin_names=None,
     runtime_arcs=None,
     output_cache=None,
+    device=None,
 ):
     """Build target rows for every active runtime arc and action."""
 
@@ -211,17 +212,19 @@ def build_action_arc_table(
             "lut_action requires missing runtime tensors: " + ", ".join(missing)
         )
 
-    device = data.inst_cell_id.device
+    device = torch.device(
+        data.inst_cell_id.device if device is None else device
+    )
     num_actions = len(action_names)
     num_instances = int(data.inst_cell_id.numel())
     arcs = (
         data.flat_inst_arcs_by_level if runtime_arcs is None else runtime_arcs
-    ).long()
+    ).to(device=device, dtype=torch.long)
     if arcs.ndim != 2 or int(arcs.shape[1]) < 5:
         raise RuntimeError("flat_inst_arcs_by_level must have at least five columns")
     num_arcs = int(arcs.shape[0])
 
-    current_cells = data.inst_cell_id.long()
+    current_cells = data.inst_cell_id.to(device=device, dtype=torch.long)
     targets_started_at = time.perf_counter()
     candidate_count = int(candidate_table.target_cell_ids.shape[0])
     safe_current = current_cells.clamp(
@@ -231,7 +234,9 @@ def build_action_arc_table(
     valid_current = (current_cells >= 0) & (
         current_cells < candidate_count
     )
-    targets = candidate_table.target_cell_ids.to(device=device)[safe_current]
+    targets = candidate_table.target_cell_ids.to(
+        device=device, dtype=torch.long
+    )[safe_current]
     target_cells = torch.where(
         valid_current.unsqueeze(1),
         targets,
@@ -255,7 +260,7 @@ def build_action_arc_table(
                 data.flat_libcell_info.device
             ),
             3,
-        ].long()
+        ].to(device=device, dtype=torch.long)
         allowed = (target_vts >= 0) & (target_vts < int(vt_mask.shape[1]))
         target_valid[instance_rows, action_index] &= allowed
         if bool(allowed.any()):
@@ -265,7 +270,7 @@ def build_action_arc_table(
                 target_vts[allowed],
             ]
 
-    pin2node = data.pin2node_map.long()
+    pin2node = data.pin2node_map.to(device=device, dtype=torch.long)
     output_pins = arcs[:, 1].long()
     safe_output_pins = output_pins.clamp(
         min=0,

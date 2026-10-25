@@ -1365,7 +1365,10 @@ class CellModeling(nn.Module):
                     mt_sub * vt_available.shape[1]
                     + ao_sub
                 )
-                available = state["_vt_available_flat"].index_select(
+                flat_vt_available = state["_vt_available_flat"].to(
+                    device=mt.device
+                )
+                available = flat_vt_available.index_select(
                     0, base_indices
                 ).reshape(-1, vt_available.shape[2])
                 support[arc_mask] = available.any(dim=1) & valid_indices

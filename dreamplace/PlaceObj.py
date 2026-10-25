@@ -3112,14 +3112,23 @@ class PlaceObj(nn.Module):
         return str(mode or "off")
 
     def _action_target_pin_ids(self, data_collections, context, action_index):
-        pin2node = data_collections.pin2node_map.long()
-        offsets = data_collections.pin_2_libpin_offset.long()
+        device = context.beta.device
+        pin2node = data_collections.pin2node_map.to(
+            device=device, dtype=torch.long
+        )
+        offsets = data_collections.pin_2_libpin_offset.to(
+            device=device, dtype=torch.long
+        )
         safe_nodes = pin2node.clamp(
             min=0,
             max=max(int(context.target_cell_ids.shape[0]) - 1, 0),
         )
-        target_cells = context.target_cell_ids[safe_nodes, action_index].long()
-        starts = data_collections.cell_id_2_libpin_id_start.long()
+        target_cells = context.target_cell_ids.to(device=device)[
+            safe_nodes, action_index
+        ].long()
+        starts = data_collections.cell_id_2_libpin_id_start.to(
+            device=device, dtype=torch.long
+        )
         safe_cells = target_cells.clamp(
             min=0,
             max=max(int(starts.numel()) - 2, 0),
@@ -3128,7 +3137,7 @@ class PlaceObj(nn.Module):
         valid = (pin2node >= 0) & (offsets >= 0) & (target_cells >= 0)
         valid &= target_cells + 1 < int(starts.numel())
         valid &= (target_ids >= 0) & (target_ids < starts[safe_cells + 1])
-        valid &= context.valid_instances[safe_nodes, action_index]
+        valid &= context.valid_instances.to(device=device)[safe_nodes, action_index]
         return target_ids, valid
 
     def _invalidate_action_instances(
@@ -3140,8 +3149,11 @@ class PlaceObj(nn.Module):
     ):
         if not bool(invalid_pins.any()):
             return
-        pin2node = data_collections.pin2node_map.long()
-        nodes = pin2node[invalid_pins]
+        device = context.beta.device
+        pin2node = data_collections.pin2node_map.to(
+            device=device, dtype=torch.long
+        )
+        nodes = pin2node[invalid_pins.to(device=device)]
         nodes = nodes[
             (nodes >= 0) & (nodes < int(context.valid_instances.shape[0]))
         ]
@@ -3160,10 +3172,22 @@ class PlaceObj(nn.Module):
             return pin_cap_base, pin_rcap_base, pin_fcap_base
         if not int(getattr(self.params, "timing_action_pin_cap_gradient", 1)):
             return pin_cap_base, pin_rcap_base, pin_fcap_base
-        current_cap, current_rcap, current_fcap = (
-            pin_cap_base, pin_rcap_base, pin_fcap_base
+        device = context.beta.device
+        current_cap, current_rcap, current_fcap = tuple(
+            value.to(device=device)
+            for value in (pin_cap_base, pin_rcap_base, pin_fcap_base)
         )
-        pin2node = data_collections.pin2node_map.long()
+        pin_cap_base, pin_rcap_base, pin_fcap_base = (
+            current_cap,
+            current_rcap,
+            current_fcap,
+        )
+        flat_lib_pin_cap = data_collections.flat_lib_pin_cap.to(device=device)
+        flat_lib_pin_rcap = data_collections.flat_lib_pin_rcap.to(device=device)
+        flat_lib_pin_fcap = data_collections.flat_lib_pin_fcap.to(device=device)
+        pin2node = data_collections.pin2node_map.to(
+            device=device, dtype=torch.long
+        )
         safe_nodes = pin2node.clamp(
             min=0,
             max=max(int(context.beta.shape[0]) - 1, 0),
@@ -3174,17 +3198,17 @@ class PlaceObj(nn.Module):
             )
             safe_target_ids = target_ids.clamp(
                 min=0,
-                max=max(int(data_collections.flat_lib_pin_cap.numel()) - 1, 0),
+                max=max(int(flat_lib_pin_cap.numel()) - 1, 0),
             )
-            target_cap = data_collections.flat_lib_pin_cap[safe_target_ids]
-            target_rcap = data_collections.flat_lib_pin_rcap[safe_target_ids]
-            target_fcap = data_collections.flat_lib_pin_fcap[safe_target_ids]
+            target_cap = flat_lib_pin_cap[safe_target_ids]
+            target_rcap = flat_lib_pin_rcap[safe_target_ids]
+            target_fcap = flat_lib_pin_fcap[safe_target_ids]
             in_bounds = (
                 valid
                 & (target_ids >= 0)
-                & (target_ids < int(data_collections.flat_lib_pin_cap.numel()))
-                & (target_ids < int(data_collections.flat_lib_pin_rcap.numel()))
-                & (target_ids < int(data_collections.flat_lib_pin_fcap.numel()))
+                & (target_ids < int(flat_lib_pin_cap.numel()))
+                & (target_ids < int(flat_lib_pin_rcap.numel()))
+                & (target_ids < int(flat_lib_pin_fcap.numel()))
             )
             finite = (
                 torch.isfinite(target_cap)
@@ -3213,12 +3237,22 @@ class PlaceObj(nn.Module):
         context = getattr(self, "_active_discrete_action_context", None)
         if context is None:
             return slew_limits, cap_limits
-        pin2node = data_collections.pin2node_map.long()
+        device = context.beta.device
+        if slew_limits is not None:
+            slew_limits = slew_limits.to(device=device)
+        if cap_limits is not None:
+            cap_limits = cap_limits.to(device=device)
+        pin2node = data_collections.pin2node_map.to(
+            device=device, dtype=torch.long
+        )
         safe_nodes = pin2node.clamp(
             min=0,
             max=max(int(context.beta.shape[0]) - 1, 0),
         )
         if slew_limits is not None:
+            flat_lib_pin_slew_limit = data_collections.flat_lib_pin_slew_limit.to(
+                device=device
+            )
             result = slew_limits
             for action_index in range(len(context.action_names)):
                 target_ids, valid = self._action_target_pin_ids(
@@ -3226,11 +3260,11 @@ class PlaceObj(nn.Module):
                 )
                 safe = target_ids.clamp(
                     min=0,
-                    max=max(int(data_collections.flat_lib_pin_slew_limit.numel()) - 1, 0),
+                    max=max(int(flat_lib_pin_slew_limit.numel()) - 1, 0),
                 )
-                target = data_collections.flat_lib_pin_slew_limit[safe]
+                target = flat_lib_pin_slew_limit[safe]
                 in_bounds = valid & (
-                    target_ids < int(data_collections.flat_lib_pin_slew_limit.numel())
+                    target_ids < int(flat_lib_pin_slew_limit.numel())
                 )
                 finite = torch.isfinite(target)
                 self._invalidate_action_instances(
@@ -3247,6 +3281,9 @@ class PlaceObj(nn.Module):
                 result = result + weight * torch.nan_to_num(delta)
             slew_limits = result
         if cap_limits is not None:
+            flat_lib_pin_cap_limit = data_collections.flat_lib_pin_cap_limit.to(
+                device=device
+            )
             result = cap_limits
             for action_index in range(len(context.action_names)):
                 target_ids, valid = self._action_target_pin_ids(
@@ -3254,11 +3291,11 @@ class PlaceObj(nn.Module):
                 )
                 safe = target_ids.clamp(
                     min=0,
-                    max=max(int(data_collections.flat_lib_pin_cap_limit.numel()) - 1, 0),
+                    max=max(int(flat_lib_pin_cap_limit.numel()) - 1, 0),
                 )
-                target = data_collections.flat_lib_pin_cap_limit[safe]
+                target = flat_lib_pin_cap_limit[safe]
                 in_bounds = valid & (
-                    target_ids < int(data_collections.flat_lib_pin_cap_limit.numel())
+                    target_ids < int(flat_lib_pin_cap_limit.numel())
                 )
                 finite = torch.isfinite(target)
                 self._invalidate_action_instances(
@@ -3331,20 +3368,32 @@ class PlaceObj(nn.Module):
                 float(raw_pin_fcap_base[global_pin_id].item()),
                 float(pin_fcap_base[global_pin_id].item()),
             )
+        if getattr(self, "_active_discrete_action_context", None) is not None:
+            self.inst_pins_mask = self.inst_pins_mask.to(device=pin_cap_base.device)
         self.output_pin_mask = self.inst_pins_mask & (pin_cap_base == 0)
 
         # fill in the pin capacitance for non-pin nodes
         non_inst_pins_mask = ~self.inst_pins_mask
-        pin_cap_base[data_collections.end_points] += data_collections.outcaps
-        pin_rcap_base[data_collections.end_points] += data_collections.outcaps
-        pin_fcap_base[data_collections.end_points] += data_collections.outcaps
+        end_points = data_collections.end_points.to(device=pin_cap_base.device)
+        outcaps = data_collections.outcaps.to(device=pin_cap_base.device)
+        pin_cap_base[end_points] += outcaps
+        pin_rcap_base[end_points] += outcaps
+        pin_fcap_base[end_points] += outcaps
         return pin_cap_base, pin_rcap_base, pin_fcap_base
 
     def _discrete_action_leakage_tensor(self, context=None):
         cell_leakage = getattr(self.data_collections, "flat_libcell_leakage", None)
         if cell_leakage is None:
             return None
-        current_cells = self.data_collections.inst_cell_id.long()
+        device = (
+            context.beta.device
+            if context is not None
+            else cell_leakage.device
+        )
+        cell_leakage = cell_leakage.to(device=device)
+        current_cells = self.data_collections.inst_cell_id.to(
+            device=device, dtype=torch.long
+        )
         safe_current = current_cells.clamp(
             min=0,
             max=max(int(cell_leakage.numel()) - 1, 0),
@@ -3361,19 +3410,21 @@ class PlaceObj(nn.Module):
             return base.clamp(min=0.0).sum()
         leakage = base
         for action_index in range(len(context.action_names)):
-            target_cells = context.target_cell_ids[:, action_index].long()
+            target_cells = context.target_cell_ids.to(device=device)[
+                :, action_index
+            ].long()
             safe_target = target_cells.clamp(
                 min=0,
                 max=max(int(cell_leakage.numel()) - 1, 0),
             )
             target = cell_leakage[safe_target].to(dtype=base.dtype)
-            valid = context.valid_instances[:, action_index]
+            valid = context.valid_instances.to(device=device)[:, action_index]
             delta = torch.where(
                 valid,
                 target - base,
                 torch.zeros_like(target),
             )
-            leakage = leakage + context.beta[:, action_index] * torch.nan_to_num(delta)
+            leakage = leakage + context.beta.to(device=device)[:, action_index] * torch.nan_to_num(delta)
         return leakage.clamp(min=0.0).sum()
 
     def get_total_leakage_tensor(self):
@@ -6445,12 +6496,18 @@ class PlaceObj(nn.Module):
         if self._current_timing_surrogate_mode() == "lut_only":
             # A legal master owns exact limits. Soft VT probabilities belong
             # to the surrogate; beta supplies the action interpolation below.
+            slew_limit_table = self.data_collections.flat_lib_pin_slew_limit
+            cap_limit_table = self.data_collections.flat_lib_pin_cap_limit
             slew_limits = (
                 None
                 if reuse_zero_slew_aux
-                else self.data_collections.flat_lib_pin_slew_limit[self.pin2libpin_flat_ids]
+                else slew_limit_table[
+                    self.pin2libpin_flat_ids.to(device=slew_limit_table.device)
+                ]
             )
-            cap_limits = self.data_collections.flat_lib_pin_cap_limit[self.pin2libpin_flat_ids]
+            cap_limits = cap_limit_table[
+                self.pin2libpin_flat_ids.to(device=cap_limit_table.device)
+            ]
         elif reuse_zero_slew_aux:
             cap_limits = compute_size_interpolated_pin_properties(
                 self.data_collections,
@@ -6471,11 +6528,15 @@ class PlaceObj(nn.Module):
                 pin_mask=aux_limit_pin_mask,
             )
             if slew_limits is None:
-                slew_limits = self.data_collections.flat_lib_pin_slew_limit[
-                    self.pin2libpin_flat_ids
+                slew_limit_table = self.data_collections.flat_lib_pin_slew_limit
+                slew_limits = slew_limit_table[
+                    self.pin2libpin_flat_ids.to(device=slew_limit_table.device)
                 ]
         if cap_limits is None:
-            cap_limits = self.data_collections.flat_lib_pin_cap_limit[self.pin2libpin_flat_ids]
+            cap_limit_table = self.data_collections.flat_lib_pin_cap_limit
+            cap_limits = cap_limit_table[
+                self.pin2libpin_flat_ids.to(device=cap_limit_table.device)
+            ]
         slew_limits, cap_limits = self._apply_discrete_action_limits(
             slew_limits,
             cap_limits,

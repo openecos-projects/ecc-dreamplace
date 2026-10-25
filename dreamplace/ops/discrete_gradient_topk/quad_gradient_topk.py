@@ -756,12 +756,16 @@ def apply_quad_gradient_from_action_scores(
     changed_rows = torch.nonzero(changed, as_tuple=False).flatten()
     changed_actions = best_actions[changed_rows]
     changed_targets = targets[changed_rows, changed_actions]
+    target_lookup_rows = changed_targets.to(
+        device=data_collections.flat_libcell_info.device,
+        dtype=torch.long,
+    )
     changed_sizes = data_collections.flat_libcell_info[
-        changed_targets, 2
-    ].to(dtype=size_logits.dtype)
+        target_lookup_rows, 2
+    ].to(device=size_logits.device, dtype=size_logits.dtype)
     changed_vts = data_collections.flat_libcell_info[
-        changed_targets, 3
-    ].long()
+        target_lookup_rows, 3
+    ].to(device=vt_logits.device, dtype=torch.long)
 
     next_size = size_logits.detach().clone()
     next_vt = vt_logits.detach().clone()
@@ -771,11 +775,15 @@ def apply_quad_gradient_from_action_scores(
             if size_parameterization == "real_size"
             else sizes_to_logits(
                 changed_sizes,
-                data_collections.inst_size_lower[changed_rows].to(
+                data_collections.inst_size_lower[
+                    changed_rows.to(device=data_collections.inst_size_lower.device)
+                ].to(
                     device=size_logits.device,
                     dtype=size_logits.dtype,
                 ),
-                data_collections.inst_size_upper[changed_rows].to(
+                data_collections.inst_size_upper[
+                    changed_rows.to(device=data_collections.inst_size_upper.device)
+                ].to(
                     device=size_logits.device,
                     dtype=size_logits.dtype,
                 ),

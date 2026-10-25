@@ -44,6 +44,9 @@ class DiscreteActionContext:
     action_cell_aat_calls: int = 0
 
     def validate(self, *, device, dtype):
+        device = torch.device(device)
+        if device.type == "cuda" and device.index is None:
+            device = torch.device("cuda", torch.cuda.current_device())
         if self.beta.ndim != 2 or int(self.beta.shape[1]) != len(self.action_names):
             raise ValueError("discrete action beta must have shape [N, 4]")
         if self.beta.device != device or self.beta.dtype != dtype:
@@ -52,18 +55,51 @@ class DiscreteActionContext:
                 f"beta={self.beta.device}/{self.beta.dtype}, "
                 f"timing={device}/{dtype}"
             )
-        for name in (
-            "valid_instances",
-            "target_cell_ids",
-            "target_arc_ids",
-            "valid_arcs",
-            "target_senses",
-        ):
+        def check_tensor(name, *, expected_dtype=None, required=False):
             value = getattr(self, name)
+            if value is None:
+                if required:
+                    raise ValueError(f"discrete action {name} is required")
+                return
+            if not torch.is_tensor(value):
+                raise ValueError(f"discrete action {name} must be a tensor")
             if value.device != device:
                 raise ValueError(
                     f"discrete action {name} device mismatch: {value.device} != {device}"
                 )
+            if expected_dtype is not None and value.dtype != expected_dtype:
+                raise ValueError(
+                    f"discrete action {name} dtype mismatch: "
+                    f"{value.dtype} != {expected_dtype}"
+                )
+
+        for name, expected_dtype in (
+            ("valid_instances", torch.bool),
+            ("target_cell_ids", torch.long),
+            ("target_arc_ids", torch.long),
+            ("valid_arcs", torch.bool),
+            ("target_senses", torch.long),
+            ("inst_ids", torch.long),
+        ):
+            check_tensor(name, expected_dtype=expected_dtype, required=True)
+        for name, expected_dtype in (
+            ("check_target_arc_ids", torch.long),
+            ("check_inst_ids", torch.long),
+            ("constraint_target_arc_ids", torch.long),
+            ("constraint_inst_ids", torch.long),
+            ("current_cell_ids", torch.long),
+            ("drive_load_node", torch.long),
+            ("drive_load_pin_net", torch.long),
+            ("drive_load_driver_mask", torch.bool),
+        ):
+            check_tensor(name, expected_dtype=expected_dtype)
+        for name in (
+            "output_rcap_delta",
+            "output_fcap_delta",
+            "drive_load_rcap",
+            "drive_load_fcap",
+        ):
+            check_tensor(name, expected_dtype=dtype)
         if self.valid_instances.shape != self.beta.shape:
             raise ValueError("valid_instances shape must match beta")
         if self.target_arc_ids.shape != self.valid_arcs.shape:
@@ -137,17 +173,19 @@ def _drive_load_tables(data, table, *, device, dtype):
     load of every net is obtained by scattering these onto ``pin2net``.
     """
 
-    arcs = data.flat_inst_arcs_by_level.long()
+    arcs = data.flat_inst_arcs_by_level.to(device=device, dtype=torch.long)
     in_pins = arcs[:, 0].clamp(min=0)
-    inst = table.inst_ids.long()
+    inst = table.inst_ids.to(device=device, dtype=torch.long)
     num_actions = int(table.valid_arcs.shape[1])
-    num_pins = int(data.pin2net_map.numel())
+    pin2net_map = data.pin2net_map.to(device=device, dtype=torch.long)
+    num_pins = int(pin2net_map.numel())
     safe_inst = inst.clamp(min=0)
-    targets = table.target_cell_ids[safe_inst].long()
-    starts = data.cell_id_2_libpin_id_start.long()
-    offsets = data.pin_2_libpin_offset[in_pins].long()
+    targets = table.target_cell_ids.to(device=device)[safe_inst].long()
+    starts = data.cell_id_2_libpin_id_start.to(device=device, dtype=torch.long)
+    offsets = data.pin_2_libpin_offset.to(device=device, dtype=torch.long)[in_pins]
     target_pins = starts[targets.clamp(min=0)] + offsets.unsqueeze(1)
-    current_pins = (starts[data.inst_cell_id[safe_inst].long()] + offsets).unsqueeze(1)
+    current_cells = data.inst_cell_id.to(device=device, dtype=torch.long)
+    current_pins = (starts[current_cells[safe_inst]] + offsets).unsqueeze(1)
     valid = table.valid_instances[safe_inst] & (inst >= 0).unsqueeze(1) & (targets >= 0)
 
     def one(pin_table):
@@ -268,6 +306,7 @@ def build_discrete_action_context(
             action_names=action_names,
             pin_names=pin_names,
             output_cache=output_cache,
+            device=device,
         )
         endpoint_tables = {}
         for kind, attribute in (
@@ -284,6 +323,7 @@ def build_discrete_action_context(
                 pin_names=pin_names,
                 runtime_arcs=endpoint_arcs,
                 output_cache=output_cache,
+                device=device,
             )
             has_checks = torch.zeros(
                 table.valid_instances.shape[0], dtype=torch.bool, device=device
@@ -348,10 +388,15 @@ def build_discrete_action_context(
             drive_rcap, drive_fcap = _drive_load_tables(
                 data, table, device=device, dtype=dtype
             )
-            drive_node = data.pin2node_map.long()
-            drive_pin_net = data.pin2net_map.long().clamp(min=0)
+            drive_node = data.pin2node_map.to(device=device, dtype=torch.long)
+            drive_pin_net = data.pin2net_map.to(
+                device=device, dtype=torch.long
+            ).clamp(min=0)
             drive_net_count = max(int(drive_pin_net.max().item()) + 1, 1)
-            driver_of_pin = data.net2driver_pin_map.long()[drive_pin_net]
+            net2driver_pin_map = data.net2driver_pin_map.to(
+                device=device, dtype=torch.long
+            )
+            driver_of_pin = net2driver_pin_map[drive_pin_net]
             drive_driver_mask = driver_of_pin == torch.arange(
                 int(drive_pin_net.numel()), device=driver_of_pin.device
             )
@@ -383,7 +428,9 @@ def build_discrete_action_context(
         action_names=tuple(action_names),
         topology_key=topology_key,
         mapping_summary=copy.deepcopy(table.summary),
-        current_cell_ids=data.inst_cell_id.detach().clone(),
+        current_cell_ids=data.inst_cell_id.detach().to(
+            device=device, dtype=torch.long
+        ).clone(),
         drive_load_rcap=drive_rcap,
         drive_load_fcap=drive_fcap,
         drive_load_node=drive_node,

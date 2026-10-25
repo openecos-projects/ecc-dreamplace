@@ -221,6 +221,8 @@ class DiscreteTimingOwner:
 
     def _action_loss(self, model, pos):
         map_started_at = time.perf_counter()
+        timing_op = self.ops.timing_propagation_op
+        action_device = torch.device(getattr(timing_op, "device", pos.device))
         context = build_discrete_action_context(
             self.data,
             self.candidates,
@@ -229,7 +231,7 @@ class DiscreteTimingOwner:
                 getattr(self.data, "flat_lib_pin_names", None)
                 or getattr(self.placedb, "flat_lib_pin_names", None)
             ),
-            device=torch.device(pos.device),
+            device=action_device,
             dtype=pos.dtype,
             requires_grad=True,
             load_delta=bool(

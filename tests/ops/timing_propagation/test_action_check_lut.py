@@ -121,3 +121,39 @@ def test_check_master_and_data_slew_share_the_same_beta(transition, frontend):
         step[0, a] = 1e-6
         numerical[0, a] = (forward(step) - forward(-step)) / 2e-6
     torch.testing.assert_close(gradient, numerical, atol=1e-8, rtol=0.0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_check_values_moves_cpu_rows_to_lut_device():
+    device = torch.device("cuda")
+    timing = SimpleNamespace(
+        endpoints_timing_check_arcs=torch.tensor(
+            [[0, 1, 0, 0, 1]], device=device
+        ),
+        lut_entry_vectorized=lambda cell, clock, data, rows, lut: rows.to(
+            dtype=data.dtype
+        ) + data * 0.0,
+        arcs_info=SimpleNamespace(
+            r_check_luts=object(),
+            f_check_luts=object(),
+        ),
+    )
+    context = SimpleNamespace(
+        beta=torch.zeros((1, 4), device=device),
+        check_inst_ids=torch.zeros(1, dtype=torch.long, device=device),
+        check_target_arc_ids=torch.tensor(
+            [[1, 2, 3, 4]], dtype=torch.long, device=device
+        ),
+        valid_instances=torch.ones((1, 4), dtype=torch.bool, device=device),
+    )
+
+    result = action_check_values(
+        timing,
+        context,
+        torch.tensor([0], dtype=torch.long),
+        torch.zeros(1, dtype=torch.long, device=device),
+        torch.zeros(1, device=device),
+        torch.ones(1, device=device),
+    )
+
+    assert result.device == torch.device("cuda", torch.cuda.current_device())

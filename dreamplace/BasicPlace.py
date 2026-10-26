@@ -272,6 +272,12 @@ class PlaceDataCollection(object):
                     except AttributeError:
                         pass
 
+    def _snapshot_original_geometry(self):
+        self.original_node_size_x = self.node_size_x.clone()
+        self.original_node_size_y = self.node_size_y.clone()
+        self.original_pin_offset_x = self.pin_offset_x.clone()
+        self.original_pin_offset_y = self.pin_offset_y.clone()
+
     def __init__(self, pos, params, placedb, device):
         """
         @brief initialization
@@ -350,21 +356,15 @@ class PlaceDataCollection(object):
                 dtype=self.pos[0].dtype,
                 device=device,
             ).reshape(-1, 4)
-            # original node size for legalization, since they will be adjusted in global placement
-            if params.routability_opt_flag:
-                self.original_node_size_x = self.node_size_x.clone()
-                self.original_node_size_y = self.node_size_y.clone()
-
             self.pin_offset_x = torch.tensor(
                 placedb.pin_offset_x, dtype=self.pos[0].dtype, device=device
             )
             self.pin_offset_y = torch.tensor(
                 placedb.pin_offset_y, dtype=self.pos[0].dtype, device=device
             )
-            # original pin offset for legalization, since they will be adjusted in global placement
-            if params.routability_opt_flag:
-                self.original_pin_offset_x = self.pin_offset_x.clone()
-                self.original_pin_offset_y = self.pin_offset_y.clone()
+            # S5B1 exposes this geometry to final write-back even when
+            # routability optimization is disabled.
+            self._snapshot_original_geometry()
 
             self.target_density = torch.empty(
                 1, dtype=self.pos[0].dtype, device=device)

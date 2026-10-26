@@ -40,6 +40,10 @@ def _install_basicplace_import_stubs():
         "dreamplace.ops.pin_weight_sum.pin_weight_sum",
         "dreamplace.ops.irt_egr",
         "dreamplace.ops.irt_egr.irt_egr",
+        "dreamplace.ops.m2_legalize",
+        "dreamplace.ops.m2_legalize.m2_rail_legalization",
+        "dreamplace.ops.routability",
+        "dreamplace.ops.routability.cooptimization_area",
         "dreamplace.ops.cell_modeling",
         "dreamplace.ops.cell_modeling.cell_modeling",
         "dreamplace.ops.gate_projection",
@@ -68,6 +72,20 @@ def _install_basicplace_import_stubs():
         "dreamplace.ops.timing_propagation.crash_stage_marker"
     ].write_crash_stage_marker = lambda *args, **kwargs: None
     sys.modules["dreamplace.ops.cell_modeling.cell_modeling"].CellModeling = object
+    m2_rail_legalization = sys.modules[
+        "dreamplace.ops.m2_legalize.m2_rail_legalization"
+    ]
+    for symbol in (
+        "build_m2_soft_legalization",
+        "build_m2_pg_rail_hybrid_legalization_view",
+        "build_legalization",
+        "run_adaptive_padding_legalization",
+        "build_m2_pa_refine",
+    ):
+        setattr(m2_rail_legalization, symbol, lambda *args, **kwargs: None)
+    sys.modules[
+        "dreamplace.ops.routability.cooptimization_area"
+    ].initialize_overflow_reference = lambda *args, **kwargs: None
     gate_projection = sys.modules["dreamplace.ops.gate_projection.gate_projection"]
     for symbol in (
         "ArgminProjectionResolver",
@@ -127,6 +145,54 @@ class BasicPlacePlotClockTest(unittest.TestCase):
             second,
             "/tmp/result/design/plot/iter000030_g00_local0030.png",
         )
+
+    def test_original_geometry_snapshot_does_not_require_routability(self):
+        import torch
+
+        data = object.__new__(self.BasicPlaceModule.PlaceDataCollection)
+        data.node_size_x = torch.tensor([1.0, 2.0])
+        data.node_size_y = torch.tensor([3.0, 4.0])
+        data.pin_offset_x = torch.tensor([0.1, 0.2])
+        data.pin_offset_y = torch.tensor([0.3, 0.4])
+
+        data._snapshot_original_geometry()
+        data.node_size_x.add_(1.0)
+        data.pin_offset_x.add_(1.0)
+
+        torch.testing.assert_close(data.original_node_size_x, torch.tensor([1.0, 2.0]))
+        torch.testing.assert_close(data.original_node_size_y, torch.tensor([3.0, 4.0]))
+        torch.testing.assert_close(data.original_pin_offset_x, torch.tensor([0.1, 0.2]))
+        torch.testing.assert_close(data.original_pin_offset_y, torch.tensor([0.3, 0.4]))
+
+    def test_s5b1_writeback_recovers_geometry_without_routability(self):
+        from types import SimpleNamespace
+
+        import numpy as np
+        import torch
+
+        from dreamplace.ops.routability.gpugr_context import extract_movable_lpos
+
+        data = object.__new__(self.BasicPlaceModule.PlaceDataCollection)
+        data.node_size_x = torch.tensor([2.0, 4.0])
+        data.node_size_y = torch.tensor([6.0, 8.0])
+        data.pin_offset_x = torch.tensor([0.1, 0.2])
+        data.pin_offset_y = torch.tensor([0.3, 0.4])
+        data._snapshot_original_geometry()
+        data.node_size_x.add_(torch.tensor([2.0, 4.0]))
+        data.node_size_y.add_(torch.tensor([4.0, 8.0]))
+
+        params = SimpleNamespace(
+            cell_padding_x=-1.0, scale_factor=1.0, shift_factor=(0.0, 0.0)
+        )
+        placedb = SimpleNamespace(
+            num_movable_nodes=2, num_nodes=2, cooptimization_geometry=data
+        )
+        node_x, node_y = extract_movable_lpos(
+            torch.tensor([10.0, 20.0, 5.0, 15.0]), params, placedb
+        )
+
+        np.testing.assert_allclose(node_x, [11.0, 22.0])
+        np.testing.assert_allclose(node_y, [7.0, 19.0])
 
     def test_generation_change_avoids_restart_overwrite(self):
         placedb = types.SimpleNamespace(runtimedb_generation=0)

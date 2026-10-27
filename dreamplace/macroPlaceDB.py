@@ -401,6 +401,10 @@ class MacroPlaceDB(object):
         self.is_pin_upper_y = None
         self.dtype = None
         self.pydb = None
+        self.hold_timing_data = None
+        self.hold_timing_corner = None
+        self.flat_lib_pin_min_rcap = None
+        self.flat_lib_pin_min_fcap = None
         
         
         self.max_net_weight = None # maximum net weight in timing opt
@@ -4448,6 +4452,17 @@ class MacroPlaceDB(object):
         @brief initialize data members from raw database 
         @param params parameters 
         """
+        from dreamplace.ops.placeio_ecc.hold_schema import read_hold_timing_schema
+
+        self.hold_timing_data = (
+            read_hold_timing_schema(pydb)
+            if bool(getattr(params, "timing_hold_enabled", False))
+            else None
+        )
+        if self.hold_timing_data is not None:
+            self.flat_lib_pin_min_rcap, self.flat_lib_pin_min_fcap = (
+                self.hold_timing_data.min_pin_caps
+            )
         # pydb = place_io.PlaceIOFunction.pydb(self.rawdb)
         self.num_physical_nodes = pydb.num_nodes
         self.num_terminals = pydb.num_terminals

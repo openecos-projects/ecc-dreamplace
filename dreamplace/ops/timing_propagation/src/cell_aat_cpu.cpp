@@ -14,10 +14,10 @@ void cellAatForwardCpuLauncher(
     const scalar_t* ra, const scalar_t* fa, const scalar_t* rs, const scalar_t* fs,
     const scalar_t* rc, const scalar_t* fc, TimingLutTable<scalar_t> rd,
     TimingLutTable<scalar_t> fd, TimingLutTable<scalar_t> rt, TimingLutTable<scalar_t> ft,
-    scalar_t* updates, scalar_t* derivatives, bool smooth, scalar_t alpha) {
+    scalar_t* updates, scalar_t* derivatives, bool smooth, scalar_t alpha, bool early) {
   #pragma omp parallel for if(count >= 2048) num_threads(at::get_num_threads()) schedule(static)
   for (int i = 0; i < count; ++i) {
-    cellForwardRow<scalar_t>(i, arcs, columns, count, pins, ra, fa, rs, fs, rc, fc, rd, fd, rt, ft, updates, derivatives, smooth, alpha);
+    cellForwardRow<scalar_t>(i, arcs, columns, count, pins, ra, fa, rs, fs, rc, fc, rd, fd, rt, ft, updates, derivatives, smooth, alpha, early);
   }
 }
 template <typename scalar_t>
@@ -51,11 +51,11 @@ void cellAatActionValuesCpuLauncher(
     if (need_delays) {
       cellValueRowAt<scalar_t>(in, out, arc[3], arc[4], pins,
           ra, fa, rs, fs, rc, fc, rd, fd, rt, ft,
-          current, smooth, alpha);
+          current, smooth, alpha, columns > 8 ? arc[8] : 15);
     } else {
       cellValueRow4At<scalar_t>(in, out, arc[3], arc[4], pins,
           ra, fa, rs, fs, rc, fc, rd, fd, rt, ft,
-          current, smooth, alpha);
+          current, smooth, alpha, columns > 8 ? arc[8] : 15);
       for (int k = 4; k < 8; ++k) current[k] = 0;
     }
     for (int action = 0; action < action_count; ++action) {
@@ -67,7 +67,7 @@ void cellAatActionValuesCpuLauncher(
       scalar_t target[4];
       cellValueRow4At<scalar_t>(in, out, target_rows[key], target_senses[key], pins,
           ra, fa, rs, fs, rc, fc, rd, fd, rt, ft,
-          target, smooth, alpha);
+          target, smooth, alpha, columns > 8 ? arc[8] : 15);
       bool finite = true;
       for (int k = 0; k < 4; ++k) {
         finite = finite && std::isfinite(target[k]) && std::isfinite(current[k]);
@@ -114,7 +114,7 @@ void cellAatActionBackwardCpuLauncher(
       const scalar_t target_fc = fc[out] + cap_delta_f[key];
       cellValueRow4AtLoad<scalar_t>(in, out, target_rows[key], target_senses[key], pins,
           ra, fa, rs, fs, target_rc, target_fc, rd, fd, rt, ft,
-          target, smooth, alpha);
+          target, smooth, alpha, columns > 8 ? arc[8] : 15);
       bool finite = true;
       for (int k = 0; k < 4; ++k) finite = finite && std::isfinite(target[k]);
       finite_actions[key] = finite;
@@ -169,7 +169,7 @@ TimingLutTable<scalar_t> table(const std::vector<at::Tensor>& values, int offset
 
 std::vector<at::Tensor> cell_aat_forward_cpu(
     at::Tensor arcs, at::Tensor ra, at::Tensor fa, at::Tensor rs, at::Tensor fs,
-    at::Tensor rc, at::Tensor fc, std::vector<at::Tensor> tables, bool smooth, double alpha) {
+    at::Tensor rc, at::Tensor fc, std::vector<at::Tensor> tables, bool smooth, double alpha, bool early) {
   requireTensor(arcs, ra, at::kLong);
   TORCH_CHECK(arcs.dim() == 2 && arcs.size(1) >= 5, "cell AAT arcs need at least five columns");
   for (const auto& pin : {ra, fa, rs, fs, rc, fc}) {
@@ -194,7 +194,7 @@ std::vector<at::Tensor> cell_aat_forward_cpu(
         ra.data_ptr<scalar_t>(), fa.data_ptr<scalar_t>(), rs.data_ptr<scalar_t>(), fs.data_ptr<scalar_t>(),
         rc.data_ptr<scalar_t>(), fc.data_ptr<scalar_t>(), table<scalar_t>(tables, 0),
         table<scalar_t>(tables, 5), table<scalar_t>(tables, 10), table<scalar_t>(tables, 15),
-        updates.data_ptr<scalar_t>(), jac.data_ptr<scalar_t>(), smooth, scalar_t(alpha));
+        updates.data_ptr<scalar_t>(), jac.data_ptr<scalar_t>(), smooth, scalar_t(alpha), early);
   });
   return {updates, jac};
 }

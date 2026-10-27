@@ -9,6 +9,7 @@ from dreamplace.ops.placeio_ecc.sparse_timing_schema import SparseTimingView
 from dreamplace.ops.timing_propagation.action_cell_aat import apply_action_cell_aat
 from dreamplace.ops.timing_propagation.discrete_actions import DiscreteActionContext
 from dreamplace.ops.timing_propagation.sparse_timing import SparseTimingSchedule
+from sparse_fixtures import add_transition_masks
 
 DTYPE = torch.float64
 
@@ -105,6 +106,7 @@ def _circuit(sense):
         "check_values": np.zeros((2, 4)),
     }
     view = SparseTimingView(arrays, ("sys",), ("sys",), (), "fd", "fd")
+    add_transition_masks(arrays, base)
     schedule = SparseTimingSchedule(view, base.numpy(), device="cpu", dtype=DTYPE)
     return schedule, base, tables, delay, slew, pin_cap, current, targets
 

@@ -21,6 +21,7 @@ from dreamplace.ops.placeio_ecc.sparse_timing_schema import SparseTimingView
 from dreamplace.ops.timing_propagation.discrete_actions import DiscreteActionContext
 from dreamplace.ops.timing_propagation.action_cell_aat import apply_action_cell_aat
 from dreamplace.ops.timing_propagation.sparse_timing import SparseTimingSchedule
+from sparse_fixtures import add_transition_masks
 
 
 def _lut(values, trans, caps, trans_dims, cap_dims):
@@ -84,6 +85,7 @@ def _schedule():
         ],
         dtype=np.int64,
     )
+    add_transition_masks(arrays, base)
     return SparseTimingSchedule(view, base, device="cpu", dtype=torch.float64), torch.tensor(base)
 
 
@@ -280,6 +282,7 @@ def _slew_schedule():
         ],
         dtype=np.int64,
     )
+    add_transition_masks(arrays, base)
     return SparseTimingSchedule(view, base, device="cpu", dtype=torch.float64), torch.tensor(base)
 
 
@@ -777,6 +780,7 @@ def _output_load_schedule():
         ],
         dtype=np.int64,
     )
+    add_transition_masks(arrays, base)
     return SparseTimingSchedule(view, base, device="cpu", dtype=torch.float64), torch.tensor(base)
 
 
@@ -928,6 +932,7 @@ def test_physical_pin_ids_do_not_follow_state_ids():
         ],
         dtype=torch.long,
     )
+    add_transition_masks(arrays, base)
     schedule = SparseTimingSchedule(view, base.numpy(), device="cpu", dtype=torch.float64)
     tables = _tables()
     beta = torch.zeros((2, 4), dtype=torch.float64, requires_grad=True)
@@ -1078,6 +1083,7 @@ def test_two_input_cell_sums_both_driver_loads_and_both_arcs():
         ],
         dtype=torch.long,
     )
+    add_transition_masks(arrays, base)
     schedule = SparseTimingSchedule(
         view, base.numpy(), device="cpu", dtype=torch.float64
     )
@@ -1271,6 +1277,7 @@ def test_slew_step_propagates_through_multiple_cells():
         ],
         dtype=np.int64,
     )
+    add_transition_masks(arrays, base)
     schedule = SparseTimingSchedule(
         view, base, device="cpu", dtype=torch.float64
     )

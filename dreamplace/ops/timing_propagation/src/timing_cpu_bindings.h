@@ -15,7 +15,7 @@ std::vector<at::Tensor> hard_scatter_forward_cpu(at::Tensor, at::Tensor, at::Ten
 std::vector<at::Tensor> hard_scatter_backward_cpu(at::Tensor, at::Tensor, at::Tensor,
     at::Tensor, at::Tensor, at::Tensor, at::Tensor, bool);
 std::vector<at::Tensor> cell_aat_forward_cpu(at::Tensor, at::Tensor, at::Tensor, at::Tensor,
-    at::Tensor, at::Tensor, at::Tensor, std::vector<at::Tensor>, bool, double);
+    at::Tensor, at::Tensor, at::Tensor, std::vector<at::Tensor>, bool, double, bool);
 at::Tensor cell_aat_values_cpu(at::Tensor, at::Tensor, at::Tensor, at::Tensor,
     at::Tensor, at::Tensor, at::Tensor, std::vector<at::Tensor>, bool, double);
 std::vector<at::Tensor> cell_aat_action_values_cpu(at::Tensor, at::Tensor, at::Tensor,
@@ -41,6 +41,8 @@ std::vector<at::Tensor> timing_lanes_backward_cpu(at::Tensor, at::Tensor, at::Te
 
 
 inline void registerTimingCpu(pybind11::module_& m) {
+  m.attr("cell_early_schema_version") = 1;
+  m.attr("cell_transition_schema_version") = 1;
   m.def("timing_lanes_forward", &timing_lanes_forward_cpu, "Grouped arrival/slew lanes (CPU)");
   m.def("timing_lanes_backward", &timing_lanes_backward_cpu, "Arrival/slew lane adjoints (CPU)");
   m.def("buffer_interpolate_forward", &buffer_interpolate_forward_cpu, "Buffer drive-strength interpolation (CPU)");
@@ -50,7 +52,11 @@ inline void registerTimingCpu(pybind11::module_& m) {
   m.def("hard_scatter_forward", &hard_scatter_forward_cpu, "Slew max and Torch tie counts (CPU)");
   m.def("hard_scatter_backward", &hard_scatter_backward_cpu, "Slew max first-order adjoints (CPU)");
   m.def("buffer_indexed_forward", &buffer_lut_indexed_cpu, "Indexed buffer LUT query with 1D extrapolation (CPU)");
-  m.def("cell_aat_forward", &cell_aat_forward_cpu, "Fixed-master cell AAT forward (CPU)");
+  m.def("cell_aat_forward", &cell_aat_forward_cpu, "Fixed-master late/early cell AAT forward (CPU)",
+        pybind11::arg("arcs"), pybind11::arg("ra"), pybind11::arg("fa"),
+        pybind11::arg("rs"), pybind11::arg("fs"), pybind11::arg("rc"), pybind11::arg("fc"),
+        pybind11::arg("tables"), pybind11::arg("smooth"), pybind11::arg("alpha"),
+        pybind11::arg("early") = false);
   m.def("cell_aat_values", &cell_aat_values_cpu, "Fixed-master cell AAT values (CPU)");
   m.def("cell_aat_action_values", &cell_aat_action_values_cpu,
         "Fixed-master current plus four discrete target cell AAT values (CPU)");

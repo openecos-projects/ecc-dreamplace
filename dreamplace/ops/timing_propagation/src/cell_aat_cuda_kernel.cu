@@ -13,9 +13,9 @@ __global__ void cellForward(
     const scalar_t* ra, const scalar_t* fa, const scalar_t* rs, const scalar_t* fs,
     const scalar_t* rc, const scalar_t* fc, TimingLutTable<scalar_t> rd,
     TimingLutTable<scalar_t> fd, TimingLutTable<scalar_t> rt, TimingLutTable<scalar_t> ft,
-    scalar_t* updates, scalar_t* derivatives, bool smooth, scalar_t alpha) {
+    scalar_t* updates, scalar_t* derivatives, bool smooth, scalar_t alpha, bool early) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < count) cellForwardRow<scalar_t>(i, arcs, columns, count, pins, ra, fa, rs, fs, rc, fc, rd, fd, rt, ft, updates, derivatives, smooth, alpha);
+  if (i < count) cellForwardRow<scalar_t>(i, arcs, columns, count, pins, ra, fa, rs, fs, rc, fc, rd, fd, rt, ft, updates, derivatives, smooth, alpha, early);
 }
 
 template <typename scalar_t>
@@ -64,11 +64,11 @@ void cellAatForwardLauncher(
     const scalar_t* ra, const scalar_t* fa, const scalar_t* rs, const scalar_t* fs,
     const scalar_t* rc, const scalar_t* fc, TimingLutTable<scalar_t> rd,
     TimingLutTable<scalar_t> fd, TimingLutTable<scalar_t> rt, TimingLutTable<scalar_t> ft,
-    scalar_t* updates, scalar_t* derivatives, bool smooth, scalar_t alpha, cudaStream_t stream) {
+    scalar_t* updates, scalar_t* derivatives, bool smooth, scalar_t alpha, bool early, cudaStream_t stream) {
   if (count == 0) return;
   cellForward<scalar_t><<<(count + 127) / 128, 128, 0, stream>>>(
       arcs, columns, count, pins, ra, fa, rs, fs, rc, fc, rd, fd, rt, ft,
-      updates, derivatives, smooth, alpha);
+      updates, derivatives, smooth, alpha, early);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -115,7 +115,7 @@ void cellAatGroupedBackwardLauncher(
   template void cellAatForwardLauncher<scalar_t>(const int64_t*, int, int, int, \
       const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*, \
       TimingLutTable<scalar_t>, TimingLutTable<scalar_t>, TimingLutTable<scalar_t>, TimingLutTable<scalar_t>, \
-      scalar_t*, scalar_t*, bool, scalar_t, cudaStream_t); \
+      scalar_t*, scalar_t*, bool, scalar_t, bool, cudaStream_t); \
   template void cellAatValuesLauncher<scalar_t>(const int64_t*, int, int, int, \
       const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*, \
       TimingLutTable<scalar_t>, TimingLutTable<scalar_t>, TimingLutTable<scalar_t>, TimingLutTable<scalar_t>, \

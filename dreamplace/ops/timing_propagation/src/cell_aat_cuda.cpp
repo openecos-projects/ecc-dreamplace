@@ -9,7 +9,7 @@ template <typename scalar_t>
 void cellAatForwardLauncher(const int64_t*, int, int, int,
     const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*,
     TimingLutTable<scalar_t>, TimingLutTable<scalar_t>, TimingLutTable<scalar_t>, TimingLutTable<scalar_t>,
-    scalar_t*, scalar_t*, bool, scalar_t, cudaStream_t);
+    scalar_t*, scalar_t*, bool, scalar_t, bool, cudaStream_t);
 template <typename scalar_t>
 void cellAatValuesLauncher(const int64_t*, int, int, int,
     const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*,
@@ -42,7 +42,7 @@ TimingLutTable<scalar_t> table(const std::vector<at::Tensor>& values, int offset
 
 std::vector<at::Tensor> cell_aat_forward_cuda(
     at::Tensor arcs, at::Tensor ra, at::Tensor fa, at::Tensor rs, at::Tensor fs,
-    at::Tensor rc, at::Tensor fc, std::vector<at::Tensor> tables, bool smooth, double alpha) {
+    at::Tensor rc, at::Tensor fc, std::vector<at::Tensor> tables, bool smooth, double alpha, bool early) {
   requireTensor(arcs, ra, at::kLong);
   TORCH_CHECK(arcs.dim() == 2 && arcs.size(1) >= 5, "cell AAT arcs need at least five columns");
   for (const auto& pin : {ra, fa, rs, fs, rc, fc}) {
@@ -64,7 +64,7 @@ std::vector<at::Tensor> cell_aat_forward_cuda(
         ra.data_ptr<scalar_t>(), fa.data_ptr<scalar_t>(), rs.data_ptr<scalar_t>(), fs.data_ptr<scalar_t>(),
         rc.data_ptr<scalar_t>(), fc.data_ptr<scalar_t>(), table<scalar_t>(tables, 0),
         table<scalar_t>(tables, 5), table<scalar_t>(tables, 10), table<scalar_t>(tables, 15),
-        updates.data_ptr<scalar_t>(), jac.data_ptr<scalar_t>(), smooth, scalar_t(alpha), stream);
+        updates.data_ptr<scalar_t>(), jac.data_ptr<scalar_t>(), smooth, scalar_t(alpha), early, stream);
   });
   return {updates, jac};
 }

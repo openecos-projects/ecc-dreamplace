@@ -86,6 +86,7 @@ class SparseTopology:
         cells = arrays["cell_edges"]
         order = np.argsort(arrays["state_level"][cells[:, 2]], kind="stable")
         cells = cells[order]
+        cell_masks = arrays["cell_transition_mask"][order]
         self.base_cells = torch.from_numpy(cells[:, 0].copy())
         base = timing.flat_inst_arcs_by_level.detach().cpu().long()
         arcs = base[self.base_cells].clone()
@@ -95,6 +96,7 @@ class SparseTopology:
         sink = np.concatenate((cells[:, 2], nets[:, 2]))
         arc_id = np.r_[np.arange(len(cells)), np.full(len(nets), -1)]
         order = np.argsort(sink, kind="stable")
+        masks = np.concatenate((cell_masks, arrays["net_transition_mask"]))[order]
         offsets = np.r_[0, np.cumsum(np.bincount(sink, minlength=states))]
         seeds = np.flatnonzero(arrays["state_seed"].any(axis=1))
         self.predecessors = tuple(
@@ -110,6 +112,7 @@ class SparseTopology:
             arcs,
             *self.predecessors,
             timing.critical_path_topology_epoch,
+            torch.from_numpy(masks.copy()),
         )
         levels = arrays["state_level"][cells[:, 2]]
         level_offsets = np.r_[

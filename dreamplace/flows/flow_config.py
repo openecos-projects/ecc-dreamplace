@@ -38,6 +38,7 @@ from dreamplace.flows.timing_opt_config import (
     is_legacy_timing_opt_name,
     normalize_timing_opt_params,
 )
+from dreamplace.flows.hold_config import validate_hold_configuration
 
 
 _BUFFERING_FLAGS = (
@@ -846,6 +847,7 @@ def apply_flow_defaults(params):
     from dreamplace.flows.gr_sizing_config import configure_gr_sizing
 
     configure_gr_sizing(params)
+    validate_hold_configuration(params, flow_kind)
     params._flow_defaults_resolved = True
     return flow_kind
 

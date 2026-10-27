@@ -330,7 +330,7 @@ std::vector<at::Tensor> hard_scatter_forward_cuda(at::Tensor, at::Tensor, at::Te
 std::vector<at::Tensor> hard_scatter_backward_cuda(at::Tensor, at::Tensor, at::Tensor,
     at::Tensor, at::Tensor, at::Tensor, at::Tensor, bool);
 std::vector<at::Tensor> cell_aat_forward_cuda(at::Tensor, at::Tensor, at::Tensor, at::Tensor,
-    at::Tensor, at::Tensor, at::Tensor, std::vector<at::Tensor>, bool, double);
+    at::Tensor, at::Tensor, at::Tensor, std::vector<at::Tensor>, bool, double, bool);
 at::Tensor cell_aat_values_cuda(at::Tensor, at::Tensor, at::Tensor, at::Tensor,
     at::Tensor, at::Tensor, at::Tensor, std::vector<at::Tensor>, bool, double);
 std::vector<at::Tensor> cell_aat_backward_cuda(at::Tensor, at::Tensor, at::Tensor, int64_t,
@@ -348,6 +348,8 @@ std::vector<at::Tensor> timing_lanes_backward_cuda(at::Tensor, at::Tensor, at::T
     std::vector<at::Tensor>, bool);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.attr("cell_early_schema_version") = 1;
+  m.attr("cell_transition_schema_version") = 1;
   m.def("timing_lanes_forward", &timing_lanes_forward_cuda, "Grouped arrival/slew lanes (CUDA)");
   m.def("timing_lanes_backward", &timing_lanes_backward_cuda, "Arrival/slew lane adjoints (CUDA)");
   m.def("buffer_interpolate_forward", &buffer_interpolate_forward_cuda, "Buffer drive-strength interpolation (CUDA)");
@@ -357,7 +359,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("hard_scatter_forward", &hard_scatter_forward_cuda, "Slew max and Torch tie counts (CUDA)");
   m.def("hard_scatter_backward", &hard_scatter_backward_cuda, "Slew max first-order adjoints (CUDA)");
   m.def("buffer_indexed_forward", &buffer_lut_indexed_cuda, "Indexed buffer LUT query with 1D extrapolation (CUDA)");
-  m.def("cell_aat_forward", &cell_aat_forward_cuda, "Fixed-master cell AAT forward (CUDA)");
+  m.def("cell_aat_forward", &cell_aat_forward_cuda, "Fixed-master late/early cell AAT forward (CUDA)",
+        pybind11::arg("arcs"), pybind11::arg("ra"), pybind11::arg("fa"),
+        pybind11::arg("rs"), pybind11::arg("fs"), pybind11::arg("rc"), pybind11::arg("fc"),
+        pybind11::arg("tables"), pybind11::arg("smooth"), pybind11::arg("alpha"),
+        pybind11::arg("early") = false);
   m.def("cell_aat_values", &cell_aat_values_cuda, "Fixed-master cell AAT values (CUDA)");
   m.def("cell_aat_backward", &cell_aat_backward_cuda, "Fixed-master cell AAT backward (CUDA)",
         pybind11::arg("arcs"), pybind11::arg("jac"), pybind11::arg("gradient"), pybind11::arg("pins"),

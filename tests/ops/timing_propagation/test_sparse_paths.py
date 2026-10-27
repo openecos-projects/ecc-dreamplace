@@ -9,6 +9,58 @@ from sparse_fixtures import (
 )
 
 
+def test_native_paths_ignore_a_larger_but_forbidden_net_predecessor():
+    from dreamplace.ops.timing_propagation.timing_propagation import _tp_cpp
+
+    def ids(values):
+        return torch.tensor(values, dtype=torch.long)
+
+    def values(rows):
+        return torch.tensor(rows, dtype=torch.float64)
+
+    extractor = _tp_cpp.SetupCriticalPathExtractor(
+        ids([]).reshape(0, 8),
+        ids([0, 0, 0, 2]),
+        ids([0, 1]),
+        ids([-1, -1]),
+        ids([0, 1]),
+        0,
+        ids([1, 8]),
+    )
+    empty = values([])
+    paths = extractor.extract(
+        ids([2]),
+        ids([0]),
+        values([-1]),
+        values([-2]),
+        values([10, 5, 12]),
+        values([100, 20, 22]),
+        values([0, 0, 2]),
+        values([0, 0, 2]),
+        empty,
+        empty,
+        empty,
+        empty,
+        2,
+        16,
+        1e-6,
+    )
+    # Pin 0's 100 ps falling arrival is excluded by its rise-only edge.
+    assert {
+        "offsets": paths.path_offsets.tolist(),
+        "pins": paths.path_pins.tolist(),
+        "transitions": paths.path_transitions.tolist(),
+        "valid": paths.path_valid.tolist(),
+        "residual": paths.max_residual_ps.tolist(),
+    } == {
+        "offsets": [0, 2, 4],
+        "pins": [1, 2, 0, 2],
+        "transitions": [1, 1, 0, 0],
+        "valid": [True, True],
+        "residual": [0, 0],
+    }
+
+
 def test_sparse_critical_paths_keep_state_and_physical_identity(native_device):
     timing = production_timing(native_device)
     timing.request_critical_path_snapshot()
@@ -39,9 +91,7 @@ def test_sparse_pruner_maps_legal_states_to_existing_physical_consumers(native_d
     run_production(timing, inputs(native_device))
     assert timing.last_active_endpoint_ids == [3]
     assert timing.last_traversal_pruning_result.kept_flat_arc_indices.tolist() == [0]
-    assert timing.last_traversal_pruning_result.kept_state_indices.tolist() == list(
-        range(6)
-    )
+    assert timing.last_traversal_pruning_result.kept_state_indices.tolist() == list(range(6))
     incidence = timing.compute_active_endpoint_incidence([3])
     assert incidence.pin_endpoint_incidence_count.tolist() == [1, 1, 1, 1]
     assert incidence.arc_endpoint_incidence_count.tolist() == [1]
@@ -82,9 +132,7 @@ def test_sparse_view_replacement_rebuilds_schedule():
 
 
 @pytest.mark.parametrize("scope", ["setup_only", "setup_plus_recovery"])
-def test_sparse_metric_scope_and_path_scope_use_native_check_classes(
-    native_device, scope
-):
+def test_sparse_metric_scope_and_path_scope_use_native_check_classes(native_device, scope):
     timing = production_timing(native_device)
     timing.timing_metric_scope = scope
     timing.endpoints_timing_check_arcs = torch.tensor(
@@ -143,6 +191,4 @@ def test_sparse_full_rat_and_path_report_keep_matching_launch_states(native_devi
         pin_names=["a", "b", "in", "out"],
         flat_inst_arcs_by_level=timing.flat_inst_arcs_by_level,
     )
-    assert all(
-        abs(row["incoming_residual_ps"]) < 1e-3 for row in rows if row["step_index"]
-    )
+    assert all(abs(row["incoming_residual_ps"]) < 1e-3 for row in rows if row["step_index"])

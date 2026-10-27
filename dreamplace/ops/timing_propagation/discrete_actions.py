@@ -271,6 +271,7 @@ def build_discrete_action_context(
         tensor_key("flat_lib_pin_fcap"),
         tensor_key("cell_id_2_arc_id_start"),
         tensor_key("flat_libarc_info"),
+        tensor_key("flat_libarc_check_types"),
         tensor_key("cell_id_2_libpin_id_start"),
         tensor_key("pin_2_libpin_offset"),
         tensor_key("pin2node_map"),

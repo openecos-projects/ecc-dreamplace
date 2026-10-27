@@ -11,9 +11,11 @@ from .timing_lanes_native import try_timing_lanes_native
 
 class _CellAat(Function):
     @staticmethod
-    def forward(ctx, arcs, ra, fa, rs, fs, rc, fc, tables, smooth, alpha):
+    def forward(ctx, arcs, ra, fa, rs, fs, rc, fc, tables, smooth, alpha, early=False):  # noqa: FBT002 -- Function.apply takes positional arguments
         original = arcs, ra, fa, rs, fs, rc, fc
         native = lut_entry_2d_op._select_module(ra)
+        if arcs.shape[1] > 8 and getattr(native, "cell_transition_schema_version", 0) != 1:
+            raise RuntimeError("masked cell propagation requires a fresh ecc-dreamplace build")
         groups = ()
         if not ra.is_cuda or torch.are_deterministic_algorithms_enabled():
             groups = (
@@ -21,12 +23,19 @@ class _CellAat(Function):
                 *scatter_groups(arcs[:, 1], ra.numel()),
             )
         arcs = arcs.long().contiguous()
+        options = {"early": True} if early else {}
         updates, jac = native.cell_aat_forward(
-            arcs, *(p.contiguous() for p in (ra, fa, rs, fs, rc, fc)), tables, smooth, alpha
+            arcs,
+            *(p.contiguous() for p in (ra, fa, rs, fs, rc, fc)),
+            tables,
+            smooth,
+            alpha,
+            **options,
         )
         ctx.save_for_backward(arcs, jac, *groups, *original, *tables)
         ctx.group_count = len(groups)
         ctx.pin_count = ra.numel()
+        ctx.input_count = len(ctx.needs_input_grad)
         return updates
 
     @staticmethod
@@ -36,7 +45,8 @@ class _CellAat(Function):
         grads = lut_entry_2d_op._select_module(jac).cell_aat_backward(
             arcs, jac, gradient.contiguous(), ctx.pin_count, groups
         )
-        return None, *grads, None, None, None
+        # Existing late callers omit the optional early-mode argument.
+        return (None, *grads, None, None, None, None)[: ctx.input_count]
 
 
 def _tables(timing):

@@ -4,10 +4,8 @@ from contextlib import contextmanager
 
 import torch
 
-from dreamplace.flows.timing_opt_config import (
-    DEFAULT_TIMING_OPT_COEFFICIENTS,
-    TIMING_OPT_COEFFICIENT_FIELDS,
-)
+from dreamplace.flows.timing_opt_config import DEFAULT_TIMING_OPT_COEFFICIENTS
+from dreamplace.flows.timing_phase_coefficients import timing_phase_coefficients
 from dreamplace.ops.routability.cooptimization_area import capture_area
 
 
@@ -45,31 +43,18 @@ def timing_electrical_window(params, data):
 
 @contextmanager
 def timing_sizing_coefficients(params, model):
-    """Apply a fixed or inherited S/WNS/TNS/slew/cap coefficient policy."""
+    """Apply sizing-window setup/DRV/hold weights and restore the live GP policy."""
 
     policy = getattr(
         params,
         "timing_opt_coefficients",
         DEFAULT_TIMING_OPT_COEFFICIENTS,
     )
-    original = {
-        name: float(getattr(model, field)) for name, field in TIMING_OPT_COEFFICIENT_FIELDS.items()
+    fixed = None if policy["mode"] == "inherit" else {
+        name: value for name, value in policy.items() if name != "mode"
     }
-    original_weight = float(model.timing_grad_balance_weight)
-    coefficients = original if policy["mode"] == "inherit" else policy
-    try:
-        for name, field in TIMING_OPT_COEFFICIENT_FIELDS.items():
-            setattr(model, field, coefficients[name])
-        model.timing_grad_balance_weight = 1.0 if policy["mode"] == "fixed" else original_weight
-        yield {
-            "mode": policy["mode"],
-            **{name: coefficients[name] for name in TIMING_OPT_COEFFICIENT_FIELDS},
-            "timing_grad_balance_weight": float(model.timing_grad_balance_weight),
-        }
-    finally:
-        for name, field in TIMING_OPT_COEFFICIENT_FIELDS.items():
-            setattr(model, field, original[name])
-        model.timing_grad_balance_weight = original_weight
+    with timing_phase_coefficients(model, fixed) as effective:
+        yield {"mode": policy["mode"], **effective}
 
 
 def virtual_timing_area(owner, model, state=None):

@@ -1,5 +1,6 @@
 """Pure metric and timing-state conversions used by the placement flow."""
 
+import copy
 import math
 
 import numpy as np
@@ -14,9 +15,29 @@ def timing_scalar(value):
     return float(value)
 
 
-def combined_timing_loss(wns, tns):
+def combined_timing_loss(wns, tns, model=None):
     if wns is None or tns is None:
         return None
+    hold = None if model is None else getattr(model, "hold_objective", None)
+    if hold is not None and hold.active:
+        timing_op = getattr(
+            getattr(model, "op_collections", None),
+            "timing_propagation_op",
+            None,
+        )
+        evaluation = None if timing_op is None else getattr(timing_op, "last_evaluation", None)
+        if evaluation is None:
+            raise RuntimeError("joint restore score requires the current timing evaluation")
+        reference = evaluation.setup_wns
+        with torch.no_grad():
+            return timing_scalar(
+                model._timing_loss(
+                    torch.as_tensor(wns, device=reference.device, dtype=reference.dtype),
+                    torch.as_tensor(tns, device=reference.device, dtype=reference.dtype),
+                    None,
+                    None,
+                )
+            )
     return float(-(0.01 * float(wns) + 0.0001 * float(tns)))
 
 
@@ -38,6 +59,9 @@ def update_metric_timing(metric, wns, tns, ws, timing_op):
         metric.slew_violation = getattr(timing_op, "last_total_slew_violation", None)
         metric.cap_violation = getattr(timing_op, "last_total_cap_violation", None)
         metric.leakage = getattr(timing_op, "last_total_leakage", None)
+        evaluation = getattr(timing_op, "last_evaluation", None)
+        if evaluation is not None and evaluation.hold is not None:
+            metric.hold_timing = evaluation.hold_report()
 
 
 def metric_snapshot(metric):
@@ -60,12 +84,16 @@ def metric_snapshot(metric):
         snapshot["combined_timing_loss"] = combined_timing_loss(
             snapshot["wns"], snapshot["tns"]
         )
+    if getattr(metric, "hold_timing", None) is not None:
+        snapshot["hold_timing"] = copy.deepcopy(metric.hold_timing)
     return snapshot
 
 
 def apply_metric_snapshot(metric, snapshot):
     if metric is None or not isinstance(snapshot, dict):
         return
+    if "hold_timing" in snapshot or hasattr(metric, "hold_timing"):
+        metric.hold_timing = copy.deepcopy(snapshot.get("hold_timing"))
     for attr_name in (
         "objective", "wns", "tns", "timing_objective",
         "slew_violation", "cap_violation", "leakage", "combined_timing_loss",
@@ -145,7 +173,7 @@ def metric_to_record(metric):
             return [float(v) for v in value.detach().cpu().numpy().tolist()]
         return float(value)
 
-    return {
+    record = {
         "iteration": metric.iteration,
         "detailed_step": list(metric.detailed_step) if metric.detailed_step is not None else None,
         "objective": scalar_or_none(metric.objective),
@@ -252,10 +280,17 @@ def metric_to_record(metric):
             getattr(metric, "joint_projected_buffer_count", None)
         ),
     }
+    if getattr(metric, "combined_timing_loss", None) is not None:
+        record["combined_timing_loss"] = scalar_or_none(metric.combined_timing_loss)
+    if getattr(metric, "hold_timing", None) is not None:
+        record["hold_timing"] = copy.deepcopy(metric.hold_timing)
+    return record
 
 
 def enrich_timing_record(record):
     enriched = dict(record)
+    if isinstance(enriched.get("combined_timing_loss"), (float, int)):
+        return enriched
     wns = enriched.get("wns")
     tns = enriched.get("tns")
     if isinstance(wns, (float, int)) and isinstance(tns, (float, int)):

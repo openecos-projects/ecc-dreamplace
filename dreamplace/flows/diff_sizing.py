@@ -185,13 +185,28 @@ class DiffSizingController:
                 name: getattr(model, field, None)
                 for name, field in _COEFFICIENT_FIELDS.items()
             }
+            previous_hold_objective = getattr(model, "hold_objective", None)
             self.params.timing_opt_sizing_rounds = int(spec.rounds)
             self.params.discrete_gradient_topk_shared_budget_percent = float(
                 spec.selection_percent
             )
-            for name, field in _COEFFICIENT_FIELDS.items():
-                setattr(model, field, float(getattr(spec.coefficients, name)))
             try:
+                for name, field in _COEFFICIENT_FIELDS.items():
+                    setattr(model, field, float(getattr(spec.coefficients, name)))
+                if previous_hold_objective is None and (
+                    spec.coefficients.hold_wns or spec.coefficients.hold_tns
+                ):
+                    raise ValueError(
+                        "nonzero diff_sizing hold weights require timing_hold_enabled"
+                    )
+                if previous_hold_objective is not None:
+                    from dataclasses import replace
+
+                    model.hold_objective = replace(
+                        previous_hold_objective,
+                        wns=float(spec.coefficients.hold_wns),
+                        tns=float(spec.coefficients.hold_tns),
+                    )
                 with self.owner.electrical_window():
                     phase_sizing = self.owner.run_sizing(
                         model,
@@ -221,6 +236,7 @@ class DiffSizingController:
                     )
                 for name, field in _COEFFICIENT_FIELDS.items():
                     setattr(model, field, previous_coefficients[name])
+                model.hold_objective = previous_hold_objective
             for record in phase_sizing.get("rounds", ()) or ():
                 record["phase"] = index
                 record["phase_action"] = spec.action

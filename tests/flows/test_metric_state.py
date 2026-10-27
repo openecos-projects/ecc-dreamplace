@@ -1,11 +1,11 @@
 """Complete/incomplete optimizer history conversion at the metric owner."""
+import json
 from types import SimpleNamespace
 
 import torch
-
 from dreamplace.EvalMetrics import EvalMetrics
-from dreamplace.NonLinearPlace import NonLinearPlace
 from dreamplace.flows import metric_state
+from dreamplace.NonLinearPlace import NonLinearPlace
 
 
 def _metric(value):
@@ -70,6 +70,19 @@ def _record_metric(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def test_joint_hold_score_survives_metric_record_and_json_roundtrip():
+    metric = EvalMetrics(0)
+    metric.wns = -10.0
+    metric.tns = -100.0
+    metric.combined_timing_loss = torch.tensor(28.0)
+    metric.hold_timing = {"generation": 1, "wns_ns": -0.004}
+
+    record = metric_state.metric_to_record(metric)
+    decoded = json.loads(json.dumps(record))
+
+    assert metric_state.enrich_timing_record(decoded) == record | {"combined_timing_loss": 28.0}
 
 
 def test_metric_record_includes_l_shape_and_timing_gradient_ratios():

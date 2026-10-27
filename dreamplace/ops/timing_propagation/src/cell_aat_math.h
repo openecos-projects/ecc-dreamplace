@@ -24,6 +24,29 @@ TIMING_INLINE scalar_t pairMaximum(
 }
 
 template <typename scalar_t>
+TIMING_INLINE scalar_t pairEarly(
+    scalar_t a, scalar_t b, bool smooth, scalar_t alpha, scalar_t& wa, scalar_t& wb) {
+  if (isinf(a) && a > 0 && isinf(b) && b > 0) {
+    wa = wb = 0;
+    return INFINITY;
+  }
+  return -pairMaximum(-a, -b, smooth, alpha, wa, wb);
+}
+
+template <typename scalar_t>
+TIMING_INLINE scalar_t maskedArrivalPair(
+    scalar_t a, scalar_t b, bool use_a, bool use_b, bool smooth,
+    scalar_t alpha, bool early, scalar_t& wa, scalar_t& wb) {
+  if (!use_a || !use_b) {
+    wa = use_a ? 1 : 0;
+    wb = use_b ? 1 : 0;
+    return use_a ? a : use_b ? b : early ? scalar_t(INFINITY) : scalar_t(-2e8);
+  }
+  return early ? pairEarly(a, b, smooth, alpha, wa, wb)
+               : pairMaximum(a, b, smooth, alpha, wa, wb);
+}
+
+template <typename scalar_t>
 TIMING_INLINE void queryJacobian(
     scalar_t* jac, int output, TimingLutQuery<scalar_t> query,
     int slew_column, int cap_column) {
@@ -32,14 +55,22 @@ TIMING_INLINE void queryJacobian(
 }
 
 template <typename scalar_t>
+TIMING_INLINE TimingLutQuery<scalar_t> cellLutQuery(
+    TimingLutTable<scalar_t> table, int64_t row, scalar_t slew, scalar_t cap, bool early) {
+  if (early && !isfinite(slew)) return {scalar_t(INFINITY), scalar_t(0), scalar_t(0)};
+  return timingLutQuery(table, row, slew, cap);
+}
+
+template <typename scalar_t>
 TIMING_INLINE void cellForwardRow(int i,
     const int64_t* arcs, int columns, int count, int pins,
     const scalar_t* ra, const scalar_t* fa, const scalar_t* rs, const scalar_t* fs,
     const scalar_t* rc, const scalar_t* fc, TimingLutTable<scalar_t> rd,
     TimingLutTable<scalar_t> fd, TimingLutTable<scalar_t> rt, TimingLutTable<scalar_t> ft,
-    scalar_t* updates, scalar_t* derivatives, bool smooth, scalar_t alpha) {
+    scalar_t* updates, scalar_t* derivatives, bool smooth, scalar_t alpha, bool early = false) {
   const int64_t* arc = arcs + i * columns;
   const int64_t in = arc[0], out = arc[1], row = arc[3], sense = arc[4];
+  const int mask = columns > 8 ? arc[8] : 15;
   TIMING_ASSERT(in >= 0 && in < pins && out >= 0 && out < pins);
   scalar_t* v = updates + i * 8;
   scalar_t* j = derivatives + i * 48;
@@ -49,10 +80,10 @@ TIMING_INLINE void cellForwardRow(int i,
     const bool positive = sense == 1;
     const scalar_t r_slew = positive ? rs[in] : fs[in];
     const scalar_t f_slew = positive ? fs[in] : rs[in];
-    const auto dr = timingLutQuery(rd, row, r_slew, rc[out]);
-    const auto df = timingLutQuery(fd, row, f_slew, fc[out]);
-    const auto tr = timingLutQuery(rt, row, r_slew, rc[out]);
-    const auto tf = timingLutQuery(ft, row, f_slew, fc[out]);
+    const auto dr = cellLutQuery(rd, row, r_slew, rc[out], early);
+    const auto df = cellLutQuery(fd, row, f_slew, fc[out], early);
+    const auto tr = cellLutQuery(rt, row, r_slew, rc[out], early);
+    const auto tf = cellLutQuery(ft, row, f_slew, fc[out], early);
     v[0] = (positive ? ra[in] : fa[in]) + dr.value;
     v[1] = (positive ? fa[in] : ra[in]) + df.value;
     v[2] = tr.value; v[3] = tf.value;
@@ -67,25 +98,34 @@ TIMING_INLINE void cellForwardRow(int i,
     v[rise_delay] = dr.value; v[fall_delay] = df.value;
     queryJacobian(j, rise_delay, dr, rise_slew, 4);
     queryJacobian(j, fall_delay, df, fall_slew, 5);
+    for (int output = 0; output < 2; ++output) {
+      const int input = positive ? output : 1 - output;
+      if (!(mask & (1 << (2 * input + output)))) {
+        v[output] = early ? scalar_t(INFINITY) : scalar_t(-2e8);
+        for (int column = 0; column < 6; ++column) j[output * 6 + column] = 0;
+      }
+    }
   } else {
-    const auto drr = timingLutQuery(rd, row, rs[in], rc[out]);
-    const auto dfr = timingLutQuery(rd, row, fs[in], rc[out]);
-    const auto dff = timingLutQuery(fd, row, fs[in], fc[out]);
-    const auto drf = timingLutQuery(fd, row, rs[in], fc[out]);
-    const auto trr = timingLutQuery(rt, row, rs[in], rc[out]);
-    const auto tfr = timingLutQuery(rt, row, fs[in], rc[out]);
-    const auto tff = timingLutQuery(ft, row, fs[in], fc[out]);
-    const auto trf = timingLutQuery(ft, row, rs[in], fc[out]);
+    const auto drr = cellLutQuery(rd, row, rs[in], rc[out], early);
+    const auto dfr = cellLutQuery(rd, row, fs[in], rc[out], early);
+    const auto dff = cellLutQuery(fd, row, fs[in], fc[out], early);
+    const auto drf = cellLutQuery(fd, row, rs[in], fc[out], early);
+    const auto trr = cellLutQuery(rt, row, rs[in], rc[out], early);
+    const auto tfr = cellLutQuery(rt, row, fs[in], rc[out], early);
+    const auto tff = cellLutQuery(ft, row, fs[in], fc[out], early);
+    const auto trf = cellLutQuery(ft, row, rs[in], fc[out], early);
     scalar_t a, b;
-    v[0] = pairMaximum(ra[in] + drr.value, fa[in] + dfr.value, smooth, alpha, a, b);
+    v[0] = maskedArrivalPair(ra[in] + drr.value, fa[in] + dfr.value, mask & 1, mask & 4, smooth, alpha, early, a, b);
     j[0] = a; j[1] = b; j[2] = a * drr.dt; j[3] = b * dfr.dt;
     j[4] = a * drr.dc + b * dfr.dc;
-    v[1] = pairMaximum(fa[in] + dff.value, ra[in] + drf.value, smooth, alpha, a, b);
+    v[1] = maskedArrivalPair(fa[in] + dff.value, ra[in] + drf.value, mask & 8, mask & 2, smooth, alpha, early, a, b);
     j[6] = b; j[7] = a; j[8] = b * drf.dt; j[9] = a * dff.dt;
     j[11] = a * dff.dc + b * drf.dc;
-    v[2] = pairMaximum(trr.value, tfr.value, smooth, alpha, a, b);
+    v[2] = early ? pairEarly(trr.value, tfr.value, false, alpha, a, b)
+                 : pairMaximum(trr.value, tfr.value, smooth, alpha, a, b);
     j[14] = a * trr.dt; j[15] = b * tfr.dt; j[16] = a * trr.dc + b * tfr.dc;
-    v[3] = pairMaximum(tff.value, trf.value, smooth, alpha, a, b);
+    v[3] = early ? pairEarly(tff.value, trf.value, false, alpha, a, b)
+                 : pairMaximum(tff.value, trf.value, smooth, alpha, a, b);
     j[20] = b * trf.dt; j[21] = a * tff.dt; j[23] = a * tff.dc + b * trf.dc;
     v[4] = drr.value; v[5] = dfr.value; v[6] = drf.value; v[7] = dff.value;
     queryJacobian(j, 4, drr, 2, 4);
@@ -96,104 +136,14 @@ TIMING_INLINE void cellForwardRow(int i,
 }
 
 template <typename scalar_t>
-TIMING_INLINE void cellValueRowAt(int64_t in, int64_t out, int64_t row,
+TIMING_INLINE void cellValueRowAtLoad(int64_t in, int64_t out, int64_t row,
     int64_t sense, int pins,
     const scalar_t* ra, const scalar_t* fa, const scalar_t* rs, const scalar_t* fs,
-    const scalar_t* rc, const scalar_t* fc, TimingLutTable<scalar_t> rd,
+    scalar_t rc_load, scalar_t fc_load, TimingLutTable<scalar_t> rd,
     TimingLutTable<scalar_t> fd, TimingLutTable<scalar_t> rt, TimingLutTable<scalar_t> ft,
-    scalar_t* updates, bool smooth, scalar_t alpha) {
+    scalar_t* v, bool smooth, scalar_t alpha, int mask = 15) {
   TIMING_ASSERT(in >= 0 && in < pins && out >= 0 && out < pins);
-  scalar_t* v = updates;
   for (int k = 4; k < 8; ++k) v[k] = -INFINITY;
-  if (sense == 1 || sense == -1) {
-    const bool positive = sense == 1;
-    const scalar_t r_slew = positive ? rs[in] : fs[in];
-    const scalar_t f_slew = positive ? fs[in] : rs[in];
-    const auto dr = timingLutQuery(rd, row, r_slew, rc[out]);
-    const auto df = timingLutQuery(fd, row, f_slew, fc[out]);
-    const auto tr = timingLutQuery(rt, row, r_slew, rc[out]);
-    const auto tf = timingLutQuery(ft, row, f_slew, fc[out]);
-    v[0] = (positive ? ra[in] : fa[in]) + dr.value;
-    v[1] = (positive ? fa[in] : ra[in]) + df.value;
-    v[2] = tr.value; v[3] = tf.value;
-    const int rise_delay = positive ? 4 : 5, fall_delay = positive ? 7 : 6;
-    v[rise_delay] = dr.value; v[fall_delay] = df.value;
-  } else {
-    const auto drr = timingLutQuery(rd, row, rs[in], rc[out]);
-    const auto dfr = timingLutQuery(rd, row, fs[in], rc[out]);
-    const auto dff = timingLutQuery(fd, row, fs[in], fc[out]);
-    const auto drf = timingLutQuery(fd, row, rs[in], fc[out]);
-    const auto trr = timingLutQuery(rt, row, rs[in], rc[out]);
-    const auto tfr = timingLutQuery(rt, row, fs[in], rc[out]);
-    const auto tff = timingLutQuery(ft, row, fs[in], fc[out]);
-    const auto trf = timingLutQuery(ft, row, rs[in], fc[out]);
-    scalar_t a, b;
-    v[0] = pairMaximum(ra[in] + drr.value, fa[in] + dfr.value, smooth, alpha, a, b);
-    v[1] = pairMaximum(fa[in] + dff.value, ra[in] + drf.value, smooth, alpha, a, b);
-    v[2] = pairMaximum(trr.value, tfr.value, smooth, alpha, a, b);
-    v[3] = pairMaximum(tff.value, trf.value, smooth, alpha, a, b);
-    v[4] = drr.value; v[5] = dfr.value; v[6] = drf.value; v[7] = dff.value;
-  }
-}
-
-template <typename scalar_t>
-TIMING_INLINE void cellValueRow(int i,
-    const int64_t* arcs, int columns, int count, int pins,
-    const scalar_t* ra, const scalar_t* fa, const scalar_t* rs, const scalar_t* fs,
-    const scalar_t* rc, const scalar_t* fc, TimingLutTable<scalar_t> rd,
-    TimingLutTable<scalar_t> fd, TimingLutTable<scalar_t> rt, TimingLutTable<scalar_t> ft,
-    scalar_t* updates, bool smooth, scalar_t alpha) {
-  const int64_t* arc = arcs + i * columns;
-  cellValueRowAt(arc[0], arc[1], arc[3], arc[4], pins,
-      ra, fa, rs, fs, rc, fc, rd, fd, rt, ft,
-      updates + i * 8, smooth, alpha);
-}
-
-template <typename scalar_t>
-TIMING_INLINE void cellValueRow4At(int64_t in, int64_t out, int64_t row,
-    int64_t sense, int pins,
-    const scalar_t* ra, const scalar_t* fa, const scalar_t* rs, const scalar_t* fs,
-    const scalar_t* rc, const scalar_t* fc, TimingLutTable<scalar_t> rd,
-    TimingLutTable<scalar_t> fd, TimingLutTable<scalar_t> rt, TimingLutTable<scalar_t> ft,
-    scalar_t* values, bool smooth, scalar_t alpha) {
-  TIMING_ASSERT(in >= 0 && in < pins && out >= 0 && out < pins);
-  if (sense == 1 || sense == -1) {
-    const bool positive = sense == 1;
-    const scalar_t r_slew = positive ? rs[in] : fs[in];
-    const scalar_t f_slew = positive ? fs[in] : rs[in];
-    const auto dr = timingLutQuery(rd, row, r_slew, rc[out]);
-    const auto df = timingLutQuery(fd, row, f_slew, fc[out]);
-    const auto tr = timingLutQuery(rt, row, r_slew, rc[out]);
-    const auto tf = timingLutQuery(ft, row, f_slew, fc[out]);
-    values[0] = (positive ? ra[in] : fa[in]) + dr.value;
-    values[1] = (positive ? fa[in] : ra[in]) + df.value;
-    values[2] = tr.value;
-    values[3] = tf.value;
-  } else {
-    const auto drr = timingLutQuery(rd, row, rs[in], rc[out]);
-    const auto dfr = timingLutQuery(rd, row, fs[in], rc[out]);
-    const auto dff = timingLutQuery(fd, row, fs[in], fc[out]);
-    const auto drf = timingLutQuery(fd, row, rs[in], fc[out]);
-    const auto trr = timingLutQuery(rt, row, rs[in], rc[out]);
-    const auto tfr = timingLutQuery(rt, row, fs[in], rc[out]);
-    const auto tff = timingLutQuery(ft, row, fs[in], fc[out]);
-    const auto trf = timingLutQuery(ft, row, rs[in], fc[out]);
-    scalar_t a, b;
-    values[0] = pairMaximum(ra[in] + drr.value, fa[in] + dfr.value, smooth, alpha, a, b);
-    values[1] = pairMaximum(fa[in] + dff.value, ra[in] + drf.value, smooth, alpha, a, b);
-    values[2] = pairMaximum(trr.value, tfr.value, smooth, alpha, a, b);
-    values[3] = pairMaximum(tff.value, trf.value, smooth, alpha, a, b);
-  }
-}
-template <typename scalar_t>
-TIMING_INLINE void cellValueRow4AtLoad(int64_t in, int64_t out, int64_t row,
-    int64_t sense, int pins,
-    const scalar_t* ra, const scalar_t* fa, const scalar_t* rs, const scalar_t* fs,
-    scalar_t rc_load, scalar_t fc_load,
-    TimingLutTable<scalar_t> rd, TimingLutTable<scalar_t> fd,
-    TimingLutTable<scalar_t> rt, TimingLutTable<scalar_t> ft,
-    scalar_t* values, bool smooth, scalar_t alpha) {
-  TIMING_ASSERT(in >= 0 && in < pins && out >= 0 && out < pins);
   if (sense == 1 || sense == -1) {
     const bool positive = sense == 1;
     const scalar_t r_slew = positive ? rs[in] : fs[in];
@@ -202,10 +152,11 @@ TIMING_INLINE void cellValueRow4AtLoad(int64_t in, int64_t out, int64_t row,
     const auto df = timingLutQuery(fd, row, f_slew, fc_load);
     const auto tr = timingLutQuery(rt, row, r_slew, rc_load);
     const auto tf = timingLutQuery(ft, row, f_slew, fc_load);
-    values[0] = (positive ? ra[in] : fa[in]) + dr.value;
-    values[1] = (positive ? fa[in] : ra[in]) + df.value;
-    values[2] = tr.value;
-    values[3] = tf.value;
+    v[0] = (mask & (positive ? 1 : 4)) ? (positive ? ra[in] : fa[in]) + dr.value : scalar_t(-2e8);
+    v[1] = (mask & (positive ? 8 : 2)) ? (positive ? fa[in] : ra[in]) + df.value : scalar_t(-2e8);
+    v[2] = tr.value; v[3] = tf.value;
+    v[positive ? 4 : 5] = dr.value;
+    v[positive ? 7 : 6] = df.value;
   } else {
     const auto drr = timingLutQuery(rd, row, rs[in], rc_load);
     const auto dfr = timingLutQuery(rd, row, fs[in], rc_load);
@@ -216,11 +167,60 @@ TIMING_INLINE void cellValueRow4AtLoad(int64_t in, int64_t out, int64_t row,
     const auto tff = timingLutQuery(ft, row, fs[in], fc_load);
     const auto trf = timingLutQuery(ft, row, rs[in], fc_load);
     scalar_t a, b;
-    values[0] = pairMaximum(ra[in] + drr.value, fa[in] + dfr.value, smooth, alpha, a, b);
-    values[1] = pairMaximum(fa[in] + dff.value, ra[in] + drf.value, smooth, alpha, a, b);
-    values[2] = pairMaximum(trr.value, tfr.value, smooth, alpha, a, b);
-    values[3] = pairMaximum(tff.value, trf.value, smooth, alpha, a, b);
+    v[0] = maskedArrivalPair(ra[in] + drr.value, fa[in] + dfr.value, mask & 1, mask & 4, smooth, alpha, false, a, b);
+    v[1] = maskedArrivalPair(fa[in] + dff.value, ra[in] + drf.value, mask & 8, mask & 2, smooth, alpha, false, a, b);
+    v[2] = pairMaximum(trr.value, tfr.value, smooth, alpha, a, b);
+    v[3] = pairMaximum(tff.value, trf.value, smooth, alpha, a, b);
+    v[4] = drr.value; v[5] = dfr.value; v[6] = drf.value; v[7] = dff.value;
   }
+}
+
+template <typename scalar_t>
+TIMING_INLINE void cellValueRowAt(int64_t in, int64_t out, int64_t row,
+    int64_t sense, int pins,
+    const scalar_t* ra, const scalar_t* fa, const scalar_t* rs, const scalar_t* fs,
+    const scalar_t* rc, const scalar_t* fc, TimingLutTable<scalar_t> rd,
+    TimingLutTable<scalar_t> fd, TimingLutTable<scalar_t> rt, TimingLutTable<scalar_t> ft,
+    scalar_t* values, bool smooth, scalar_t alpha, int mask = 15) {
+  cellValueRowAtLoad(in, out, row, sense, pins, ra, fa, rs, fs, rc[out], fc[out],
+      rd, fd, rt, ft, values, smooth, alpha, mask);
+}
+
+template <typename scalar_t>
+TIMING_INLINE void cellValueRow(int i,
+    const int64_t* arcs, int columns, int count, int pins,
+    const scalar_t* ra, const scalar_t* fa, const scalar_t* rs, const scalar_t* fs,
+    const scalar_t* rc, const scalar_t* fc, TimingLutTable<scalar_t> rd,
+    TimingLutTable<scalar_t> fd, TimingLutTable<scalar_t> rt, TimingLutTable<scalar_t> ft,
+    scalar_t* updates, bool smooth, scalar_t alpha) {
+  const int64_t* arc = arcs + i * columns;
+  cellValueRowAt<scalar_t>(arc[0], arc[1], arc[3], arc[4], pins,
+      ra, fa, rs, fs, rc, fc, rd, fd, rt, ft,
+      updates + i * 8, smooth, alpha, columns > 8 ? arc[8] : 15);
+}
+
+template <typename scalar_t>
+TIMING_INLINE void cellValueRow4AtLoad(int64_t in, int64_t out, int64_t row,
+    int64_t sense, int pins,
+    const scalar_t* ra, const scalar_t* fa, const scalar_t* rs, const scalar_t* fs,
+    scalar_t rc_load, scalar_t fc_load, TimingLutTable<scalar_t> rd,
+    TimingLutTable<scalar_t> fd, TimingLutTable<scalar_t> rt, TimingLutTable<scalar_t> ft,
+    scalar_t* values, bool smooth, scalar_t alpha, int mask = 15) {
+  scalar_t all[8];
+  cellValueRowAtLoad(in, out, row, sense, pins, ra, fa, rs, fs, rc_load, fc_load,
+      rd, fd, rt, ft, all, smooth, alpha, mask);
+  for (int k = 0; k < 4; ++k) values[k] = all[k];
+}
+
+template <typename scalar_t>
+TIMING_INLINE void cellValueRow4At(int64_t in, int64_t out, int64_t row,
+    int64_t sense, int pins,
+    const scalar_t* ra, const scalar_t* fa, const scalar_t* rs, const scalar_t* fs,
+    const scalar_t* rc, const scalar_t* fc, TimingLutTable<scalar_t> rd,
+    TimingLutTable<scalar_t> fd, TimingLutTable<scalar_t> rt, TimingLutTable<scalar_t> ft,
+    scalar_t* values, bool smooth, scalar_t alpha, int mask = 15) {
+  cellValueRow4AtLoad(in, out, row, sense, pins, ra, fa, rs, fs, rc[out], fc[out],
+      rd, fd, rt, ft, values, smooth, alpha, mask);
 }
 
 template <typename scalar_t>

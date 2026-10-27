@@ -32,6 +32,7 @@ from dreamplace.ops.placeio_ecc.sparse_timing_schema import SparseTimingView
 from dreamplace.ops.timing_propagation.action_cell_aat import apply_action_cell_aat
 from dreamplace.ops.timing_propagation.discrete_actions import DiscreteActionContext
 from dreamplace.ops.timing_propagation.sparse_timing import SparseTimingSchedule
+from sparse_fixtures import add_transition_masks
 
 DTYPE = torch.float64
 NP_DTYPE = np.float64
@@ -124,6 +125,7 @@ def _schedule():
         ],
         dtype=np.int64,
     )
+    add_transition_masks(arrays, base)
     schedule = SparseTimingSchedule(
         view,
         base,

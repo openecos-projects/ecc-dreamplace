@@ -5,6 +5,17 @@ from dreamplace.ops.placeio_ecc.sparse_timing_schema import SparseTimingView
 from dreamplace.ops.timing_propagation.sparse_timing import SparseTimingSchedule
 
 
+def add_transition_masks(arrays, base_cell):
+    """Complete synthetic fixtures whose arcs have no exception selectors."""
+    base = np.asarray(base_cell, dtype=np.int64).reshape(-1, 8)
+    for name in ("cell_edges", "slew_only_cell_edges"):
+        rows = base[arrays[name][:, 0]]
+        masks = np.where(rows[:, 4] == 1, 9, np.where(rows[:, 4] == -1, 6, 15))
+        triggers = np.where(rows[:, 5] == 1, 3, np.where(rows[:, 5] == -1, 12, 15))
+        arrays[name.replace("edges", "transition_mask")] = masks & triggers
+    arrays["net_transition_mask"] = np.full(len(arrays["net_edges"]), 9, dtype=np.int64)
+
+
 def sparse_view(
     *, false_path=False, cell=False, adjustment=(0, 0, 1, 1), slew_only=False
 ):
@@ -16,7 +27,9 @@ def sparse_view(
         "state_pin": np.array([0, 1, 2, 2, 3, 3][:count], dtype=np.int64),
         "state_domain": np.array([0, 1, 0, 1, 0, 1][:count], dtype=np.int64),
         "state_tag": np.array([0, 1, 0, 1, 0, 1][:count], dtype=np.int64),
+        "state_launch_tag": np.array([0, 1, 0, 1, 0, 1][:count], dtype=np.int64),
         "state_source_type": np.ones(count, dtype=np.int64),
+        "state_role": np.zeros(count, dtype=np.int64),
         "state_level": np.array([1, 1, 2, 2, 3, 3][:count], dtype=np.int64),
         "state_slew_group": np.array([0, 1, 2, 2, 3, 3][:count], dtype=np.int64),
         "state_valid": np.ones((count, 2), dtype=np.uint8),
@@ -29,6 +42,10 @@ def sparse_view(
             dtype=np.float64,
         ),
         "net_edges": np.array([[2, 0, 2], [2, 1, 3]], dtype=np.int64),
+        "net_transition_mask": np.full(2, 9, dtype=np.int64),
+        "cell_transition_mask": np.full(2 if cell else 0, 9, dtype=np.int64),
+        "slew_only_cell_transition_mask": np.empty(0, dtype=np.int64),
+        "context_state": np.empty(0, dtype=np.int64),
         "net_threshold_adjustments": np.array([adjustment] * 2, dtype=np.float64),
         "cell_edges": np.array([[0, 2, 4], [0, 3, 5]], dtype=np.int64)
         if cell
@@ -63,7 +80,9 @@ def sparse_view(
     }
     if slew_only:
         arrays["slew_only_cell_edges"] = arrays["cell_edges"]
+        arrays["slew_only_cell_transition_mask"] = arrays["cell_transition_mask"]
         arrays["cell_edges"] = np.empty((0, 3), dtype=np.int64)
+        arrays["cell_transition_mask"] = np.empty(0, dtype=np.int64)
     view = SparseTimingView(
         arrays, ("sys", "jtag"), ("sys", "jtag"), (), "fixture", "fixture"
     )

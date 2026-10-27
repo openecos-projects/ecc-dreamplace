@@ -27,7 +27,11 @@ def propagate_required(timing, model, result, trace):
                 scatter_timing_min(
                     value,
                     level.net[:, 0],
-                    value[level.net[:, 1]] - entry.net_delays[:, lane],
+                    torch.where(
+                        level.net_transition_mask & (1 << (3 * lane)) != 0,
+                        value[level.net[:, 1]] - entry.net_delays[:, lane],
+                        torch.inf,
+                    ),
                     include_self=True,
                     mode=timing.timing_aggregation_mode,
                     tau_ps=timing.timing_aggregation_tau_ps,

@@ -7,29 +7,29 @@ Use compare_opensta.py for the OpenSTA endpoint qualification gate.
 
 import argparse
 import json
-from pathlib import Path
 import resource
-from types import SimpleNamespace
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
-
 from dreamplace.ops.placeio_ecc.sparse_timing_schema import read_sparse_timing_view
 from dreamplace.ops.timing_propagation.lut_entry_indexed import lut_entry_indexed
 from dreamplace.ops.timing_propagation.sparse_timing import SparseTimingSchedule
 
 
-def production_timing(view, base, device):
+def production_timing(view, base, device, *, backend=None):
     """Use the real production entry on the same frozen native export.
 
     Legacy scalar seed/RAT fields are intentionally empty: schema v3 supplies
     those via the validated sparse view. RC remains frozen and zero-wire here.
     """
+    from dreamplace.flows.timing_factory import build_timing_propagation_op
+    from dreamplace.ops.placeio_ecc.timing_generation import timing_generation_lease
     from dreamplace.ops.timing_propagation.timing_propagation import (
         ARCS_INFO,
         LUTS_INFO,
-        TimingPropagation,
     )
 
     def ids(values):
@@ -54,7 +54,7 @@ def production_timing(view, base, device):
     arrays = view.arrays
     seeds = arrays["state_pin"][arrays["state_seed"].any(axis=1)]
     empty = torch.empty(0, device=device, dtype=torch.float64)
-    return TimingPropagation(
+    arguments = dict(
         inrdelays=empty,
         infdelays=empty,
         inrtrans=empty,
@@ -74,7 +74,7 @@ def production_timing(view, base, device):
         inst_flat_arcs_start=ids([0]),
         inst_flat_arcs=ids(base["flat_inst_arcs_by_level"]),
         endpoints_constraint_arcs=ids([]).reshape(0, 8),
-        endpoints_timing_check_arcs=ids(base["endpoints_timing_check_arcs"]),
+        endpoints_timing_check_arcs=ids(base["endpoints_timing_check_arcs"]).reshape(-1, 8),
         flat_inst_arcs_by_level=ids(base["flat_inst_arcs_by_level"]),
         flat_inst_arcs_by_level_start=ids(base["flat_inst_arcs_by_level_start"]),
         endpoints_rRAT=empty,
@@ -88,6 +88,34 @@ def production_timing(view, base, device):
         sparse_timing_view=view,
         production_fast_loop=True,
     )
+    params = SimpleNamespace(
+        timing_propagation_device=arguments.pop("timing_propagation_device"),
+        timing_aggregation_mode=arguments.pop("timing_aggregation_mode"),
+        production_fast_loop=arguments.pop("production_fast_loop"),
+    )
+    placedb = SimpleNamespace(
+        endpoints_rRAT=arguments.pop("endpoints_rRAT"),
+        endpoints_fRAT=arguments.pop("endpoints_fRAT"),
+        sparse_timing_view=arguments.pop("sparse_timing_view"),
+        hold_timing_data=None,
+        hold_timing_corner=None,
+        rawdb=backend,
+        pydb=backend.pydb if backend is not None else None,
+    )
+    arguments["pin2net_map"] = arguments.pop("pin_net")
+    arguments["timing_model_lease"] = timing_generation_lease(placedb)
+    for name in (
+        "pin_pair_arc_keys",
+        "flat_pin_pair_arc_start",
+        "flat_pin_pair_arc_indices",
+        "pin2node_map",
+        "inst_main_id",
+    ):
+        arguments[name] = None
+    timing = build_timing_propagation_op(params, placedb, SimpleNamespace(**arguments), None)
+    if timing.sparse_timing_view is not view:
+        raise RuntimeError("production timing factory lost the native sparse model")
+    return timing
 
 
 def lut_info(base, prefix, device):
@@ -148,7 +176,7 @@ def run(args):
     )
     endpoint_arcs = torch.as_tensor(
         base["endpoints_timing_check_arcs"], dtype=torch.int64, device=args.device
-    )
+    ).reshape(-1, 8)
     dynamic = model.legal & (model.check_index[:, 2] >= 0)
     indices = model.check_index[dynamic]
     lib_arc = endpoint_arcs[indices[:, 2], 3]

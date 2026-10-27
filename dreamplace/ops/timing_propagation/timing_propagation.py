@@ -755,6 +755,8 @@ class TimingPropagation(nn.Module):
                  backend_endpoint_rSlew=None,
                  backend_endpoint_fSlew=None,
                  sparse_timing_view=None,
+                 timing_model_lease=None,
+                 hold_timing_data=None,
                  ):
         super(TimingPropagation, self).__init__()
         write_crash_stage_marker(
@@ -767,7 +769,20 @@ class TimingPropagation(nn.Module):
 
         self.num_pins = pin_net.shape[0]
         self.sparse_timing_view = sparse_timing_view
+        self.timing_model_lease = timing_model_lease
         self._sparse_runtime = None
+        from .early_propagation import EarlyPropagation
+
+        self.early_propagation = (
+            EarlyPropagation(hold_timing_data, use_native=False)
+            if hold_timing_data is not None
+            else None
+        )
+        self.hold_rc = None
+        self.early_timing_view = None
+        self.hold_liberty_paths = ()
+        self.last_evaluation = None
+        self.evaluation_generation = 0
         # TimingPropagation keeps the Python timing state on the same exported
         # basis as PyPlaceDB:
         #   - delay / AAT / RAT / slew / slack are in ps
@@ -980,6 +995,68 @@ class TimingPropagation(nn.Module):
         self._setup_critical_path_extractor_epoch = None
         self.critical_path_topology_epoch = 0
         self.last_critical_path_extraction_stats = None
+
+    def _run_early_evaluation(
+        self,
+        early_rc_inputs,
+        *,
+        cell_use_surrogate,
+        clk2q_use_surrogate,
+        dynamic_net_provider,
+    ):
+        if self.early_propagation is None:
+            return None
+        if early_rc_inputs is None:
+            raise RuntimeError("hold propagation requires min RC from the current forward")
+        if dynamic_net_provider is not None:
+            early_analysis = getattr(dynamic_net_provider, "early_analysis", None)
+            if not callable(early_analysis):
+                raise RuntimeError("hold propagation requires a dynamic provider with early_analysis")
+            early_context = early_analysis(early_rc_inputs.pin_caps)
+        else:
+            from contextlib import nullcontext
+
+            early_context = nullcontext(None)
+
+        def sides(values):
+            return tuple(
+                self._forward_input_tensor(values[edge]) for edge in ("rise", "fall")
+            )
+
+        with torch.set_grad_enabled(
+            torch.is_grad_enabled() and early_rc_inputs.gradients_enabled
+        ), early_context as early_provider:
+            early_timing = self.early_timing_view
+            if early_timing is None:
+                early_timing = self
+            else:
+                early_timing.timing_aggregation_mode = self.timing_aggregation_mode
+                early_timing.timing_aggregation_tau_ps = self.timing_aggregation_tau_ps
+                early_timing._dynamic_net_level_view_epoch = self._dynamic_net_level_view_epoch
+            return self.early_propagation.forward(
+                early_timing,
+                sides(early_rc_inputs.delays),
+                sides(early_rc_inputs.impulses),
+                sides(early_rc_inputs.caps),
+                surrogate=cell_use_surrogate,
+                clock_surrogate=clk2q_use_surrogate,
+                dynamic_provider=early_provider,
+            )
+
+    def _publish_timing_evaluation(self, outputs, hold_result):
+        from .timing_evaluation import TimingEvaluation
+
+        self.evaluation_generation += 1
+        self.last_evaluation = TimingEvaluation(
+            self.evaluation_generation,
+            outputs[0],
+            outputs[1],
+            outputs[2],
+            outputs[3],
+            self.timing_aggregation_mode,
+            hold_result,
+            self.hold_liberty_paths,
+        )
 
     def _skip_full_rat_propagation_in_fast_loop(self):
         return bool(getattr(self, "production_fast_loop", False))
@@ -4829,8 +4906,14 @@ class TimingPropagation(nn.Module):
         dynamic_net_arc_inputs=None,
         dynamic_net_subgraph_inputs=None,
         dynamic_net_provider=None,
+        early_rc_inputs=None,
     ):
+        if self.timing_model_lease is not None:
+            self.timing_model_lease.require_current()
         start_time = time.time()
+        self.last_evaluation = None
+        if self.early_propagation is not None and early_rc_inputs is None:
+            raise RuntimeError("hold propagation requires min RC from the current forward")
 
         def profile_clock():
             if self.timing_propagation_profile:
@@ -4937,6 +5020,13 @@ class TimingPropagation(nn.Module):
                 dynamic_net_provider=dynamic_net_provider,
                 surrogate_mode=surrogate_mode,
             )
+            hold_result = self._run_early_evaluation(
+                early_rc_inputs,
+                cell_use_surrogate=cell_use_surrogate,
+                clk2q_use_surrogate=clk2q_use_surrogate,
+                dynamic_net_provider=dynamic_net_provider,
+            )
+            self._publish_timing_evaluation(outputs, hold_result)
             self.last_parity_payload = self._try_run_cpu_cuda_parity(
                 pin_net_delays, pin_net_impulses, pin_net_caps, surrogate_mode,
                 outputs[0], outputs[1], self.last_endpoint_slack_tensor,
@@ -5269,6 +5359,12 @@ class TimingPropagation(nn.Module):
         if critical_path_snapshot_requested and dynamic_net_provider is not None:
             critical_path_pin_net_delay_rise = pin_net_delay_rise
             critical_path_pin_net_delay_fall = pin_net_delay_fall
+        hold_result = self._run_early_evaluation(
+            early_rc_inputs,
+            cell_use_surrogate=cell_use_surrogate,
+            clk2q_use_surrogate=clk2q_use_surrogate,
+            dynamic_net_provider=dynamic_net_provider,
+        )
         self._store_forward_state(
             pin_rAAT=pin_rAAT,
             pin_fAAT=pin_fAAT,
@@ -5292,6 +5388,7 @@ class TimingPropagation(nn.Module):
             critical_path_pin_net_delay_rise=critical_path_pin_net_delay_rise,
             critical_path_pin_net_delay_fall=critical_path_pin_net_delay_fall,
         )
+        self._publish_timing_evaluation((wns, tns, ws, ts), hold_result)
         total_runtime_ms = (profile_clock() - profile_started_at) * 1000.0
         post_timing_boundary = {
             "core_device": str(self.device),

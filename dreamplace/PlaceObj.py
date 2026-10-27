@@ -143,6 +143,7 @@ from dreamplace.ops.size_interpolated_pin.sizing_limit_utils import (
     warmup_size_interpolated_pin_native_cache,
 )
 from dreamplace.flows.joint_proximal import JointProximalObjective
+from dreamplace.flows.hold_objective import HoldObjective
 
 _AIMP_TRUE_VALUES = {"1", "true", "yes", "on"}
 _AIMP_FALSE_VALUES = {"0", "false", "no", "off"}
@@ -929,6 +930,7 @@ class PlaceObj(nn.Module):
         self.invoke_timing_count = 0
         self.timing_wns_coeff = float(getattr(params, "timing_wns_coeff", 0.01))
         self.timing_tns_coeff = float(getattr(params, "timing_tns_coeff", 0.0001))
+        self.hold_objective = HoldObjective.from_params(params)
         self.timing_grad_balance_target_ratio = float(
             getattr(params, "timing_grad_balance_target_ratio", 0.01)
         )
@@ -1630,11 +1632,36 @@ class PlaceObj(nn.Module):
             ),
             "leakage_mW": self.last_timing_objective_terms["raw_terms"]["leakage"],
         }
+        hold_term = zero
+        hold_objective = getattr(self, "hold_objective", None)
+        if hold_objective is not None:
+            if timing_op is None:
+                raise RuntimeError("hold objective requires the timing propagation operator")
+            hold_term = hold_objective.loss(timing_op.last_evaluation)
+            total_loss = total_loss + hold_term
+        self.last_timing_objective_terms["hold"] = {
+            "enabled": hold_objective is not None,
+            "coefficients": (
+                None
+                if hold_objective is None
+                else {
+                    "wns": float(hold_objective.wns),
+                    "tns": float(hold_objective.tns),
+                }
+            ),
+            "margin_ns": (
+                None
+                if hold_objective is None
+                else float(hold_objective.margin_ps) / 1000.0
+            ),
+            "loss": float(hold_term.detach().item()),
+        }
         self.last_timing_objective_terms["total_loss"] = float(total_loss.detach().item())
         self.last_timing_objective_terms["grad_balance"] = copy.deepcopy(
             getattr(self, "timing_grad_balance_summary", {})
         )
         self._last_timing_objective_component_tensors = dict(weighted_terms)
+        self._last_timing_objective_component_tensors["hold"] = hold_term
         return total_loss
 
     def _timing_loss(self, wns, tns, ws, ts):
@@ -6300,6 +6327,10 @@ class PlaceObj(nn.Module):
                 "surrogate_mode": surrogate_mode,
                 "dynamic_net_arc_inputs": dynamic_net_arc_inputs,
             }
+            if getattr(timing_op, "hold_rc", None) is not None:
+                timing_kwargs["early_rc_inputs"] = timing_op.hold_rc.evaluate(
+                    self, new_x, new_y, pin_caps_base_for_elmore,
+                )
             if dynamic_net_provider is not None:
                 timing_kwargs["dynamic_net_provider"] = dynamic_net_provider
             critical_path_snapshot_owned = False
@@ -10332,7 +10363,12 @@ class PlaceObj(nn.Module):
             timing_lut_2d_native_op=getattr(
                 params, "timing_lut_2d_native_op", "auto"
             ),
+            hold_timing_data=getattr(placedb, "hold_timing_data", None),
         )
+        if getattr(placedb, "hold_timing_data", None) is not None:
+            from dreamplace.flows.hold_rc import HoldRC
+
+            timing_propagation_op.hold_rc = HoldRC(placedb.hold_timing_data)
         write_crash_stage_marker(
             "timing_propagation_op_construction",
             "done",

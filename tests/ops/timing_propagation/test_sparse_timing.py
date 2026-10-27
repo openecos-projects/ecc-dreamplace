@@ -193,7 +193,11 @@ def test_compact_invalid_transition_keeps_shared_electrical_slew(native_device, 
     lanes = model.propagate((), values[:2], values[2:4], values[4:], smooth=smooth)
     torch.testing.assert_close(lanes[0][3], lanes[0].new_tensor(-2e8))
     torch.testing.assert_close(
-        lanes[2][2:], torch.sqrt(lanes[2].new_tensor([0.08, 0.08]))
+        lanes[2][2:], torch.sqrt(lanes[2].new_tensor([0.13, 0.13]))
     )
-    gradient = torch.autograd.grad(lanes[0][3], values[2])[0]
+    gradient = torch.autograd.grad(lanes[0][3], values[2], retain_graph=True)[0]
     torch.testing.assert_close(gradient, torch.zeros_like(gradient))
+    slew_gradient = torch.autograd.grad(lanes[2][3], values[4])[0]
+    expected = torch.zeros_like(slew_gradient)
+    expected[2] = 0.5 / (0.13 ** 0.5)
+    torch.testing.assert_close(slew_gradient, expected)

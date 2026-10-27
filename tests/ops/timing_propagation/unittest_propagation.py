@@ -819,6 +819,10 @@ class TestTimingPropagationFastLoopState(unittest.TestCase):
         dtype = torch.float32
         model = TimingPropagation.__new__(TimingPropagation)
         torch.nn.Module.__init__(model)
+        model.timing_model_lease = None
+        model.early_propagation = None
+        model.evaluation_generation = 0
+        model.hold_liberty_paths = ()
         model.endpoints_timing_check_arcs = torch.empty((0, 8), dtype=torch.long)
         model.timing_metric_scope = "setup_plus_recovery"
         model.timing_aggregation_mode = "hard"

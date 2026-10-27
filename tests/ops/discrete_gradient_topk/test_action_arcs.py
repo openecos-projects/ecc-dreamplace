@@ -1,7 +1,6 @@
 from types import SimpleNamespace
 
 import torch
-
 from dreamplace.ops.discrete_gradient_topk.action_arcs import (
     build_action_arc_table,
 )
@@ -104,6 +103,25 @@ def test_all_arcs_rule_invalidates_the_whole_instance_action():
 
     assert result.valid_arcs[:, 0].tolist() == [True, False]
     assert result.valid_instances[:, 0].tolist() == [False, False]
+
+
+def test_setup_and_hold_with_equal_pins_and_trigger_keep_their_check_class():
+    candidates = QuadCandidateTable(target_cell_ids=torch.tensor([[1, -1, -1, -1]]))
+    data = _data(
+        target_cells=candidates.target_cell_ids, pin_starts=[0, 2, 4],
+        arc_info=[[0, 1, 0, 0, 1, 1], [0, 1, 0, 1, 1, 1],
+                  [0, 1, 1, 0, 1, 1], [0, 1, 1, 1, 1, 1]],
+        arcs=[[0, 1, 0, 0, 1, 1], [0, 1, 0, 1, 1, 1]],
+        inst_cell_id=[0], pin2node=[0, 0],
+    )
+    data.cell_id_2_arc_id_start = torch.tensor([0, 2, 4])
+    data.flat_libarc_check_types = torch.tensor([1, 2, 2, 1])
+    result = build_action_arc_table(data, candidates, action_names=ACTION_NAMES)
+    assert result.target_arc_ids.tolist() == [[3, -1, -1, -1], [2, -1, -1, -1]]
+    assert result.valid_instances.tolist() == [[True, False, False, False]]
+    data.flat_libarc_check_types[2:] = torch.tensor([1, 2])
+    refreshed = build_action_arc_table(data, candidates, action_names=ACTION_NAMES)
+    assert refreshed.target_arc_ids.tolist() == [[2, -1, -1, -1], [3, -1, -1, -1]]
 
 
 def test_pin_count_change_is_invalid_even_with_equal_arc_signature():

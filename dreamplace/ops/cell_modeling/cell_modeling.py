@@ -2088,9 +2088,10 @@ class CellModeling(nn.Module):
         return torch.where(has_vt_candidates, torch.nan_to_num(interpolated), torch.zeros_like(interpolated))
 
     def _dataset_spec(self, dataset_name):
-        if dataset_name not in DATASET_SPECS:
+        specs = getattr(self, "dataset_specs", DATASET_SPECS)
+        if dataset_name not in specs:
             raise ValueError(f"unknown cell-model dataset: {dataset_name}")
-        return DATASET_SPECS[dataset_name]
+        return specs[dataset_name]
 
     def _flatten_lut_points(self, dataset_name):
         spec = self._dataset_spec(dataset_name)

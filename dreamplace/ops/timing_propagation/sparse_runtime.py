@@ -180,7 +180,9 @@ class SparseTimingRuntime:
         if version == self._master_version:
             return
         self._cell_arcs = {
-            id(level): torch.cat((level.cell[:, :2], base[level.base_cells, 2:]), dim=1)
+            id(level): torch.cat(
+                (level.cell[:, :2], base[level.base_cells, 2:], level.cell[:, 8:]), dim=1
+            )
             for level in self.schedule.levels
         }
         self._master_version = version
@@ -250,7 +252,7 @@ class SparseTimingRuntime:
                         need_delays=bool(self._need_delays),
                         defer_target_queries=True,
                     )
-                return _CellAat.apply(
+                updates = _CellAat.apply(
                     selected,
                     *lanes,
                     *caps,
@@ -258,6 +260,7 @@ class SparseTimingRuntime:
                     SMOOTH_MAX_ENABLED and not _force_hard_pairwise_max_enabled(),
                     SMOOTH_MAX_ALPHA,
                 )
+                return updates if self._need_delays else updates[:, :4]
             if action_context is not None:
                 raise RuntimeError(
                     "lut_action requires the fixed-master native cell LUT path; "

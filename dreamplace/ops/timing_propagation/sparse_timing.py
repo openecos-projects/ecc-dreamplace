@@ -10,9 +10,9 @@ import numpy as np
 import torch
 
 from .cell_aat_native import _CellAat
+from .hard_scatter_native import scatter_slew_max
 from .net_aat_native import _NetAat
 from .timing_lanes_native import _TimingLanes
-from .hard_scatter_native import scatter_slew_max
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,7 @@ class _SparseTimingLevel:
     base_cells: torch.Tensor
     arrival_cell_count: int
     net: torch.Tensor
+    net_transition_mask: torch.Tensor
     arrival_destinations: torch.Tensor
     arrival_states: torch.Tensor
     slew_index: torch.Tensor
@@ -65,6 +66,7 @@ class SparseTimingSchedule:
     ):
         view.require_supported()
         arrays = view.arrays
+        self.early = view.early
         self.dtype = dtype
         self.device = torch.device(device)
         self.aggregation_mode = str(aggregation_mode or "hard")
@@ -72,21 +74,15 @@ class SparseTimingSchedule:
         if self.aggregation_tau_ps <= 0.0:
             raise ValueError("sparse endpoint aggregation tau must be positive")
         self.state_pin = torch.as_tensor(arrays["state_pin"], device=device)
-        self.state_slew_group = torch.as_tensor(
-            arrays["state_slew_group"], device=device
-        )
+        self.state_slew_group = torch.as_tensor(arrays["state_slew_group"], device=device)
         self.num_slew_groups = int(arrays["state_slew_group"].max(initial=-1)) + 1
         self.num_pins = len(arrays["pin_state_start"]) - 1
         self.valid = torch.as_tensor(arrays["state_valid"], device=device).bool()
         self.all_transitions_valid = bool(arrays["state_valid"].all())
         self.seed = torch.as_tensor(arrays["state_seed"], device=device).bool()
-        self.reference = torch.as_tensor(
-            arrays["state_reference"], device=device, dtype=dtype
-        )
+        self.reference = torch.as_tensor(arrays["state_reference"], device=device, dtype=dtype)
         self.check_index = torch.as_tensor(arrays["check_index"], device=device)
-        self.check_values = torch.as_tensor(
-            arrays["check_values"], device=device, dtype=dtype
-        )
+        self.check_values = torch.as_tensor(arrays["check_values"], device=device, dtype=dtype)
         legal = arrays["check_index"][:, 6].astype(bool)
         if check_mask is not None:
             legal = legal & check_mask
@@ -116,31 +112,31 @@ class SparseTimingSchedule:
                 raise RuntimeError(f"sparse {name} is not a forward DAG edge")
             order = np.argsort(levels, kind="stable")
             edges = edges[order]
+            masks = arrays[name.replace("edges", "transition_mask")][order]
             if name != "net_edges":
                 rows = base_cell[edges[:, 0]].copy()
                 rows[:, :2] = edges[:, 1:]
+                rows = np.column_stack((rows, masks))
             else:
                 rows = edges[:, 1:].copy()
                 adjustments = arrays["net_threshold_adjustments"][order]
             offsets = np.r_[
                 0,
-                np.cumsum(
-                    np.bincount(levels, minlength=int(state_level.max(initial=0)) + 1)
-                ),
+                np.cumsum(np.bincount(levels, minlength=int(state_level.max(initial=0)) + 1)),
             ]
-            groups.append((rows, offsets, edges[:, 0]))
+            groups.append((rows, offsets, edges[:, 0], masks))
         levels = []
         for level in range(len(groups[0][1]) - 1):
             cell, net, slew_only = tuple(
                 rows[int(offsets[level]) : int(offsets[level + 1])]
-                for rows, offsets, _ in groups
+                for rows, offsets, _, _ in groups
             )
             if len(cell) or len(net) or len(slew_only):
                 arrival_cell_count = len(cell)
                 base_cells = np.concatenate(
                     tuple(
                         ids[int(offsets[level]) : int(offsets[level + 1])]
-                        for _, offsets, ids in (groups[0], groups[2])
+                        for _, offsets, ids, _ in (groups[0], groups[2])
                     )
                 )
                 cell = np.concatenate((cell, slew_only))
@@ -155,9 +151,7 @@ class SparseTimingSchedule:
                 arrival_destinations = np.unique(
                     np.concatenate((cell[:arrival_cell_count, 1], net[:, 1]))
                 )
-                adjustment = adjustments[
-                    int(groups[1][1][level]) : int(groups[1][1][level + 1])
-                ]
+                adjustment = adjustments[int(groups[1][1][level]) : int(groups[1][1][level + 1])]
                 levels.append(
                     _SparseTimingLevel(
                         states=index(states),
@@ -167,6 +161,9 @@ class SparseTimingSchedule:
                         base_cells=index(base_cells),
                         arrival_cell_count=arrival_cell_count,
                         net=index(net),
+                        net_transition_mask=index(
+                            groups[1][3][int(groups[1][1][level]) : int(groups[1][1][level + 1])]
+                        ),
                         arrival_destinations=index(arrival_destinations),
                         arrival_states=index(states[arrival_destinations]),
                         slew_index=index(slew_index),
@@ -192,6 +189,7 @@ class SparseTimingSchedule:
         trace=None,
         arrival_plan=None,
         initial_arrivals=None,
+        initial_slew=None,
     ):
         """Return state lanes; caps/delays/impulses stay in physical pin domain.
 
@@ -200,27 +198,47 @@ class SparseTimingSchedule:
         """
         if tau_ps <= 0:
             raise ValueError("sparse timing tau must be positive")
+        unreachable = torch.inf if self.early else -2e8
+        empty_slew = torch.inf if self.early else 0.0
+
+        def scatter_slew(dest, index, src):
+            sign = -1 if self.early else 1
+            return sign * scatter_slew_max(sign * dest, index, sign * src)
+
+        def merge(index, *values):
+            sign = -1 if self.early else 1
+            return tuple(
+                sign * value
+                for value in _TimingLanes.apply(
+                    index, smooth, tau_ps, *(sign * value for value in values)
+                )
+            )
+
         lanes = tuple(
             torch.where(
                 self.seed[:, lane % 2],
                 self.reference[:, lane],
-                self.reference.new_full((), -2e8 if lane < 2 else 0.0),
+                self.reference.new_full((), unreachable if lane < 2 else empty_slew),
             )
             for lane in range(4)
         )
         physical_slew = torch.stack(
             tuple(
-                scatter_slew_max(
-                    self.reference.new_zeros(self.num_slew_groups),
+                scatter_slew(
+                    self.reference.new_full((self.num_slew_groups,), empty_slew),
                     self.state_slew_group,
                     value,
                 )
                 for value in lanes[2:]
             )
         )
-        arrivals = (
-            torch.stack(lanes[:2]) if initial_arrivals is None else initial_arrivals
-        )
+        if initial_slew is not None:
+            physical_slew = (
+                torch.minimum(physical_slew, initial_slew)
+                if self.early
+                else torch.maximum(physical_slew, initial_slew)
+            )
+        arrivals = torch.stack(lanes[:2]) if initial_arrivals is None else initial_arrivals
         for level_index, level in enumerate(self.levels):
             cell, net = level.cell, level.net
             arrival_cell_count = level.arrival_cell_count
@@ -239,36 +257,33 @@ class SparseTimingSchedule:
                     cell_updates(level, lanes, local_caps)
                     if cell_updates is not None
                     else _CellAat.apply(
-                        cell, *lanes, *local_caps, tables, smooth, 1.0 / tau_ps
+                        cell, *lanes, *local_caps, tables, smooth, 1.0 / tau_ps, self.early
                     )
                 )
                 arrival_cell = cell[:arrival_cell_count]
                 if trace is not None:
-                    cell_delays = updates[:arrival_cell_count, 4:8].detach()
+                    bits = cell.new_tensor([1, 4, 2, 8])
+                    cell_delays = torch.where(
+                        (cell[:arrival_cell_count, 8, None] & bits) != 0,
+                        updates[:arrival_cell_count, 4:8],
+                        -torch.inf,
+                    ).detach()
                 arrival_updates = updates[:arrival_cell_count]
-                if not self.all_transitions_valid:
-                    mask = self.valid[level.states[arrival_cell[:, 1]]]
-                    arrival_updates = torch.stack(
-                        tuple(
-                            torch.where(
-                                mask[:, lane % 2],
-                                arrival_updates[:, lane],
-                                updates.new_full((), -2e8 if lane < 2 else 0.0),
-                            )
-                            for lane in range(4)
-                        ),
-                        dim=1,
-                    )
+                mask = self.valid[level.states[arrival_cell[:, 1]]]
+                mask = mask & torch.stack(
+                    (arrival_cell[:, 8] & 5 != 0, arrival_cell[:, 8] & 10 != 0), dim=1
+                )
+                arrival_updates = torch.cat(
+                    (
+                        torch.where(mask, arrival_updates[:, :2], unreachable),
+                        arrival_updates[:, 2:],
+                    ),
+                    dim=1,
+                )
                 if arrival_cell_count:
-                    rows = (
-                        slice(None)
-                        if arrival_plan is None
-                        else arrival_plan[level_index][0]
-                    )
-                    lanes = _TimingLanes.apply(
+                    rows = slice(None) if arrival_plan is None else arrival_plan[level_index][0]
+                    lanes = merge(
                         arrival_cell[rows, 1],
-                        smooth,
-                        tau_ps,
                         *lanes,
                         *(arrival_updates[rows, lane] for lane in range(4)),
                     )
@@ -286,12 +301,18 @@ class SparseTimingSchedule:
                     )
                 )
             if net.numel():
+                net_lanes = lanes
+                if self.early:
+                    net_lanes = (
+                        *lanes[:2],
+                        *(torch.where(torch.isfinite(value), value, 0) for value in lanes[2:]),
+                    )
                 updates = (
-                    net_updates(level, lanes, delays, impulses)
+                    net_updates(level, net_lanes, delays, impulses)
                     if net_updates is not None
                     else _NetAat.apply(
                         net,
-                        *lanes,
+                        *net_lanes,
                         *(value[level.pins] for value in (*delays, *impulses)),
                         1e-8,
                     )
@@ -302,33 +323,37 @@ class SparseTimingSchedule:
                     updates[2] * level.adjustment[:, 2],
                     updates[3] * level.adjustment[:, 3],
                 )
-                if not self.all_transitions_valid:
-                    mask = self.valid[level.states[net[:, 1]]]
-                    updates = tuple(
-                        torch.where(
-                            mask[:, lane % 2],
-                            value,
-                            value.new_full((), -2e8 if lane < 2 else 0.0),
-                        )
-                        for lane, value in enumerate(updates)
-                    )
                 if trace is not None:
+                    # Store the physical transfer before arrival legality is
+                    # applied: multiple tagged edges can share this sink.
                     net_delays = torch.stack(
                         tuple(
-                            (updates[lane] - lanes[lane][net[:, 0]]).detach()
+                            (updates[lane] - net_lanes[lane][net[:, 0]]).detach()
                             for lane in range(2)
                         ),
                         dim=1,
                     )
-                rows = (
-                    slice(None)
-                    if arrival_plan is None
-                    else arrival_plan[level_index][1]
+                mask = self.valid[level.states[net[:, 1]]]
+                mask = mask & torch.stack(
+                    (level.net_transition_mask & 1 != 0, level.net_transition_mask & 8 != 0), dim=1
                 )
-                lanes = _TimingLanes.apply(
+                updates = (
+                    tuple(
+                        torch.where(mask[:, lane], value, unreachable)
+                        for lane, value in enumerate(updates[:2])
+                    )
+                    + updates[2:]
+                )
+                if self.early:
+                    updates = updates[:2] + tuple(
+                        torch.where(
+                            torch.isfinite(lanes[lane + 2][net[:, 0]]), updates[lane + 2], torch.inf
+                        )
+                        for lane in range(2)
+                    )
+                rows = slice(None) if arrival_plan is None else arrival_plan[level_index][1]
+                lanes = merge(
                     net[rows, 1],
-                    smooth,
-                    tau_ps,
                     *lanes,
                     *(value[rows] for value in updates),
                 )
@@ -341,7 +366,7 @@ class SparseTimingSchedule:
             slew_destinations = physical_slew.index_select(1, level.slew_destinations)
             slew_values = torch.stack(
                 tuple(
-                    scatter_slew_max(
+                    scatter_slew(
                         value,
                         level.slew_index,
                         torch.cat(tuple(update[lane] for update in slew_updates)),
@@ -370,9 +395,7 @@ class SparseTimingSchedule:
         if check_lut_values.shape != self.check_values[:, 0].shape:
             raise ValueError("sparse check LUT values do not align with native rules")
         required = self.check_values[:, 0] + self.check_values[:, 1] * check_lut_values
-        arrivals = torch.stack(lanes[:2], dim=1)[
-            self.check_state, self.check_transition
-        ]
+        arrivals = torch.stack(lanes[:2], dim=1)[self.check_state, self.check_transition]
         slack = required[self.legal] - arrivals
         if self.aggregation_mode == "smooth":
             endpoint_ids = self.check_to_endpoint.long()
@@ -384,9 +407,7 @@ class SparseTimingSchedule:
                 reduce="amax",
                 include_self=False,
             )
-            shifted = torch.exp(
-                (-slack - maximum[endpoint_ids]) / self.aggregation_tau_ps
-            )
+            shifted = torch.exp((-slack - maximum[endpoint_ids]) / self.aggregation_tau_ps)
             total = slack.new_zeros(self.endpoint_pins.numel())
             total.index_add_(0, endpoint_ids, shifted)
             maximum_violation = maximum + self.aggregation_tau_ps * torch.log(total)
@@ -399,11 +420,7 @@ class SparseTimingSchedule:
             )
         endpoint_slack = -maximum_violation
         zero = lanes[0].sum() * 0
-        wns = (
-            torch.minimum(endpoint_slack.min(), zero)
-            if endpoint_slack.numel()
-            else zero
-        )
+        wns = torch.minimum(endpoint_slack.min(), zero) if endpoint_slack.numel() else zero
         tns = torch.clamp(endpoint_slack, max=0).sum()
         return SparseTimingResult(
             lanes, required, slack, self.endpoint_pins, endpoint_slack, wns, tns

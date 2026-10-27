@@ -295,6 +295,9 @@ def build_action_arc_table(
         device="cpu", dtype=torch.long
     )
     pin_names = tuple(pin_names) if pin_names is not None else None
+    check_types = getattr(data, "flat_libarc_check_types", None)
+    if check_types is not None and check_types.shape != (flat_arc_info.shape[0],):
+        raise RuntimeError("lut_action library check classes do not align with library arcs")
     library_key = (
         int(data.cell_id_2_arc_id_start.data_ptr()),
         int(data.cell_id_2_arc_id_start._version),
@@ -303,6 +306,7 @@ def build_action_arc_table(
         int(data.cell_id_2_libpin_id_start.data_ptr()),
         int(data.cell_id_2_libpin_id_start._version),
         None if pin_names is None else hash(pin_names),
+        None if check_types is None else (int(check_types.data_ptr()), int(check_types._version)),
     )
     pin_identity_unavailable_reason = None
     if pin_names is not None:
@@ -465,10 +469,12 @@ def build_action_arc_table(
         ]
         cached_changed_cells += int(changed_cells.numel())
         if int(changed_cells.numel()) and arc_signatures is None:
-            arc_signatures = [
-                (int(row[0]), int(row[1]), int(row[4]), int(row[5]))
-                for row in flat_arc_info.tolist()
-            ]
+            arc_signatures = [_signature(row) for row in flat_arc_info.tolist()]
+            if check_types is not None:
+                arc_signatures = [
+                    (*signature, int(check_type))
+                    for signature, check_type in zip(arc_signatures, check_types.detach().cpu().tolist(), strict=True)
+                ]
         for source_cell in changed_cells.tolist():
             source_begin = int(arc_start[source_cell].item())
             source_end = int(arc_start[source_cell + 1].item())

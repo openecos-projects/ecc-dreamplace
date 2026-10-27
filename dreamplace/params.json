@@ -773,6 +773,25 @@
         "description": "enable integrated STA initialization and differentiable timing updates during placement",
         "default": 1
     },
+    "timing_hold_enabled": {
+        "description": "enable the independent ideal-clock early/min timing lane",
+        "default": false
+    },
+    "timing_hold_margin_ns": {
+        "description": "hold slack margin used only when forming the optional hold objective",
+        "default": 0.0
+    },
+    "timing_hold_coefficients": {
+        "description": "named hold objective coefficients; zero values retain report-only behavior",
+        "default": {
+            "wns": 0.0,
+            "tns": 0.0
+        }
+    },
+    "timing_hold_lib_paths": {
+        "description": "optional Liberty paths for an independent early corner",
+        "default": []
+    },
     "export_pin_violation_csv": {
         "description": "export detailed per-pin slew/cap violation CSV files; disabled by default because it is expensive on large designs",
         "default": 0

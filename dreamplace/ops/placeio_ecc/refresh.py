@@ -30,7 +30,7 @@ class RefreshController:
                 raw_db.with_routability,
                 with_sta=True,
                 timing_model_only=str(
-                    summary.get("mode") or raw_db.timing_inputs.get("timing_mode", "complete")
+                    summary.get("mode") or raw_db.timing_inputs.get("timing_mode", "model_only")
                 )
                 == "model_only",
                 **asdict(raw_db.export_options),

@@ -1361,6 +1361,8 @@ class DiscreteTimingOwner:
                     {
                         "round": round_id,
                         "loss": float(loss.detach()),
+                        # The next round compares against this entry's terms.
+                        "objective_terms": objective_snapshot(model, loss),
                         "fits": fits,
                         "actions": summary.get("selected_scores", ()),
                         "action_counts": dict(summary.get("action_counts", {}) or {}),

@@ -220,11 +220,11 @@
         "default": "auto"
     },
     "timing_action_gradient_mode": {
-        "description": "discrete sizing gradient mode, off | lut_action",
+        "description": "discrete sizing gradient mode; default lut_action, off is the legacy path",
         "default": "lut_action"
     },
     "timing_action_score_objective": {
-        "description": "objective differentiated for the local action score, loss (weighted objective) | tns | wns",
+        "description": "objective differentiated for the local LUT action score; loss uses diff_sizing_coefficients, tns/wns select a single timing metric",
         "default": "loss"
     },
     "timing_action_load_delta": {
@@ -881,11 +881,11 @@
         "default": 0.1
     },
     "inflation_density_weight_scale": {
-        "description": "positive scale for the Xplace-style density-weight restart ratio ||grad wirelength||_1 / ||grad density||_1 after each inflation geometry epoch; the default 0.001 keeps the restarted density force small, 1.0 uses the normalized ratio directly, and 0.1 reproduces the historical DreamPlace post-restart scale",
+        "description": "positive scale for the Xplace-style density-weight restart ratio after inflation; the default 0.001 keeps the restarted density force small, 1.0 uses the normalized gradient ratio directly, and 0.1 reproduces the historical DreamPlace post-restart scale",
         "default": 0.001
     },
     "inflation_filler_consumption_mode": {
-        "description": "filler area consumed by routability inflation: filler_first subtracts the inflation area from filler before raising target density, proportional shrinks filler and non-filler whitespace together, capacity_only preserves the legacy behavior of shrinking filler only at the placement-area limit",
+        "description": "how routability inflation consumes filler: filler_first subtracts the inflation area from filler before raising target density, proportional shrinks filler and non-filler whitespace together, capacity_only preserves the legacy limit-only shrink",
         "default": "filler_first"
     },
     "legalize_before_each_inflation_flag": {
@@ -922,11 +922,11 @@
     },
     "diff_sizing_timing_rc_mode": {
         "default": "gr",
-        "description": "standalone diff_sizing timing RC source; placement | gr"
+        "description": "standalone diff_sizing timing RC source; placement uses the placement parasitics and gr uses the frozen GR snapshot"
     },
     "diff_sizing_optimization_flows": {
         "default": null,
-        "description": "ordered standalone diff_sizing phases [action, rounds, [wns, tns, slew, cap], selection_percent]; null keeps one quad phase"
+        "description": "ordered standalone diff_sizing phases: [action, rounds, [wns, tns, slew, cap], selection_percent]; action is quad, up, or down and percent is in (0, 100]; null keeps one quad phase with the stage round budget"
     },
     "cell_model_schema": {
         "default": "main_id_arc_offset_piecewise_linear",

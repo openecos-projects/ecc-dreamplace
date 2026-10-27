@@ -87,15 +87,23 @@ def sparse_digest(arrays, metadata):
     return digest.hexdigest()
 
 
+def model_rule_units(values):
+    """Integer 1e-9 ps rule units, rounded like the producer's std::llround.
+
+    llround rounds halves away from zero; np.rint rounds halves to even and
+    disagrees with the producer on exact .5 values.
+    """
+    scaled = values * 1e9
+    return (np.sign(scaled) * np.floor(np.abs(scaled) + 0.5)).astype(np.int64)
+
+
 def model_digest(arrays, metadata):
     """Digest structure and rules, excluding references and float roundoff."""
     model_arrays = {name: arrays[name] for name in MODEL_KEYS if name != "check_values"}
     # Native model preparation can differ from complete STA by sub-femtosecond
     # rounding in the affine intercept. Match the producer's 1e-9 ps integer
     # canonicalization while retaining sensitivity to meaningful rule changes.
-    model_arrays["check_values"] = np.rint(arrays["check_values"][:, :3] * 1e9).astype(
-        np.int64, copy=False
-    )
+    model_arrays["check_values"] = model_rule_units(arrays["check_values"][:, :3])
     return sparse_digest(model_arrays, metadata)
 
 

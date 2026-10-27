@@ -6,6 +6,7 @@ import pytest
 from dreamplace.ops.placeio_ecc.sparse_timing_schema import (
     STATE_KEYS,
     model_digest,
+    model_rule_units,
     read_sparse_timing_view,
     sparse_digest,
 )
@@ -243,6 +244,13 @@ def test_model_digest_ignores_sub_femtosecond_rule_roundoff(pydb):
 
     assert after.model_digest == before.model_digest
     assert after.semantic_digest != before.semantic_digest
+
+
+def test_model_rule_units_round_half_away_from_zero_like_native_llround():
+    # 15299.9999999925 ps scales to exactly ...992.5; std::llround gives ...993.
+    values = np.array([15299.9999999925, -2.5e-9, 1.5e-9, 0.0])
+
+    assert model_rule_units(values).tolist() == [15299999999993, -3, 2, 0]
 
 
 def test_model_rule_changes_invalidate_model_digest(pydb):

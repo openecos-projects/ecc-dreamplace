@@ -2929,8 +2929,8 @@ class PlaceObj(nn.Module):
         if not torch.any(sizeable_mask):
             return pin_cap_base, pin_rcap_base, pin_fcap_base
 
-        size_var = size_var.float()
-        vt_var = vt_var.float()
+        size_var = size_var.to(pin_cap_base)
+        vt_var = vt_var.to(pin_cap_base)
         cache = self._get_sizing_pin_cap_static_cache(data_collections)
         if cache is not None:
             sizeable_mask = cache["sizeable_mask"]
@@ -3112,53 +3112,14 @@ class PlaceObj(nn.Module):
         return str(mode or "off")
 
     def _action_target_pin_ids(self, data_collections, context, action_index):
-        device = context.beta.device
-        pin2node = data_collections.pin2node_map.to(
-            device=device, dtype=torch.long
-        )
-        offsets = data_collections.pin_2_libpin_offset.to(
-            device=device, dtype=torch.long
-        )
-        safe_nodes = pin2node.clamp(
-            min=0,
-            max=max(int(context.target_cell_ids.shape[0]) - 1, 0),
-        )
-        target_cells = context.target_cell_ids.to(device=device)[
-            safe_nodes, action_index
-        ].long()
-        starts = data_collections.cell_id_2_libpin_id_start.to(
-            device=device, dtype=torch.long
-        )
-        safe_cells = target_cells.clamp(
-            min=0,
-            max=max(int(starts.numel()) - 2, 0),
-        )
-        target_ids = starts[safe_cells] + offsets
-        valid = (pin2node >= 0) & (offsets >= 0) & (target_cells >= 0)
-        valid &= target_cells + 1 < int(starts.numel())
-        valid &= (target_ids >= 0) & (target_ids < starts[safe_cells + 1])
-        valid &= context.valid_instances.to(device=device)[safe_nodes, action_index]
-        return target_ids, valid
+        from dreamplace.ops.timing_propagation.action_pin_caps import target_pin_ids
 
-    def _invalidate_action_instances(
-        self,
-        context,
-        data_collections,
-        action_index,
-        invalid_pins,
-    ):
-        if not bool(invalid_pins.any()):
-            return
-        device = context.beta.device
-        pin2node = data_collections.pin2node_map.to(
-            device=device, dtype=torch.long
-        )
-        nodes = pin2node[invalid_pins.to(device=device)]
-        nodes = nodes[
-            (nodes >= 0) & (nodes < int(context.valid_instances.shape[0]))
-        ]
-        if nodes.numel():
-            context.valid_instances[nodes, action_index] = False
+        return target_pin_ids(data_collections, context, action_index)
+
+    def _invalidate_action_instances(self, context, data_collections, action_index, invalid_pins):
+        from dreamplace.ops.timing_propagation.action_pin_caps import invalidate_instances
+
+        invalidate_instances(context, data_collections, action_index, invalid_pins)
 
     def _apply_discrete_action_pin_caps(
         self,
@@ -3167,71 +3128,16 @@ class PlaceObj(nn.Module):
         pin_fcap_base,
         data_collections,
     ):
-        context = getattr(self, "_active_discrete_action_context", None)
-        if context is None:
-            return pin_cap_base, pin_rcap_base, pin_fcap_base
-        if not int(getattr(self.params, "timing_action_pin_cap_gradient", 1)):
-            return pin_cap_base, pin_rcap_base, pin_fcap_base
-        device = context.beta.device
-        current_cap, current_rcap, current_fcap = tuple(
-            value.to(device=device)
-            for value in (pin_cap_base, pin_rcap_base, pin_fcap_base)
+        from dreamplace.ops.timing_propagation.action_pin_caps import apply_pin_caps
+
+        return apply_pin_caps(
+            self,
+            (pin_cap_base, pin_rcap_base, pin_fcap_base),
+            data_collections,
+            (data_collections.flat_lib_pin_cap,
+             data_collections.flat_lib_pin_rcap,
+             data_collections.flat_lib_pin_fcap),
         )
-        pin_cap_base, pin_rcap_base, pin_fcap_base = (
-            current_cap,
-            current_rcap,
-            current_fcap,
-        )
-        flat_lib_pin_cap = data_collections.flat_lib_pin_cap.to(device=device)
-        flat_lib_pin_rcap = data_collections.flat_lib_pin_rcap.to(device=device)
-        flat_lib_pin_fcap = data_collections.flat_lib_pin_fcap.to(device=device)
-        pin2node = data_collections.pin2node_map.to(
-            device=device, dtype=torch.long
-        )
-        safe_nodes = pin2node.clamp(
-            min=0,
-            max=max(int(context.beta.shape[0]) - 1, 0),
-        )
-        for action_index, name in enumerate(context.action_names):
-            target_ids, valid = self._action_target_pin_ids(
-                data_collections, context, action_index
-            )
-            safe_target_ids = target_ids.clamp(
-                min=0,
-                max=max(int(flat_lib_pin_cap.numel()) - 1, 0),
-            )
-            target_cap = flat_lib_pin_cap[safe_target_ids]
-            target_rcap = flat_lib_pin_rcap[safe_target_ids]
-            target_fcap = flat_lib_pin_fcap[safe_target_ids]
-            in_bounds = (
-                valid
-                & (target_ids >= 0)
-                & (target_ids < int(flat_lib_pin_cap.numel()))
-                & (target_ids < int(flat_lib_pin_rcap.numel()))
-                & (target_ids < int(flat_lib_pin_fcap.numel()))
-            )
-            finite = (
-                torch.isfinite(target_cap)
-                & torch.isfinite(target_rcap)
-                & torch.isfinite(target_fcap)
-            )
-            self._invalidate_action_instances(
-                context,
-                data_collections,
-                action_index,
-                in_bounds & ~finite,
-            )
-            valid = in_bounds & finite
-            delta_cap = target_cap - current_cap
-            delta_rcap = target_rcap - current_rcap
-            delta_fcap = target_fcap - current_fcap
-            weight = context.beta[safe_nodes, action_index] * valid.to(
-                context.beta.dtype
-            )
-            pin_cap_base = pin_cap_base + weight * torch.nan_to_num(delta_cap)
-            pin_rcap_base = pin_rcap_base + weight * torch.nan_to_num(delta_rcap)
-            pin_fcap_base = pin_fcap_base + weight * torch.nan_to_num(delta_fcap)
-        return pin_cap_base, pin_rcap_base, pin_fcap_base
 
     def _apply_discrete_action_limits(self, slew_limits, cap_limits, data_collections):
         context = getattr(self, "_active_discrete_action_context", None)

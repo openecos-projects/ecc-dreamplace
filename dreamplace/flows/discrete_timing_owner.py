@@ -576,6 +576,8 @@ class DiscreteTimingOwner:
         base_loss,
         *,
         action_mask=None,
+        selection_scores=None,
+        wns_scores=None,
     ):
         """Record actual one-action TNS/WNS deltas for a debug shortlist.
 
@@ -593,10 +595,12 @@ class DiscreteTimingOwner:
                 device=valid.device,
             )
             valid = valid & mask.unsqueeze(0)
+        if selection_scores is None:
+            selection_scores = local_scores
         scores = torch.where(
             valid,
-            local_scores,
-            torch.full_like(local_scores, float("inf")),
+            selection_scores,
+            torch.full_like(selection_scores, float("inf")),
         )
         action_count = int(scores.shape[1])
         sizeable_count = int(data.inst_is_sizeable.sum().item())
@@ -740,6 +744,12 @@ class DiscreteTimingOwner:
                     target_cell,
                 )
                 local_score = float(local_scores[inst, action])
+                selection_score = float(selection_scores[inst, action])
+                local_wns_score = (
+                    None
+                    if wns_scores is None
+                    else float(wns_scores[inst, action])
+                )
                 probe = None
                 probe_stride = max(1, limit // max(probe_limit, 1))
                 if (
@@ -812,6 +822,8 @@ class DiscreteTimingOwner:
                                 "instance_id": int(inst),
                                 "action": ACTION_NAMES[int(action)],
                                 "local_score": local_score,
+                                "selection_score": selection_score,
+                                "local_wns_score": local_wns_score,
                                 "old_cell": int(old_cell),
                                 "target_cell": int(target_cell),
                                 "old_cell_name": _cell_name(int(old_cell)),
@@ -827,6 +839,11 @@ class DiscreteTimingOwner:
                                     None
                                     if base_wns is None or trial_wns is None
                                     else float(trial_wns) - float(base_wns)
+                                ),
+                                "delta_wns_loss": (
+                                    None
+                                    if base_wns is None or trial_wns is None
+                                    else float(base_wns) - float(trial_wns)
                                 ),
                                 "base_loss": float(base_loss),
                                 "trial_loss": trial_loss_value,
@@ -1230,14 +1247,18 @@ class DiscreteTimingOwner:
                         0,
                     )
                 ):
+                    trial_tns_scores = action_context.action_scores(extra_grads.get("tns"))
+                    trial_wns_scores = action_context.action_scores(extra_grads.get("wns"))
                     trial_summary = self._trial_tns_action_scores(
                         model,
                         pos,
                         action_context,
-                        action_scores,
+                        trial_tns_scores,
                         geometry,
                         float(loss.detach()),
                         action_mask=action_mask,
+                        selection_scores=action_scores,
+                        wns_scores=trial_wns_scores,
                     )
                 selection_valid = action_context.valid_instances
                 if action_mask is not None:

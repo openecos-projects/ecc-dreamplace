@@ -814,64 +814,15 @@ class TestTimingPropagationFastLoopState(unittest.TestCase):
         self.assertIsNot(debug_value, source)
         torch.testing.assert_close(debug_value, source)
 
-    def test_fast_loop_detaches_surrogate_slew_and_cap_inputs_by_default(self):
-        model = TimingPropagation.__new__(TimingPropagation)
-        model.production_fast_loop = True
-        slew = torch.arange(4, dtype=torch.float32, requires_grad=True)
-        cap = torch.arange(4, dtype=torch.float32, requires_grad=True)
-
-        with mock.patch.dict(
-            os.environ,
-            {
-                "AIMP_DETACH_SURROGATE_SLEW_INPUTS": "",
-                "AIMP_DETACH_SURROGATE_CAP_INPUTS": "",
-                "AIMP_DISABLE_DETACH_SURROGATE_SLEW_INPUTS": "",
-                "AIMP_DISABLE_DETACH_SURROGATE_CAP_INPUTS": "",
-            },
-            clear=False,
-        ):
-            self.assertFalse(model._surrogate_slew_input_tensor(slew).requires_grad)
-            self.assertFalse(model._surrogate_cap_input_tensor(cap).requires_grad)
-
-    def test_fast_loop_surrogate_input_detach_disable_overrides_default(self):
-        model = TimingPropagation.__new__(TimingPropagation)
-        model.production_fast_loop = True
-        slew = torch.arange(4, dtype=torch.float32, requires_grad=True)
-        cap = torch.arange(4, dtype=torch.float32, requires_grad=True)
-
-        with mock.patch.dict(
-            os.environ,
-            {
-                "AIMP_DISABLE_DETACH_SURROGATE_SLEW_INPUTS": "1",
-                "AIMP_DISABLE_DETACH_SURROGATE_CAP_INPUTS": "1",
-            },
-            clear=False,
-        ):
-            self.assertIs(model._surrogate_slew_input_tensor(slew), slew)
-            self.assertIs(model._surrogate_cap_input_tensor(cap), cap)
-
-    def test_non_fast_loop_keeps_surrogate_slew_and_cap_inputs_attached(self):
-        model = TimingPropagation.__new__(TimingPropagation)
-        model.production_fast_loop = False
-        slew = torch.arange(4, dtype=torch.float32, requires_grad=True)
-        cap = torch.arange(4, dtype=torch.float32, requires_grad=True)
-
-        with mock.patch.dict(
-            os.environ,
-            {
-                "AIMP_DISABLE_DETACH_SURROGATE_SLEW_INPUTS": "",
-                "AIMP_DISABLE_DETACH_SURROGATE_CAP_INPUTS": "",
-            },
-            clear=False,
-        ):
-            self.assertIs(model._surrogate_slew_input_tensor(slew), slew)
-            self.assertIs(model._surrogate_cap_input_tensor(cap), cap)
-
     def _build_minimal_forward_model(self, production_fast_loop, *, forbid_cell_rat):
         device = torch.device("cpu")
         dtype = torch.float32
         model = TimingPropagation.__new__(TimingPropagation)
         torch.nn.Module.__init__(model)
+        model.endpoints_timing_check_arcs = torch.empty((0, 8), dtype=torch.long)
+        model.timing_metric_scope = "setup_plus_recovery"
+        model.timing_aggregation_mode = "hard"
+        model.timing_aggregation_tau_ps = 2.0
         model.production_fast_loop = bool(production_fast_loop)
         model.timing_propagation_profile = False
         model.timing_forward_count = 0

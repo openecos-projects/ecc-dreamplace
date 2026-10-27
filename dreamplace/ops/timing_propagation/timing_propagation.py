@@ -1393,30 +1393,6 @@ class TimingPropagation(nn.Module):
             and tensor.dtype in (torch.float32, torch.float64)
         )
 
-    def _surrogate_slew_input_tensor(self, pin_slew):
-        if not getattr(self, "production_fast_loop", False):
-            return pin_slew
-        if (
-            os.environ.get("AIMP_DISABLE_DETACH_SURROGATE_SLEW_INPUTS", "")
-            .strip()
-            .lower()
-            in ("1", "true", "yes", "on")
-        ):
-            return pin_slew
-        return pin_slew.detach()
-
-    def _surrogate_cap_input_tensor(self, pin_net_caps):
-        if not getattr(self, "production_fast_loop", False):
-            return pin_net_caps
-        if (
-            os.environ.get("AIMP_DISABLE_DETACH_SURROGATE_CAP_INPUTS", "")
-            .strip()
-            .lower()
-            in ("1", "true", "yes", "on")
-        ):
-            return pin_net_caps
-        return pin_net_caps.detach()
-
     def _build_cell_aat_surrogate_support_cache(
         self,
         working_flat_arcs_by_level,
@@ -3326,8 +3302,8 @@ class TimingPropagation(nn.Module):
             )
             profile_timer = profile_now
 
-        active_slew = self._surrogate_slew_input_tensor(pin_slew)
-        active_cap = self._surrogate_cap_input_tensor(pin_net_caps)
+        active_slew = pin_slew
+        active_cap = pin_net_caps
         if valid_indices is not None:
             active_slew = active_slew.index_select(0, valid_indices)
             active_cap = active_cap.index_select(0, valid_indices)

@@ -29,6 +29,14 @@ sys.path.pop()
 
 
 class SizingModeTest(unittest.TestCase):
+    def _make_objective_place_obj(self):
+        obj = PlaceObj.__new__(PlaceObj)
+        nn.Module.__init__(obj)
+        obj._candidate_density_view = None
+        obj.use_l_shape_routability = False
+        obj.l_shape_routability_op = None
+        return obj
+
     def _make_size_only_place_obj(
         self,
         timing_lane="timing_only",
@@ -36,8 +44,7 @@ class SizingModeTest(unittest.TestCase):
         cap_weight=1.0,
         leakage_weight=0.0,
     ):
-        obj = PlaceObj.__new__(PlaceObj)
-        nn.Module.__init__(obj)
+        obj = self._make_objective_place_obj()
         obj.params = SimpleNamespace(
             placement_sizing_mode="size_only",
             macro_overlap_flag=False,
@@ -361,7 +368,7 @@ class SizingModeTest(unittest.TestCase):
         )
 
     def test_timing_backward_component_profile_is_disabled_by_default(self):
-        model = PlaceObj.__new__(PlaceObj)
+        model = self._make_objective_place_obj()
         model.params = SimpleNamespace(placement_sizing_mode="size_only")
         model.op_collections = SimpleNamespace()
         model.joint_proximal_objective = JointProximalObjective(model.params)
@@ -384,7 +391,7 @@ class SizingModeTest(unittest.TestCase):
         )
 
     def test_timing_backward_component_profile_records_component_grad_times(self):
-        model = PlaceObj.__new__(PlaceObj)
+        model = self._make_objective_place_obj()
         model.params = SimpleNamespace(placement_sizing_mode="size_only")
         model.op_collections = SimpleNamespace()
         model.joint_proximal_objective = JointProximalObjective(model.params)
@@ -456,54 +463,6 @@ class SizingModeTest(unittest.TestCase):
             model.last_timing_objective_terms["detached_zero_terms"],
             ["slew"],
         )
-
-    def test_surrogate_fast_loop_detaches_slew_inputs_unless_disabled_by_env(self):
-        source = torch.tensor([1.0, 2.0], dtype=torch.float32, requires_grad=True)
-
-        debug_model = TimingPropagation.__new__(TimingPropagation)
-        debug_model.production_fast_loop = False
-        debug_value = debug_model._surrogate_slew_input_tensor(source)
-        self.assertIs(debug_value, source)
-        self.assertTrue(debug_value.requires_grad)
-
-        fast_model = TimingPropagation.__new__(TimingPropagation)
-        fast_model.production_fast_loop = True
-        with mock.patch.dict(os.environ, {}, clear=True):
-            fast_detached = fast_model._surrogate_slew_input_tensor(source)
-        self.assertIsNot(fast_detached, source)
-        self.assertFalse(fast_detached.requires_grad)
-        torch.testing.assert_close(fast_detached, source.detach())
-
-        with mock.patch.dict(
-            os.environ, {"AIMP_DISABLE_DETACH_SURROGATE_SLEW_INPUTS": "1"}
-        ):
-            fast_kept = fast_model._surrogate_slew_input_tensor(source)
-        self.assertIs(fast_kept, source)
-        self.assertTrue(fast_kept.requires_grad)
-
-    def test_surrogate_fast_loop_detaches_cap_inputs_unless_disabled_by_env(self):
-        source = torch.tensor([0.1, 0.2], dtype=torch.float32, requires_grad=True)
-
-        debug_model = TimingPropagation.__new__(TimingPropagation)
-        debug_model.production_fast_loop = False
-        debug_value = debug_model._surrogate_cap_input_tensor(source)
-        self.assertIs(debug_value, source)
-        self.assertTrue(debug_value.requires_grad)
-
-        fast_model = TimingPropagation.__new__(TimingPropagation)
-        fast_model.production_fast_loop = True
-        with mock.patch.dict(os.environ, {}, clear=True):
-            fast_detached = fast_model._surrogate_cap_input_tensor(source)
-        self.assertIsNot(fast_detached, source)
-        self.assertFalse(fast_detached.requires_grad)
-        torch.testing.assert_close(fast_detached, source.detach())
-
-        with mock.patch.dict(
-            os.environ, {"AIMP_DISABLE_DETACH_SURROGATE_CAP_INPUTS": "1"}
-        ):
-            fast_kept = fast_model._surrogate_cap_input_tensor(source)
-        self.assertIs(fast_kept, source)
-        self.assertTrue(fast_kept.requires_grad)
 
     def test_fast_loop_can_limit_cap_limit_interpolation_to_output_pins_by_env(self):
         obj = PlaceObj.__new__(PlaceObj)
@@ -857,6 +816,8 @@ class SizingModeTest(unittest.TestCase):
             r_delay_luts=luts,
             f_trans_luts=luts,
             r_trans_luts=luts,
+            f_check_luts=luts,
+            r_check_luts=luts,
         )
         tp.cell_modeling_op = None
         tp.pin2node_map = None
@@ -943,6 +904,8 @@ class SizingModeTest(unittest.TestCase):
             r_delay_luts=luts,
             f_trans_luts=luts,
             r_trans_luts=luts,
+            f_check_luts=luts,
+            r_check_luts=luts,
         )
         tp.cell_modeling_op = None
         tp.pin2node_map = None
@@ -1063,8 +1026,7 @@ class SizingModeTest(unittest.TestCase):
             self.assertAlmostEqual(float(rows[0]["Py Delay (ps)"]), 123.0)
 
     def test_density_area_proxy_produces_size_gradients(self):
-        obj = PlaceObj.__new__(PlaceObj)
-        nn.Module.__init__(obj)
+        obj = self._make_objective_place_obj()
         obj.params = SimpleNamespace(
             placement_sizing_mode="size_only",
             macro_overlap_flag=False,
@@ -1105,8 +1067,7 @@ class SizingModeTest(unittest.TestCase):
         self.assertGreater(size_logits.grad.abs().sum().item(), 0.0)
 
     def test_size_only_obj_fn_excludes_wirelength_and_main_density_terms(self):
-        obj = PlaceObj.__new__(PlaceObj)
-        nn.Module.__init__(obj)
+        obj = self._make_objective_place_obj()
         obj.params = SimpleNamespace(
             placement_sizing_mode="size_only",
             macro_overlap_flag=False,
@@ -1159,8 +1120,7 @@ class SizingModeTest(unittest.TestCase):
         self.assertAlmostEqual(loss.item(), expected_timing_loss + expected_area_penalty, places=6)
 
     def test_size_only_obj_and_grad_fn_blocks_pos_gradients_but_keeps_sizing_gradients(self):
-        obj = PlaceObj.__new__(PlaceObj)
-        nn.Module.__init__(obj)
+        obj = self._make_objective_place_obj()
         obj.params = SimpleNamespace(
             placement_sizing_mode="size_only",
             macro_overlap_flag=False,
@@ -1257,8 +1217,7 @@ class SizingModeTest(unittest.TestCase):
         )
 
     def test_size_only_fast_loop_defaults_to_full_backward(self):
-        obj = PlaceObj.__new__(PlaceObj)
-        nn.Module.__init__(obj)
+        obj = self._make_objective_place_obj()
         obj.params = SimpleNamespace(
             placement_sizing_mode="size_only",
             production_fast_loop=True,
@@ -1674,8 +1633,7 @@ class SizingModeTest(unittest.TestCase):
             self.assertEqual("diagnostic_unverified", saved["backend_metadata"]["sta_state_status"])
 
     def test_joint_placeobj_path_produces_pos_size_and_vt_gradients(self):
-        obj = PlaceObj.__new__(PlaceObj)
-        nn.Module.__init__(obj)
+        obj = self._make_objective_place_obj()
         obj.params = SimpleNamespace(
             placement_sizing_mode="joint",
             macro_overlap_flag=False,

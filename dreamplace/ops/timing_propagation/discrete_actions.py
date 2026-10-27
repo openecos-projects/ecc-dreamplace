@@ -169,24 +169,28 @@ class DiscreteActionContext:
 def _drive_load_tables(data, table, *, device, dtype):
     """Per input pin cap delta for each of the four actions.
 
-    Only the sized cell's own input pins carry a nonzero entry; the driver
-    load of every net is obtained by scattering these onto ``pin2net``.
+    Physical pin ownership supplies both the master and its Liberty offset.
+    Runtime arc sources can instead be local clock indices, and multiple arcs
+    can share an input. Neither is a valid domain for assigning pin caps.
     """
 
-    arcs = data.flat_inst_arcs_by_level.to(device=device, dtype=torch.long)
-    in_pins = arcs[:, 0].clamp(min=0)
-    inst = table.inst_ids.to(device=device, dtype=torch.long)
-    num_actions = int(table.valid_arcs.shape[1])
-    pin2net_map = data.pin2net_map.to(device=device, dtype=torch.long)
-    num_pins = int(pin2net_map.numel())
-    safe_inst = inst.clamp(min=0)
+    nodes = data.pin2node_map.to(device=device, dtype=torch.long)
+    current_cells = data.inst_cell_id.to(device=device, dtype=torch.long)
+    safe_inst = nodes.clamp(min=0, max=current_cells.numel() - 1)
     targets = table.target_cell_ids.to(device=device)[safe_inst].long()
     starts = data.cell_id_2_libpin_id_start.to(device=device, dtype=torch.long)
-    offsets = data.pin_2_libpin_offset.to(device=device, dtype=torch.long)[in_pins]
-    target_pins = starts[targets.clamp(min=0)] + offsets.unsqueeze(1)
-    current_cells = data.inst_cell_id.to(device=device, dtype=torch.long)
-    current_pins = (starts[current_cells[safe_inst]] + offsets).unsqueeze(1)
-    valid = table.valid_instances[safe_inst] & (inst >= 0).unsqueeze(1) & (targets >= 0)
+    offsets = data.pin_2_libpin_offset.to(device=device, dtype=torch.long)
+    cells = current_cells[safe_inst]
+    safe_cells = cells.clamp(min=0, max=starts.numel() - 2)
+    safe_targets = targets.clamp(min=0, max=starts.numel() - 2)
+    target_pins = starts[safe_targets] + offsets.unsqueeze(1)
+    current_pins = (starts[safe_cells] + offsets).unsqueeze(1)
+    valid_pin = (nodes >= 0) & (nodes < current_cells.numel()) & (offsets >= 0)
+    valid_pin &= (cells >= 0) & (cells + 1 < starts.numel())
+    valid_pin &= current_pins[:, 0] < starts[safe_cells + 1]
+    valid = table.valid_instances.to(device=device)[safe_inst] & valid_pin.unsqueeze(1)
+    valid &= (targets >= 0) & (targets + 1 < starts.numel())
+    valid &= target_pins < starts[safe_targets + 1]
 
     def one(pin_table):
         max_pin = max(int(pin_table.numel()) - 1, 0)
@@ -198,17 +202,7 @@ def _drive_load_tables(data, table, *, device, dtype):
         )
         target = pin_table[target_pins.clamp(min=0, max=max_pin)]
         current = pin_table[current_pins.clamp(min=0, max=max_pin)]
-        delta = torch.where(valid & in_bounds, target - current, torch.zeros_like(target))
-        out = torch.zeros((num_pins, num_actions), device=device, dtype=dtype)
-        rows = in_pins.unsqueeze(1).expand(-1, num_actions).reshape(-1)
-        cols = (
-            torch.arange(num_actions, device=device)
-            .unsqueeze(0)
-            .expand(int(in_pins.numel()), num_actions)
-            .reshape(-1)
-        )
-        out.index_put_((rows, cols), delta.reshape(-1))
-        return out
+        return torch.where(valid & in_bounds, target - current, torch.zeros_like(target))
 
     rcap = one(data.flat_lib_pin_rcap.to(device=device, dtype=dtype))
     fcap = one(data.flat_lib_pin_fcap.to(device=device, dtype=dtype))
@@ -279,6 +273,7 @@ def build_discrete_action_context(
         tensor_key("flat_libarc_info"),
         tensor_key("cell_id_2_libpin_id_start"),
         tensor_key("pin_2_libpin_offset"),
+        tensor_key("pin2node_map"),
         tensor_key("pin2net_map"),
         tensor_key("net2driver_pin_map"),
         int(candidate_table.target_cell_ids.data_ptr()),

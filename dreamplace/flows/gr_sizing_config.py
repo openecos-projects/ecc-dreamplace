@@ -52,7 +52,8 @@ def configure_gr_sizing(params):
     params.diff_timing_driven_placement = 0
     params.cell_model_schema = "main_id_arc_offset_piecewise_linear"
     params.piecewise_gradient_mode = "native_piecewise"
-    params.timing_propagation_device = "cpu"
+    if not getattr(params, "_timing_propagation_device_explicit", False):
+        params.timing_propagation_device = "cpu"
     params.enable_fillers = 0
     params.gp_noise_ratio = 0.0
     params.random_center_init_flag = 0

@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <filesystem>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -8,6 +10,7 @@
 
 #include "openroad_place_io_bridge.h"
 #include "openroad_pyplacedb_export.h"
+#include "utility/src/pybind_path.h"
 
 namespace py = pybind11;
 
@@ -16,54 +19,35 @@ namespace {
 using dreamplace::placeio_openroad::OpenRoadPlaceIOBridge;
 using dreamplace::placeio_openroad::PyPlaceDB;
 
-std::vector<std::string> parseFlagValues(const py::list& args, const std::string& flag)
+std::vector<std::string> pathTexts(const std::vector<std::filesystem::path>& paths)
 {
-  std::vector<std::string> values;
-  const auto arg_count = py::len(args);
-  for (py::ssize_t i = 0; i < arg_count; ++i) {
-    if (py::cast<std::string>(args[i]) == flag && i + 1 < arg_count) {
-      values.push_back(py::cast<std::string>(args[i + 1]));
-    }
+  std::vector<std::string> texts;
+  texts.reserve(paths.size());
+  for (const auto& path : paths) {
+    texts.push_back(path.string());
   }
-  return values;
-}
-
-int parseFlagInt(const py::list& args, const std::string& flag, int default_value)
-{
-  const auto values = parseFlagValues(args, flag);
-  if (values.empty()) {
-    return default_value;
-  }
-  try {
-    return std::max(1, std::stoi(values.back()));
-  } catch (const std::exception&) {
-    return default_value;
-  }
+  return texts;
 }
 
 using BridgePtr = std::shared_ptr<OpenRoadPlaceIOBridge>;
 
-BridgePtr forward(const py::list& args)
+BridgePtr forward(const std::filesystem::path& def_input,
+                  const std::vector<std::filesystem::path>& lef_input,
+                  const std::vector<std::filesystem::path>& lib_input,
+                  const std::filesystem::path& sdc_input,
+                  const std::vector<std::string>& vt_suffixes,
+                  int num_threads)
 {
-  const auto lef_files = parseFlagValues(args, "--lef_input");
-  const auto def_files = parseFlagValues(args, "--def_input");
-  const auto liberty_files = parseFlagValues(args, "--lib_input");
-  const auto sdc_files = parseFlagValues(args, "--sdc_input");
-  auto vt_suffixes = parseFlagValues(args, "--vt_suffix");
-  const int thread_count = parseFlagInt(args, "--num_threads", 8);
-  if (def_files.empty()) {
+  if (def_input.empty()) {
     throw std::runtime_error("placeio_openroad requires exactly one DEF input");
   }
-  if (sdc_files.size() > 1) {
-    throw std::runtime_error("placeio_openroad accepts at most one SDC input");
-  }
   return std::make_shared<OpenRoadPlaceIOBridge>(
-      lef_files,
-      def_files.front(),
-      liberty_files,
-      sdc_files.empty() ? std::string() : sdc_files.front(),
+      pathTexts(lef_input),
+      def_input.string(),
+      pathTexts(lib_input),
+      sdc_input.string(),
       vt_suffixes,
-      thread_count);
+      std::max(1, num_threads));
 }
 
 PyPlaceDB pydb(const BridgePtr& bridge)
@@ -239,7 +223,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
            &OpenRoadPlaceIOBridge::runCoordinateBufferInsert,
            py::arg("action"),
            py::arg("config") = py::dict())
-      .def("write_def", &OpenRoadPlaceIOBridge::writeDef);
+      .def("write_def",
+           [](const OpenRoadPlaceIOBridge& bridge,
+              const std::filesystem::path& filename) {
+             bridge.writeDef(filename.string());
+           },
+           pybind11::arg("filename"));
 
   py::class_<PyPlaceDB>(m, "PyPlaceDB")
       .def(py::init<>())
@@ -417,7 +406,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
       .def_readwrite("total_fixed_node_area", &PyPlaceDB::total_fixed_node_area)
       .def_readwrite("num_movable_pins", &PyPlaceDB::num_movable_pins);
 
-  m.def("forward", &forward, "Read LEF/DEF through OpenROAD in-process");
+  m.def("forward", &forward, "Read LEF/DEF through OpenROAD in-process",
+        pybind11::arg("def_input"),
+        pybind11::arg("lef_input") = std::vector<std::filesystem::path>(),
+        pybind11::arg("lib_input") = std::vector<std::filesystem::path>(),
+        pybind11::arg("sdc_input") = std::filesystem::path(),
+        pybind11::arg("vt_suffixes") = std::vector<std::string>(),
+        pybind11::arg("num_threads") = 8);
   m.def("pydb", &pydb, "Build a Python placement DB from the OpenROAD bridge");
   m.def("apply", &apply, "Apply node coordinates to the OpenROAD bridge");
   m.def("apply_sizing", &apply_sizing, "Apply sizing masters to the OpenROAD bridge");
@@ -475,10 +470,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
   m.def(
       "write",
       [](const BridgePtr& bridge,
-         const std::string& filename,
+         const std::filesystem::path& filename,
          int nodemap_input_flag,
          const py::object& node_x,
-         const py::object& node_y) { write(bridge, filename, nodemap_input_flag, node_x, node_y); },
-      "Write a DEF after applying node coordinates");
+         const py::object& node_y) {
+        write(bridge, filename.string(), nodemap_input_flag, node_x, node_y);
+      },
+      "Write a DEF after applying node coordinates",
+      pybind11::arg("bridge"),
+      pybind11::arg("filename"),
+      pybind11::arg("nodemap_input_flag"),
+      pybind11::arg("node_x"),
+      pybind11::arg("node_y"));
   m.attr("OpenRoadRawDB") = m.attr("OpenRoadPlaceIOBridge");
 }

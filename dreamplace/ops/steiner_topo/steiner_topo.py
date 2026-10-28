@@ -566,8 +566,8 @@ class SteinerTopo(nn.Module):
             self.flat_net2pin_map,
             self.flat_net2pin_start_map,
             self.ignore_net_degree,
-            str(_FLUTE_POWV_FILE),
-            str(_FLUTE_POST_FILE),
+            _FLUTE_POWV_FILE,
+            _FLUTE_POST_FILE,
             deterministic_flag=self.deterministic_flag,
             **self.frozen_nets.build_options(self),
         )

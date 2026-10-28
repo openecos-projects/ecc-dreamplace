@@ -172,8 +172,8 @@ def build_local_steiner_topology_from_pydb(
         flat_netpin_tensor,
         netpin_start_tensor,
         int(build_tree_max_degree),
-        str(_FLUTE_POWV_FILE),
-        str(_FLUTE_POST_FILE),
+        _FLUTE_POWV_FILE,
+        _FLUTE_POST_FILE,
     )
     (
         newx,

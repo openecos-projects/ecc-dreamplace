@@ -67,6 +67,34 @@ def test_density_updates_apply_configured_multiplier(algo, mode, factor, density
     assert model.density_weight.item() != 1.0
 
 
+@pytest.mark.parametrize("algo", ["hpwl", "overflow"])
+def test_timing_coefficient_growth_is_capped(algo, density_update_model):
+    model = density_update_model
+    model.params.placement_sizing_mode = "place_only"
+    model.params.timing_coeff_growth_factor = 1.01
+    update = model.build_update_density_weight(model.params, model.placedb, algo=algo)
+    metric = SimpleNamespace(
+        hpwl=torch.tensor(101.0),
+        density=torch.tensor([0.5]),
+        overflow=torch.tensor([0.2]),
+    )
+    previous = SimpleNamespace(hpwl=torch.tensor(100.0))
+
+    for iteration in range(1, 695):
+        update(metric, previous, iteration)
+    below_cap_multiplier = 1.01**694
+    assert (model.timing_wns_coeff, model.timing_tns_coeff) == pytest.approx(
+        (0.02 * below_cap_multiplier, 0.0002 * below_cap_multiplier)
+    )
+
+    update(metric, previous, 695)
+    capped = (20.0, 0.2)
+    assert (model.timing_wns_coeff, model.timing_tns_coeff) == pytest.approx(capped)
+
+    update(metric, previous, 696)
+    assert (model.timing_wns_coeff, model.timing_tns_coeff) == pytest.approx(capped)
+
+
 @pytest.mark.parametrize("factor", [0.0, -1.0, float("nan"), float("inf")])
 def test_invalid_growth_factor_is_rejected(factor, density_update_model):
     model = density_update_model

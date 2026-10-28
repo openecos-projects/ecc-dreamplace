@@ -115,26 +115,34 @@ The fixed preset may remain in the object when switching `mode` to `inherit`;
 inherit mode always uses the live placement values.
 
 `timing_coeff_growth_factor` controls the WNS/TNS coefficient multiplier at
-each GP density-weight update. The default `1.0` freezes the coefficients;
-`1.01` grows them, and values between zero and one decay them.
-The multiplier must be positive and finite. Slew/cap weights and the outer norm
-weight retain their own settings. Inherit-mode sizing windows read the resulting
-live coefficients; fixed-mode windows use their configured values. Standalone
-`size_only` sizing, including `diff_sizing` S50, skips this growth schedule.
+each GP density-weight update. The default `1.01` grows the coefficients;
+`1.0` freezes them, and values between zero and one decay them.
+The multiplier must be positive and finite, and its cumulative growth is capped
+at 1000 times the placement's starting WNS/TNS coefficients. Slew/cap weights
+and the outer norm weight retain their own settings. Inherit-mode sizing
+windows read the resulting live coefficients; fixed-mode windows use their
+configured values. Standalone `size_only` sizing, including `diff_sizing` S50,
+skips this growth schedule.
 
-`timing_grad_balance_target_ratio` defaults to 0.2 for direct-loss placement.
+`timing_grad_balance_target_ratio` defaults to 0.01 for direct-loss placement.
 At the first active timing step, the timing and wirelength gradient L1 norms
 determine the outer timing weight, which is then reused. Set the ratio to 0.0
 to disable balancing and retain weight 1.0. It is a gradient-ratio target,
 not a multiplier on WNS/TNS coefficients. Standalone `size_only` sizing does
 not initialize coordinate gradient balancing. ECC exposes the ratio through
 `place.timing_grad_balance_target_ratio`; explicit values override the default.
+`timing_grad_balance_reset_on_restart` defaults to 1, so each inflation/GP
+restart clears the initialized balance state and recomputes the outer weight.
+Set `place.timing_grad_balance_reset_on_restart = 0` to preserve the current
+weight and cached balance state across restarts.
 
-`timing_aggregation_mode` selects AAT/RAT propagation aggregation: `smooth`
-(default) uses LSE, while `hard` uses max/min. LSE uses the positive temperature
+`timing_aggregation_mode` selects aggregation for AAT/RAT propagation and
+endpoint rise/fall and timing-check candidates: `smooth` (default) uses LSE,
+while `hard` uses max/min. LSE uses the positive temperature
 `timing_aggregation_tau_ps` (default 2.0 ps). Smaller temperatures approach
-hard max/min. ECC exposes both through `place.*` parameters. Endpoint WNS
-still uses hard min, and TNS still sums negative slacks.
+hard max/min. ECC exposes both through `place.*` parameters. With `smooth`,
+endpoint WNS/TNS use the aggregated soft slack and TNS clamps each endpoint
+slack at zero before summing; `hard` preserves hard min/max semantics.
 
 `overflow_reference_mode` selects the area used to normalize overflow. The
 default `initial` freezes the GP-entry movable area. `ordinary` preserves the
@@ -166,6 +174,9 @@ Relevant configuration knobs include:
 | `max_route_opt_adjust_rate` | Maximum route-driven area inflation rate. |
 | `route_opt_adjust_exponent` | Exponent applied to the route utilization map before inflation. |
 | `route_area_adjust_stop_ratio` | Stop threshold for route-area inflation. |
+| `inflation_density_weight_scale` | Scale on the Xplace-style density-gradient restart ratio after inflation; defaults to `0.001`, while `1.0` uses the ratio directly and `0.1` reproduces the historical DreamPlace factor. |
+| `inflation_filler_consumption_mode` | How routability inflation consumes whitespace: `filler_first` (default) shrinks filler before raising target density, `proportional` shrinks filler and other whitespace together, and `capacity_only` preserves filler until the placement-area limit. |
+| `l_shape_weight_max_multiplier` | Relative cap for the adaptive L-shape weight. Each calibration epoch stores its first applied weight as `w0` and limits later growth to `multiplier * w0`; default `10.0`, while `0` disables the relative cap. |
 
 ## Build
 

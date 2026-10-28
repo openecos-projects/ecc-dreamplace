@@ -118,6 +118,12 @@ def _build_minimal_forward_model():
     model = TimingPropagation.__new__(TimingPropagation)
     torch.nn.Module.__init__(model)
     model.production_fast_loop = True
+    model.early_propagation = None
+    model.timing_model_lease = None
+    model.timing_aggregation_mode = "hard"
+    model.timing_aggregation_tau_ps = 2.0
+    model.evaluation_generation = 0
+    model.hold_liberty_paths = ()
     model.timing_propagation_profile = False
     model.timing_forward_count = 0
     model.device = device
@@ -130,6 +136,8 @@ def _build_minimal_forward_model():
     model.inftrans = torch.tensor([1.0], device=device, dtype=dtype)
     model.start_points = torch.tensor([0], device=device, dtype=torch.long)
     model.end_points = torch.tensor([2], device=device, dtype=torch.long)
+    model.endpoints_timing_check_arcs = torch.empty((0, 8), device=device, dtype=torch.long)
+    model.timing_metric_scope = "setup_only"
     model.endpoints_rRAT = torch.tensor([100.0], device=device, dtype=dtype)
     model.endpoints_fRAT = torch.tensor([100.0], device=device, dtype=dtype)
     model.clk_pin_rtran = torch.tensor([1.0], device=device, dtype=dtype)

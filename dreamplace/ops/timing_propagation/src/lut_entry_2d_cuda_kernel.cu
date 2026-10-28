@@ -1,5 +1,7 @@
 #include <stdint.h>
 #include <math.h>
+#include <c10/cuda/CUDAStream.h>
+#include <c10/cuda/CUDAException.h>
 
 #include "cuda_runtime.h"
 
@@ -174,7 +176,20 @@ __global__ void lut2dBackwardKernel(
   bool is_t_degenerate = fabs((double)t_interval) < kDenomEps;
   bool is_c_degenerate = fabs((double)c_interval) < kDenomEps;
   scalar_t g = grad_output[batch_idx];
-  if (is_t_degenerate || is_c_degenerate) {
+  if (is_t_degenerate && is_c_degenerate) {
+    grad_lut_values[idx00] = g;
+    return;
+  } else if (is_t_degenerate) {
+    const scalar_t fraction = (cin - c0) / c_interval;
+    grad_lut_values[idx00] = g * (scalar_t(1) - fraction);
+    grad_lut_values[idx01] = g * fraction;
+    grad_output_caps[batch_idx] = g * (v01 - v00) / c_interval;
+    return;
+  } else if (is_c_degenerate) {
+    const scalar_t fraction = (tin - t0) / t_interval;
+    grad_lut_values[idx00] = g * (scalar_t(1) - fraction);
+    grad_lut_values[idx10] = g * fraction;
+    grad_input_trans[batch_idx] = g * (v10 - v00) / t_interval;
     return;
   }
   scalar_t denom = t_interval * c_interval;
@@ -334,7 +349,8 @@ void lut2dForwardCudaLauncher(
     int32_t padded_lut_size) {
   int thread_count = 256;
   int block_count = (batch_size + thread_count - 1) / thread_count;
-  lut2dForwardKernel<scalar_t><<<block_count, thread_count>>>(
+  if (block_count == 0) return;
+  lut2dForwardKernel<scalar_t><<<block_count, thread_count, 0, c10::cuda::getCurrentCUDAStream().stream()>>>(
       input_trans_ptr, output_caps_ptr, trans_tables_batch_ptr, cap_tables_batch_ptr,
       lut_values_batch_ptr, trans_dims_actual_ptr, cap_dims_actual_ptr, output_ptr,
       batch_size, padded_trans_dim, padded_cap_dim, padded_lut_size);
@@ -359,7 +375,8 @@ void lut2dBackwardCudaLauncher(
     int32_t padded_lut_size) {
   int thread_count = 256;
   int block_count = (batch_size + thread_count - 1) / thread_count;
-  lut2dBackwardKernel<scalar_t><<<block_count, thread_count>>>(
+  if (block_count == 0) return;
+  lut2dBackwardKernel<scalar_t><<<block_count, thread_count, 0, c10::cuda::getCurrentCUDAStream().stream()>>>(
       grad_output_ptr, input_trans_ptr, output_caps_ptr, trans_tables_batch_ptr,
       cap_tables_batch_ptr, lut_values_batch_ptr, trans_dims_actual_ptr,
       cap_dims_actual_ptr, grad_input_trans_ptr, grad_output_caps_ptr,
@@ -384,7 +401,8 @@ void lut2dBuildCoeffCudaLauncher(
   int32_t total_cells = num_luts * trans_cells * cap_cells;
   int thread_count = 256;
   int block_count = (total_cells + thread_count - 1) / thread_count;
-  lut2dBuildCoeffKernel<scalar_t><<<block_count, thread_count>>>(
+  if (block_count == 0) return;
+  lut2dBuildCoeffKernel<scalar_t><<<block_count, thread_count, 0, c10::cuda::getCurrentCUDAStream().stream()>>>(
       trans_tables_batch_ptr, cap_tables_batch_ptr, lut_values_batch_ptr,
       trans_dims_actual_ptr, cap_dims_actual_ptr, coeff_ptr, num_luts,
       padded_trans_dim, padded_cap_dim, padded_lut_size, trans_cells, cap_cells,
@@ -408,7 +426,8 @@ void lut2dCoeffForwardCudaLauncher(
     int32_t cap_cells) {
   int thread_count = 256;
   int block_count = (batch_size + thread_count - 1) / thread_count;
-  lut2dCoeffForwardKernel<scalar_t><<<block_count, thread_count>>>(
+  if (block_count == 0) return;
+  lut2dCoeffForwardKernel<scalar_t><<<block_count, thread_count, 0, c10::cuda::getCurrentCUDAStream().stream()>>>(
       input_trans_ptr, output_caps_ptr, trans_tables_batch_ptr, cap_tables_batch_ptr,
       coeff_batch_ptr, trans_dims_actual_ptr, cap_dims_actual_ptr, output_ptr,
       batch_size, padded_trans_dim, padded_cap_dim, trans_cells, cap_cells);
@@ -433,7 +452,8 @@ void lut2dCoeffBackwardCudaLauncher(
     int32_t cap_cells) {
   int thread_count = 256;
   int block_count = (batch_size + thread_count - 1) / thread_count;
-  lut2dCoeffBackwardKernel<scalar_t><<<block_count, thread_count>>>(
+  if (block_count == 0) return;
+  lut2dCoeffBackwardKernel<scalar_t><<<block_count, thread_count, 0, c10::cuda::getCurrentCUDAStream().stream()>>>(
       grad_output_ptr, input_trans_ptr, output_caps_ptr, trans_tables_batch_ptr,
       cap_tables_batch_ptr, coeff_batch_ptr, trans_dims_actual_ptr,
       cap_dims_actual_ptr, grad_input_trans_ptr, grad_output_caps_ptr, batch_size,

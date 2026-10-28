@@ -67,6 +67,23 @@ def test_timing_grad_balance_defers_zero_timing_gradient():
     assert result["weight_applied"] == 1.0
 
 
+def test_timing_metric_snapshot_exposes_gradient_balance_ratio():
+    model = _model()
+    model.timing_grad_balance_summary = {
+        "timing_to_wirelength_grad_ratio": 2.5,
+        "weighted_timing_to_wirelength_grad_ratio": 0.1,
+        "weight_applied": 0.04,
+        "target_ratio": 0.1,
+    }
+
+    snapshot = model.timing_metric_snapshot()
+
+    assert snapshot["timing_grad_raw_ratio"] == pytest.approx(2.5)
+    assert snapshot["timing_grad_ratio"] == pytest.approx(0.1)
+    assert snapshot["timing_grad_weight"] == pytest.approx(0.04)
+    assert snapshot["timing_grad_target_ratio"] == pytest.approx(0.1)
+
+
 def test_timing_outer_weight_scales_composite_wns_tns_term():
     model = _model()
     model.timing_grad_balance_weight = 2.0
@@ -137,6 +154,50 @@ def test_timing_grad_balance_initializes_from_real_autograd_gradients():
     assert result["weight_applied"] == pytest.approx(0.04)
     assert model.timing_grad_balance_weight == pytest.approx(0.04)
     assert pos.grad is None
+
+
+def test_timing_grad_balance_reset_recomputes_from_restart_geometry():
+    model = _model()
+    model.timing_grad_balance_target_ratio = 0.05
+    model.timing_wns_coeff = 1.0
+    model.timing_tns_coeff = 0.0
+    model.apply_timing_grad_balance_state(
+        {
+            "status": "initialized",
+            "initialized": True,
+            "target_ratio": 0.01,
+            "weight_applied": 7.0,
+        }
+    )
+    model.op_collections.wirelength_op = lambda pos: (2.0 * pos).sum()
+    model.timing_obj = lambda pos: (
+        -(5.0 * pos).sum(),
+        pos.sum() * 0.0,
+        None,
+        None,
+    )
+    pos = torch.tensor([1.0, 2.0], requires_grad=True)
+
+    reset = model.reset_timing_grad_balance(reason="inflation_restart")
+    result = model.initialize_timing_grad_balance(
+        pos,
+        iteration=20,
+        overflow=0.19,
+    )
+
+    assert reset == {
+        "artifact": "timing_grad_balance",
+        "artifact_version": 1,
+        "status": "pending",
+        "initialized": False,
+        "target_ratio": 0.05,
+        "norm": "l1",
+        "weight_applied": 1.0,
+        "reset_reason": "inflation_restart",
+    }
+    assert result["status"] == "initialized"
+    assert result["target_ratio"] == pytest.approx(0.05)
+    assert model.timing_grad_balance_weight == pytest.approx(0.02)
 
 
 def test_size_only_density_weight_update_does_not_drift_timing_coefficients():

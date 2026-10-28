@@ -90,6 +90,42 @@ def _piecewise_python(size_table, arc_table, size_count, trans_tables, cap_table
 
 
 class CellModelingPiecewiseSizeOpTest(unittest.TestCase):
+    def test_cpu_size_only_backward_skips_unrequested_gradients(self):
+        from dreamplace.ops.cell_modeling import cell_modeling_op
+
+        dtype = torch.float32
+        size_table = torch.tensor([[1.0, 2.0]], dtype=dtype)
+        arc_table = torch.tensor([[0, 1]], dtype=torch.long)
+        size_count = torch.tensor([2], dtype=torch.long)
+        trans_tables = torch.tensor([[0.1, 0.3], [0.1, 0.3]], dtype=dtype)
+        cap_tables = torch.tensor([[0.2, 0.5], [0.2, 0.5]], dtype=dtype)
+        values = torch.tensor([[1.0, 2.0, 3.0, 4.0], [2.0, 3.0, 4.0, 5.0]], dtype=dtype)
+        trans_dims = torch.tensor([2, 2], dtype=torch.long)
+        cap_dims = torch.tensor([2, 2], dtype=torch.long)
+        size = torch.tensor([1.5], dtype=dtype, requires_grad=True)
+        slew = torch.tensor([0.2], dtype=dtype)
+        cap = torch.tensor([0.3], dtype=dtype)
+
+        out = cell_modeling_op.piecewise_size_forward(
+            size_table,
+            arc_table,
+            size_count,
+            trans_tables,
+            cap_tables,
+            values,
+            trans_dims,
+            cap_dims,
+            size,
+            slew,
+            cap,
+        )
+        out.sum().backward()
+
+        self.assertTrue(torch.isfinite(size.grad).all())
+        self.assertNotEqual(float(size.grad), 0.0)
+        self.assertIsNone(slew.grad)
+        self.assertIsNone(cap.grad)
+
     def test_piecewise_backend_profile_records_cpu_forward_backward(self):
         from dreamplace.ops.cell_modeling import cell_modeling_op
 

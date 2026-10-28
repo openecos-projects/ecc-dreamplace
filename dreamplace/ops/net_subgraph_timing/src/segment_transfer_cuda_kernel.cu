@@ -3,6 +3,8 @@
 
 #include <c10/cuda/CUDAException.h>
 #include "cuda_runtime.h"
+#include "candidate_scratch_cuda.cuh"
+#include "candidate_backward_math.h"
 
 namespace {
 
@@ -2400,76 +2402,7 @@ __global__ void candidateNetSubgraphBackwardKernel(
     scalar_t* grad_buffer_output_slew,
     int32_t net_count) {
   const int32_t net = blockIdx.x * blockDim.x + threadIdx.x;
-  if (net >= net_count) {
-    return;
-  }
-  const int64_t begin = net_flat_topo_sort_start[net];
-  const int64_t end = net_flat_topo_sort_start[net + 1];
-  if (begin == end) {
-    return;
-  }
-  const scalar_t log10_value = scalar_t(2.302585092994046);
-  const scalar_t log10_squared = log10_value * log10_value;
-
-  for (int64_t pos = end; pos-- > begin;) {
-    const int64_t node = net_flat_topo_sort[pos];
-    const int64_t candidate = candidate_index_by_node[node];
-    const scalar_t bu = candidate >= 0 ? candidate_bu[candidate] : scalar_t(0);
-    const scalar_t delay = candidate >= 0 ? buffer_delay[candidate] : scalar_t(0);
-    const scalar_t output_slew =
-        candidate >= 0 ? buffer_output_slew[candidate] : scalar_t(0);
-
-    grad_arrival_in[node] += grad_arrival_out[node];
-    if (candidate >= 0) {
-      grad_candidate_bu[candidate] += grad_arrival_out[node] * delay;
-      grad_buffer_delay[candidate] += grad_arrival_out[node] * bu;
-    }
-    grad_slew_in[node] += grad_slew_out[node] * (scalar_t(1) - bu);
-    if (candidate >= 0) {
-      grad_candidate_bu[candidate] +=
-          grad_slew_out[node] * (output_slew - slew_in[node]);
-      grad_buffer_output_slew[candidate] += grad_slew_out[node] * bu;
-    }
-
-    const int64_t parent = pin_fa[node];
-    if (parent >= 0) {
-      const scalar_t resistance = edge_resistance[node];
-      const scalar_t wire_delta = resistance * lin[node];
-      grad_arrival_out[parent] += grad_arrival_in[node];
-      grad_lin[node] += grad_arrival_in[node] * resistance;
-      const scalar_t slew_value = slew_in[node];
-      if (fabs(slew_value) > scalar_t(0)) {
-        grad_slew_out[parent] +=
-            grad_slew_in[node] * slew_out[parent] / slew_value;
-        const scalar_t grad_wire_delta =
-            grad_slew_in[node] * log10_squared * wire_delta / slew_value;
-        grad_lin[node] += grad_wire_delta * resistance;
-      }
-    } else {
-      grad_driver_arrival[net] += grad_arrival_in[node];
-      grad_driver_slew[net] += grad_slew_in[node];
-    }
-  }
-
-  for (int64_t pos = begin; pos < end; ++pos) {
-    const int64_t node = net_flat_topo_sort[pos];
-    const int64_t candidate = candidate_index_by_node[node];
-    const scalar_t bu = candidate >= 0 ? candidate_bu[candidate] : scalar_t(0);
-    if (candidate >= 0) {
-      grad_candidate_bu[candidate] +=
-          grad_lin[node] * (buffer_input_cap[candidate] - lout[node]);
-      grad_buffer_input_cap[candidate] += grad_lin[node] * bu;
-      grad_lout[node] += grad_lin[node] * (scalar_t(1) - bu);
-    } else {
-      grad_lout[node] += grad_lin[node];
-    }
-    const scalar_t children_grad = grad_lout[node];
-    for (int64_t edge = flat_pin_to_start[node];
-         edge < flat_pin_to_start[node + 1];
-         ++edge) {
-      grad_lin[flat_pin_to[edge]] += children_grad;
-    }
-  }
+  if (net < net_count) candidateBackwardNet<scalar_t>(net, net_flat_topo_sort, net_flat_topo_sort_start, pin_fa, flat_pin_to_start, flat_pin_to, edge_resistance, candidate_index_by_node, candidate_bu, buffer_input_cap, buffer_delay, buffer_output_slew, lin, lout, slew_in, slew_out, grad_lout, grad_lin, grad_arrival_in, grad_arrival_out, grad_slew_in, grad_slew_out, grad_driver_arrival, grad_driver_slew, grad_candidate_bu, grad_buffer_input_cap, grad_buffer_delay, grad_buffer_output_slew, net_count);
 }
 
 template <typename scalar_t>
@@ -2511,6 +2444,17 @@ void candidateNetSubgraphForwardCudaLauncher(
     int32_t sink_count,
     cudaStream_t stream) {
   const int32_t threads = 128;
+  const int32_t output_count = max(node_count, sink_count);
+  if (output_count > 0) {
+    const candidate_scratch::Forward<scalar_t> scratch{
+        candidate_index_by_node,
+        {effective_node_cap, lout, lin, arrival_in, arrival_out, slew_in, slew_out},
+        {sink_arrival, sink_slew, sink_load, sink_cap, sink_net_delay, sink_net_impulse}};
+    candidate_scratch::initialize_forward<scalar_t><<<(output_count + threads - 1) / threads,
+                                                     threads, 0, stream>>>(
+        scratch, node_count, sink_count);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
   const int32_t candidate_blocks = (candidate_count + threads - 1) / threads;
   if (candidate_blocks > 0) {
     candidateIndexByNodeKernel<scalar_t><<<candidate_blocks, threads, 0, stream>>>(
@@ -2774,9 +2718,20 @@ void candidateNetSubgraphBackwardCudaLauncher(
     scalar_t* grad_buffer_delay,
     scalar_t* grad_buffer_output_slew,
     int32_t net_count,
+    int32_t candidate_count,
     int32_t sink_count,
     cudaStream_t stream) {
   const int32_t threads = 128;
+  const int32_t gradient_count = max(net_count, candidate_count);
+  if (gradient_count > 0) {
+    const candidate_scratch::Gradient<scalar_t> scratch{
+        {grad_driver_arrival, grad_driver_slew},
+        {grad_candidate_bu, grad_buffer_input_cap, grad_buffer_delay, grad_buffer_output_slew}};
+    candidate_scratch::initialize_gradient<scalar_t><<<(gradient_count + threads - 1) / threads,
+                                                      threads, 0, stream>>>(
+        scratch, net_count, candidate_count);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
   const int32_t sink_blocks = (sink_count + threads - 1) / threads;
   if (sink_blocks > 0) {
     candidateNetSubgraphSeedSinkGradKernel<scalar_t><<<sink_blocks, threads, 0, stream>>>(
@@ -2848,7 +2803,7 @@ void candidateNetSubgraphBackwardCudaLauncher(
       const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*,             \
       const scalar_t*, scalar_t*, scalar_t*, scalar_t*, scalar_t*, scalar_t*,         \
       scalar_t*, scalar_t*, scalar_t*, scalar_t*, scalar_t*, scalar_t*, scalar_t*,    \
-      int32_t, int32_t, cudaStream_t)
+      int32_t, int32_t, int32_t, cudaStream_t)
 
 #define INSTANTIATE_CANDIDATE_FIXED_BSU_FORWARD(scalar_t)                             \
   template void candidateNetSubgraphFixedBsuForwardCudaLauncher<scalar_t>(            \

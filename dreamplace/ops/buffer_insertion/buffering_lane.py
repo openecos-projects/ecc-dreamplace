@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import torch
 
+from .candidate_state_refresh import CandidateStateRefreshMixin
+
 
 def _json_safe_copy(value, field_name):
     try:
@@ -95,8 +97,10 @@ class BufferCommitRequest:
         }
 
 
-class BufferingOptimizationLane:
+class BufferingOptimizationLane(CandidateStateRefreshMixin):
     """Canonical lifecycle holder for relaxed buffering state."""
+
+    shared_typed_candidate_gradients = True
 
     def __init__(
         self,
@@ -119,6 +123,23 @@ class BufferingOptimizationLane:
         self.segment_capacity_bundle = None
         self.segment_capacity_controller = None
         self._candidate_gc_restore_required = False
+        self._full_candidate_records = (
+            tuple(buffer_optimization_state.candidate_records)
+            if buffer_optimization_state is not None
+            and hasattr(buffer_optimization_state, "candidate_records")
+            else None
+        )
+        self._full_candidate_topology_signature = None
+        self._full_candidate_structure_signature = None
+        self._full_candidate_geometry_digest = None
+        self._full_candidate_refresh_topology_digest = None
+        self._full_candidate_candidate_generation = None
+        self._last_candidate_incremental_refresh = None
+        self._candidate_state_contains_full_domain = bool(
+            buffer_optimization_state is not None
+            and hasattr(buffer_optimization_state, "candidate_records")
+        )
+        self.timing_loss = None
         self._summary = {
             "status": "initialized",
             "mode": getattr(config, "mode", None),
@@ -234,9 +255,27 @@ class BufferingOptimizationLane:
                 self._summary["state_build_metadata"] = dict(build_result.metadata)
             if build_result.status == "ok":
                 self.buffer_optimization_state = build_result.buffer_optimization_state
+                if hasattr(self.buffer_optimization_state, "candidate_records"):
+                    self._full_candidate_records = tuple(
+                        self.buffer_optimization_state.candidate_records
+                    )
+                    self._candidate_state_contains_full_domain = not bool(
+                        getattr(
+                            self.buffer_optimization_state,
+                            "timing_active_only",
+                            False,
+                        )
+                    )
                 self.buffer_relaxed_timing_payload = (
                     build_result.buffer_relaxed_timing_payload
                 )
+                if self._state_kind() == "candidate":
+                    self._full_candidate_topology_signature = (
+                        self._candidate_topology_signature()
+                    )
+                    self._full_candidate_structure_signature = (
+                        self._candidate_structure_signature()
+                    )
                 self._summary["state_source"] = build_result.metadata.get(
                     "state_source",
                     "buffering_state_builder",
@@ -247,6 +286,19 @@ class BufferingOptimizationLane:
         else:
             if runtime_profile is not None:
                 runtime_profile["state_build_ms"] = 0.0
+            if self._state_kind() == "candidate":
+                if self.buffer_optimization_state is not None:
+                    self._full_candidate_records = tuple(
+                        self.buffer_optimization_state.candidate_records
+                    )
+                if self._full_candidate_topology_signature is None:
+                    self._full_candidate_topology_signature = (
+                        self._candidate_topology_signature()
+                    )
+                if self._full_candidate_structure_signature is None:
+                    self._full_candidate_structure_signature = (
+                        self._candidate_structure_signature()
+                    )
         if (
             bool(getattr(self.config, "segment_capacity_enabled", False))
             and self.segment_capacity_controller is None
@@ -357,6 +409,29 @@ class BufferingOptimizationLane:
                         "per_size_output_slew"
                     )
             attached = True
+        if self._state_kind() == "candidate":
+            if (
+                self.buffer_optimization_state is not None
+                and not bool(
+                    getattr(
+                        self.buffer_optimization_state,
+                        "timing_active_only",
+                        False,
+                    )
+                )
+            ):
+                self._full_candidate_records = tuple(
+                    self.buffer_optimization_state.candidate_records
+                )
+                self._candidate_state_contains_full_domain = True
+            if self._full_candidate_topology_signature is None:
+                self._full_candidate_topology_signature = (
+                    self._candidate_topology_signature()
+                )
+            if self._full_candidate_structure_signature is None:
+                self._full_candidate_structure_signature = (
+                    self._candidate_structure_signature()
+                )
         self._summary["state_attached"] = bool(attached)
         self._summary["relaxed_timing_enabled"] = self._has_relaxed_timing_state()
         self._update_state_kind_summary()
@@ -402,7 +477,14 @@ class BufferingOptimizationLane:
                 "buffering objective expects timing_obj to return "
                 "(wns, tns, worst_slack, total_slack)"
             ) from exc
-        timing_loss = -tns
+        model._diff_opt_last_timing_metrics = {
+            "wns": float(wns.detach()) if hasattr(wns, "detach") else float(wns),
+            "tns": float(tns.detach()) if hasattr(tns, "detach") else float(tns),
+        }
+        timing_loss = (
+            -tns if self.timing_loss is None
+            else self.timing_loss(wns, tns, worst_slack, total_slack)
+        )
         capacity_metrics = {}
         if self.segment_capacity_controller is not None:
             loss, capacity_metrics = self.segment_capacity_controller.compose_objective(

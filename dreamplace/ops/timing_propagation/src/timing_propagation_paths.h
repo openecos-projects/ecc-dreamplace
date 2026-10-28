@@ -10,6 +10,7 @@
 namespace dreamplace {
 
 struct TraversalPruningRefreshResult {
+  at::Tensor kept_pin_indices;
   at::Tensor kept_flat_arc_indices;
   at::Tensor kept_level_offsets;
   at::Tensor kept_counts_by_level;
@@ -57,7 +58,8 @@ class SetupCriticalPathExtractor {
       const at::Tensor& pin_pred_pin,
       const at::Tensor& pin_pred_arc_id,
       const at::Tensor& start_points,
-      int64_t topology_epoch);
+      int64_t topology_epoch,
+      const at::Tensor& pin_pred_transition_mask = at::Tensor());
 
   CriticalPathBatch extract(
       const at::Tensor& endpoint_pins,
@@ -87,6 +89,7 @@ class SetupCriticalPathExtractor {
   std::vector<int64_t> predecessor_offsets_;
   std::vector<int64_t> predecessor_pins_;
   std::vector<int64_t> predecessor_arc_ids_;
+  std::vector<int64_t> predecessor_transition_masks_;
   std::vector<int64_t> arc_senses_;
   std::vector<uint8_t> is_start_pin_;
 };

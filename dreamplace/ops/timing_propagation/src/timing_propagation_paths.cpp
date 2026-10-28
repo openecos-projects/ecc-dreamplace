@@ -115,7 +115,8 @@ SetupCriticalPathExtractor::SetupCriticalPathExtractor(
     const at::Tensor& pin_pred_pin,
     const at::Tensor& pin_pred_arc_id,
     const at::Tensor& start_points,
-    int64_t topology_epoch)
+    int64_t topology_epoch,
+    const at::Tensor& pin_pred_transition_mask)
     : topology_epoch_(topology_epoch) {
   TORCH_CHECK(flat_inst_arcs_by_level.defined(),
               "flat_inst_arcs_by_level must be defined");
@@ -141,6 +142,11 @@ SetupCriticalPathExtractor::SetupCriticalPathExtractor(
   predecessor_offsets_ = tensor_to_i64_vector(pin_pred_start, "pin_pred_start");
   predecessor_pins_ = tensor_to_i64_vector(pin_pred_pin, "pin_pred_pin");
   predecessor_arc_ids_ = tensor_to_i64_vector(pin_pred_arc_id, "pin_pred_arc_id");
+  predecessor_transition_masks_ = pin_pred_transition_mask.defined() && pin_pred_transition_mask.numel()
+      ? tensor_to_i64_vector(pin_pred_transition_mask, "pin_pred_transition_mask")
+      : std::vector<int64_t>(predecessor_pins_.size(), 15);
+  TORCH_CHECK(predecessor_transition_masks_.size() == predecessor_pins_.size(),
+              "pin_pred_transition_mask length must match pin_pred_pin");
   TORCH_CHECK(!predecessor_offsets_.empty(),
               "pin_pred_start must contain at least one offset");
   TORCH_CHECK(predecessor_offsets_.front() == 0,
@@ -158,6 +164,8 @@ SetupCriticalPathExtractor::SetupCriticalPathExtractor(
   for (size_t edge_idx = 0; edge_idx < predecessor_pins_.size(); ++edge_idx) {
     const int64_t pred = predecessor_pins_[edge_idx];
     const int64_t arc_id = predecessor_arc_ids_[edge_idx];
+    TORCH_CHECK(predecessor_transition_masks_[edge_idx] >= 0 && predecessor_transition_masks_[edge_idx] <= 15,
+                "pin_pred_transition_mask must use only the four legal branch bits");
     TORCH_CHECK(pred >= 0 && pred < num_pins_,
                 "pin_pred_pin contains out-of-range pin id");
     TORCH_CHECK(arc_id == -1 || (arc_id >= 0 && arc_id < num_cell_arcs_),
@@ -345,7 +353,9 @@ CriticalPathBatch SetupCriticalPathExtractor::extract(
       for (int64_t edge_idx = edge_begin; edge_idx < edge_end; ++edge_idx) {
         const int64_t pred_pin = predecessor_pins_[static_cast<size_t>(edge_idx)];
         const int64_t arc_id = predecessor_arc_ids_[static_cast<size_t>(edge_idx)];
+        const int64_t mask = predecessor_transition_masks_[static_cast<size_t>(edge_idx)];
         if (arc_id == -1) {
+          if (!(mask & (1 << (3 * current_transition)))) continue;
           const double pred_aat = current_transition == 0
               ? rise_aat[static_cast<size_t>(pred_pin)]
               : fall_aat[static_cast<size_t>(pred_pin)];
@@ -358,23 +368,23 @@ CriticalPathBatch SetupCriticalPathExtractor::extract(
 
         const int64_t sense = arc_senses_[static_cast<size_t>(arc_id)];
         if (current_transition == 0) {
-          if (sense >= 0) {
+          if (sense >= 0 && (mask & 1)) {
             consider(pred_pin, 0, arc_id,
                      rise_aat[static_cast<size_t>(pred_pin)] +
                          delay_rr[static_cast<size_t>(arc_id)]);
           }
-          if (sense <= 0) {
+          if (sense <= 0 && (mask & 4)) {
             consider(pred_pin, 1, arc_id,
                      fall_aat[static_cast<size_t>(pred_pin)] +
                          delay_fr[static_cast<size_t>(arc_id)]);
           }
         } else {
-          if (sense >= 0) {
+          if (sense >= 0 && (mask & 8)) {
             consider(pred_pin, 1, arc_id,
                      fall_aat[static_cast<size_t>(pred_pin)] +
                          delay_ff[static_cast<size_t>(arc_id)]);
           }
-          if (sense <= 0) {
+          if (sense <= 0 && (mask & 2)) {
             consider(pred_pin, 0, arc_id,
                      rise_aat[static_cast<size_t>(pred_pin)] +
                          delay_rf[static_cast<size_t>(arc_id)]);
@@ -679,6 +689,7 @@ TraversalPruningRefreshResult CriticalEndpointTraversalPruner::refresh(
       endpoint_count == 0 ? 0 : std::min<int64_t>(endpoint_count, max_task_count);
 
   struct LocalTraversalMarks {
+    std::vector<uint8_t> visited_pin;
     std::vector<uint8_t> kept_arc;
   };
 
@@ -690,7 +701,8 @@ TraversalPruningRefreshResult CriticalEndpointTraversalPruner::refresh(
         (endpoint_count * task_id) / std::max<int64_t>(1, task_count);
     const int64_t end =
         (endpoint_count * (task_id + 1)) / std::max<int64_t>(1, task_count);
-    std::vector<uint8_t> visited_pin(static_cast<size_t>(num_pins_), 0);
+    auto& visited_pin = local_marks[static_cast<size_t>(task_id)].visited_pin;
+    visited_pin.assign(static_cast<size_t>(num_pins_), 0);
     auto& kept_arc_local = local_marks[static_cast<size_t>(task_id)].kept_arc;
     kept_arc_local.assign(static_cast<size_t>(num_flat_arcs_), 0);
     std::vector<int64_t> stack;
@@ -747,7 +759,11 @@ TraversalPruningRefreshResult CriticalEndpointTraversalPruner::refresh(
   }
 
   std::vector<uint8_t> kept_arc(static_cast<size_t>(num_flat_arcs_), 0);
+  std::vector<uint8_t> kept_pin(static_cast<size_t>(num_pins_), 0);
   for (const auto& marks : local_marks) {
+    for (int64_t pin = 0; pin < num_pins_; ++pin) {
+      kept_pin[static_cast<size_t>(pin)] |= marks.visited_pin[static_cast<size_t>(pin)];
+    }
     for (int64_t arc_idx = 0; arc_idx < num_flat_arcs_; ++arc_idx) {
       if (marks.kept_arc[static_cast<size_t>(arc_idx)]) {
         kept_arc[static_cast<size_t>(arc_idx)] = 1;
@@ -787,6 +803,13 @@ TraversalPruningRefreshResult CriticalEndpointTraversalPruner::refresh(
       std::chrono::duration<double, std::milli>(finished_at - started_at).count();
 
   TraversalPruningRefreshResult result;
+  std::vector<int64_t> kept_pins;
+  for (int64_t pin = 0; pin < num_pins_; ++pin) {
+    if (kept_pin[static_cast<size_t>(pin)]) {
+      kept_pins.push_back(pin);
+    }
+  }
+  result.kept_pin_indices = i64_tensor_from_vector(kept_pins);
   result.kept_flat_arc_indices = i64_tensor_from_vector(kept_indices);
   result.kept_level_offsets = i64_tensor_from_vector(kept_level_offsets);
   result.kept_counts_by_level = i64_tensor_from_vector(kept_counts_by_level);

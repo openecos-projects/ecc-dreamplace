@@ -1,5 +1,7 @@
 #include "utility/src/torch.h"
+#include "utility/src/cuda_tensor.h"
 #include "utility/src/utils.h"
+#include "candidate_sink_gradients.h"
 
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -322,6 +324,7 @@ void candidateNetSubgraphBackwardCudaLauncher(
     scalar_t* grad_buffer_delay,
     scalar_t* grad_buffer_output_slew,
     int32_t net_count,
+    int32_t candidate_count,
     int32_t sink_count,
     cudaStream_t stream);
 
@@ -1227,20 +1230,21 @@ py::dict candidate_net_subgraph_forward_cuda(
   const auto stream = c10::cuda::getCurrentCUDAStream(node_capacitance.get_device()).stream();
 
   auto index_options = node_capacitance.options().dtype(at::kLong);
-  auto candidate_index_by_node = at::full({node_count}, -1, index_options);
-  auto effective_node_cap = at::zeros_like(node_capacitance);
-  auto lout = at::zeros_like(node_capacitance);
-  auto lin = at::zeros_like(node_capacitance);
-  auto arrival_in = at::zeros_like(node_capacitance);
-  auto arrival_out = at::zeros_like(node_capacitance);
-  auto slew_in = at::zeros_like(node_capacitance);
-  auto slew_out = at::zeros_like(node_capacitance);
-  auto sink_arrival = at::zeros({sink_count}, node_capacitance.options());
-  auto sink_slew = at::zeros({sink_count}, node_capacitance.options());
-  auto sink_load = at::zeros({sink_count}, node_capacitance.options());
-  auto sink_cap = at::zeros({sink_count}, node_capacitance.options());
-  auto sink_net_delay = at::zeros({sink_count}, node_capacitance.options());
-  auto sink_net_impulse = at::zeros({sink_count}, node_capacitance.options());
+  // The launcher initializes every output in one kernel before propagation.
+  auto candidate_index_by_node = fullyWrittenCudaTensor({node_count}, index_options);
+  auto effective_node_cap = fullyWrittenCudaTensor(node_capacitance.sizes(), node_capacitance.options());
+  auto lout = fullyWrittenCudaTensor(node_capacitance.sizes(), node_capacitance.options());
+  auto lin = fullyWrittenCudaTensor(node_capacitance.sizes(), node_capacitance.options());
+  auto arrival_in = fullyWrittenCudaTensor(node_capacitance.sizes(), node_capacitance.options());
+  auto arrival_out = fullyWrittenCudaTensor(node_capacitance.sizes(), node_capacitance.options());
+  auto slew_in = fullyWrittenCudaTensor(node_capacitance.sizes(), node_capacitance.options());
+  auto slew_out = fullyWrittenCudaTensor(node_capacitance.sizes(), node_capacitance.options());
+  auto sink_arrival = fullyWrittenCudaTensor({sink_count}, node_capacitance.options());
+  auto sink_slew = fullyWrittenCudaTensor({sink_count}, node_capacitance.options());
+  auto sink_load = fullyWrittenCudaTensor({sink_count}, node_capacitance.options());
+  auto sink_cap = fullyWrittenCudaTensor({sink_count}, node_capacitance.options());
+  auto sink_net_delay = fullyWrittenCudaTensor({sink_count}, node_capacitance.options());
+  auto sink_net_impulse = fullyWrittenCudaTensor({sink_count}, node_capacitance.options());
 
   AT_DISPATCH_FLOATING_TYPES(scalar_type, "candidateNetSubgraphForwardCuda", [&] {
     candidateNetSubgraphForwardCudaLauncher<scalar_t>(
@@ -1634,15 +1638,22 @@ py::dict candidate_net_subgraph_backward_cuda(
   auto grad_arrival_out = grad_arrival_out_input.clone();
   auto grad_slew_in = grad_slew_in_input.clone();
   auto grad_slew_out = grad_slew_out_input.clone();
-  auto grad_driver_arrival = at::zeros(
+  // Keep independent tensors; only their clearing is combined by the launcher.
+  auto grad_driver_arrival = fullyWrittenCudaTensor(
       {net_flat_topo_sort_start.numel() - 1}, lin.options());
-  auto grad_driver_slew = at::zeros_like(grad_driver_arrival);
-  auto grad_candidate_bu = at::zeros_like(candidate_bu);
-  auto grad_buffer_input_cap = at::zeros_like(buffer_input_cap);
-  auto grad_buffer_delay = at::zeros_like(buffer_delay);
-  auto grad_buffer_output_slew = at::zeros_like(buffer_output_slew);
+  auto grad_driver_slew = fullyWrittenCudaTensor(grad_driver_arrival.sizes(), grad_driver_arrival.options());
+  auto grad_candidate_bu = fullyWrittenCudaTensor(candidate_bu.sizes(), candidate_bu.options());
+  auto grad_buffer_input_cap = fullyWrittenCudaTensor(buffer_input_cap.sizes(), buffer_input_cap.options());
+  auto grad_buffer_delay = fullyWrittenCudaTensor(buffer_delay.sizes(), buffer_delay.options());
+  auto grad_buffer_output_slew = fullyWrittenCudaTensor(buffer_output_slew.sizes(), buffer_output_slew.options());
   const int32_t net_count = static_cast<int32_t>(net_flat_topo_sort_start.numel() - 1);
-  const int32_t sink_count = static_cast<int32_t>(sink_node_id.numel());
+  const bool deterministic = at::globalContext().deterministicAlgorithms();
+  if (deterministic) {
+    seedCandidateSinkGradients(net_flat_topo_sort, net_flat_topo_sort_start, sink_node_id,
+        sink_net_index, slew_out, grad_sink_arrival, grad_sink_slew, grad_sink_load,
+        grad_sink_net_delay, grad_sink_net_impulse, grad_lin, grad_arrival_out, grad_slew_out);
+  }
+  const int32_t sink_count = deterministic ? 0 : static_cast<int32_t>(sink_node_id.numel());
   AT_DISPATCH_FLOATING_TYPES(scalar_type, "candidateNetSubgraphBackwardCuda", [&] {
     candidateNetSubgraphBackwardCudaLauncher<scalar_t>(
         net_flat_topo_sort.data_ptr<int64_t>(),
@@ -1680,6 +1691,7 @@ py::dict candidate_net_subgraph_backward_cuda(
         grad_buffer_delay.data_ptr<scalar_t>(),
         grad_buffer_output_slew.data_ptr<scalar_t>(),
         net_count,
+        static_cast<int32_t>(candidate_bu.numel()),
         sink_count,
         stream);
   });
@@ -1690,6 +1702,12 @@ py::dict candidate_net_subgraph_backward_cuda(
   result["grad_buffer_input_cap"] = grad_buffer_input_cap;
   result["grad_buffer_delay"] = grad_buffer_delay;
   result["grad_buffer_output_slew"] = grad_buffer_output_slew;
+  result["grad_lout"] = grad_lout;
+  result["grad_arrival_in"] = grad_arrival_in;
+  result["grad_slew_in"] = grad_slew_in;
+  result["grad_lin"] = grad_lin;
+  result["grad_arrival_out"] = grad_arrival_out;
+  result["grad_slew_out"] = grad_slew_out;
   return result;
 }
 

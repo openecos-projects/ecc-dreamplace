@@ -2543,7 +2543,7 @@ class OpenRoadPlaceIOBridgeImpl
           force_accept_selected_actions;
       evaluator_summary["nonpositive_trial_eps"] = nonpositive_trial_eps;
       evaluator_summary["timing_objective_lane"] =
-          pyStringOrDefault(config, "timing_objective_lane", "timing_only");
+          pyStringOrDefault(config, "timing_objective_lane", "timing_slew_cap");
       evaluator_summary["local_delta_slew_penalty_weight"] =
           local_delta_slew_penalty_weight;
       evaluator_summary["local_delta_cap_penalty_weight"] =
@@ -3332,7 +3332,7 @@ class OpenRoadPlaceIOBridgeImpl
           result["local_delta_cap_penalty_weight_source"] =
               local_delta_cap_weight_info.source;
           result["timing_objective_lane"] =
-              pyStringOrDefault(config, "timing_objective_lane", "timing_only");
+              pyStringOrDefault(config, "timing_objective_lane", "timing_slew_cap");
           noop_selected_count += 1;
           best_trial_noop_count += 1;
           rejected_count += 1;
@@ -3421,7 +3421,7 @@ class OpenRoadPlaceIOBridgeImpl
           result["local_delta_cap_penalty_weight_source"] =
               local_delta_cap_weight_info.source;
           result["timing_objective_lane"] =
-              pyStringOrDefault(config, "timing_objective_lane", "timing_only");
+              pyStringOrDefault(config, "timing_objective_lane", "timing_slew_cap");
           nonpositive_trial_reject_count += 1;
           rejected_count += 1;
           typed_summary.evaluator_result_count += 1;
@@ -3575,7 +3575,7 @@ class OpenRoadPlaceIOBridgeImpl
         result["force_accept_selected_actions"] = force_accept_selected_actions;
         result["nonpositive_trial_eps"] = nonpositive_trial_eps;
         result["timing_objective_lane"] =
-            pyStringOrDefault(config, "timing_objective_lane", "timing_only");
+            pyStringOrDefault(config, "timing_objective_lane", "timing_slew_cap");
         result["local_delta_slew_penalty_weight_source"] =
             local_delta_slew_weight_info.source;
         result["local_delta_cap_penalty_weight_source"] =

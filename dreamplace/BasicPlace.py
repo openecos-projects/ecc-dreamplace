@@ -594,6 +594,10 @@ class PlaceDataCollection(object):
             )
 
             if params.with_sta:
+                from dreamplace.ops.placeio_ecc.timing_generation import timing_generation_lease
+
+                self.timing_model_lease = timing_generation_lease(placedb)
+                self.sparse_timing_view = getattr(placedb, "sparse_timing_view", None)
                 # diff timing opt
                 self.inrdelays = torch.from_numpy(
                     placedb.inrdelays
@@ -747,6 +751,10 @@ class PlaceDataCollection(object):
                     placedb.inst_libcell_offset).to(device)
 
                 self.flat_libarc_info = torch.from_numpy(placedb.flat_libarc_info).to(device)
+                if getattr(placedb, "hold_timing_data", None) is not None:
+                    self.flat_libarc_check_types = torch.from_numpy(
+                        placedb.hold_timing_data.lib_arc_check_types
+                    ).to(device)
                 self.flat_libcell_info = torch.from_numpy(placedb.flat_libcell_info).to(device)
                 self.flat_libcell_width = (
                     None
@@ -772,6 +780,10 @@ class PlaceDataCollection(object):
 
                 self.cell_id_2_libpin_id_start = torch.from_numpy(
                     placedb.cell_id_2_libpin_id_start).to(device)
+                lib_pin_names = getattr(placedb, "flat_lib_pin_names", None)
+                self.flat_lib_pin_names = (
+                    None if not lib_pin_names else tuple(lib_pin_names)
+                )
                 self.pin_2_libpin_offset = torch.from_numpy(
                     placedb.pin_2_libpin_offset).to(device)
                 self.flat_lib_pin_offset_x = torch.from_numpy(

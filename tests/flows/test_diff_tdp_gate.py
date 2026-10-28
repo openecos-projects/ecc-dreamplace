@@ -438,3 +438,49 @@ def test_gradient_net_weight_carrier_does_not_initialize_direct_loss_balance():
 
     assert result is None
     assert model.initialize_count == 0
+
+
+def test_restart_reset_clears_cached_timing_grad_balance_state():
+    class FakeModel:
+        def reset_timing_grad_balance(self, reason):
+            self.reason = reason
+            return {
+                "status": "pending",
+                "initialized": False,
+                "target_ratio": 0.05,
+            }
+
+    placer = _placer()
+    placer._timing_grad_balance_state = {"initialized": True, "weight_applied": 7.0}
+    model = FakeModel()
+    params = SimpleNamespace(timing_grad_balance_reset_on_restart=1)
+
+    state = placer._reset_timing_grad_balance_for_restart(
+        model,
+        params,
+        iteration=25,
+    )
+
+    assert state["status"] == "pending"
+    assert model.reason == "inflation_restart"
+    assert placer._timing_grad_balance_state is None
+
+
+def test_restart_reset_can_be_disabled():
+    class FakeModel:
+        def reset_timing_grad_balance(self, reason):
+            raise AssertionError("reset should not be called")
+
+    placer = _placer()
+    cached_state = {"initialized": True, "weight_applied": 7.0}
+    placer._timing_grad_balance_state = cached_state
+    params = SimpleNamespace(timing_grad_balance_reset_on_restart=0)
+
+    state = placer._reset_timing_grad_balance_for_restart(
+        FakeModel(),
+        params,
+        iteration=25,
+    )
+
+    assert state is None
+    assert placer._timing_grad_balance_state is cached_state

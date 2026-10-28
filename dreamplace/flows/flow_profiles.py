@@ -63,7 +63,7 @@ TIMING_OBJECTIVE_DEFAULTS = (
     ("with_sta", 1),
     ("timing_eval_flag", 1),
     ("timing_surrogate_mode", "lut_only"),
-    ("timing_objective_lane", "timing_only"),
+    ("timing_objective_lane", "timing_slew_cap"),
     ("critical_endpoint_pruning_mode", "off"),
     ("production_fast_loop", True),
     ("timing_lut_2d_native_op", "auto"),
@@ -159,6 +159,7 @@ PIN2PIN_TIMING_PLACEMENT_DEFAULTS = (
 
 SIZING_DEFAULTS = (
     ("placement_sizing_mode", "size_only"),
+    ("diff_sizing_terminal_gr_sta_enabled", 0),
     ("sizing_parameterization", "logits"),
     ("real_size_learning_rate", 0.1),
     ("real_size_execution_mode", "continuous_only"),
@@ -302,6 +303,37 @@ SEGMENT_COUNT_DIRECT_JOINT_DEFAULTS = (
     ("joint_segment_buffering_rounds", 1),
     ("joint_segment_buffering_selection_fraction", 0.001),
     ("joint_segment_pin2pin_rebootstrap_enabled", 1),
+    ("buffering_commit_enabled", 1),
+    ("joint_post_commit_continue", False),
+)
+
+
+DISCRETE_ALTERNATING_SIZING_BUFFERING_PROFILE = (
+    "discrete_alternating_sizing_buffering_v1"
+)
+
+
+DISCRETE_ALTERNATING_SIZING_BUFFERING_DEFAULTS = (
+    ("placement_sizing_mode", "joint"),
+    ("sizing_parameterization", "real_size"),
+    ("real_size_execution_mode", "continuous_only"),
+    ("real_size_warmup_steps", 0),
+    ("continuous_size_dynamics_mode", "none"),
+    ("buffering_mode", "candidate"),
+    ("buffering_segment_strategy", "continuous"),
+    ("buffering_candidate_strategy", "discrete_net_gradient"),
+    ("buffering_candidate_drive_type_mode", "four_strength_table"),
+    ("buffering_route_b_selection_fraction", 0.001),
+    ("joint_alternating_outer_rounds", 5),
+    ("joint_alternating_sizing_rounds", 5),
+    ("joint_alternating_sizing_shared_budget", 1),
+    ("joint_alternating_sizing_shared_budget_percent", 1.0),
+    ("joint_alternating_sizing_action_policy", "quad_shared_budget_all_legal"),
+    ("joint_alternating_buffering_rounds", 1),
+    ("joint_alternating_buffering_selection_fraction", 0.001),
+    ("joint_alternating_buffering_mode", "candidate"),
+    ("joint_alternating_buffer_commit_each_round", 0),
+    ("joint_alternating_buffer_commit_policy", "final_only"),
     ("buffering_commit_enabled", 1),
     ("joint_post_commit_continue", False),
 )

@@ -774,7 +774,7 @@ def test_diff_timing_driven_placement_cli_applies_profile_defaults(tmp_path):
     assert params.with_sta == 1
     assert params.differentiable_timing_obj == 1
     assert params.timing_surrogate_mode == "lut_only"
-    assert params.timing_objective_lane == "timing_only"
+    assert params.timing_objective_lane == "timing_slew_cap"
     assert params.timing_topology_refresh_interval == 15
     assert params.timing_topology_enable_overflow_threshold == 0.35
     assert params.timing_wns_coeff == 0.01
@@ -791,7 +791,7 @@ def test_diff_timing_driven_placement_cli_applies_profile_defaults(tmp_path):
 def test_timing_grad_balance_ratio_schema_default_is_loaded():
     params = placer_cli._load_params_json(None)
 
-    assert params.timing_grad_balance_target_ratio == 0.2
+    assert params.timing_grad_balance_target_ratio == 0.01
 
 
 def test_sizing_flow_disables_position_timing_gradient_balance_by_default(tmp_path):

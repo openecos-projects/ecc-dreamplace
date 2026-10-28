@@ -1,15 +1,22 @@
-import hashlib
 import gc
+import hashlib
 import json
 import time
 from pathlib import Path
 
 import torch
+from dreamplace.ops.timing_propagation.buffer_timing_fast_path import buffer_timing_fast_path
 
 from .buffering_inner_loop import BufferingInnerLoopSummary
-from .discrete_candidate_scheduler import schedule_candidate_gradient_actions
-from .discrete_virtual_buffer_runner import _compact_round_record, _metric_snapshot
-from .discrete_virtual_scheduler import ROUTE_B_AFFECTED_NETS_PER_ACTION
+from .typed_candidate_gradient import typed_candidate_objective_gradient as _typed_candidate_objective_gradient
+from .buffering_lane import _tensor_digest
+from .discrete_candidate_scheduler import (
+    schedule_candidate_gradient_actions,
+    schedule_typed_candidate_gradient_actions,
+)
+from .discrete_virtual_buffer_runner import _compact_round_record
+from .candidate_objective import objective_snapshot as _objective_snapshot
+
 
 
 def _assert_candidate_state(lane, *, require_zero):
@@ -28,34 +35,62 @@ def _assert_candidate_state(lane, *, require_zero):
     )
     if strategy != "discrete_net_gradient":
         raise ValueError("candidate discrete runner requires discrete_net_gradient")
-    fixed_bsu_index = state.fixed_bsu_index
-    if fixed_bsu_index is None:
-        raise ValueError("candidate discrete_net_gradient requires fixed_bsu_index")
     if bool(getattr(config, "segment_capacity_enabled", False)):
         raise ValueError("candidate discrete_net_gradient cannot use capacity control")
     if getattr(config, "max_selected_actions", None) is not None:
         raise ValueError("candidate discrete_net_gradient cannot use max_selected_actions")
     state.validate_binary_()
-    if require_zero and not bool((state.activation_param.detach() == 0.0).all()):
-        raise ValueError("candidate discrete_net_gradient must start from zero")
+    if getattr(state, "is_typed_candidate", False):
+        if str(getattr(config, "candidate_drive_type_mode", "")) != "four_strength_table":
+            raise ValueError("typed candidate state requires four_strength_table mode")
+        if require_zero and not bool(
+            (state.activation_param.detach().sum(dim=1) == 0.0).all()
+        ):
+            raise ValueError("typed candidate discrete_net_gradient must start from zero")
+    else:
+        fixed_bsu_index = state.fixed_bsu_index
+        if fixed_bsu_index is None:
+            raise ValueError("candidate discrete_net_gradient requires fixed_bsu_index")
+        if require_zero and not bool((state.activation_param.detach() == 0.0).all()):
+            raise ValueError("candidate discrete_net_gradient must start from zero")
     return state
 
 
 def _selected_rows(state, transition):
     result = []
     rows = transition.selected_candidate_indices.detach().cpu().tolist()
-    for row_index, net_index, candidate_id, raw_grad, improvement in zip(
+    selected_types = getattr(transition, "selected_drive_type_ids", None)
+    selected_types = (
+        selected_types.detach().cpu().tolist()
+        if selected_types is not None
+        else [None] * len(rows)
+    )
+    for row_index, drive_type_id, net_index, candidate_id, raw_grad, improvement in zip(
         rows,
+        selected_types,
         transition.selected_net_indices.detach().cpu().tolist(),
         transition.selected_candidate_ids.detach().cpu().tolist(),
         transition.selected_raw_grads.detach().cpu().tolist(),
         transition.selected_predicted_improvements.detach().cpu().tolist(),
+        strict=True,
     ):
         record = state.candidate_records[int(row_index)]
+        drive_type = None
+        if drive_type_id is not None and getattr(state, "is_typed_candidate", False):
+            drive_type = state.drive_type_table_metadata["masters"][int(drive_type_id)]
         result.append(
             {
                 "candidate_row_index": int(row_index),
                 "candidate_id": int(candidate_id),
+                "drive_type_id": (
+                    None if drive_type_id is None else int(drive_type_id)
+                ),
+                "drive_type_master_name": (
+                    "" if drive_type is None else str(drive_type["master_name"])
+                ),
+                "drive_type_cell_id": (
+                    None if drive_type is None else int(drive_type["cell_id"])
+                ),
                 "net_id": int(state.net_ids[int(net_index)].detach().cpu().item()),
                 "bu_before": 0,
                 "bu_after": 1,
@@ -78,6 +113,44 @@ def _selected_rows(state, transition):
 
 
 def _verify_exact_projection(state, projection):
+    validation = dict(getattr(projection, "validation", {}) or {})
+    if getattr(state, "is_typed_candidate", False):
+        active_rows = torch.nonzero(
+            state.activation_param.detach().sum(dim=1) == 1.0,
+            as_tuple=False,
+        ).flatten()
+        selected_types = state.selected_drive_type().detach()
+        active_action_keys = tuple(
+            sorted(
+                (
+                    int(state.candidate_ids[row].detach().cpu().item()),
+                    int(selected_types[row].detach().cpu().item()),
+                )
+                for row in active_rows.detach().cpu().tolist()
+            )
+        )
+        projected_action_keys = tuple(
+            tuple(int(value) for value in item)
+            for item in validation.get("projected_action_keys", ())
+        )
+        if active_action_keys != projected_action_keys:
+            raise ValueError("typed candidate projection changed the active action set")
+        projected_count = int(getattr(projection, "projected_buffer_count", 0) or 0)
+        if projected_count != len(active_action_keys):
+            raise ValueError("typed candidate projection reports an inconsistent buffer count")
+        serialized = json.dumps(active_action_keys, separators=(",", ":"))
+        return {
+            "status": "ok",
+            "active_action_count": len(active_action_keys),
+            "projected_action_count": projected_count,
+            "projected_candidate_count": projected_count,
+            "active_action_keys": active_action_keys,
+            "projected_action_keys": projected_action_keys,
+            "exact_active_action_match": True,
+            "active_action_keys_sha256": hashlib.sha256(
+                serialized.encode("utf-8")
+            ).hexdigest(),
+        }
     active_candidate_ids = tuple(
         sorted(
             int(value)
@@ -86,7 +159,6 @@ def _verify_exact_projection(state, projection):
             ].detach().cpu().tolist()
         )
     )
-    validation = dict(getattr(projection, "validation", {}) or {})
     projected_candidate_ids = tuple(
         int(value) for value in validation.get("projected_candidate_ids", ())
     )
@@ -125,7 +197,10 @@ def _backend_provenance(lane, model):
         if isinstance(payload, dict)
         else {}
     )
-    fixed_bsu_index = int(getattr(state, "fixed_bsu_index", -1))
+    raw_fixed_bsu_index = getattr(state, "fixed_bsu_index", -1)
+    fixed_bsu_index = (
+        -1 if raw_fixed_bsu_index is None else int(raw_fixed_bsu_index)
+    )
     legal_master_names = list(legal_table.get("legal_master_names", ()) or ())
     fixed_master_name = (
         str(legal_master_names[fixed_bsu_index])
@@ -182,8 +257,16 @@ def _backend_provenance(lane, model):
             getattr(params, "timing_surrogate_mode", "") or ""
         ),
         "state_device": str(getattr(getattr(state, "activation_param", None), "device", "")),
+        "timing_active_only": bool(getattr(state, "timing_active_only", False)),
         "fixed_bsu_index": fixed_bsu_index,
         "fixed_buffer_master_name": fixed_master_name,
+        "candidate_drive_type_mode": summary.get(
+            "candidate_drive_type_mode",
+            getattr(lane.config, "candidate_drive_type_mode", "single_fixed"),
+        ),
+        "candidate_drive_type_table": summary.get(
+            "candidate_drive_type_table"
+        ),
         "candidate_policy": str(
             getattr(params, "buffering_candidate_policy", "segment_only")
         ),
@@ -221,11 +304,59 @@ def _backend_provenance(lane, model):
     }
 
 
+def _typed_candidate_snapshot_identity(lane, state):
+    """Digest the immutable per-round candidate/timing input boundary."""
+
+    digest = hashlib.sha256()
+    for name in (
+        "candidate_ids",
+        "candidate_net_id",
+        "candidate_net_index",
+        "net_ids",
+        "activation_param",
+    ):
+        value = getattr(state, name, None)
+        if value is None:
+            digest.update((name + ":<none>").encode("utf-8"))
+            continue
+        tensor = torch.as_tensor(value).detach().cpu().contiguous()
+        digest.update(name.encode("utf-8"))
+        digest.update(str(tuple(tensor.shape)).encode("ascii"))
+        digest.update(str(tensor.dtype).encode("ascii"))
+        digest.update(tensor.numpy().tobytes())
+    payload = getattr(lane, "buffer_relaxed_timing_payload", None)
+    metadata = dict(payload.get("metadata", {}) or {}) if isinstance(payload, dict) else {}
+    digest.update(
+        json.dumps(
+            {
+                "topology_generation": metadata.get("topology_generation"),
+                "frozen_topology_generation": metadata.get("frozen_topology_generation"),
+                "candidate_generation_mode": metadata.get("candidate_generation_mode"),
+                "candidate_count": int(state.candidate_ids.numel()),
+                "net_count": int(state.net_ids.numel()),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    return digest.hexdigest()
+
+
 def _write_trace(output_dir, payload):
     path = Path(output_dir) / "candidate_discrete_scheduler_trace.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     serialized = json.dumps(payload, allow_nan=False, indent=2, sort_keys=True)
     contents = (serialized + "\n").encode("utf-8")
+    if path.exists():
+        window_index = (
+            len(list(path.parent.glob("candidate_discrete_scheduler_trace.window*.json")))
+            + 1
+        )
+        path.replace(
+            path.with_name(
+                f"candidate_discrete_scheduler_trace.window{window_index:03d}.json"
+            )
+        )
     path.write_bytes(contents)
     return str(path), hashlib.sha256(contents).hexdigest()
 
@@ -244,21 +375,46 @@ def update_discrete_candidate_scheduler_trace_commit(trace_path, commit):
     return hashlib.sha256(contents).hexdigest()
 
 
-def _run_discrete_candidate_buffer_scheduler_impl(*, lane, model, rounds):
+
+def _run_discrete_candidate_buffer_scheduler_impl(
+    *, lane, model, rounds, allow_existing_activation=False
+):
     """Run Candidate Route-B on one frozen full-design candidate topology."""
     rounds = int(rounds)
     if rounds <= 0:
         raise ValueError("candidate discrete_net_gradient requires positive rounds")
-    state = _assert_candidate_state(lane, require_zero=True)
+    state = _assert_candidate_state(
+        lane,
+        require_zero=not bool(allow_existing_activation),
+    )
+    selection_fraction = float(
+        getattr(lane.config, "route_b_selection_fraction", 0.001)
+    )
     trace_rounds = []
     pending_record = None
     terminal_reason = "max_rounds"
     iterations = 0
+    best_activation = state.activation_param.detach().clone()
+    best_score = float("inf")
+    best_key = (float("inf"), float("inf"), float("inf"), float("inf"))
+    best_round = 0
+    best_snapshot = None
 
     for round_index in range(rounds):
         _assert_candidate_state(lane, require_zero=False)
         activation_before = state.activation_param.detach()
-        active_count_before = int((activation_before == 1.0).sum().cpu().item())
+        snapshot_id = _typed_candidate_snapshot_identity(lane, state)
+        drive_type_order = list(range(int(getattr(state, "drive_type_count", 1))))
+        active_count_before = int(
+            (
+                activation_before.sum(dim=1) > 0.0
+                if getattr(state, "is_typed_candidate", False)
+                else activation_before == 1.0
+            )
+            .sum()
+            .cpu()
+            .item()
+        )
         activation_binary_before = bool(
             ((activation_before == 0.0) | (activation_before == 1.0))
             .all()
@@ -266,9 +422,37 @@ def _run_discrete_candidate_buffer_scheduler_impl(*, lane, model, rounds):
             .item()
         )
         forward_started_at = time.perf_counter()
-        loss, metrics = lane.objective(model)
-        objective_forward_ms = (time.perf_counter() - forward_started_at) * 1000.0
-        snapshot = _metric_snapshot(loss, metrics)
+        typed_gradient_metadata = {}
+        if getattr(state, "is_typed_candidate", False):
+            snapshot, raw_grad, typed_gradient_metadata = (
+                _typed_candidate_objective_gradient(
+                    lane,
+                    model,
+                    state,
+                    snapshot_id=snapshot_id,
+                )
+            )
+            loss = snapshot["loss"]
+            phase_times = typed_gradient_metadata["phase_times_ms"]
+            objective_forward_ms = sum(item["forward_ms"] for item in phase_times)
+            objective_grad_ms = sum(item["backward_ms"] for item in phase_times)
+        else:
+            loss, metrics = lane.objective(model)
+            objective_forward_ms = (time.perf_counter() - forward_started_at) * 1000.0
+            snapshot = _objective_snapshot(model, loss, metrics)
+        snapshot_key = (
+            float(snapshot["restore_score"]),
+            float(snapshot.get("slew_violation") or 0.0)
+            + float(snapshot.get("cap_violation") or 0.0),
+            -float(snapshot.get("wns") or 0.0),
+            int(round_index),
+        )
+        if snapshot_key < best_key:
+            best_key = snapshot_key
+            best_score = float(snapshot["restore_score"])
+            best_round = int(round_index)
+            best_snapshot = dict(snapshot)
+            best_activation = state.activation_param.detach().clone()
         if pending_record is not None:
             pending_record["actual_delta_loss"] = (
                 snapshot["loss"] - pending_record["loss_before"]
@@ -278,25 +462,46 @@ def _run_discrete_candidate_buffer_scheduler_impl(*, lane, model, rounds):
             )
             pending_record = None
 
-        gradient_started_at = time.perf_counter()
-        raw_grad, = torch.autograd.grad(
-            loss,
-            state.activation_param,
-            retain_graph=False,
-            create_graph=False,
-        )
-        objective_grad_ms = (time.perf_counter() - gradient_started_at) * 1000.0
+        if not getattr(state, "is_typed_candidate", False):
+            gradient_started_at = time.perf_counter()
+            raw_grad, = torch.autograd.grad(
+                loss,
+                state.activation_param,
+                retain_graph=False,
+                create_graph=False,
+            )
+            objective_grad_ms = (time.perf_counter() - gradient_started_at) * 1000.0
         scheduler_started_at = time.perf_counter()
-        transition = schedule_candidate_gradient_actions(
-            candidate_net_index=state.candidate_net_index,
-            net_ids=state.net_ids,
-            candidate_ids=state.candidate_ids,
-            activations=state.activation_param.detach(),
-            raw_grad=raw_grad,
-        )
+        if getattr(state, "is_typed_candidate", False):
+            transition = schedule_typed_candidate_gradient_actions(
+                candidate_net_index=state.candidate_net_index,
+                net_ids=state.net_ids,
+                candidate_ids=state.candidate_ids,
+                activations=state.activation_param.detach(),
+                raw_grad=raw_grad,
+                selection_fraction=selection_fraction,
+            )
+        else:
+            transition = schedule_candidate_gradient_actions(
+                candidate_net_index=state.candidate_net_index,
+                net_ids=state.net_ids,
+                candidate_ids=state.candidate_ids,
+                activations=state.activation_param.detach(),
+                raw_grad=raw_grad,
+                selection_fraction=selection_fraction,
+            )
         scheduler_wall_ms = (time.perf_counter() - scheduler_started_at) * 1000.0
         next_activation = transition.next_activations.detach()
-        active_count_after = int((next_activation == 1.0).sum().cpu().item())
+        active_count_after = int(
+            (
+                next_activation.sum(dim=1) > 0.0
+                if getattr(state, "is_typed_candidate", False)
+                else next_activation == 1.0
+            )
+            .sum()
+            .cpu()
+            .item()
+        )
         activation_binary_after = bool(
             ((next_activation == 0.0) | (next_activation == 1.0))
             .all()
@@ -306,6 +511,10 @@ def _run_discrete_candidate_buffer_scheduler_impl(*, lane, model, rounds):
         record = {
             "round": int(round_index),
             "forward_phase": "cold" if round_index == 0 else "warm",
+            "snapshot_id": str(snapshot_id),
+            "snapshot_state": "frozen_per_round",
+            "drive_type_order": drive_type_order,
+            "refresh_between_types": False,
             **snapshot,
             "loss_before": snapshot["loss"],
             "tns_before": snapshot["tns"],
@@ -339,6 +548,8 @@ def _run_discrete_candidate_buffer_scheduler_impl(*, lane, model, rounds):
             "prefix_size": int(transition.prefix_size),
             "positive_prefix_count": int(transition.positive_prefix_count),
             "accepted_action_count": int(transition.accepted_count),
+            "drive_type_count": int(getattr(state, "drive_type_count", 1)),
+            "typed_gradient_metadata": typed_gradient_metadata,
             "predicted_improvement_sum": float(
                 transition.selected_predicted_improvements.sum().detach().cpu().item()
             ),
@@ -355,14 +566,54 @@ def _run_discrete_candidate_buffer_scheduler_impl(*, lane, model, rounds):
             break
         with torch.no_grad():
             state.activation_param.copy_(transition.next_activations)
+        state.validate_binary_()
         pending_record = record
 
     _assert_candidate_state(lane, require_zero=False)
+    if getattr(state, "is_typed_candidate", False):
+        # The remaining activation is already a discrete state.  The
+        # preceding rounds required all candidate rows for gradients; this
+        # terminal check only needs the accepted-net subset.
+        state.timing_active_only = True
     terminal_started_at = time.perf_counter()
     with torch.no_grad():
         terminal_loss, terminal_metrics = lane.objective(model)
     terminal_forward_ms = (time.perf_counter() - terminal_started_at) * 1000.0
-    terminal_snapshot = _metric_snapshot(terminal_loss, terminal_metrics)
+    terminal_snapshot = _objective_snapshot(model, terminal_loss, terminal_metrics)
+    terminal_key = (
+        float(terminal_snapshot["restore_score"]),
+        float(terminal_snapshot.get("slew_violation") or 0.0)
+        + float(terminal_snapshot.get("cap_violation") or 0.0),
+        -float(terminal_snapshot.get("wns") or 0.0),
+        int(iterations),
+    )
+    if terminal_key < best_key:
+        best_key = terminal_key
+        best_score = float(terminal_snapshot["restore_score"])
+        best_round = int(iterations)
+        best_snapshot = dict(terminal_snapshot)
+        best_activation = state.activation_param.detach().clone()
+
+    # The controller owns one tuple-level restore boundary.  Keep the best
+    # virtual activation selected by this phase and only then project it.
+    # This is still virtual state; no native buffer topology is committed here.
+    restore_needed = not torch.equal(state.activation_param.detach(), best_activation)
+    with torch.no_grad():
+        state.activation_param.copy_(best_activation)
+    state.validate_binary_()
+    # All candidate gradients above deliberately used the full candidate
+    # domain.  Once the discrete action set is frozen, ordinary timing only
+    # needs to re-evaluate nets that actually carry an accepted virtual
+    # buffer.  Keep the full state for projection/writeback, but narrow the
+    # dynamic provider for the terminal and subsequent GP timing calls.
+    if getattr(state, "is_typed_candidate", False):
+        state.timing_active_only = True
+    if restore_needed:
+        with torch.no_grad():
+            restored_loss, restored_metrics = lane.objective(model)
+        terminal = _objective_snapshot(model, restored_loss, restored_metrics)
+    else:
+        terminal = terminal_snapshot
     if pending_record is not None:
         pending_record["actual_delta_loss"] = (
             terminal_snapshot["loss"] - pending_record["loss_before"]
@@ -384,7 +635,7 @@ def _run_discrete_candidate_buffer_scheduler_impl(*, lane, model, rounds):
     ) * 1000.0
     final_projection_wall_ms = (time.perf_counter() - projection_started_at) * 1000.0
     terminal = {
-        **terminal_snapshot,
+        **terminal,
         "terminal_forward_ms": float(terminal_forward_ms),
         "total_virtual_buffer_count": int(
             state.activation_param.detach().sum().cpu().item()
@@ -396,16 +647,61 @@ def _run_discrete_candidate_buffer_scheduler_impl(*, lane, model, rounds):
         "status": "completed",
         "mode": "candidate",
         "strategy": "discrete_net_gradient",
-        "candidate_count": int(state.activation_param.numel()),
+        "candidate_count": int(state.candidate_ids.numel()),
+        "action_count": int(state.activation_param.numel()),
         "affected_net_count": int(state.net_ids.numel()),
-        "fixed_bsu_index": int(state.fixed_bsu_index),
-        "selection_fraction": 1.0 / float(ROUTE_B_AFFECTED_NETS_PER_ACTION),
-        "affected_nets_per_action": int(ROUTE_B_AFFECTED_NETS_PER_ACTION),
+        "fixed_bsu_index": (
+            None
+            if getattr(state, "is_typed_candidate", False)
+            else int(state.fixed_bsu_index)
+        ),
+        "candidate_drive_type_mode": (
+            "four_strength_table"
+            if getattr(state, "is_typed_candidate", False)
+            else "single_fixed"
+        ),
+        "drive_type_count": int(getattr(state, "drive_type_count", 1)),
+        "selection_fraction": selection_fraction,
+        "affected_nets_per_action": 1.0 / selection_fraction,
         "rounds_requested": rounds,
         "iterations": iterations,
         "terminal_reason": terminal_reason,
+        "snapshot_policy": {
+            "mode": "frozen_per_round",
+            "typed_evaluation_order": list(range(int(getattr(state, "drive_type_count", 1)))),
+            "refresh_between_types": False,
+            "round_snapshot_ids": [
+                str(record["snapshot_id"])
+                for record in trace_rounds
+            ],
+        },
         "rounds": trace_rounds,
         "terminal": terminal,
+        "best_restore": {
+            "status": "restored",
+            "initial_snapshot": {
+                key: trace_rounds[0][key]
+                for key in (
+                    "loss",
+                    "restore_score",
+                    "wns",
+                    "tns",
+                    "slew_violation",
+                    "cap_violation",
+                    "total_slew_violation",
+                    "total_cap_violation",
+                    "weighted_terms",
+                    "coefficients",
+                    "weights",
+                )
+            },
+            "best_round": int(best_round),
+            "best_score": float(best_score),
+            "best_snapshot": best_snapshot,
+            "restored_activation_digest": _tensor_digest(
+                (("candidate_activation", state.activation_param),)
+            ),
+        },
         "projection": projection_validation,
         "runtime_refresh": dict(runtime_refresh or {}),
         "runtime": {
@@ -454,10 +750,13 @@ def _run_discrete_candidate_buffer_scheduler_impl(*, lane, model, rounds):
         terminal_reason=terminal_reason,
         trace_path=trace_path,
         trace_sha256=trace_sha256,
+        best_restore=payload["best_restore"],
     )
 
 
 def _release_candidate_python_state(lane):
+    if bool(getattr(lane, "retain_candidate_python_state", False)):
+        return
     payload = getattr(lane, "buffer_relaxed_timing_payload", None)
     metadata = payload.get("metadata", {}) if isinstance(payload, dict) else {}
     restore_gc = bool(
@@ -487,12 +786,16 @@ def _release_candidate_python_state(lane):
     gc.enable()
 
 
-def run_discrete_candidate_buffer_scheduler(*, lane, model, rounds):
+def run_discrete_candidate_buffer_scheduler(
+    *, lane, model, rounds, allow_existing_activation=False
+):
     try:
-        return _run_discrete_candidate_buffer_scheduler_impl(
-            lane=lane,
-            model=model,
-            rounds=rounds,
-        )
+        with buffer_timing_fast_path(model):
+            return _run_discrete_candidate_buffer_scheduler_impl(
+                lane=lane,
+                model=model,
+                rounds=rounds,
+                allow_existing_activation=allow_existing_activation,
+            )
     finally:
         _release_candidate_python_state(lane)

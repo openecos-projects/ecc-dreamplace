@@ -7,7 +7,18 @@ from .vt_commit import DiscreteVtCommit
 from .runtime_timing_arcs import sync_timing_arc_lut_rows
 
 
-def sync_runtime_cells(params, summary, *, data_collections, placedb, timing_op, model, direct_joint, geometry_window=None):
+def sync_runtime_cells(
+    params,
+    summary,
+    *,
+    data_collections,
+    placedb,
+    timing_op,
+    model,
+    direct_joint,
+    geometry_window=None,
+    pin_offset_mode="library",
+):
     if not isinstance(summary, dict):
         return {
             "runtime_cell_state_synced": False,
@@ -86,6 +97,15 @@ def sync_runtime_cells(params, summary, *, data_collections, placedb, timing_op,
     )
     changed_pin_ids = None
     offsets = None
+    old_cell_ids = None
+    if getattr(data_collections, "inst_cell_id", None) is not None:
+        # Capture the pre-sync master before the in-place write.  Pin geometry
+        # is imported by the reader and must move by the library delta, not be
+        # reset to the raw library table; otherwise a same-cell re-sync is not
+        # a no-op and every trial apply/restore permanently shifts the RC.
+        old_cell_ids = (
+            data_collections.inst_cell_id[inst_tensor].detach().clone()
+        )
     with torch.no_grad():
         if getattr(data_collections, "inst_cell_id", None) is not None:
             data_collections.inst_cell_id[inst_tensor] = cell_tensor.to(
@@ -209,19 +229,68 @@ def sync_runtime_cells(params, summary, *, data_collections, placedb, timing_op,
                         device=data_collections.pin_offset_y.device,
                         dtype=data_collections.pin_offset_y.dtype,
                     )
-                    if padding_x > 0.0:
-                        pin_x = pin_x + padding_x
-                    data_collections.pin_offset_x[
-                        changed_pin_ids.to(
-                            device=data_collections.pin_offset_x.device
+                    if pin_offset_mode == "delta" and old_cell_ids is not None:
+                        old_lookup = torch.full(
+                            (int(data_collections.inst_cell_id.numel()),),
+                            -1,
+                            dtype=torch.long,
+                            device=old_cell_ids.device,
                         )
-                    ] = pin_x
-                    data_collections.pin_offset_y[
-                        changed_pin_ids.to(
-                            device=data_collections.pin_offset_y.device
+                        old_lookup[inst_tensor.to(old_cell_ids.device)] = (
+                            old_cell_ids.long()
                         )
-                    ] = pin_y
-                    if geometry_window is not None:
+                        old_cells = old_lookup[
+                            changed_nodes.to(old_cell_ids.device)
+                        ].long()
+                        old_start = data_collections.cell_id_2_libpin_id_start[
+                            old_cells.clamp(min=0).to(
+                                device=data_collections.cell_id_2_libpin_id_start.device
+                            )
+                        ].long()
+                        old_libpin_ids = old_start + pin_lib_offset[
+                            changed_pin_ids.to(device=pin_lib_offset.device)
+                        ].long().to(device=old_start.device)
+                        valid_old = (
+                            (old_cells >= 0)
+                            & (old_libpin_ids >= 0)
+                            & (old_libpin_ids < int(flat_pin_x.numel()))
+                            & (old_libpin_ids < int(flat_pin_y.numel()))
+                        )
+                        old_pin_x = flat_pin_x[
+                            old_libpin_ids.clamp(min=0).to(
+                                device=flat_pin_x.device
+                            )
+                        ].to(device=pin_x.device, dtype=pin_x.dtype)
+                        old_pin_y = flat_pin_y[
+                            old_libpin_ids.clamp(min=0).to(
+                                device=flat_pin_y.device
+                            )
+                        ].to(device=pin_y.device, dtype=pin_y.dtype)
+                        # Padding is a static per-cell term and cancels in
+                        # the library delta, so it is not added here.
+                        pin_x = torch.where(valid_old, pin_x - old_pin_x, pin_x)
+                        pin_y = torch.where(valid_old, pin_y - old_pin_y, pin_y)
+                        pin_device = data_collections.pin_offset_x.device
+                        data_collections.pin_offset_x[
+                            changed_pin_ids.to(device=pin_device)
+                        ] += pin_x.to(device=pin_device)
+                        data_collections.pin_offset_y[
+                            changed_pin_ids.to(device=pin_device)
+                        ] += pin_y.to(device=pin_device)
+                    else:
+                        if padding_x > 0.0:
+                            pin_x = pin_x + padding_x
+                        data_collections.pin_offset_x[
+                            changed_pin_ids.to(
+                                device=data_collections.pin_offset_x.device
+                            )
+                        ] = pin_x
+                        data_collections.pin_offset_y[
+                            changed_pin_ids.to(
+                                device=data_collections.pin_offset_y.device
+                            )
+                        ] = pin_y
+                    if geometry_window is not None and pin_offset_mode != "delta":
                         geometry_window.apply_pins(changed_pin_ids)
 
         data_collections.runtime_cell_state_generation = int(

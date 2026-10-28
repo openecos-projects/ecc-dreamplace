@@ -60,6 +60,33 @@ class PhysicalActionSchemaTest(unittest.TestCase):
         self.assertEqual(artifact["actions"][0]["segment_split_count_on_edge"], 3)
         self.assertAlmostEqual(artifact["actions"][0]["segment_split_ratio"], 0.5)
 
+    def test_action_layer_omits_none_native_optional_scalars(self):
+        candidate = self._candidate()
+        for key in (
+            "segment_tree_depth",
+            "segment_parent_node_id",
+            "segment_child_node_id",
+            "segment_split_ratio",
+        ):
+            candidate.pop(key)
+
+        state = VirtualBufferState()
+        state.insert(candidate, bsu=0)
+        artifact = build_commit_action_candidates(
+            state,
+            legal_table=self._legal_table(),
+            executable_by_compact_batch_v1=False,
+        )
+
+        action = artifact["actions"][0]
+        for key in (
+            "segment_tree_depth",
+            "segment_parent_node_id",
+            "segment_child_node_id",
+            "segment_split_ratio",
+        ):
+            self.assertNotIn(key, action)
+
     def test_action_layer_writes_trace_schema(self):
         state = VirtualBufferState()
         state.insert(self._candidate(), bsu=0)

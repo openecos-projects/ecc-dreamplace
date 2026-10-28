@@ -68,6 +68,38 @@ class EnhancedInflationParamsTest(unittest.TestCase):
                         {"inflation_area_budget_ratio": invalid_value}
                     )
 
+    def test_inflation_filler_consumption_mode_schema_and_runtime_default(self):
+        params_path = os.path.join(
+            os.path.dirname(__file__), "..", "..", "dreamplace", "params.json"
+        )
+        with open(params_path, "r", encoding="utf-8") as f:
+            schema = json.load(f)
+
+        self.assertEqual(
+            schema["inflation_filler_consumption_mode"]["default"],
+            "filler_first",
+        )
+        params = Params()
+        params.fromJson({})
+        self.assertEqual(
+            params.inflation_filler_consumption_mode,
+            "filler_first",
+        )
+
+    def test_inflation_filler_consumption_mode_is_normalized(self):
+        params = Params()
+        params.fromJson({"inflation_filler_consumption_mode": "Proportional"})
+        self.assertEqual(params.inflation_filler_consumption_mode, "proportional")
+
+        for invalid_value in ("invalid", 1, None):
+            with self.subTest(value=invalid_value):
+                with self.assertRaisesRegex(
+                    ValueError, "inflation_filler_consumption_mode"
+                ):
+                    Params().fromJson(
+                        {"inflation_filler_consumption_mode": invalid_value}
+                    )
+
     def test_enhanced_flag_controls_enhanced_inflation(self):
         controller = load_enhanced_inflation_controller()
         params = Params()

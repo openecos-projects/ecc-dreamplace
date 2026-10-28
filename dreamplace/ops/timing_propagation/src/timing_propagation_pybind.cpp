@@ -11,6 +11,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   py::class_<dreamplace::TraversalPruningRefreshResult>(
       m, "TraversalPruningRefreshResult")
+      .def_readonly("kept_pin_indices",
+                    &dreamplace::TraversalPruningRefreshResult::kept_pin_indices)
       .def_readonly("kept_flat_arc_indices",
                     &dreamplace::TraversalPruningRefreshResult::kept_flat_arc_indices)
       .def_readonly("kept_level_offsets",
@@ -70,13 +72,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            const at::Tensor&,
            const at::Tensor&,
            const at::Tensor&,
-           int64_t>(),
+           int64_t,
+           const at::Tensor&>(),
            py::arg("flat_inst_arcs_by_level"),
            py::arg("pin_pred_start"),
            py::arg("pin_pred_pin"),
            py::arg("pin_pred_arc_id"),
            py::arg("start_points"),
-           py::arg("topology_epoch"))
+           py::arg("topology_epoch"),
+           py::arg("pin_pred_transition_mask") = at::empty({0}, at::TensorOptions().dtype(at::kLong)))
       .def("extract",
            &dreamplace::SetupCriticalPathExtractor::extract,
            py::arg("endpoint_pins"),

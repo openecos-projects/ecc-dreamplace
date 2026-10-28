@@ -401,6 +401,10 @@ class MacroPlaceDB(object):
         self.is_pin_upper_y = None
         self.dtype = None
         self.pydb = None
+        self.hold_timing_data = None
+        self.hold_timing_corner = None
+        self.flat_lib_pin_min_rcap = None
+        self.flat_lib_pin_min_fcap = None
         
         
         self.max_net_weight = None # maximum net weight in timing opt
@@ -4448,6 +4452,17 @@ class MacroPlaceDB(object):
         @brief initialize data members from raw database 
         @param params parameters 
         """
+        from dreamplace.ops.placeio_ecc.hold_schema import read_hold_timing_schema
+
+        self.hold_timing_data = (
+            read_hold_timing_schema(pydb)
+            if bool(getattr(params, "timing_hold_enabled", False))
+            else None
+        )
+        if self.hold_timing_data is not None:
+            self.flat_lib_pin_min_rcap, self.flat_lib_pin_min_fcap = (
+                self.hold_timing_data.min_pin_caps
+            )
         # pydb = place_io.PlaceIOFunction.pydb(self.rawdb)
         self.num_physical_nodes = pydb.num_nodes
         self.num_terminals = pydb.num_terminals
@@ -4626,6 +4641,7 @@ class MacroPlaceDB(object):
         self.dbu = float(pydb.dbu)
         
         if params.with_sta:
+            self.sparse_timing_view = getattr(self.rawdb, "sparse_timing_view", None)
             self.start_points = np.array(pydb.start_points, dtype=np.int32)
             self.end_points = np.array(pydb.end_points, dtype=np.int32)
             from dreamplace.ops.placeio_ecc.timing_schema import read_qualification_arrays
@@ -4940,6 +4956,10 @@ class MacroPlaceDB(object):
 
         self.cell_id_2_libpin_id_start = np.array(
             pydb.cell_id_2_libpin_id_start, dtype=np.int32)
+        self.flat_lib_pin_names = self._pydb_names_as_str_list(
+            pydb,
+            "flat_lib_pin_names",
+        )
         self.pin_2_libpin_offset = np.array(
             pydb.pin_2_libpin_offset, dtype=np.int32)
         if not hasattr(pydb, "flat_lib_pin_offset_x") or not hasattr(pydb, "flat_lib_pin_offset_y"):

@@ -25,11 +25,15 @@ import unittest
 from dataclasses import dataclass, field
 from typing import Optional
 from dreamplace.ops.timing_propagation.crash_stage_marker import write_crash_stage_marker
+from dreamplace.ops.timing_propagation.hard_scatter_native import scatter_slew_max
 from dreamplace.ops.timing_propagation.critical_endpoint_pruning import (
     DynamicCriticalEndpointSelector,
 )
 from dreamplace.ops.timing_propagation.endpoint_qualification import (
-    endpoint_metrics, qualify_check_candidates, qualify_pin_slacks,
+    aggregate_endpoint_slack,
+    endpoint_metrics,
+    qualify_check_candidates,
+    qualify_pin_slacks,
 )
 from dreamplace.ops.timing_propagation.recovery_checks import (
     TIMING_CHECK_CLASS_RECOVERY,
@@ -183,6 +187,83 @@ def smooth_max(a: torch.Tensor, b: torch.Tensor, alpha: float = SMOOTH_MAX_ALPHA
     # stack on a new dim and reduce
     return torch.logsumexp(torch.stack([alpha * a, alpha * b], dim=0), dim=0) / alpha
 
+
+class _AveScatterMax(torch.autograd.Function):
+    """Hard-max forward with an AveSmooth gradient over near-max entries.
+
+    The forward value is the ordinary scatter max, so TNS/WNS stay on the
+    hard-max timing semantics.  The backward distributes each output adjoint
+    equally among the contributions within ``epsilon`` of the group maximum.
+    This is the timing branch of the DAC 2026 quad-gradient paper: a
+    near-critical fanin gets a share of the gradient without the log-sum-exp
+    tail spreading it to every non-critical path.
+    """
+
+    @staticmethod
+    def forward(ctx, dest, index, src, include_self, epsilon):
+        idx = index.long()
+        if include_self:
+            idx_all = torch.cat(
+                [idx, torch.arange(dest.numel(), device=dest.device)],
+                dim=0,
+            )
+            values = torch.cat([src, dest], dim=0)
+        else:
+            idx_all = idx
+            values = src
+        max_per_index = torch.full(
+            (dest.numel(),),
+            -torch.inf,
+            device=dest.device,
+            dtype=dest.dtype,
+        )
+        if idx_all.numel():
+            max_per_index = torch.scatter_reduce(
+                max_per_index,
+                0,
+                idx_all,
+                values,
+                reduce="amax",
+                include_self=False,
+            )
+        near = values >= (max_per_index[idx_all] - float(epsilon))
+        count = torch.zeros(
+            dest.numel(),
+            device=dest.device,
+            dtype=dest.dtype,
+        )
+        if idx_all.numel():
+            count.scatter_add_(0, idx_all, near.to(dest.dtype))
+        touched = count > 0
+        output = torch.where(touched, max_per_index, dest)
+        ctx.save_for_backward(idx_all, near, count)
+        ctx.include_self = bool(include_self)
+        ctx.src_numel = int(src.numel())
+        ctx.dest_numel = int(dest.numel())
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        idx_all, near, count = ctx.saved_tensors
+        safe_count = count.clamp(min=1.0)
+        share = torch.where(
+            count[idx_all] > 0,
+            grad_output[idx_all] / safe_count[idx_all],
+            torch.zeros_like(grad_output[idx_all]),
+        )
+        grad_values = share * near.to(grad_output.dtype)
+        grad_src = grad_values[: ctx.src_numel]
+        if ctx.include_self:
+            grad_dest = grad_values[ctx.src_numel :]
+        else:
+            touched = count > 0
+            grad_dest = torch.where(
+                touched,
+                torch.zeros_like(grad_output),
+                grad_output,
+            )
+        return grad_dest, None, grad_src, None, None
+
 def smooth_max_reduce(x: torch.Tensor, dim: int = None, alpha: float = SMOOTH_MAX_ALPHA, keepdim: bool = False) -> torch.Tensor:
     """
     Generalized smooth max over a dimension (log-sum-exp reduction).
@@ -245,6 +326,13 @@ def smooth_scatter_max_tau(
     tau_value = float(tau)
     if tau_value <= 0.0:
         raise ValueError("tau must be positive for smooth scatter max")
+
+    native = lut_entry_2d_op._select_module(dest) if lut_entry_2d_op is not None else None
+    if (dest.dtype in (torch.float32, torch.float64) and eps == 1e-30
+            and hasattr(native, "smooth_scatter_forward")):
+        from .smooth_scatter_native import smooth_scatter_max_native
+
+        return smooth_scatter_max_native(dest, index, src, tau=tau_value, include_self=include_self)
 
     idx = index.long()
     vals = src
@@ -320,6 +408,14 @@ def scatter_timing_max(
             include_self=include_self,
             tau=tau_ps,
         )
+    if str(mode) == "avesmooth":
+        return _AveScatterMax.apply(
+            dest,
+            index,
+            src,
+            include_self,
+            float(tau_ps),
+        )
     return torch.scatter_reduce(
         dest,
         0,
@@ -345,6 +441,14 @@ def scatter_timing_min(
             src,
             include_self=include_self,
             tau=tau_ps,
+        )
+    if str(mode) == "avesmooth":
+        return -_AveScatterMax.apply(
+            -dest,
+            index,
+            -src,
+            include_self,
+            float(tau_ps),
         )
     return torch.scatter_reduce(
         dest,
@@ -389,8 +493,8 @@ class LUTS_INFO:
         self.flat_luts_dim = flat_luts_dim
         
         # --- 2. 计算实际维度 ---
-        self.trans_dims_actual = flat_luts_dim[:, 0].long()
-        self.cap_dims_actual = flat_luts_dim[:, 1].long()
+        self.trans_dims_actual = flat_luts_dim[:, 0].long().contiguous()
+        self.cap_dims_actual = flat_luts_dim[:, 1].long().contiguous()
 
         # --- 3. 预计算不同 LUT 类型的布尔掩码 ---
         # A LUT is valid as long as it has at least one timing axis.
@@ -650,6 +754,9 @@ class TimingPropagation(nn.Module):
                  endpoints_timing_check_max_valid=None,
                  backend_endpoint_rSlew=None,
                  backend_endpoint_fSlew=None,
+                 sparse_timing_view=None,
+                 timing_model_lease=None,
+                 hold_timing_data=None,
                  ):
         super(TimingPropagation, self).__init__()
         write_crash_stage_marker(
@@ -661,6 +768,21 @@ class TimingPropagation(nn.Module):
         )
 
         self.num_pins = pin_net.shape[0]
+        self.sparse_timing_view = sparse_timing_view
+        self.timing_model_lease = timing_model_lease
+        self._sparse_runtime = None
+        from .early_propagation import EarlyPropagation
+
+        self.early_propagation = (
+            EarlyPropagation(hold_timing_data, use_native=False)
+            if hold_timing_data is not None
+            else None
+        )
+        self.hold_rc = None
+        self.early_timing_view = None
+        self.hold_liberty_paths = ()
+        self.last_evaluation = None
+        self.evaluation_generation = 0
         # TimingPropagation keeps the Python timing state on the same exported
         # basis as PyPlaceDB:
         #   - delay / AAT / RAT / slew / slack are in ps
@@ -751,8 +873,10 @@ class TimingPropagation(nn.Module):
         self.timing_propagation_parity_atol_ps = float(timing_propagation_parity_atol_ps)
         self.timing_propagation_parity_rtol = float(timing_propagation_parity_rtol)
         self.timing_aggregation_mode = str(timing_aggregation_mode or "smooth")
-        if self.timing_aggregation_mode not in ("hard", "smooth"):
-            raise ValueError("timing_aggregation_mode must be one of: hard, smooth")
+        if self.timing_aggregation_mode not in ("hard", "smooth", "avesmooth"):
+            raise ValueError(
+                "timing_aggregation_mode must be one of: hard, smooth, avesmooth"
+            )
         self.timing_aggregation_tau_ps = float(timing_aggregation_tau_ps)
         if self.timing_aggregation_tau_ps <= 0.0:
             raise ValueError("timing_aggregation_tau_ps must be positive")
@@ -871,6 +995,68 @@ class TimingPropagation(nn.Module):
         self._setup_critical_path_extractor_epoch = None
         self.critical_path_topology_epoch = 0
         self.last_critical_path_extraction_stats = None
+
+    def _run_early_evaluation(
+        self,
+        early_rc_inputs,
+        *,
+        cell_use_surrogate,
+        clk2q_use_surrogate,
+        dynamic_net_provider,
+    ):
+        if self.early_propagation is None:
+            return None
+        if early_rc_inputs is None:
+            raise RuntimeError("hold propagation requires min RC from the current forward")
+        if dynamic_net_provider is not None:
+            early_analysis = getattr(dynamic_net_provider, "early_analysis", None)
+            if not callable(early_analysis):
+                raise RuntimeError("hold propagation requires a dynamic provider with early_analysis")
+            early_context = early_analysis(early_rc_inputs.pin_caps)
+        else:
+            from contextlib import nullcontext
+
+            early_context = nullcontext(None)
+
+        def sides(values):
+            return tuple(
+                self._forward_input_tensor(values[edge]) for edge in ("rise", "fall")
+            )
+
+        with torch.set_grad_enabled(
+            torch.is_grad_enabled() and early_rc_inputs.gradients_enabled
+        ), early_context as early_provider:
+            early_timing = self.early_timing_view
+            if early_timing is None:
+                early_timing = self
+            else:
+                early_timing.timing_aggregation_mode = self.timing_aggregation_mode
+                early_timing.timing_aggregation_tau_ps = self.timing_aggregation_tau_ps
+                early_timing._dynamic_net_level_view_epoch = self._dynamic_net_level_view_epoch
+            return self.early_propagation.forward(
+                early_timing,
+                sides(early_rc_inputs.delays),
+                sides(early_rc_inputs.impulses),
+                sides(early_rc_inputs.caps),
+                surrogate=cell_use_surrogate,
+                clock_surrogate=clk2q_use_surrogate,
+                dynamic_provider=early_provider,
+            )
+
+    def _publish_timing_evaluation(self, outputs, hold_result):
+        from .timing_evaluation import TimingEvaluation
+
+        self.evaluation_generation += 1
+        self.last_evaluation = TimingEvaluation(
+            self.evaluation_generation,
+            outputs[0],
+            outputs[1],
+            outputs[2],
+            outputs[3],
+            self.timing_aggregation_mode,
+            hold_result,
+            self.hold_liberty_paths,
+        )
 
     def _skip_full_rat_propagation_in_fast_loop(self):
         return bool(getattr(self, "production_fast_loop", False))
@@ -1135,6 +1321,26 @@ class TimingPropagation(nn.Module):
         residual_tolerance_ps,
         include_recovery,
     ):
+        action_context = getattr(self, "_active_discrete_action_context", None)
+        if action_context is not None:
+            if getattr(self, "sparse_timing_view", None) is None:
+                raise RuntimeError(
+                    "lut_action requires the sparse timing runtime; the scalar "
+                    "fallback cannot preserve the all-arcs action mask"
+                )
+            from .cell_aat_native import _tables
+
+            if _tables(self) is None:
+                raise RuntimeError(
+                    "lut_action requires raw 2D LUT tables; cached coefficient "
+                    "tables are not supported by the action path"
+                )
+        if getattr(self, "sparse_timing_view", None) is not None:
+            return self._sparse_runtime.extract_paths(
+                snapshot, global_k=global_k, max_depth=max_depth,
+                residual_tolerance_ps=residual_tolerance_ps,
+                include_recovery=include_recovery,
+            )
         if snapshot["aggregation_mode"] != "hard":
             raise RuntimeError("critical path snapshot does not use hard aggregation")
         if snapshot["topology_epoch"] != int(self.critical_path_topology_epoch):
@@ -1261,32 +1467,8 @@ class TimingPropagation(nn.Module):
             return True
         return bool(
             getattr(self, "production_fast_loop", False)
-            and getattr(tensor, "is_cuda", False)
+            and tensor.dtype in (torch.float32, torch.float64)
         )
-
-    def _surrogate_slew_input_tensor(self, pin_slew):
-        if not getattr(self, "production_fast_loop", False):
-            return pin_slew
-        if (
-            os.environ.get("AIMP_DISABLE_DETACH_SURROGATE_SLEW_INPUTS", "")
-            .strip()
-            .lower()
-            in ("1", "true", "yes", "on")
-        ):
-            return pin_slew
-        return pin_slew.detach()
-
-    def _surrogate_cap_input_tensor(self, pin_net_caps):
-        if not getattr(self, "production_fast_loop", False):
-            return pin_net_caps
-        if (
-            os.environ.get("AIMP_DISABLE_DETACH_SURROGATE_CAP_INPUTS", "")
-            .strip()
-            .lower()
-            in ("1", "true", "yes", "on")
-        ):
-            return pin_net_caps
-        return pin_net_caps.detach()
 
     def _build_cell_aat_surrogate_support_cache(
         self,
@@ -1762,14 +1944,17 @@ class TimingPropagation(nn.Module):
         parity_device = torch.device(f"cuda:{self._resolved_gpu_id_for_cuda()}")
         saved_traversal_pruner = self._traversal_pruner
         saved_traversal_result = self.last_traversal_pruning_result
+        saved_sparse_runtime = getattr(self, "_sparse_runtime", None)
         self._traversal_pruner = None
         self.last_traversal_pruning_result = None
+        self._sparse_runtime = None
         try:
             cpu_op = copy.deepcopy(self)
             cuda_op = copy.deepcopy(self)
         finally:
             self._traversal_pruner = saved_traversal_pruner
             self.last_traversal_pruning_result = saved_traversal_result
+            self._sparse_runtime = saved_sparse_runtime
         for op, device in ((cpu_op, torch.device("cpu")), (cuda_op, parity_device)):
             op.timing_propagation_parity_check = False
             op.timing_propagation_profile = False
@@ -2156,7 +2341,7 @@ class TimingPropagation(nn.Module):
         if cache is None:
             cache = {}
             self._cell_aat_static_cache = cache
-        key = (int(inst_arcs.data_ptr()), tuple(inst_arcs.shape), str(inst_arcs.device))
+        key = (int(inst_arcs.data_ptr()), tuple(inst_arcs.shape), str(inst_arcs.device), inst_arcs._version)
         cached = cache.get(key)
         if cached is not None:
             self._cell_aat_static_cache_hits = int(
@@ -2176,6 +2361,9 @@ class TimingPropagation(nn.Module):
             "is_pos_unate": is_pos_unate,
             "is_neg_unate": is_neg_unate,
             "is_non_unate": is_non_unate,
+            "pos_arc_indices": is_pos_unate.nonzero(as_tuple=True)[0],
+            "neg_arc_indices": is_neg_unate.nonzero(as_tuple=True)[0],
+            "non_arc_indices": is_non_unate.nonzero(as_tuple=True)[0],
             "has_pos_unate": bool(torch.any(is_pos_unate).detach().cpu().item()),
             "has_neg_unate": bool(torch.any(is_neg_unate).detach().cpu().item()),
             "has_non_unate": bool(torch.any(is_non_unate).detach().cpu().item()),
@@ -2311,6 +2499,9 @@ class TimingPropagation(nn.Module):
         return torch.as_tensor(array_value, dtype=torch.int32, device="cpu").contiguous()
 
     def _ensure_traversal_pruner(self):
+        if getattr(self, "sparse_timing_view", None) is not None:
+            self._traversal_pruner_topology_source = "sparse_state_predecessor_csr"
+            return self._sparse_runtime.topology
         if self._traversal_pruner is not None:
             return self._traversal_pruner
         if _tp_cpp is None or not hasattr(_tp_cpp, "CriticalEndpointTraversalPruner"):
@@ -2918,7 +3109,19 @@ class TimingPropagation(nn.Module):
         return state
 
     def _vt_scalar(self, vt_var):
-        vt_codes = torch.arange(vt_var.shape[1], device=vt_var.device, dtype=vt_var.dtype)
+        vt_codes = getattr(self, "_surrogate_vt_codes", None)
+        if (
+            vt_codes is None
+            or vt_codes.shape[0] != vt_var.shape[1]
+            or vt_codes.device != vt_var.device
+            or vt_codes.dtype != vt_var.dtype
+        ):
+            vt_codes = torch.arange(
+                vt_var.shape[1],
+                device=vt_var.device,
+                dtype=vt_var.dtype,
+            )
+            self._surrogate_vt_codes = vt_codes
         return torch.sum(vt_var * vt_codes.unsqueeze(0), dim=1)
 
     def _surrogate_entry(self, node_ids, pin_slew, pin_net_caps, lib_arc_idxs, arc_type):
@@ -2957,7 +3160,7 @@ class TimingPropagation(nn.Module):
         pin_ids = node_ids.long()
         if self.pin2node_map is None:
             return None
-        node_ids = self.pin2node_map[pin_ids].long()
+        node_ids = self.pin2node_map.index_select(0, pin_ids).long()
         if profile_enabled:
             profile_now = self._sync_profile_clock(pin_slew.device)
             self._record_local_cell_aat_profile_value(
@@ -2981,12 +3184,12 @@ class TimingPropagation(nn.Module):
 
         size_var = surrogate_state["size_var"]
         vt_var = surrogate_state["vt_var"]
-        main_ids = self.inst_main_id[node_ids].long()
+        main_ids = self.inst_main_id.index_select(0, node_ids).long()
         arc_types = arc_types.long()
         valid_main_id_mask = main_ids >= 0
         sizeable_mask = torch.ones_like(valid_main_id_mask, dtype=torch.bool)
         if self.inst_is_sizeable is not None:
-            sizeable_mask = self.inst_is_sizeable[node_ids].bool()
+            sizeable_mask = self.inst_is_sizeable.index_select(0, node_ids).bool()
         fixed_non_sizeable_mask = torch.zeros_like(valid_main_id_mask, dtype=torch.bool)
         inst_size_init = surrogate_state.get("inst_size_init")
         inst_vt_init = surrogate_state.get("inst_vt_init")
@@ -3047,21 +3250,36 @@ class TimingPropagation(nn.Module):
                     int(pin_slew.numel()),
                 )
             return valid_mask, torch.zeros_like(pin_slew), False
-        surrogate_values = torch.zeros_like(pin_slew)
-        size_values = size_var[node_ids]
-        vt_values = vt_var[node_ids]
+        size_values = size_var.index_select(0, node_ids)
+        vt_values = vt_var.index_select(0, node_ids)
         if torch.any(fixed_non_sizeable_mask):
             size_values = size_values.clone()
             vt_values = vt_values.clone()
-            size_values[fixed_non_sizeable_mask] = inst_size_init[node_ids][
-                fixed_non_sizeable_mask
-            ].detach()
-            vt_values[fixed_non_sizeable_mask] = inst_vt_init[node_ids][
-                fixed_non_sizeable_mask
-            ].detach()
-        vt_scalar = self._vt_scalar(vt_values[valid_mask])
-        arc_offsets = lib_arc_idxs[valid_mask].long()
-        selected_arc_types = arc_types[valid_mask]
+            size_values[fixed_non_sizeable_mask] = inst_size_init.index_select(
+                0, node_ids
+            )[fixed_non_sizeable_mask].detach()
+            vt_values[fixed_non_sizeable_mask] = inst_vt_init.index_select(
+                0, node_ids
+            )[fixed_non_sizeable_mask].detach()
+
+        valid_indices = None
+        if bool(valid_mask.all().detach().item()):
+            active_main_ids = main_ids
+            active_arc_idxs = lib_arc_idxs.long()
+            active_arc_types = arc_types
+            active_size_values = size_values
+            active_vt_values = vt_values
+        else:
+            valid_indices = torch.nonzero(valid_mask, as_tuple=False).squeeze(1)
+            active_main_ids = main_ids.index_select(0, valid_indices)
+            active_arc_idxs = lib_arc_idxs.index_select(0, valid_indices).long()
+            active_arc_types = arc_types.index_select(0, valid_indices)
+            active_size_values = size_values.index_select(0, valid_indices)
+            active_vt_values = vt_values.index_select(0, valid_indices)
+
+        vt_scalar = self._vt_scalar(active_vt_values)
+        arc_offsets = active_arc_idxs
+        selected_arc_types = active_arc_types
         if self.lib_arc_offsets is not None:
             arc_offsets = self.lib_arc_offsets[arc_offsets].long()
         skip_support_check = (
@@ -3078,13 +3296,14 @@ class TimingPropagation(nn.Module):
             support_mask = None
         elif hasattr(self.cell_modeling_op, "supports_arc_types"):
             support_mask = self.cell_modeling_op.supports_arc_types(
-                main_ids[valid_mask],
+                active_main_ids,
                 arc_offsets,
                 selected_arc_types,
             )
         else:
             support_mask = None
         if support_mask is not None:
+            all_supported = bool(support_mask.all().detach().item())
             if profile_enabled:
                 support_missing_count = int(
                     torch.count_nonzero(~support_mask).detach().cpu().item()
@@ -3094,32 +3313,45 @@ class TimingPropagation(nn.Module):
                     "surrogate_support_missing_count",
                     support_missing_count,
                 )
-            if profile_enabled and torch.any(~support_mask):
+            if profile_enabled and not all_supported:
                 self._record_local_surrogate_unsupported_keys(
                     profile,
-                    main_ids[valid_mask][~support_mask],
+                    active_main_ids[~support_mask],
                     arc_offsets[~support_mask],
                     selected_arc_types[~support_mask],
                 )
-            valid_indices = torch.nonzero(valid_mask, as_tuple=False).squeeze(1)
-            valid_mask = valid_mask.clone()
-            valid_mask[valid_indices] = support_mask
-            arc_offsets = arc_offsets[support_mask]
-            vt_scalar = vt_scalar[support_mask]
-            selected_arc_types = selected_arc_types[support_mask]
-            if not torch.any(valid_mask):
-                if profile_enabled:
-                    self._record_local_cell_aat_profile_count(
-                        profile,
-                        "surrogate_candidate_count",
-                        int(pin_slew.numel()),
-                    )
-                    self._record_local_cell_aat_profile_count(
-                        profile,
-                        "surrogate_unsupported_count",
-                        int(pin_slew.numel()),
-                    )
-                return valid_mask, surrogate_values, False
+            if not all_supported:
+                support_indices = torch.nonzero(
+                    support_mask, as_tuple=False
+                ).squeeze(1)
+                if valid_indices is None:
+                    valid_indices = support_indices
+                else:
+                    valid_indices = valid_indices.index_select(0, support_indices)
+                valid_mask = torch.zeros_like(valid_mask)
+                valid_mask.index_fill_(0, valid_indices, True)
+                active_main_ids = active_main_ids.index_select(0, support_indices)
+                active_size_values = active_size_values.index_select(
+                    0, support_indices
+                )
+                arc_offsets = arc_offsets.index_select(0, support_indices)
+                vt_scalar = vt_scalar.index_select(0, support_indices)
+                selected_arc_types = selected_arc_types.index_select(
+                    0, support_indices
+                )
+                if valid_indices.numel() == 0:
+                    if profile_enabled:
+                        self._record_local_cell_aat_profile_count(
+                            profile,
+                            "surrogate_candidate_count",
+                            int(pin_slew.numel()),
+                        )
+                        self._record_local_cell_aat_profile_count(
+                            profile,
+                            "surrogate_unsupported_count",
+                            int(pin_slew.numel()),
+                        )
+                    return valid_mask, torch.zeros_like(pin_slew), False
         if profile_enabled:
             supported_count = int(torch.count_nonzero(valid_mask).detach().cpu().item())
             candidate_count = int(pin_slew.numel())
@@ -3147,13 +3379,18 @@ class TimingPropagation(nn.Module):
             )
             profile_timer = profile_now
 
+        active_slew = pin_slew
+        active_cap = pin_net_caps
+        if valid_indices is not None:
+            active_slew = active_slew.index_select(0, valid_indices)
+            active_cap = active_cap.index_select(0, valid_indices)
         cell_model_values = self.cell_modeling_op(
-            main_ids[valid_mask],
+            active_main_ids,
             arc_offsets,
             vt_scalar,
-            size_values[valid_mask],
-            self._surrogate_slew_input_tensor(pin_slew)[valid_mask],
-            self._surrogate_cap_input_tensor(pin_net_caps)[valid_mask],
+            active_size_values,
+            active_slew,
+            active_cap,
             selected_arc_types,
         )
         if profile_enabled:
@@ -3165,7 +3402,11 @@ class TimingPropagation(nn.Module):
             )
             profile_timer = profile_now
 
-        surrogate_values[valid_mask] = cell_model_values
+        if valid_indices is None:
+            surrogate_values = cell_model_values
+        else:
+            surrogate_values = torch.zeros_like(pin_slew)
+            surrogate_values.index_copy_(0, valid_indices, cell_model_values)
         if profile_enabled:
             profile_now = self._sync_profile_clock(pin_slew.device)
             self._record_local_cell_aat_profile_value(
@@ -3725,6 +3966,18 @@ class TimingPropagation(nn.Module):
         dtype = input_trans.dtype
         batch_size = arc_idxs.shape[0]
 
+        native_lut = lut_entry_2d_op._select_module(input_trans) if lut_entry_2d_op is not None else None
+        if (self._use_lut_2d_native_op_for_tensor(input_trans)
+                and hasattr(native_lut, "indexed_forward")
+                and not getattr(luts_info, "use_2d_coeff_cache", False)
+                and not getattr(luts_info, "use_2d_coeff_op", False)
+                and not any(table.requires_grad for table in (
+                    luts_info.flat_luts_values, luts_info.flat_luts_trans_table,
+                    luts_info.flat_luts_cap_table))):
+            from .lut_entry_indexed import lut_entry_indexed
+
+            return lut_entry_indexed(input_trans, output_caps, arc_idxs, luts_info)
+
         # --- 1. 获取当前批次对应的掩码和维度 ---
         is_scalar_batch = luts_info.is_scalar[arc_idxs]
         is_trans_1d_batch = luts_info.is_trans_1d[arc_idxs]
@@ -3817,15 +4070,19 @@ class TimingPropagation(nn.Module):
         )
 
     def r_setup_entry(self, lib_cell_idxs, clk_pin_rtrans, data_pin_trans, lib_arc_idxs):
+        from .action_check_lut import action_setup_values
+
         luts = self.arcs_info.r_delay_luts
-        return self.lut_entry_vectorized(
-            lib_cell_idxs, clk_pin_rtrans, data_pin_trans, lib_arc_idxs, luts
+        return action_setup_values(
+            self, lib_cell_idxs, clk_pin_rtrans, data_pin_trans, lib_arc_idxs, luts
         )
 
     def f_setup_entry(self, lib_cell_idxs, clk_pin_rtrans, data_pin_trans, lib_arc_idxs):
+        from .action_check_lut import action_setup_values
+
         luts = self.arcs_info.f_delay_luts
-        return self.lut_entry_vectorized(
-            lib_cell_idxs, clk_pin_rtrans, data_pin_trans, lib_arc_idxs, luts
+        return action_setup_values(
+            self, lib_cell_idxs, clk_pin_rtrans, data_pin_trans, lib_arc_idxs, luts
         )
 
     def _entry_with_optional_surrogate(
@@ -4188,8 +4445,8 @@ class TimingPropagation(nn.Module):
             mode=self.timing_aggregation_mode,
             tau_ps=self.timing_aggregation_tau_ps,
         )
-        pin_rtran = torch.scatter_reduce(pin_rtran, 0, arc_out_pins.long(), r_trans, reduce="amax", include_self=False)
-        pin_ftran = torch.scatter_reduce(pin_ftran, 0, arc_out_pins.long(), f_trans, reduce="amax", include_self=False)
+        pin_rtran = scatter_slew_max(pin_rtran, arc_out_pins.long(), r_trans, include_self=False)
+        pin_ftran = scatter_slew_max(pin_ftran, arc_out_pins.long(), f_trans, include_self=False)
 
         net_in_pins = torch.unique(self.pin_net[arc_out_pins])
         return (net_in_pins, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran)
@@ -4200,7 +4457,8 @@ class TimingPropagation(nn.Module):
                                 pin_rtran, pin_ftran,
                                 pin_net_cap_rise, pin_net_cap_fall
                                 , use_surrogate=None, profile_level=None,
-                                need_delay_updates=True):
+                                need_delay_updates=True,
+                                global_arc_rows=None):
         """
         Optimized version of the AAT calculation function.
         It groups arcs by their 'unate' property (timing sense) to avoid
@@ -4211,323 +4469,37 @@ class TimingPropagation(nn.Module):
 
         # Get outpin and inpin ranges for all cells
 
-        level_inst_arcs = inst_arcs
-        static_level_data = (
-            self._get_cell_aat_static_level_data(level_inst_arcs)
-            if getattr(self, "use_cell_aat_static_cache", False)
-            else None
-        )
-
-        if static_level_data is None:
-            arc_in_pins = level_inst_arcs[:, 0]
-            arc_out_pins = level_inst_arcs[:, 1]
-            lib_cell_idxs = level_inst_arcs[:, 2]
-            lib_arc_idxs = level_inst_arcs[:, 3]
-            timing_senses = level_inst_arcs[:, 4]
-        else:
-            arc_in_pins = static_level_data["arc_in_pins"]
-            arc_out_pins = static_level_data["arc_out_pins"]
-            lib_cell_idxs = static_level_data["lib_cell_idxs"]
-            lib_arc_idxs = static_level_data["lib_arc_idxs"]
-
-        if torch.logical_and(arc_out_pins == 2485, arc_in_pins == 3200).any():
-            logging.warning(f"flat arc index is: {torch.where(torch.logical_and(arc_out_pins == 2485, arc_in_pins == 3200))}")
-
-        # 1. 准备输入条件 (Prepare inputs)
-        pin_r_slew_in = pin_rtran[arc_in_pins]
-        pin_f_slew_in = pin_ftran[arc_in_pins]
-        pin_r_load_out = pin_net_cap_rise[arc_out_pins]
-        pin_f_load_out = pin_net_cap_fall[arc_out_pins]
-
-        # 2. 根据 Unate 类型进行分组 (Group arcs by unate type)
-        if static_level_data is None:
-            is_pos_unate = timing_senses == 1
-            is_neg_unate = timing_senses == -1
-            is_non_unate = ~(is_pos_unate | is_neg_unate)
-            has_pos_unate = torch.any(is_pos_unate)
-            has_neg_unate = torch.any(is_neg_unate)
-            has_non_unate = torch.any(is_non_unate)
-        else:
-            is_pos_unate = static_level_data["is_pos_unate"]
-            is_neg_unate = static_level_data["is_neg_unate"]
-            is_non_unate = static_level_data["is_non_unate"]
-            has_pos_unate = static_level_data["has_pos_unate"]
-            has_neg_unate = static_level_data["has_neg_unate"]
-            has_non_unate = static_level_data["has_non_unate"]
-
-        num_level_arcs = level_inst_arcs.shape[0]
-
-        r_trans = torch.zeros(num_level_arcs, device=device, dtype=self.dtype)
-        f_trans = torch.zeros(num_level_arcs, device=device, dtype=self.dtype)
-        # 初始化 AAT 更新张量
-        r_aat_updates = torch.full_like(r_trans, -float('inf'), device=device, dtype=self.dtype)
-        f_aat_updates = torch.full_like(r_trans, -float('inf'), device=device, dtype=self.dtype)
-        # --- 3. 按需计算每种 Unate 类型的 Delay 和 Tran ---
-        if need_delay_updates:
-            delay_rr_updates = torch.full_like(r_trans, -float('inf'), device=device, dtype=self.dtype)
-            delay_rf_updates = torch.full_like(r_trans, -float('inf'), device=device, dtype=self.dtype)
-            delay_fr_updates = torch.full_like(r_trans, -float('inf'), device=device, dtype=self.dtype)
-            delay_ff_updates = torch.full_like(r_trans, -float('inf'), device=device, dtype=self.dtype)
-        else:
-            delay_rr_updates = delay_rf_updates = None
-            delay_fr_updates = delay_ff_updates = None
         if use_surrogate is None:
             use_surrogate = self._cell_modeling_enabled()
+        action_context = getattr(self, "_active_discrete_action_context", None)
+        if lut_entry_2d_op is not None:
+            from .cell_aat_native import try_cell_aat_native
 
-        profile_enabled = bool(getattr(self, "timing_propagation_profile", False))
-        level_profile = None
-        if profile_enabled:
-            level_profile = {
-                "level": None if profile_level is None else int(profile_level),
-                "num_arcs": int(num_level_arcs),
-                "query_count": 0,
-                "query_build_ms": 0.0,
-                "query_eval_ms": 0.0,
-                "cell_update_ms": 0.0,
-                "unique_net_ms": 0.0,
-            }
-            for key in self._cell_aat_detail_count_keys():
-                level_profile[key] = 0
-            profile_timer = self._sync_profile_clock(device)
-
-        level_queries = []
-
-        def register_level_query(name, mask, pin_slew, pin_load, arc_type, luts):
-            level_queries.append(
-                {
-                    "name": name,
-                    "lib_cell_idxs": lib_cell_idxs[mask],
-                    "pin_slew": pin_slew[mask],
-                    "pin_net_caps": pin_load[mask],
-                    "lib_arc_idxs": lib_arc_idxs[mask],
-                    "luts": luts,
-                    "node_ids": arc_out_pins[mask],
-                    "arc_type": arc_type,
-                }
+            native_result = try_cell_aat_native(
+                self, inst_arcs, (pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
+                                 pin_net_cap_rise, pin_net_cap_fall),
+                use_surrogate=use_surrogate,
+                need_delay_updates=need_delay_updates,
+                global_arc_rows=global_arc_rows,
             )
+            if native_result is not None:
+                return native_result
+        elif action_context is not None:
+            raise RuntimeError(
+                "lut_action requires lut_entry_2d_op for the scalar cell LUT path"
+            )
+        from .cell_aat_queries import query_cell_aat_updates
 
-        if has_pos_unate:
-            register_level_query(
-                "pos_delay_rr",
-                is_pos_unate,
-                pin_r_slew_in,
-                pin_r_load_out,
-                1,
-                self.arcs_info.r_delay_luts,
-            )
-            register_level_query(
-                "pos_tran_rr",
-                is_pos_unate,
-                pin_r_slew_in,
-                pin_r_load_out,
-                3,
-                self.arcs_info.r_trans_luts,
-            )
-            register_level_query(
-                "pos_delay_ff",
-                is_pos_unate,
-                pin_f_slew_in,
-                pin_f_load_out,
-                0,
-                self.arcs_info.f_delay_luts,
-            )
-            register_level_query(
-                "pos_tran_ff",
-                is_pos_unate,
-                pin_f_slew_in,
-                pin_f_load_out,
-                2,
-                self.arcs_info.f_trans_luts,
-            )
-
-        if has_neg_unate:
-            register_level_query(
-                "neg_delay_fr",
-                is_neg_unate,
-                pin_f_slew_in,
-                pin_r_load_out,
-                1,
-                self.arcs_info.r_delay_luts,
-            )
-            register_level_query(
-                "neg_tran_fr",
-                is_neg_unate,
-                pin_f_slew_in,
-                pin_r_load_out,
-                3,
-                self.arcs_info.r_trans_luts,
-            )
-            register_level_query(
-                "neg_delay_rf",
-                is_neg_unate,
-                pin_r_slew_in,
-                pin_f_load_out,
-                0,
-                self.arcs_info.f_delay_luts,
-            )
-            register_level_query(
-                "neg_tran_rf",
-                is_neg_unate,
-                pin_r_slew_in,
-                pin_f_load_out,
-                2,
-                self.arcs_info.f_trans_luts,
-            )
-
-        if has_non_unate:
-            register_level_query(
-                "non_delay_rr",
-                is_non_unate,
-                pin_r_slew_in,
-                pin_r_load_out,
-                1,
-                self.arcs_info.r_delay_luts,
-            )
-            register_level_query(
-                "non_delay_fr",
-                is_non_unate,
-                pin_f_slew_in,
-                pin_r_load_out,
-                1,
-                self.arcs_info.r_delay_luts,
-            )
-            register_level_query(
-                "non_tran_rr",
-                is_non_unate,
-                pin_r_slew_in,
-                pin_r_load_out,
-                3,
-                self.arcs_info.r_trans_luts,
-            )
-            register_level_query(
-                "non_tran_fr",
-                is_non_unate,
-                pin_f_slew_in,
-                pin_r_load_out,
-                3,
-                self.arcs_info.r_trans_luts,
-            )
-            register_level_query(
-                "non_delay_ff",
-                is_non_unate,
-                pin_f_slew_in,
-                pin_f_load_out,
-                0,
-                self.arcs_info.f_delay_luts,
-            )
-            register_level_query(
-                "non_delay_rf",
-                is_non_unate,
-                pin_r_slew_in,
-                pin_f_load_out,
-                0,
-                self.arcs_info.f_delay_luts,
-            )
-            register_level_query(
-                "non_tran_ff",
-                is_non_unate,
-                pin_f_slew_in,
-                pin_f_load_out,
-                2,
-                self.arcs_info.f_trans_luts,
-            )
-            register_level_query(
-                "non_tran_rf",
-                is_non_unate,
-                pin_r_slew_in,
-                pin_f_load_out,
-                2,
-                self.arcs_info.f_trans_luts,
-            )
-
-        if level_profile is not None:
-            profile_now = self._sync_profile_clock(device)
-            level_profile["query_build_ms"] = (profile_now - profile_timer) * 1000.0
-            level_profile["query_count"] = len(level_queries)
-            profile_timer = profile_now
-
-        query_results = {
-            query["name"]: result
-            for query, result in zip(
-                level_queries,
-                self._entry_queries_with_optional_surrogate(
-                    level_queries,
-                    use_surrogate,
-                    profile=level_profile,
-                ),
-            )
-        }
-        if level_profile is not None:
-            profile_now = self._sync_profile_clock(device)
-            level_profile["query_eval_ms"] = (profile_now - profile_timer) * 1000.0
-            profile_timer = profile_now
-        
-        # A. Positive Unate (r->r, f->f)
-        if has_pos_unate:
-            mask = is_pos_unate
-            delay_rr = query_results["pos_delay_rr"]
-            tran_rr = query_results["pos_tran_rr"]
-            delay_ff = query_results["pos_delay_ff"]
-            tran_ff = query_results["pos_tran_ff"]
-
-            if need_delay_updates:
-                delay_rr_updates[mask] = delay_rr
-                delay_ff_updates[mask] = delay_ff
-            r_trans[mask] = tran_rr
-            f_trans[mask] = tran_ff
-            r_aat_updates[mask] = pin_rAAT[arc_in_pins[mask]] + delay_rr
-            f_aat_updates[mask] = pin_fAAT[arc_in_pins[mask]] + delay_ff
-
-        # B. Negative Unate (f->r, r->f)
-        if has_neg_unate:
-            mask = is_neg_unate
-            delay_fr = query_results["neg_delay_fr"]
-            tran_fr = query_results["neg_tran_fr"]
-            delay_rf = query_results["neg_delay_rf"]
-            tran_rf = query_results["neg_tran_rf"]
-
-            if need_delay_updates:
-                delay_fr_updates[mask] = delay_fr
-                delay_rf_updates[mask] = delay_rf
-            r_trans[mask] = tran_fr
-            f_trans[mask] = tran_rf
-            r_aat_updates[mask] = pin_fAAT[arc_in_pins[mask]] + delay_fr # <-- 使用 pin_fAAT
-            f_aat_updates[mask] = pin_rAAT[arc_in_pins[mask]] + delay_rf # <-- 使用 pin_rAAT
-
-        # C. Non-Unate (worst of all applicable cases)
-        if has_non_unate:
-            mask = is_non_unate
-            delay_rr_non = query_results["non_delay_rr"]
-            delay_fr_non = query_results["non_delay_fr"]
-            tran_rr_non = query_results["non_tran_rr"]
-            tran_fr_non = query_results["non_tran_fr"]
-            if need_delay_updates:
-                delay_fr_updates[mask] = delay_fr_non
-                delay_rr_updates[mask] = delay_rr_non
-
-            # unate_r_delays = torch.maximum(delay_rr_non, delay_fr_non)
-            r_trans[mask] = smooth_max(tran_rr_non, tran_fr_non, alpha=SMOOTH_MAX_ALPHA)
-
-            aat_rr = pin_rAAT[arc_in_pins[mask]] + delay_rr_non
-            aat_fr = pin_fAAT[arc_in_pins[mask]] + delay_fr_non
-            r_aat_updates[mask] = smooth_max(aat_rr, aat_fr, alpha=SMOOTH_MAX_ALPHA)
-
-            # Fall output calculation (worst of f->f and r->f)
-            delay_ff_non = query_results["non_delay_ff"]
-            delay_rf_non = query_results["non_delay_rf"]
-            tran_ff_non = query_results["non_tran_ff"]
-            tran_rf_non = query_results["non_tran_rf"]
-
-            f_trans[mask] = smooth_max(tran_ff_non, tran_rf_non, alpha=SMOOTH_MAX_ALPHA)
-
-            if need_delay_updates:
-                delay_ff_updates[mask] = delay_ff_non
-                delay_rf_updates[mask] = delay_rf_non
-
-            aat_ff = pin_fAAT[arc_in_pins[mask]] + delay_ff_non
-            aat_rf = pin_rAAT[arc_in_pins[mask]] + delay_rf_non
-            f_aat_updates[mask] = smooth_max(aat_ff, aat_rf, alpha=SMOOTH_MAX_ALPHA)
-
+        updates = query_cell_aat_updates(
+            self, inst_arcs, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
+            pin_net_cap_rise, pin_net_cap_fall, use_surrogate=use_surrogate,
+            need_delay_updates=need_delay_updates, profile_level=profile_level,
+        )
+        r_aat_updates, f_aat_updates, r_trans, f_trans = updates.lanes
+        delay_rr_updates, delay_fr_updates, delay_rf_updates, delay_ff_updates = updates.delays
+        level_profile = updates.profile
+        profile_timer = self._sync_profile_clock(device) if level_profile is not None else None
+        arc_out_pins = inst_arcs[:, 1]
         # --- 4. 存储和更新 (Store and Update) ---
         # The logic from here remains the same, as r_delays, f_delays, etc. are now fully populated.
 
@@ -4598,6 +4570,17 @@ class TimingPropagation(nn.Module):
             net_arcs_global_indices.numel(), device=pin_rAAT.device)
         net_arcs_level = self.net_flat_arcs[net_arcs_global_indices]
 
+        if lut_entry_2d_op is not None:
+            from .net_aat_native import try_net_aat_native
+
+            native_result = try_net_aat_native(
+                self, net_arcs_level, (pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
+                                      pin_net_delay_rise, pin_net_delay_fall,
+                                      pin_net_impulse_rise, pin_net_impulse_fall), SLEW_SQRT_EPS,
+            )
+            if native_result is not None:
+                return native_result
+
         arc_fopins = net_arcs_level[:, 1]
         arc_fipins = net_arcs_level[:, 0]
 
@@ -4629,10 +4612,8 @@ class TimingPropagation(nn.Module):
             mode=self.timing_aggregation_mode,
             tau_ps=self.timing_aggregation_tau_ps,
         )
-        pin_rtran = torch.scatter_reduce(pin_rtran, 0, arc_fopins.long(
-        ), r_tran_updates, reduce="amax", include_self=True)
-        pin_ftran = torch.scatter_reduce(pin_ftran, 0, arc_fopins.long(
-        ), f_tran_updates, reduce="amax", include_self=True)
+        pin_rtran = scatter_slew_max(pin_rtran, arc_fopins.long(), r_tran_updates)
+        pin_ftran = scatter_slew_max(pin_ftran, arc_fopins.long(), f_tran_updates)
         logging.debug(f"Net AAT Level Time: {time.time() - start_time:.4f}s")
         return pin_rAAT, pin_fAAT, pin_rtran, pin_ftran
 
@@ -4925,8 +4906,14 @@ class TimingPropagation(nn.Module):
         dynamic_net_arc_inputs=None,
         dynamic_net_subgraph_inputs=None,
         dynamic_net_provider=None,
+        early_rc_inputs=None,
     ):
+        if self.timing_model_lease is not None:
+            self.timing_model_lease.require_current()
         start_time = time.time()
+        self.last_evaluation = None
+        if self.early_propagation is not None and early_rc_inputs is None:
+            raise RuntimeError("hold propagation requires min RC from the current forward")
 
         def profile_clock():
             if self.timing_propagation_profile:
@@ -5007,11 +4994,45 @@ class TimingPropagation(nn.Module):
         pin_net_impulse_fall = self._forward_input_tensor(pin_net_impulses['fall'])
         pin_net_cap_rise = self._forward_input_tensor(pin_net_caps['rise'])
         pin_net_cap_fall = self._forward_input_tensor(pin_net_caps['fall'])
+        action_context = getattr(self, "_active_discrete_action_context", None)
+        if action_context is not None:
+            pin_net_cap_rise, pin_net_cap_fall = action_context.maybe_apply_drive_load(
+                pin_net_cap_rise, pin_net_cap_fall
+            )
         if dynamic_net_provider is not None and hasattr(dynamic_net_provider, "apply_dynamic_net_cap_overlay"):
             pin_net_cap_rise, pin_net_cap_fall = dynamic_net_provider.apply_dynamic_net_cap_overlay(
                 pin_net_cap_rise=pin_net_cap_rise,
                 pin_net_cap_fall=pin_net_cap_fall,
             )
+        if getattr(self, "sparse_timing_view", None) is not None:
+            from .sparse_runtime import SparseTimingRuntime
+
+            if (self._sparse_runtime is None
+                    or self._sparse_runtime.view is not self.sparse_timing_view
+                    or self._sparse_runtime.topology_epoch != self.critical_path_topology_epoch
+                    or self._sparse_runtime.schedule.device != self.device):
+                self._sparse_runtime = SparseTimingRuntime(self)
+            outputs = self._sparse_runtime.forward(
+                (pin_net_delay_rise, pin_net_delay_fall),
+                (pin_net_impulse_rise, pin_net_impulse_fall),
+                (pin_net_cap_rise, pin_net_cap_fall),
+                surrogate_flags=(clk2q_use_surrogate, cell_use_surrogate),
+                dynamic_net_provider=dynamic_net_provider,
+                surrogate_mode=surrogate_mode,
+            )
+            hold_result = self._run_early_evaluation(
+                early_rc_inputs,
+                cell_use_surrogate=cell_use_surrogate,
+                clk2q_use_surrogate=clk2q_use_surrogate,
+                dynamic_net_provider=dynamic_net_provider,
+            )
+            self._publish_timing_evaluation(outputs, hold_result)
+            self.last_parity_payload = self._try_run_cpu_cuda_parity(
+                pin_net_delays, pin_net_impulses, pin_net_caps, surrogate_mode,
+                outputs[0], outputs[1], self.last_endpoint_slack_tensor,
+            )
+            self.last_profile_payload["parity"] = self.last_parity_payload
+            return tuple(value.to(return_device) if torch.is_tensor(value) else value for value in outputs)
         critical_path_snapshot_requested = bool(
             getattr(self, "_critical_path_snapshot_requested", False)
         )
@@ -5180,6 +5201,7 @@ class TimingPropagation(nn.Module):
                 use_surrogate=cell_use_surrogate,
                 profile_level=level,
                 need_delay_updates=need_cell_arc_delay_cache,
+                global_arc_rows=abs_arc_indices,
             )
 
             profile_timer = self._sync_profile_clock(device)
@@ -5313,7 +5335,12 @@ class TimingPropagation(nn.Module):
         endpoint_rslack, endpoint_fslack = qualify_pin_slacks(
             self, metric_endpoint_ids, endpoint_rslack, endpoint_fslack
         )
-        endpoints_slack = torch.min(endpoint_rslack, endpoint_fslack)
+        endpoints_slack = aggregate_endpoint_slack(
+            endpoint_rslack,
+            endpoint_fslack,
+            mode=self.timing_aggregation_mode,
+            tau_ps=self.timing_aggregation_tau_ps,
+        )
         RAT_THRESHOLD = 8e7 
         # valid_mask = (pin_rRAT < RAT_THRESHOLD) & (pin_fRAT < RAT_THRESHOLD)
         # all_valid_slacks = slack[valid_mask]
@@ -5332,6 +5359,12 @@ class TimingPropagation(nn.Module):
         if critical_path_snapshot_requested and dynamic_net_provider is not None:
             critical_path_pin_net_delay_rise = pin_net_delay_rise
             critical_path_pin_net_delay_fall = pin_net_delay_fall
+        hold_result = self._run_early_evaluation(
+            early_rc_inputs,
+            cell_use_surrogate=cell_use_surrogate,
+            clk2q_use_surrogate=clk2q_use_surrogate,
+            dynamic_net_provider=dynamic_net_provider,
+        )
         self._store_forward_state(
             pin_rAAT=pin_rAAT,
             pin_fAAT=pin_fAAT,
@@ -5355,6 +5388,7 @@ class TimingPropagation(nn.Module):
             critical_path_pin_net_delay_rise=critical_path_pin_net_delay_rise,
             critical_path_pin_net_delay_fall=critical_path_pin_net_delay_fall,
         )
+        self._publish_timing_evaluation((wns, tns, ws, ts), hold_result)
         total_runtime_ms = (profile_clock() - profile_started_at) * 1000.0
         post_timing_boundary = {
             "core_device": str(self.device),
@@ -5443,27 +5477,29 @@ class TimingPropagation(nn.Module):
         pin_net_impulse_fall=None,
         critical_path_pin_net_delay_rise=None,
         critical_path_pin_net_delay_fall=None,
+        capture_critical_path=True,
     ):
-        self._capture_critical_path_snapshot(
-            pin_rAAT=pin_rAAT,
-            pin_fAAT=pin_fAAT,
-            pin_rRAT=pin_rRAT,
-            pin_fRAT=pin_fRAT,
-            pin_net_delay_rise=(
-                pin_net_delay_rise
-                if critical_path_pin_net_delay_rise is None
-                else critical_path_pin_net_delay_rise
-            ),
-            pin_net_delay_fall=(
-                pin_net_delay_fall
-                if critical_path_pin_net_delay_fall is None
-                else critical_path_pin_net_delay_fall
-            ),
-            cell_arc_rr_delays=cell_arc_rr_delays,
-            cell_arc_fr_delays=cell_arc_fr_delays,
-            cell_arc_rf_delays=cell_arc_rf_delays,
-            cell_arc_ff_delays=cell_arc_ff_delays,
-        )
+        if capture_critical_path:
+            self._capture_critical_path_snapshot(
+                pin_rAAT=pin_rAAT,
+                pin_fAAT=pin_fAAT,
+                pin_rRAT=pin_rRAT,
+                pin_fRAT=pin_fRAT,
+                pin_net_delay_rise=(
+                    pin_net_delay_rise
+                    if critical_path_pin_net_delay_rise is None
+                    else critical_path_pin_net_delay_rise
+                ),
+                pin_net_delay_fall=(
+                    pin_net_delay_fall
+                    if critical_path_pin_net_delay_fall is None
+                    else critical_path_pin_net_delay_fall
+                ),
+                cell_arc_rr_delays=cell_arc_rr_delays,
+                cell_arc_fr_delays=cell_arc_fr_delays,
+                cell_arc_rf_delays=cell_arc_rf_delays,
+                cell_arc_ff_delays=cell_arc_ff_delays,
+            )
         self.pin_rtran_live, self.pin_ftran_live = pin_rtran, pin_ftran
         self.pin_net_cap_rise_live, self.pin_net_cap_fall_live = (
             pin_net_cap_rise,
@@ -5529,7 +5565,7 @@ class TimingPropagation(nn.Module):
     def _prepare_violation_inputs(self, values, pin_mask, limits, metric_name: str):
         values = values.reshape(-1)
         mask = pin_mask.bool().to(values.device).reshape(-1)
-        limits = limits.to(values.device).float().reshape(-1)
+        limits = limits.to(values).reshape(-1)
         # mask/limits are always design-pin tensors. values may come from the
         # larger RC graph and therefore include a trailing Steiner-only suffix.
 
@@ -5590,8 +5626,8 @@ class TimingPropagation(nn.Module):
         if not torch.any(valid_mask):
             return rise_values.new_zeros(()) if virtual_drv is None else virtual_drv[0]
 
-        rise_violation = torch.clamp(rise_values[valid_mask].float() - limits[valid_mask], min=0.0)
-        fall_violation = torch.clamp(fall_values[valid_mask].float() - limits[valid_mask], min=0.0)
+        rise_violation = torch.clamp(rise_values[valid_mask] - limits[valid_mask], min=0.0)
+        fall_violation = torch.clamp(fall_values[valid_mask] - limits[valid_mask], min=0.0)
         total_violation_per_pin = torch.maximum(rise_violation, fall_violation)
 
         # Debug: log top 20 slew violations
@@ -5654,11 +5690,11 @@ class TimingPropagation(nn.Module):
             return rise_values.new_zeros(()) if virtual_drv is None else virtual_drv[1]
 
         rise_violation = torch.clamp(
-            rise_values[valid_mask].float() - limits[valid_mask],
+            rise_values[valid_mask] - limits[valid_mask],
             min=0.0,
         )
         fall_violation = torch.clamp(
-            fall_values[valid_mask].float() - limits[valid_mask],
+            fall_values[valid_mask] - limits[valid_mask],
             min=0.0,
         )
         total_violation_per_pin = torch.maximum(rise_violation, fall_violation)

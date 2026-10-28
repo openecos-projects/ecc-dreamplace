@@ -70,6 +70,20 @@ class PydbTopologyTest(unittest.TestCase):
             build_edge_rc_by_net_from_rc_timing_topology,
         )
 
+    def test_selected_net_rc_matches_full_build_with_noncontiguous_net_ids(self):
+        topology = {
+            "net_ids": [10, 25], "net_flat_topo_sort": [0, 1, 2, 3],
+            "net_flat_topo_sort_start": [0, 2, 4], "pin_fa": [-1, 0, -1, 2],
+            "node_x": [0, 1000, 3000, 6000], "node_y": [0, 0, 0, 0],
+        }
+        options = {"dbu": 1000, "r_unit": 2., "c_unit": .25}
+        full, _ = build_edge_rc_by_net_from_rc_timing_topology(topology, **options)
+        selected, summary = build_edge_rc_by_net_from_rc_timing_topology(
+            topology, selected_net_ids=[25], **options,
+        )
+        self.assertEqual(selected, {25: full[25]})
+        self.assertEqual(summary["edge_rc_map_net_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

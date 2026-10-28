@@ -93,6 +93,33 @@ def prepare_snapshot(
     ]
     eligible = eligible.clone()
     eligible[excluded] = False
+    # The router deliberately keeps some top-level IO pins without an access
+    # vertex.  Such nets cannot form an electrical GR tree, so leave them on
+    # the existing fallback RC path instead of asking the native packer to
+    # attach a pin outside its net slice.
+    missing_pin_access = set()
+    route_pin_vertex = route_pack.get("pin_vertex")
+    route_pin_net = route_pack.get("pin_net")
+    route_net_names = route_pack.get("net_names")
+    if (
+        route_pin_vertex is not None
+        and route_pin_net is not None
+        and route_net_names is not None
+    ):
+        missing = np.flatnonzero(np.asarray(route_pin_vertex, dtype=np.int64) < 0)
+        py_net_ids = pin_mapping.net_names
+        missing_nets = np.unique(np.asarray(route_pin_net, dtype=np.int64)[missing])
+        for route_net_id in missing_nets:
+            route_net_id = int(route_net_id)
+            if 0 <= route_net_id < len(route_net_names):
+                net_name = route_net_names[route_net_id]
+                if isinstance(net_name, bytes):
+                    net_name = net_name.decode("utf-8")
+                py_net_id = py_net_ids.get(str(net_name))
+                if py_net_id is not None:
+                    missing_pin_access.add(int(py_net_id))
+        if missing_pin_access:
+            eligible[list(missing_pin_access)] = False
     packed = gr_parasitics_cpp.prepare_tree(
         route_pack,
         pin_mapping.pin_names,
@@ -120,6 +147,8 @@ def prepare_snapshot(
     valid = pin_vertex >= 0
     valid_ids = valid.nonzero().flatten()
     tensors["pin_to_vertex"] = pin_vertex
+    model_report = dict(packed["model_report"])
+    model_report["filtered_missing_pin_access_net_count"] = len(missing_pin_access)
     return RouteSnapshot(
         identity=identity,
         rc_parameters=rc_parameters,
@@ -127,6 +156,6 @@ def prepare_snapshot(
         valid_pin_ids=valid_ids,
         valid_vertex_ids=pin_vertex[valid_ids],
         filtered_net_count=int(packed["filtered_net_count"]),
-        model_report=packed["model_report"],
+        model_report=model_report,
         **tensors,
     )

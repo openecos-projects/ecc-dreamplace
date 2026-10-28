@@ -20,6 +20,8 @@ from dreamplace.flows.flow_profiles import (
     PIN2PIN_TIMING_PLACEMENT_DEFAULTS as _PIN2PIN_TIMING_PLACEMENT_DEFAULTS,
     PROXIMAL_ALTERNATING_JOINT_DEFAULTS as _PROXIMAL_ALTERNATING_JOINT_DEFAULTS,
     SEGMENT_COUNT_DIRECT_JOINT_DEFAULTS as _SEGMENT_COUNT_DIRECT_JOINT_DEFAULTS,
+    DISCRETE_ALTERNATING_SIZING_BUFFERING_DEFAULTS as _DISCRETE_ALTERNATING_DEFAULTS,
+    DISCRETE_ALTERNATING_SIZING_BUFFERING_PROFILE,
     SEGMENT_JOINT_FIXED_WINDOW_SCHEDULE,
     SEGMENT_JOINT_OVERFLOW_MILESTONE_SCHEDULE,
     SIZING_DEFAULTS as _SIZING_DEFAULTS,
@@ -36,6 +38,7 @@ from dreamplace.flows.timing_opt_config import (
     is_legacy_timing_opt_name,
     normalize_timing_opt_params,
 )
+from dreamplace.flows.hold_config import validate_hold_configuration
 
 
 _BUFFERING_FLAGS = (
@@ -54,6 +57,13 @@ def _has_any_enabled(params, names):
 
 def infer_flow_kind(params):
     explicit = getattr(params, "flow_kind", None) or getattr(params, "flow", None)
+    profile = _joint_quality_profile(params)
+    if profile == DISCRETE_ALTERNATING_SIZING_BUFFERING_PROFILE and explicit in (
+        None,
+        "placement",
+        "joint",
+    ):
+        return FlowKind.JOINT
     if explicit:
         return FlowKind(str(explicit))
 
@@ -245,6 +255,11 @@ def _set_joint_stage_optimizer_default(params):
     buffering or sizing parameter group, and nesterov rejects any group other
     than "placement". Switch the inherited optimizer before the run starts.
     """
+    if (
+        _joint_quality_profile(params)
+        == DISCRETE_ALTERNATING_SIZING_BUFFERING_PROFILE
+    ):
+        return
     stages = getattr(params, "global_place_stages", None) or []
     sizing_enabled = bool(getattr(params, "joint_segment_sizing_enabled", True))
     no_sizing_segment_joint = (
@@ -435,13 +450,41 @@ def _apply_discrete_net_gradient_defaults(params, flow_kind):
         flow_kind == FlowKind.JOINT
         and _joint_quality_profile(params) == "segment_count_direct_joint_v1"
     )
+    discrete_alternating_joint = (
+        flow_kind == FlowKind.JOINT
+        and _joint_quality_profile(params)
+        == DISCRETE_ALTERNATING_SIZING_BUFFERING_PROFILE
+    )
     inflation_placement = (
         flow_kind == FlowKind.PLACEMENT and _param_enabled(params, "timing_opt_enabled")
     )
-    if flow_kind != FlowKind.BUFFERING and not canonical_joint and not inflation_placement:
-        raise ValueError("discrete_net_gradient requires standalone flow_kind=buffering")
+    diff_opt_placement = (
+        flow_kind == FlowKind.PLACEMENT
+        and _param_enabled(params, "diff_opt_enabled")
+    )
     if (
-        getattr(params, "buffering_fixed_bsu_index", None) is None
+        flow_kind != FlowKind.BUFFERING
+        and not canonical_joint
+        and not discrete_alternating_joint
+        and not inflation_placement
+        and not diff_opt_placement
+    ):
+        raise ValueError("discrete_net_gradient requires standalone flow_kind=buffering")
+    candidate_drive_type_mode = str(
+        getattr(params, "buffering_candidate_drive_type_mode", "single_fixed")
+        or "single_fixed"
+    ).strip()
+    candidate_drive_strength_table = str(
+        getattr(params, "buffering_candidate_drive_strength_table", "") or ""
+    ).strip()
+    if candidate_drive_type_mode not in {"single_fixed", "four_strength_table"}:
+        raise ValueError(
+            "unsupported buffering candidate drive type mode: "
+            f"{candidate_drive_type_mode}"
+        )
+    if (
+        candidate_drive_type_mode == "single_fixed"
+        and getattr(params, "buffering_fixed_bsu_index", None) is None
         and not str(
             getattr(params, "buffering_fixed_buffer_master", "") or ""
         ).strip()
@@ -450,6 +493,17 @@ def _apply_discrete_net_gradient_defaults(params, flow_kind):
             "discrete_net_gradient requires buffering_fixed_buffer_master "
             "or buffering_fixed_bsu_index"
         )
+    if candidate_drive_type_mode == "four_strength_table":
+        if mode != "candidate":
+            raise ValueError("four_strength_table requires buffering_mode=candidate")
+        if not candidate_drive_strength_table:
+            raise ValueError(
+                "four_strength_table requires buffering_candidate_drive_strength_table"
+            )
+        if getattr(params, "buffering_fixed_bsu_index", None) is not None:
+            raise ValueError(
+                "four_strength_table cannot use buffering_fixed_bsu_index"
+            )
     if bool(getattr(params, "buffering_segment_capacity_enabled", False)):
         raise ValueError("discrete_net_gradient does not allow segment capacity control")
     if getattr(params, "buffering_max_selected_actions", None) is not None:
@@ -602,6 +656,16 @@ def apply_flow_defaults(params):
         if _joint_quality_profile(params) == "staged_smoke_v1":
             for name, value in _STAGED_SMOKE_JOINT_DEFAULTS:
                 _set_flow_default(params, name, value, force=True)
+        if (
+            _joint_quality_profile(params)
+            == DISCRETE_ALTERNATING_SIZING_BUFFERING_PROFILE
+        ):
+            for name, value in _DISCRETE_ALTERNATING_DEFAULTS:
+                # This named profile is a complete flow contract.  In
+                # particular, it must replace inherited segment buffering
+                # defaults and legacy strategy values rather than letting the
+                # mode-specific guard in _set_flow_default preserve them.
+                setattr(params, name, value)
         if _joint_quality_profile(params) == "segment_count_direct_joint_v1":
             for name, value in _SEGMENT_COUNT_DIRECT_JOINT_DEFAULTS:
                 if name in {
@@ -730,6 +794,32 @@ def apply_flow_defaults(params):
                 }
             })
         for name, value in window_defaults.items():
+            candidate_buffering_mode = (
+                str(getattr(params, "buffering_mode", "segment") or "segment")
+                == "candidate"
+                and str(
+                    getattr(params, "buffering_candidate_strategy", "continuous")
+                    or "continuous"
+                )
+                == "discrete_net_gradient"
+            )
+            if candidate_buffering_mode and name in {
+                "buffering_mode",
+                "buffering_segment_strategy",
+                "buffering_segment_count_z_init",
+                "buffering_segment_count_timing_backend",
+                "buffering_segment_transfer_backend",
+                "buffering_segment_live_geometry",
+                "buffering_segment_integer_projection_interval",
+                "buffering_segment_integer_projection_start_step",
+                "buffering_segment_integer_projection_project_bsu",
+                "buffering_discrete_count_proximal_lambda",
+                "buffering_segment_projection_min_z_to_insert",
+                "buffering_segment_projection_require_setup_criticality",
+                "buffering_fixed_bsu_index",
+                "buffering_fixed_buffer_master",
+            }:
+                continue
             if name in {
                 "placement_sizing_mode", "sizing_parameterization", "continuous_size_dynamics_mode",
                 "buffering_mode", "buffering_segment_strategy", "buffering_segment_count_z_init",
@@ -746,7 +836,10 @@ def apply_flow_defaults(params):
             else:
                 _set_flow_default(params, name, value, force=True)
     _resolve_timing_propagation_device_default(params)
-    if _param_enabled(params, "timing_opt_enabled"):
+    if (
+        _param_enabled(params, "timing_opt_enabled")
+        and not getattr(params, "_timing_propagation_device_explicit", False)
+    ):
         params.timing_propagation_device = "cpu"
     _normalize_openroad_vt_suffixes(params)
     _resolve_size_parameterization_defaults(params)
@@ -754,6 +847,7 @@ def apply_flow_defaults(params):
     from dreamplace.flows.gr_sizing_config import configure_gr_sizing
 
     configure_gr_sizing(params)
+    validate_hold_configuration(params, flow_kind)
     params._flow_defaults_resolved = True
     return flow_kind
 

@@ -13,6 +13,8 @@ BUFFERING_DEFAULTS = (
     ("buffering_continuous_lr", 0.01),
     ("buffering_segment_strategy", "continuous"),
     ("buffering_candidate_strategy", "continuous"),
+    ("buffering_candidate_drive_type_mode", "single_fixed"),
+    ("buffering_candidate_drive_strength_table", ""),
     ("buffering_segment_count_z_init", 0.1),
     ("buffering_segment_count_timing_backend", "cpp_cuda_segment_transfer_explicit_autograd"),
     ("buffering_segment_transfer_backend", "segment_transfer_native"),

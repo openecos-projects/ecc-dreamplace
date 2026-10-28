@@ -10,6 +10,8 @@ from dreamplace.flows.timing_objective_policy import (
     diff_tdp_enabled,
     reset_legacy_net_weight_gate_summary,
 )
+from dreamplace.flows.timing_opt_config import DEFAULT_TIMING_OPT_COEFFICIENTS
+from dreamplace.Params import Params
 
 
 @pytest.fixture
@@ -115,6 +117,33 @@ def test_invalid_carrier_is_rejected_before_selecting_controls(placement_config)
         )
 
 
+def test_active_hold_window_survives_placement_config_resolution(placement_config):
+    overrides = {
+        "timing_placement_carrier": "direct_loss",
+        "timing_hold_enabled": True,
+        "timing_hold_coefficients": {"wns": 1., "tns": .01},
+        "timing_opt_coefficients": {
+            "mode": "fixed", "wns": 500., "tns": 5., "slew": 1., "cap": 1.,
+            "hold_wns": 2., "hold_tns": .1,
+        },
+    }
+    resolved = resolve_flow_config(
+        placement_config | overrides, explicit_keys=tuple(overrides),
+    )
+    assert {name: resolved[name] for name in overrides} == overrides
+
+
+def test_explicit_timing_device_is_not_replaced_by_cpu_compatibility_default(
+    placement_config,
+):
+    resolved = resolve_flow_config(
+        placement_config | {"timing_propagation_device": "cuda"},
+        explicit_keys=("timing_propagation_device",),
+    )
+    assert resolved["timing_opt_enabled"] == 1
+    assert resolved["timing_propagation_device"] == "cuda"
+
+
 def test_legacy_timing_opt_fields_normalize_to_canonical(placement_config):
     resolved = resolve_flow_config(
         placement_config
@@ -141,8 +170,6 @@ def test_conflicting_timing_opt_field_names_are_rejected(placement_config):
 
 
 def test_legacy_options_serialize_canonically_and_allow_internal_disable():
-    from dreamplace.Params import Params
-
     params = Params()
     params.fromJson({"inflation_s5b1_enabled": 1, "inflation_sizing_rounds": 10})
     resolved = params.toJson()
@@ -154,6 +181,7 @@ def test_legacy_options_serialize_canonically_and_allow_internal_disable():
         "timing_opt_max_windows": 5,
         "timing_opt_overflow_milestones": [],
         "timing_opt_sizing_rounds": 10,
+        "timing_opt_coefficients": dict(DEFAULT_TIMING_OPT_COEFFICIENTS),
     }
     assert "inflation_s5b1_enabled" not in resolved
     params.timing_opt_enabled = 0

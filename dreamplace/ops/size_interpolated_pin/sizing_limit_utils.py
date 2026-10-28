@@ -379,7 +379,7 @@ def _get_size_interpolated_pin_native_cache(
         candidate_sizes[rows, vt_value, :dim] = vt_sizes.to(
             device=pin_device,
             dtype=torch.float32,
-        ).unsqueeze(0)
+        ).unsqueeze(0).expand(rows.numel(), -1)
         candidate_libpin_ids[rows, vt_value, :dim] = (
             data_collections.cell_id_2_libpin_id_start[vt_cell_ids].long().unsqueeze(0)
             + offsets.unsqueeze(1)
@@ -477,7 +477,7 @@ def _get_size_interpolated_pin_native_payload(data_collections, cache):
             candidate_sizes[row_slice, vt_value, :dim] = vt_group["vt_sizes"].to(
                 device=pin_device,
                 dtype=torch.float32,
-            ).unsqueeze(0)
+            ).unsqueeze(0).expand(local_count, -1)
             candidate_libpin_ids[row_slice, vt_value, :dim] = vt_group[
                 "candidate_libpin_ids"
             ].to(device=pin_device, dtype=torch.long)

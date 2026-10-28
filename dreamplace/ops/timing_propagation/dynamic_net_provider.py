@@ -1,6 +1,8 @@
 class DynamicNetProvider:
     """Protocol boundary for TimingPropagation-integrated net arc providers."""
 
+    supports_sparse_timing = False
+
     def virtual_buffer_drv_tensors(self):
         """Additional virtual output-pin violations in ns/pF, or unsupported."""
         return None

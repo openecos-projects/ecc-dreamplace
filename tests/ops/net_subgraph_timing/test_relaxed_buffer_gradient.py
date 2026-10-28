@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -323,6 +324,47 @@ class RelaxedBufferGradientTest(unittest.TestCase):
         self.assertGreater(float(model["buffer_delay"][0]), 1.0)
         self.assertIsNotNone(state.bu_logits.grad)
         self.assertNotEqual(float(state.bu_logits.grad.abs().sum()), 0.0)
+
+    def test_empty_coordinate_probe_skips_device_lut_callback(self):
+        state = build_buffer_optimization_state(
+            [],
+            buffer_main_type_index=1,
+            legal_buffer_count=3,
+        )
+        callback_called = False
+
+        def coordinate_callback(**_kwargs):
+            nonlocal callback_called
+            callback_called = True
+            raise AssertionError("empty coordinate probe must not call the callback")
+
+        with patch(
+            "dreamplace.ops.net_subgraph_timing.net_subgraph_timing."
+            "net_subgraph_forward",
+            return_value={},
+        ):
+            result = net_subgraph_forward_relaxed(
+                net_flat_topo_sort=torch.empty(0, dtype=torch.int32),
+                net_flat_topo_sort_start=torch.tensor([0], dtype=torch.int32),
+                pin_fa=torch.empty(0, dtype=torch.int32),
+                flat_pin_to_start=torch.tensor([0], dtype=torch.int32),
+                flat_pin_to=torch.empty(0, dtype=torch.int32),
+                edge_resistance=torch.empty(0),
+                node_capacitance=torch.empty(0),
+                edge_capacitance=torch.empty(0),
+                driver_arrival=torch.empty(0),
+                driver_slew=torch.empty(0),
+                sink_node_id=torch.empty(0, dtype=torch.int32),
+                buffer_state=state,
+                per_size_input_cap=torch.empty((0, 3)),
+                per_size_delay=torch.empty((0, 3)),
+                per_size_output_slew=torch.empty((0, 3)),
+                buffer_coordinate_callback=coordinate_callback,
+                coordinate_source="current_approx",
+            )
+
+        self.assertFalse(callback_called)
+        self.assertNotIn("coordinate_probe", result)
 
     def test_liberty_coordinate_callback_bu_gradient_matches_finite_difference(self):
         buffer_device = default_fake_buffer_device(dtype=torch.float32)

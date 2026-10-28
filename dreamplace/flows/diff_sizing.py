@@ -34,7 +34,7 @@ def _stage_rounds(params):
 
 def _legacy_phase(params, rounds=None):
     return DiffSizingFlowSpec(
-        action="quad",
+        action="up",
         rounds=_stage_rounds(params) if rounds is None else int(rounds),
         coefficients=TimingCoefficients(
             wns=float(getattr(params, "timing_wns_coeff", 500.0)),

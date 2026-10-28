@@ -87,7 +87,7 @@ def test_diff_sizing_controller_uses_one_action_phase(monkeypatch):
             {"refresh_candidates_after_sizing": False},
         ),
         ("window", None),
-        ("sizing", "geometry", 17.0, (True, True, True, True)),
+        ("sizing", "geometry", 17.0, (True, False, False, True)),
         ("publish_geometry", model),
         ("commit", None),
     ]
@@ -95,7 +95,7 @@ def test_diff_sizing_controller_uses_one_action_phase(monkeypatch):
     assert sizing["best_round"] == 3
     assert sizing["best_loss"] == -2.0
     assert sizing["phase_count"] == 1
-    assert sizing["phases"][0]["action"] == "quad"
+    assert sizing["phases"][0]["action"] == "up"
     assert result["sizing_commit"] == {"ok": True, "accepted_count": 2}
     assert not hasattr(params, "discrete_gradient_topk_shared_budget_percent")
 
@@ -296,7 +296,7 @@ def test_run_diff_sizing_commits_refreshes_and_writes_summary(
     assert calls[2][2] is engine.placer.data_collections.pos[0]
     phases = calls[2][3]
     assert len(phases) == 1
-    assert phases[0].action == "quad"
+    assert phases[0].action == "up"
     assert phases[0].rounds == 2
     assert calls[3] == (
         "refresh",

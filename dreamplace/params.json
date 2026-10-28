@@ -223,6 +223,10 @@
         "description": "discrete sizing gradient mode; default lut_action, off is the legacy path",
         "default": "lut_action"
     },
+    "timing_sizing_action": {
+        "description": "action family for placement sizing windows and diff_opt sizing: up | down | quad; explicit diff_sizing phase masks take precedence",
+        "default": "up"
+    },
     "timing_action_score_objective": {
         "description": "objective differentiated for the local LUT action score; loss uses diff_sizing_coefficients, tns/wns select a single timing metric",
         "default": "loss"
@@ -926,7 +930,7 @@
     },
     "diff_sizing_optimization_flows": {
         "default": null,
-        "description": "ordered standalone diff_sizing phases: [action, rounds, [wns, tns, slew, cap], selection_percent]; action is quad, up, or down and percent is in (0, 100]; null keeps one quad phase with the stage round budget"
+        "description": "ordered standalone diff_sizing phases: [action, rounds, [wns, tns, slew, cap], selection_percent]; action is quad, up, or down and percent is in (0, 100]; null selects an up phase; ECC defaults to 50 rounds with diff_sizing_coefficients and a shared 1% budget per round"
     },
     "cell_model_schema": {
         "default": "main_id_arc_offset_piecewise_linear",

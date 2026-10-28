@@ -16,6 +16,7 @@ from dreamplace.flows.discrete_timing_common import (
     segment_counts,
     timing_area_fits,
     timing_electrical_window,
+    timing_sizing_action_mask,
     timing_sizing_coefficients,
     transfer_segment_counts,
     virtual_timing_area,
@@ -1007,6 +1008,8 @@ class DiscreteTimingOwner:
 
     def run_sizing(self, model, pos, geometry, capacity, *, action_mask=None):
         data = self.data
+        action_mask = timing_sizing_action_mask(self.params, action_mask)
+        candidates = self.candidates.with_action_mask(action_mask)
         size, vt = data.get_continuous_size_parameter(), data.vt_logits
         sizing_started_at = time.perf_counter()
         capture_started_at = time.perf_counter()
@@ -1260,18 +1263,11 @@ class DiscreteTimingOwner:
                         selection_scores=action_scores,
                         wns_scores=trial_wns_scores,
                     )
-                selection_valid = action_context.valid_instances
-                if action_mask is not None:
-                    mask = torch.as_tensor(
-                        action_mask,
-                        dtype=torch.bool,
-                        device=selection_valid.device,
-                    )
-                    if mask.shape != (selection_valid.shape[1],):
-                        raise ValueError(
-                            "sizing action mask must match the four action columns"
-                        )
-                    selection_valid = selection_valid & mask.unsqueeze(0)
+                selection_valid = action_context.valid_instances & torch.as_tensor(
+                    action_mask,
+                    dtype=torch.bool,
+                    device=action_context.valid_instances.device,
+                ).unsqueeze(0)
                 candidate_select_started_at = time.perf_counter()
                 next_size, next_vt, summary = apply_quad_gradient_from_action_scores(
                     action_scores=action_scores,
@@ -1279,7 +1275,7 @@ class DiscreteTimingOwner:
                     data_collections=data,
                     size_logits=size,
                     vt_logits=vt,
-                    candidate_table=self.candidates,
+                    candidate_table=candidates,
                     shared_budget_percent=float(
                         self.params.discrete_gradient_topk_shared_budget_percent
                     ),
@@ -1340,7 +1336,7 @@ class DiscreteTimingOwner:
                         size_up_percent=0.0,
                         size_down_percent=0.0,
                         vt_percent=0.0,
-                        candidate_table=self.candidates,
+                        candidate_table=candidates,
                         shared_budget_percent=float(
                             self.params.discrete_gradient_topk_shared_budget_percent
                         ),

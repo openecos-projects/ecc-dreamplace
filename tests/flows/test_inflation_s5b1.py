@@ -737,16 +737,3 @@ def test_placement_window_sizing_delegates_to_lut_action_owner():
     assert owner.round_index == 2
     assert delegate._pending_dirty_instance_ids == set()
     assert delegate._pending_dirty_net_ids == set()
-
-
-def test_legacy_placement_window_sizing_rejects_action_mask():
-    owner = InflationS5B1.__new__(InflationS5B1)
-    owner._lut_action_owner = None
-    with pytest.raises(ValueError, match="timing_action_gradient_mode=lut_action"):
-        owner.run_sizing(
-            "model",
-            "pos",
-            "geometry",
-            "capacity",
-            action_mask=[True, False, True, False],
-        )

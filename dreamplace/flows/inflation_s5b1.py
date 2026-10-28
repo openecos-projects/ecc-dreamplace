@@ -22,6 +22,7 @@ from dreamplace.flows.discrete_timing_common import (
     segment_counts,
     timing_area_fits,
     timing_electrical_window,
+    timing_sizing_action_mask,
     timing_sizing_coefficients,
     transfer_segment_counts,
     virtual_timing_area,
@@ -254,8 +255,11 @@ class InflationS5B1:
             reason=reason,
         )
 
-    def _sizing(self, model, pos, geometry, capacity):
+    def _sizing(self, model, pos, geometry, capacity, *, action_mask=None):
         data = self.data
+        candidates = self.candidates.with_action_mask(
+            timing_sizing_action_mask(self.params, action_mask)
+        )
         size, vt = data.get_continuous_size_parameter(), data.vt_logits
         best = self._capture()
         loss = self._loss(model, pos)
@@ -282,7 +286,7 @@ class InflationS5B1:
                 size_up_percent=0.0,
                 size_down_percent=0.0,
                 vt_percent=0.0,
-                candidate_table=self.candidates,
+                candidate_table=candidates,
                 shared_budget_percent=float(
                     self.params.discrete_gradient_topk_shared_budget_percent
                 ),
@@ -341,11 +345,7 @@ class InflationS5B1:
 
     def run_sizing(self, model, pos, geometry, capacity, *, action_mask=None):
         if self._lut_action_owner is None:
-            if action_mask is not None:
-                raise ValueError(
-                    "sizing action masks require timing_action_gradient_mode=lut_action"
-                )
-            return self._sizing(model, pos, geometry, capacity)
+            return self._sizing(model, pos, geometry, capacity, action_mask=action_mask)
         result = self._lut_action_owner.run_sizing(
             model,
             pos,

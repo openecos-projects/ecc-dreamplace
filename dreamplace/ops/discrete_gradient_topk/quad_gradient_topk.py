@@ -25,6 +25,16 @@ class QuadCandidateTable:
     def to(self, *, device):
         return QuadCandidateTable(target_cell_ids=self.target_cell_ids.to(device=device))
 
+    def with_action_mask(self, action_mask):
+        mask = torch.as_tensor(
+            action_mask, dtype=torch.bool, device=self.target_cell_ids.device
+        )
+        if mask.shape != (len(ACTION_NAMES),):
+            raise ValueError("sizing action mask must match the four action columns")
+        return QuadCandidateTable(
+            target_cell_ids=self.target_cell_ids.masked_fill(~mask.unsqueeze(0), -1)
+        )
+
 
 def build_quad_candidate_table(flat_libcell_info, flat_libcell_leakage=None):
     """Build the four legal (size-/VT-axis) neighbors for each cell.

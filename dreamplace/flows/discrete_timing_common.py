@@ -4,9 +4,20 @@ from contextlib import contextmanager
 
 import torch
 
+from dreamplace.flows.diff_sizing_spec import DIFF_SIZING_ACTION_MASKS
 from dreamplace.flows.timing_opt_config import DEFAULT_TIMING_OPT_COEFFICIENTS
 from dreamplace.flows.timing_phase_coefficients import timing_phase_coefficients
 from dreamplace.ops.routability.cooptimization_area import capture_area
+
+
+def timing_sizing_action_mask(params, action_mask=None):
+    """Resolve window/diff-opt defaults while preserving explicit phase masks."""
+    if action_mask is not None:
+        return action_mask
+    action = getattr(params, "timing_sizing_action", "up")
+    if action not in DIFF_SIZING_ACTION_MASKS:
+        raise ValueError("timing_sizing_action must be one of: up, down, quad")
+    return DIFF_SIZING_ACTION_MASKS[action]
 
 
 @contextmanager

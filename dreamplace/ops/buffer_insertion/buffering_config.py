@@ -162,17 +162,17 @@ def build_buffering_config_from_params(params, flow_kind=None):
         _get_param(params, "buffering_candidate_drive_type_mode", "single_fixed")
         or "single_fixed"
     ).strip()
-    if candidate_drive_type_mode not in {"single_fixed", "four_strength_table"}:
+    if candidate_drive_type_mode not in {"single_fixed", "four_strength_table", "fast_buffers"}:
         raise ValueError(
-            "buffering_candidate_drive_type_mode must be single_fixed or "
-            "four_strength_table"
+            "buffering_candidate_drive_type_mode must be single_fixed, "
+            "four_strength_table or fast_buffers"
         )
     candidate_drive_strength_table = _as_nonempty_string(
         _get_param(params, "buffering_candidate_drive_strength_table", "")
     )
-    if candidate_drive_type_mode == "four_strength_table" and candidate_strategy != "discrete_net_gradient":
+    if candidate_drive_type_mode != "single_fixed" and candidate_strategy != "discrete_net_gradient":
         raise ValueError(
-            "four_strength_table requires buffering_candidate_strategy=discrete_net_gradient"
+            f"{candidate_drive_type_mode} requires buffering_candidate_strategy=discrete_net_gradient"
         )
     discrete_count_proximal_lambda = _resolve_float(
         params,
@@ -299,9 +299,9 @@ def build_buffering_config_from_params(params, flow_kind=None):
                 "discrete_net_gradient requires buffering_fixed_buffer_master "
                 "or buffering_fixed_bsu_index"
             )
-        if candidate_drive_type_mode == "four_strength_table" and mode != "candidate":
+        if candidate_drive_type_mode != "single_fixed" and mode != "candidate":
             raise ValueError(
-                "four_strength_table requires buffering_mode=candidate"
+                f"{candidate_drive_type_mode} requires buffering_mode=candidate"
             )
         if candidate_drive_type_mode == "four_strength_table" and not candidate_drive_strength_table:
             raise ValueError(

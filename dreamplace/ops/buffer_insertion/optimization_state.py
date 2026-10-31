@@ -197,6 +197,9 @@ class TypedDiscreteCandidateState:
     _gradient_drive_type: int | None = None
     _shared_gradient_probe: bool = False
     timing_active_only: bool = False
+    # Optional [candidate_count, drive_type_count] mask of electrically
+    # admissible position/type actions; None admits every action.
+    drive_type_allowed: torch.Tensor | None = None
 
     def timing_affected_net_ids(self):
         """Between probes, let ordinary RC own nets without accepted buffers."""
@@ -617,8 +620,8 @@ def build_typed_discrete_candidate_state(
     buffer_main_type_index = int(buffer_main_type_index)
     legal_buffer_count = int(legal_buffer_count)
     entries = tuple(getattr(drive_type_table, "entries", ()) or ())
-    if len(entries) != 4:
-        raise ValueError("typed discrete candidate buffering requires four drive types")
+    if not entries:
+        raise ValueError("typed discrete candidate buffering requires drive types")
     if legal_buffer_count < 2:
         raise ValueError("legal_buffer_count must be at least 2")
 

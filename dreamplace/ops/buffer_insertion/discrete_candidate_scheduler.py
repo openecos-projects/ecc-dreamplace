@@ -227,12 +227,14 @@ def schedule_typed_candidate_gradient_actions(
     activations,
     raw_grad,
     selection_fraction=1.0 / ROUTE_B_AFFECTED_NETS_PER_ACTION,
+    allowed_actions=None,
 ):
     """Select one positive position/type action per ranked net for one round.
 
     ``activations`` and ``raw_grad`` have shape ``[candidate_count, type_count]``.
     A row is the physical candidate position; one-hot activation enforces that
-    only one drive type can be selected at that position.
+    only one drive type can be selected at that position.  ``allowed_actions``
+    optionally masks out electrically inadmissible position/type pairs.
     """
 
     if not torch.is_tensor(activations) or activations.ndim != 2:
@@ -291,6 +293,10 @@ def schedule_typed_candidate_gradient_actions(
     predicted = -raw_grad.detach()
     active_position = activations.detach().sum(dim=1) > 0.0
     eligible_action = (~active_position).view(-1, 1).expand(-1, drive_type_count)
+    if allowed_actions is not None:
+        if allowed_actions.shape != activations.shape:
+            raise ValueError("allowed_actions must match typed activation shape")
+        eligible_action = eligible_action & allowed_actions.to(device=device, dtype=torch.bool)
     action_score = torch.where(
         eligible_action,
         predicted,

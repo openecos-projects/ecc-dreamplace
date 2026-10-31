@@ -56,7 +56,7 @@
         "default": null
     },
     "buffering_candidate_drive_type_mode": {
-        "description": "candidate discrete buffer type selection, single_fixed | four_strength_table",
+        "description": "candidate discrete buffer type selection, single_fixed | four_strength_table | fast_buffers",
         "default": "single_fixed"
     },
     "buffering_candidate_drive_strength_table": {

@@ -158,8 +158,8 @@ class BufferFamilyContract:
             ),
         )
 
-    def _typed_legal_table(self):
-        """Build a four-master table even when OpenSTA exposes separate families.
+    def _typed_legal_table(self, typed_masters):
+        """Build a typed master table even when OpenSTA exposes separate families.
 
         The legacy contract intentionally requires one equivalent-cell family.
         Typed candidate buffering is different: each table row names its own
@@ -168,8 +168,6 @@ class BufferFamilyContract:
         the first family id as the compatibility value used by candidate
         geometry records.
         """
-        from .drive_type_table import EXPECTED_DRIVE_TYPE_MASTERS
-
         names = _as_list(getattr(self.metadata, "flat_libcell_names", []))
         rows = _as_rows(getattr(self.metadata, "flat_libcell_info", []))
         candidate_main_ids = {
@@ -188,7 +186,7 @@ class BufferFamilyContract:
         size_values = []
         main_ids = []
         missing = []
-        for master_name in EXPECTED_DRIVE_TYPE_MASTERS:
+        for master_name in typed_masters:
             match = by_name.get(master_name)
             if match is None:
                 missing.append(master_name)
@@ -285,9 +283,20 @@ class BufferFamilyContract:
         return sorted(set(reasons))
 
     def build_artifact(self):
-        typed_table = self.candidate_drive_type_mode == "four_strength_table"
-        if typed_table:
-            legal_table, typed_reasons = self._typed_legal_table()
+        from .fast_buffer_types import (
+            FAST_BUFFERS_MODE,
+            TYPED_DRIVE_TYPE_MODES,
+            fast_buffer_master_names,
+        )
+
+        if self.candidate_drive_type_mode in TYPED_DRIVE_TYPE_MODES:
+            if self.candidate_drive_type_mode == FAST_BUFFERS_MODE:
+                master_names = fast_buffer_master_names(self.metadata)
+            else:
+                from .drive_type_table import EXPECTED_DRIVE_TYPE_MASTERS
+
+                master_names = EXPECTED_DRIVE_TYPE_MASTERS
+            legal_table, typed_reasons = self._typed_legal_table(master_names)
             unsupported_reasons = list(typed_reasons)
             if legal_table is not None:
                 unsupported_reasons.extend(self._basic_reasons(legal_table))

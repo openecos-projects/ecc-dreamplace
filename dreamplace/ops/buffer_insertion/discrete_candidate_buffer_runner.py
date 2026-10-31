@@ -8,6 +8,7 @@ import torch
 from dreamplace.ops.timing_propagation.buffer_timing_fast_path import buffer_timing_fast_path
 
 from .buffering_inner_loop import BufferingInnerLoopSummary
+from .fast_buffer_types import TYPED_DRIVE_TYPE_MODES
 from .typed_candidate_gradient import typed_candidate_objective_gradient as _typed_candidate_objective_gradient
 from .buffering_lane import _tensor_digest
 from .discrete_candidate_scheduler import (
@@ -41,8 +42,8 @@ def _assert_candidate_state(lane, *, require_zero):
         raise ValueError("candidate discrete_net_gradient cannot use max_selected_actions")
     state.validate_binary_()
     if getattr(state, "is_typed_candidate", False):
-        if str(getattr(config, "candidate_drive_type_mode", "")) != "four_strength_table":
-            raise ValueError("typed candidate state requires four_strength_table mode")
+        if str(getattr(config, "candidate_drive_type_mode", "")) not in TYPED_DRIVE_TYPE_MODES:
+            raise ValueError("typed candidate state requires a typed drive type mode")
         if require_zero and not bool(
             (state.activation_param.detach().sum(dim=1) == 0.0).all()
         ):
@@ -480,6 +481,7 @@ def _run_discrete_candidate_buffer_scheduler_impl(
                 activations=state.activation_param.detach(),
                 raw_grad=raw_grad,
                 selection_fraction=selection_fraction,
+                allowed_actions=state.drive_type_allowed,
             )
         else:
             transition = schedule_candidate_gradient_actions(
@@ -656,7 +658,7 @@ def _run_discrete_candidate_buffer_scheduler_impl(
             else int(state.fixed_bsu_index)
         ),
         "candidate_drive_type_mode": (
-            "four_strength_table"
+            str(getattr(lane.config, "candidate_drive_type_mode", "four_strength_table"))
             if getattr(state, "is_typed_candidate", False)
             else "single_fixed"
         ),

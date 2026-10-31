@@ -102,7 +102,7 @@ def _add_buffering_public_args(parser):
     parser.add_argument("--buffering-fixed-bsu-index", type=_nonnegative_int)
     parser.add_argument(
         "--buffering-candidate-drive-type-mode",
-        choices=("single_fixed", "four_strength_table"),
+        choices=("single_fixed", "four_strength_table", "fast_buffers"),
     )
     parser.add_argument("--buffering-candidate-drive-strength-table")
     parser.add_argument("--buffering-discrete-count-proximal-lambda", type=float)

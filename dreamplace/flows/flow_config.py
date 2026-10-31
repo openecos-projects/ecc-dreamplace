@@ -476,7 +476,7 @@ def _apply_discrete_net_gradient_defaults(params, flow_kind):
     candidate_drive_strength_table = str(
         getattr(params, "buffering_candidate_drive_strength_table", "") or ""
     ).strip()
-    if candidate_drive_type_mode not in {"single_fixed", "four_strength_table"}:
+    if candidate_drive_type_mode not in {"single_fixed", "four_strength_table", "fast_buffers"}:
         raise ValueError(
             "unsupported buffering candidate drive type mode: "
             f"{candidate_drive_type_mode}"
@@ -503,6 +503,11 @@ def _apply_discrete_net_gradient_defaults(params, flow_kind):
             raise ValueError(
                 "four_strength_table cannot use buffering_fixed_bsu_index"
             )
+    if candidate_drive_type_mode == "fast_buffers":
+        if mode != "candidate":
+            raise ValueError("fast_buffers requires buffering_mode=candidate")
+        if getattr(params, "buffering_fixed_bsu_index", None) is not None:
+            raise ValueError("fast_buffers cannot use buffering_fixed_bsu_index")
     if bool(getattr(params, "buffering_segment_capacity_enabled", False)):
         raise ValueError("discrete_net_gradient does not allow segment capacity control")
     if getattr(params, "buffering_max_selected_actions", None) is not None:

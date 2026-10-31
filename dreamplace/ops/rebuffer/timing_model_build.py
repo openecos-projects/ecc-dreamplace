@@ -175,6 +175,9 @@ def build_timing_model(owner):
     )
     if owner._incremental_state is None or not can_rebind:
         owner.model = TimingPropagation(**timing_kwargs)
+        # The carrier withholds stale native endpoint slews (timing_carrier.py),
+        # so recovery checks keep the exported required-time anchor.
+        owner.model.recovery_check_uses_live_slew = True
         if owner._incremental_state is not None and not can_rebind:
             # The previous delay cache is indexed by a different scheduled
             # arc domain. Do one canonical full forward for rollback; using

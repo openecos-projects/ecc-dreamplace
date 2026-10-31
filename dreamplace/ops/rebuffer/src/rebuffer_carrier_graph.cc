@@ -64,29 +64,37 @@ void compileCarrierGraph(const py::object& base, TimingCarrierView& state)
         py::cast<std::string>(info[1]), py::cast<int>(info[4]), py::cast<int>(info[5])}).first->second;
   };
   // Equivalent masters need not store their Liberty arcs in the same order.
+  auto sameSignature = [&](const LibraryArc& a, const LibraryArc& b) {
+    return a.source == b.source && a.sink == b.sink && a.sense == b.sense
+           && a.trigger == b.trigger;
+  };
   auto currentArc = [&](int cell, int old_lut, int old_offset) {
     if (old_lut >= state.cell_arc_start.at(cell) && old_lut < state.cell_arc_start.at(cell + 1)) {
       return old_lut;
     }
     const auto previous = libraryArc(old_lut);
-    int match = -1;
-    for (int lut = state.cell_arc_start.at(cell); lut < state.cell_arc_start.at(cell + 1); ++lut) {
-      const auto& candidate = libraryArc(lut);
-      if (previous.source != candidate.source || previous.sink != candidate.sink
-          || previous.sense != candidate.sense || previous.trigger != candidate.trigger) continue;
-      // Equivalent masters can contain repeated Liberty arcs with the same
-      // port/sense/trigger signature.  The exported arc offset is the stable
-      // identity preserved by the native timing graph, so prefer that slot
-      // before declaring the mapping ambiguous.
-      if (old_offset >= 0
-          && lut - state.cell_arc_start[cell] == old_offset) {
-        return lut;
+    // Equivalent masters can repeat a port/sense/trigger signature (state
+    // dependent `when` arcs).  Masters of one family list those repeats in
+    // the same order, so map the k-th repeat of the old master to the k-th
+    // repeat of the current one.
+    int rank = 0;
+    if (old_offset >= 0) {
+      for (int lut = old_lut - old_offset; lut < old_lut; ++lut) {
+        if (sameSignature(libraryArc(lut), previous)) ++rank;
       }
-      if (match >= 0) throw py::value_error("ambiguous equivalent master timing arc");
-      match = lut;
     }
-    if (match < 0) throw py::value_error("current master does not contain the timing arc");
-    return match;
+    std::vector<int> matches;
+    for (int lut = state.cell_arc_start.at(cell); lut < state.cell_arc_start.at(cell + 1); ++lut) {
+      if (sameSignature(libraryArc(lut), previous)) matches.push_back(lut);
+    }
+    if (matches.empty()) throw py::value_error("current master does not contain the timing arc");
+    if (matches.size() > 1 && old_offset < 0) {
+      throw py::value_error("ambiguous equivalent master timing arc");
+    }
+    if (rank >= static_cast<int>(matches.size())) {
+      throw py::value_error("current master has fewer repeated timing arcs");
+    }
+    return matches[rank];
   };
   std::vector<Arc> arcs;
   std::vector<bool> is_clock;

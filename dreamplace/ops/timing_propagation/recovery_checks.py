@@ -79,7 +79,10 @@ def calculate_recovery_rat(timing, pin_rRAT, pin_fRAT, pin_rtran, pin_ftran, sca
         recovery = recovery & valid.any(dim=1)
     if not torch.any(recovery):
         return pin_rRAT, pin_fRAT
-    _validate_native_endpoint_slew_contract(timing)
+    # Rebuilt carriers have no native STA endpoint slews for their new graph;
+    # their owners opt into the live-slew check (``native == live``) instead.
+    if not getattr(timing, "recovery_check_uses_live_slew", False):
+        _validate_native_endpoint_slew_contract(timing)
 
     rows = arcs[recovery]
     clock_pins = rows[:, 0].long()
@@ -97,7 +100,9 @@ def calculate_recovery_rat(timing, pin_rRAT, pin_fRAT, pin_rtran, pin_ftran, sca
 
     native_r = pin_rtran[endpoint_pins]
     native_f = pin_ftran[endpoint_pins]
-    if getattr(timing, "timing_metric_scope", "setup_plus_recovery") == "setup_plus_recovery":
+    if getattr(timing, "timing_metric_scope", "setup_plus_recovery") == "setup_plus_recovery" and not getattr(
+        timing, "recovery_check_uses_live_slew", False
+    ):
         native_r_by_pin = torch.zeros(timing.num_pins, device=timing.device, dtype=timing.dtype)
         native_f_by_pin = torch.zeros_like(native_r_by_pin)
         native_r_by_pin[timing.end_points.long()] = timing.backend_endpoint_rSlew

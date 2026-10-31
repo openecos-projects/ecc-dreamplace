@@ -457,6 +457,28 @@ def test_resize_matches_liberty_arcs_by_ports_when_local_order_changes():
     assert carrier.flat_inst_arcs_by_level == [[1, 2, 1, 2, 1, 0, 1, 0]]
 
 
+def test_resize_maps_repeated_equivalent_arcs_by_occurrence():
+    base = _base()
+    # Both masters repeat A->Y positive (state-dependent `when` arcs), and
+    # BUF2 lists a negative arc first. The instance times through BUF1's
+    # second repeat, so the resize must pick BUF2's second repeat.
+    base.cell_id_2_arc_id_start = [0, 2, 5]
+    base.flat_libarc_info = [
+        ["A", "Y", 0, 0, 1, 0],
+        ["A", "Y", 0, 1, 1, 0],
+        ["A", "Y", 1, 0, -1, 0],
+        ["A", "Y", 1, 1, 1, 0],
+        ["A", "Y", 1, 2, 1, 0],
+    ]
+    base.flat_inst_arcs_by_level = [[1, 2, 0, 1, 1, 0, 1, 0]]
+    physical = deepcopy(base)
+    physical.node_master_names[0] = "BUF2"
+
+    carrier = CommittedTimingPyDB(base, physical)
+
+    assert carrier.flat_inst_arcs_by_level == [[1, 2, 1, 4, 1, 0, 2, 0]]
+
+
 def test_python_timing_and_planner_keep_only_qualified_endpoint_transitions():
     from dreamplace.ops.placeio_ecc.repair_timing import _slack_vector
 

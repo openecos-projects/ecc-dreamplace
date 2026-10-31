@@ -129,6 +129,21 @@ class RecoveryChecksTest(unittest.TestCase):
             gradients, (torch.tensor([0.0, -1.0]), torch.tensor([0.0, -10.0]))
         )
 
+    def test_live_slew_recovery_keeps_exported_anchor_without_native_slews(self):
+        # Rebuilt repair carriers withhold stale native slews; the check then
+        # anchors on the live slew, so an unchanged slew preserves the RAT.
+        op = self._recovery_fixture(native_r=False, native_f=False)
+        op.recovery_check_uses_live_slew = True
+        required = (torch.tensor([100.0, 100.0]), torch.tensor([100.0, 100.0]))
+        result = calculate_recovery_rat(
+            op,
+            *required,
+            torch.tensor([0.0, 7.0]),
+            torch.tensor([0.0, 9.0]),
+            scatter_timing_min,
+        )
+        torch.testing.assert_close(result, required)
+
     def test_setup_only_accepts_recovery_arcs_without_native_slews(self):
         op = self._recovery_fixture(
             native_r=False, native_f=False, timing_metric_scope="setup_only"

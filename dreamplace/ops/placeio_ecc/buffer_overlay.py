@@ -9,6 +9,7 @@ in the native rebuffer planner.
 
 import hashlib
 import json
+import os
 from collections.abc import Mapping
 
 ARTIFACT = "placeio_ecc_buffer_session"
@@ -25,6 +26,53 @@ def action_digest(actions):
         sort_keys=True,
     )
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+# Gate-only: recompute the digest on every cache hit and require equality.
+_CHECK_CACHED_DIGEST = os.environ.get("REBUFFER_CHECK_OVERLAY_DIGEST", "") == "1"
+
+
+class _ActionList(list):
+    """Action list that caches its canonical digest until it is mutated.
+
+    ``overlay_key`` is queried for every planner payload; recomputing the JSON
+    digest of all actions each time dominated repair snapshots. Appended
+    actions are not edited in place, so list-level mutation is the only
+    invalidation event.
+    """
+
+    __slots__ = ("_digest",)
+
+    def __init__(self, values=()):
+        super().__init__(values)
+        self._digest = None
+
+    def digest(self):
+        if self._digest is None:
+            self._digest = action_digest(self)
+        elif _CHECK_CACHED_DIGEST:
+            fresh = action_digest(self)
+            if fresh != self._digest:
+                raise AssertionError("cached overlay digest is stale: an action was edited in place")
+        return self._digest
+
+
+def _invalidating(name):
+    method = getattr(list, name)
+
+    def wrapper(self, *args, **kwargs):
+        self._digest = None
+        return method(self, *args, **kwargs)
+
+    wrapper.__name__ = name
+    return wrapper
+
+
+for _name in (
+    "append", "extend", "insert", "pop", "remove", "clear", "sort", "reverse",
+    "__setitem__", "__delitem__", "__iadd__", "__imul__",
+):
+    setattr(_ActionList, _name, _invalidating(_name))
 
 
 def _json_safe(value):
@@ -49,7 +97,7 @@ class BufferOverlay:
             raise ValueError("buffer overlay requires a base pydb")
         self.base_pydb = base_pydb
         self.timing_model = timing_model
-        self.actions = []
+        self._actions = _ActionList()
         self.net_patches = {}
         self.epoch = 0
         self._next_buffer_id = 0
@@ -62,6 +110,19 @@ class BufferOverlay:
         self.native_campaign_session = None
         self.native_topology_events = []
         self.projection_audit = {}
+
+    @property
+    def actions(self):
+        return self._actions
+
+    @actions.setter
+    def actions(self, values):
+        self._actions = _ActionList(values)
+
+    def actions_digest(self):
+        """Canonical digest of the current action list (cached until mutation)."""
+
+        return self._actions.digest()
 
     def _native_module(self):
         if self.timing_model is None or not hasattr(self.timing_model, "_net_record"):

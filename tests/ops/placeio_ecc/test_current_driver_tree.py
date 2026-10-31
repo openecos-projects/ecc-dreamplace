@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 pytest.importorskip("dreamplace.ops.rebuffer.rebuffer_cpp")
@@ -92,6 +93,18 @@ def test_current_driver_tree_imports_buffer_bridge_and_round_trips():
     buffer = next(node for node in tree["nodes"] if node["kind_name"] == "buffer")
     assert buffer["source_instance_id"] == 1
     assert buffer["existing_buffer"] is True
+
+
+def test_current_driver_tree_accepts_dense_coordinate_arrays():
+    dense = {
+        **_topology(),
+        "node_x": np.array([0.0, 1000.0, 2000.0, 1000.0, 3000.0, 99.0]),
+        "node_y": np.array([0.0, 0.0, 1000.0, 0.0, 0.0, 99.0]),
+    }
+
+    assert import_current_driver_tree(_pydb(), dense, root_net_id=0) == import_current_driver_tree(
+        _pydb(), _topology(), root_net_id=0
+    )
 
 
 def test_current_driver_tree_can_start_at_existing_buffer_output():

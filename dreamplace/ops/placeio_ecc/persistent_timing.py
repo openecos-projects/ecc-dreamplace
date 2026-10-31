@@ -8,6 +8,7 @@ multi-slot graph and retain a current partition payload for native planning.
 """
 
 import copy
+import itertools
 from types import SimpleNamespace
 
 import numpy as np
@@ -464,16 +465,7 @@ def _persistent_steiner_payload(owner, base_pydb, graph, patch, actions, state):
         "steiner_node_base": pin_count + 2 * buffer_count,
         "net_ids": list(range(base_net_count))
         + [child_net_base + index for index in range(buffer_count)],
-        "net_flat_topo_sort_start": [
-            offset
-            for offset in (
-                [0]
-                + [
-                    sum(len(row) for row in topologies[:index + 1])
-                    for index in range(len(topologies))
-                ]
-            )
-        ],
+        "net_flat_topo_sort_start": [0, *itertools.accumulate(len(row) for row in topologies)],
         "net_flat_topo_sort": [node for row in topologies for node in row],
         "pin_fa": parent,
         "flat_pin_to_start": flat_pin_to_start,

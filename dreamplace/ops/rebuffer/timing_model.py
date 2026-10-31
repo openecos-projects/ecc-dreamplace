@@ -151,8 +151,12 @@ class RebufferTimingModel:
             return None
         self._native_setup_path_stats["request_count"] += 1
         try:
-            model.request_critical_path_snapshot()
-            self._forward()
+            # The current state was just evaluated; packing it avoids a second
+            # full forward. Older operators without retained state re-run it.
+            capture = getattr(model, "capture_critical_path_snapshot_from_state", None)
+            if not (callable(capture) and capture()):
+                model.request_critical_path_snapshot()
+                self._forward()
             batch = model.extract_setup_critical_paths(
                 global_k=0,
                 max_depth=0,

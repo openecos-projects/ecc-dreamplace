@@ -21,6 +21,32 @@ def _numpy(value, dtype=np.float64):
 
 
 def timing_payload(pydb, timing_model, *, path_context=None):
+    if path_context:
+        return _timing_payload(pydb, timing_model, path_context=path_context)
+    # Every driver payload of one snapshot reads the same timing state. Each
+    # forward (full or affected) replaces these tensors, so their identity is
+    # the state version; the cache holds them so ids cannot be reused. Callers
+    # that edit an array (load slack override) copy it first.
+    model = timing_model.model
+    sources = (
+        pydb,
+        model,
+        timing_model.loads["rise"],
+        getattr(model, "pin_rtran_live", None),
+        getattr(model, "pin_slack", None),
+        getattr(model, "pin_slack_live_snapshot", None),
+        getattr(model, "last_endpoint_slack_tensor", None),
+        getattr(model, "pin_rAAT_live_snapshot", None),
+    )
+    cache = getattr(timing_model, "_timing_payload_cache", None)
+    if cache is not None and all(a is b for a, b in zip(cache[0], sources)):
+        return dict(cache[1])
+    payload = _timing_payload(pydb, timing_model)
+    timing_model._timing_payload_cache = (sources, payload)
+    return dict(payload)
+
+
+def _timing_payload(pydb, timing_model, *, path_context=None):
     payload = {
         "pin_slew_rise": _numpy(timing_model.model.pin_rtran_live),
         "pin_slew_fall": _numpy(timing_model.model.pin_ftran_live),
@@ -67,35 +93,64 @@ def timing_payload(pydb, timing_model, *, path_context=None):
     return payload
 
 
-def current_tree_topology_payload(pydb, timing_model, net_ids, *, steiner_view=None):
-    """Copy requested CSR slices from the active TP Steiner tree."""
-    source = "active_timing_propagation_patch_steiner"
+def steiner_arrays(timing_model, steiner_view=None):
+    """Return the active Steiner CSR and coordinates as contiguous arrays.
+
+    One repair snapshot exports a current tree per path driver; all of them
+    read the same Steiner state. Convert it once per source object instead of
+    once per driver.
+    """
     if steiner_view is None:
         steiner = timing_model.steiner
-        steiner_view = {
+        owner = steiner
+        source = "active_timing_propagation_steiner"
+        fields = {
             "net_flat_topo_sort_start": steiner.net_flat_topo_sort_start,
             "net_flat_topo_sort": steiner.net_flat_topo_sort,
             "pin_fa": steiner.pin_fa,
             "node_x": timing_model.new_x,
             "node_y": timing_model.new_y,
         }
-        source = "active_timing_propagation_steiner"
-    starts = _numpy(steiner_view["net_flat_topo_sort_start"], np.int32)
-    topo = _numpy(steiner_view["net_flat_topo_sort"], np.int32)
+    else:
+        owner = steiner_view
+        source = "active_timing_propagation_patch_steiner"
+        fields = {name: steiner_view[name] for name in (
+            "net_flat_topo_sort_start", "net_flat_topo_sort", "pin_fa", "node_x", "node_y"
+        )}
+    cache = getattr(timing_model, "_steiner_array_cache", None)
+    identity = tuple(id(value) for value in fields.values())
+    if cache is not None and cache[0] is owner and cache[1] == identity:
+        return cache[2]
+    arrays = {
+        "source": source,
+        "starts": _numpy(fields["net_flat_topo_sort_start"], np.int32),
+        "topo": _numpy(fields["net_flat_topo_sort"], np.int32),
+        "pin_fa": _numpy(fields["pin_fa"], np.int32),
+        "node_x": _numpy(fields["node_x"]),
+        "node_y": _numpy(fields["node_y"]),
+    }
+    # Hold the source values so their ids cannot be reused while cached.
+    timing_model._steiner_array_cache = (owner, identity, arrays, tuple(fields.values()))
+    return arrays
+
+
+def current_tree_topology_payload(pydb, timing_model, net_ids, *, steiner_view=None):
+    """Copy requested CSR slices from the active TP Steiner tree."""
+    arrays = steiner_arrays(timing_model, steiner_view)
+    starts, topo = arrays["starts"], arrays["topo"]
     slices = [topo[int(starts[net]) : int(starts[net + 1])] for net in net_ids]
     nodes = np.concatenate(slices) if slices else np.empty(0, dtype=np.int32)
-    x = _numpy(steiner_view["node_x"])
-    y = _numpy(steiner_view["node_y"])
     return {
         "status": "ok",
-        "topology_source": source,
+        "topology_source": arrays["source"],
         "steiner_node_base": len(pydb.pin_names),
         "net_ids": list(net_ids),
         "net_flat_topo_sort_start": np.cumsum([0, *map(len, slices)], dtype=np.int32),
         "net_flat_topo_sort": nodes,
-        "pin_fa": _numpy(steiner_view["pin_fa"], np.int32),
-        "node_x": {int(node): float(x[node]) for node in nodes},
-        "node_y": {int(node): float(y[node]) for node in nodes},
+        "pin_fa": arrays["pin_fa"],
+        # Dense coordinate arrays; native import keeps only ``nodes``.
+        "node_x": arrays["node_x"],
+        "node_y": arrays["node_y"],
     }
 
 

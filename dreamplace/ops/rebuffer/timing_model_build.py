@@ -13,6 +13,35 @@ import torch
 from .timing_model_payload import _list, _pad_luts, _pin_pair_arc_mapping
 
 
+_LUT_PREFIXES = ("r_delay", "f_delay", "r_trans", "f_trans", "r_check", "f_check")
+_LUT_FIELDS = ("values", "trans_table", "cap_table", "dim")
+# Padded Liberty LUTs keyed by the identity of their source arrays. Every
+# carrier of a design reads these arrays from the same metadata PyPlaceDB,
+# so one padding serves all rebuilt timing models; the cached sources keep
+# the ids from being reused while the entry is alive.
+_ARCS_INFO_CACHE = {}
+
+
+def _arcs_info(pydb, arcs_info_type, luts_info_type):
+    sources = tuple(
+        getattr(pydb, f"{prefix}_flat_luts_{field}")
+        for prefix in _LUT_PREFIXES
+        for field in _LUT_FIELDS
+    )
+    key = tuple(id(source) for source in sources)
+    cached = _ARCS_INFO_CACHE.get(key)
+    if cached is not None and all(a is b for a, b in zip(cached[0], sources)):
+        return cached[1]
+    infos = {}
+    for index, prefix in enumerate(_LUT_PREFIXES):
+        values, trans, cap, dims = _pad_luts(*(_list(item) for item in sources[4 * index : 4 * index + 4]))
+        infos[f"{prefix}_luts"] = luts_info_type(values, trans, cap, dims)
+    arcs_info = arcs_info_type(**infos)
+    _ARCS_INFO_CACHE.clear()
+    _ARCS_INFO_CACHE[key] = (sources, arcs_info)
+    return arcs_info
+
+
 def build_timing_model(owner):
     from dreamplace.ops.placeio_ecc.timing_schema import read_qualification_arrays
     from dreamplace.ops.rc_timing.rc_timing import RCTiming
@@ -40,16 +69,7 @@ def build_timing_model(owner):
         owner._net_name_to_id.setdefault(str(name), int(index))
     owner._net_record_cache = {}
     if owner._incremental_state is None:
-        infos = {}
-        for prefix in ("r_delay", "f_delay", "r_trans", "f_trans", "r_check", "f_check"):
-            values, trans, cap, dims = _pad_luts(
-                _list(getattr(pydb, f"{prefix}_flat_luts_values")),
-                _list(getattr(pydb, f"{prefix}_flat_luts_trans_table")),
-                _list(getattr(pydb, f"{prefix}_flat_luts_cap_table")),
-                _list(getattr(pydb, f"{prefix}_flat_luts_dim")),
-            )
-            infos[f"{prefix}_luts"] = LUTS_INFO(values, trans, cap, dims)
-        arcs_info = ARCS_INFO(**infos)
+        arcs_info = _arcs_info(pydb, ARCS_INFO, LUTS_INFO)
     else:
         arcs_info = owner._incremental_state.arcs_info
 

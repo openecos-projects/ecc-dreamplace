@@ -308,7 +308,6 @@ class RebufferPlanContext:
         """Map raw native VGDP actions through the physical carrier."""
 
         from dreamplace.ops.placeio_ecc.current_driver_tree import (
-            buffer_net_links,
             current_driver_tree_reachable_net_ids,
             current_driver_tree_root_net_id,
             map_current_driver_tree_actions,
@@ -319,11 +318,12 @@ class RebufferPlanContext:
             runtime = self.model.force_full_overlay_runtime()
         if runtime is None:
             raise RuntimeError("native tree action mapping requires a materialized overlay runtime")
-        active_pydb = runtime.model.pydb
+        _, active_pydb, active_design = self._active(runtime)
         raw_actions = list(values.get("actions", ()) or ())
         mapped = map_current_driver_tree_actions(raw_actions, active_pydb)
-        active_design = build_rebuffer_design_from_pydb(active_pydb)
-        links = buffer_net_links(active_pydb, active_design.get("node_is_buffer"))
+        # The same carrier already served this tree's payload; reuse its
+        # design view and buffer links instead of re-exporting them by name.
+        links = self._driver_tree_links(active_pydb, active_design)
         reachable = []
         for raw_action in raw_actions:
             partition = int(raw_action["net_id"])

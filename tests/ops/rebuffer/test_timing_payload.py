@@ -46,8 +46,8 @@ def test_current_tree_topology_reuses_tp_csr_ids_and_coordinates():
         "net_flat_topo_sort_start": [0, 2, 5],
         "net_flat_topo_sort": [2, 3, 0, 5, 1],
         "pin_fa": [-1, 5, -1, 2, -1, 0],
-        "node_x": {2: 33.0, 3: 44.0, 0: 11.0, 5: 66.0, 1: 22.0},
-        "node_y": {2: 34.0, 3: 45.0, 0: 12.0, 5: 67.0, 1: 23.0},
+        "node_x": [11.0, 22.0, 33.0, 44.0, 55.0, 66.0],
+        "node_y": [12.0, 23.0, 34.0, 45.0, 56.0, 67.0],
     }
 
 

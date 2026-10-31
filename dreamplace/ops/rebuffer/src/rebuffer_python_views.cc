@@ -113,8 +113,19 @@ rebuffer::TopologyView topologyFromDict(const py::dict& values)
   topology.pin_fa = asVector<int>(values["pin_fa"], "pin_fa");
   auto coordinateMap = [&](const char* field) {
     std::unordered_map<int, double> result;
-    if (!values.contains(field) || values[field].is_none()
-        || !py::isinstance<py::dict>(values[field])) {
+    if (!values.contains(field) || values[field].is_none()) {
+      return result;
+    }
+    if (!py::isinstance<py::dict>(values[field])) {
+      // Dense per-node array: keep only the nodes listed by this payload.
+      const auto dense = asVector<double>(values[field], field);
+      result.reserve(topology.net_flat_topo_sort.size());
+      for (const int node : topology.net_flat_topo_sort) {
+        if (node < 0 || node >= static_cast<int>(dense.size())) {
+          throw py::value_error(std::string(field) + " is shorter than the topology node ids");
+        }
+        result.emplace(node, dense[node]);
+      }
       return result;
     }
     for (const auto& item : values[field].cast<py::dict>()) {

@@ -21,7 +21,8 @@ def overlay_key(overlay):
     # is restored.  It must not invalidate a semantic snapshot for the same
     # action list; the action digest already includes the resolved native
     # split and physical load partition.
-    return action_digest(overlay.actions)
+    digest = getattr(overlay, "actions_digest", None)
+    return digest() if callable(digest) else action_digest(overlay.actions)
 
 
 def evaluate_current_overlay(owner, base_pydb, overlay):

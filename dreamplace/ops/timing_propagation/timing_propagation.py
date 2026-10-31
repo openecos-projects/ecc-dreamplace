@@ -903,6 +903,46 @@ class TimingPropagation(nn.Module):
         self._critical_path_snapshot = None
         self._critical_path_constraint_state = None
 
+    def capture_critical_path_snapshot_from_state(self):
+        """Capture the path snapshot of the last forward without re-propagating.
+
+        A full forward with a pending request only adds the setup-constraint
+        RAT candidates and packs the stored state; recompute exactly those from
+        the retained (non fast-loop) pin state. Returns False when the state is
+        unavailable, so callers fall back to a requested forward.
+        """
+        names = (
+            "pin_rAAT", "pin_fAAT", "pin_rRAT", "pin_fRAT", "pin_rtran", "pin_ftran",
+            "pin_net_delay_rise", "pin_net_delay_fall",
+            "cell_arc_rr_delays", "cell_arc_fr_delays",
+            "cell_arc_rf_delays", "cell_arc_ff_delays",
+        )
+        if any(getattr(self, name, None) is None for name in names):
+            return False
+        self.request_critical_path_snapshot()
+        endpoint_r = torch.full_like(self.pin_rRAT, 2e8)
+        endpoint_f = torch.full_like(self.pin_fRAT, 2e8)
+        endpoint_r[self.end_points] = self.endpoints_rRAT.to(endpoint_r)
+        endpoint_f[self.end_points] = self.endpoints_fRAT.to(endpoint_f)
+        # Only the constraint state is read; the returned RATs are discarded.
+        self.calculate_setup_rat(
+            endpoint_r, endpoint_f, self.clk_pin_rtran, self.clk_pin_ftran,
+            self.pin_rtran, self.pin_ftran,
+        )
+        self._capture_critical_path_snapshot(
+            pin_rAAT=self.pin_rAAT,
+            pin_fAAT=self.pin_fAAT,
+            pin_rRAT=self.pin_rRAT,
+            pin_fRAT=self.pin_fRAT,
+            pin_net_delay_rise=self.pin_net_delay_rise,
+            pin_net_delay_fall=self.pin_net_delay_fall,
+            cell_arc_rr_delays=self.cell_arc_rr_delays,
+            cell_arc_fr_delays=self.cell_arc_fr_delays,
+            cell_arc_rf_delays=self.cell_arc_rf_delays,
+            cell_arc_ff_delays=self.cell_arc_ff_delays,
+        )
+        return True
+
     def consume_critical_path_snapshot(self):
         if getattr(self, "_critical_path_snapshot", None) is None:
             raise RuntimeError("critical path snapshot has not been captured")

@@ -5,12 +5,11 @@ uint8 (0/1). The producer remaps native identities into placement pin and
 runtime base-arc domains. Digests cover the contiguous, little-endian bytes.
 """
 
-from dataclasses import dataclass
 import hashlib
 import json
+from dataclasses import dataclass
 
 import numpy as np
-
 
 INTEGER_COLUMNS = {
     "pin_state_start": 0,
@@ -118,7 +117,7 @@ def read_sparse_timing_view(pydb):
     metadata, arrays = view["metadata"], view["arrays"]
     _require(metadata["format_version"] == 1, "unsupported view format")
     _require(
-        CAPABILITIES <= set(metadata["capabilities"]), "missing producer capability"
+        set(metadata["capabilities"]) >= CAPABILITIES, "missing producer capability"
     )
     _require(
         set(arrays) == INTEGER_COLUMNS.keys() | OTHER_COLUMNS.keys(),
@@ -187,7 +186,11 @@ def read_sparse_timing_view(pydb):
     _range(arrays["state_source_type"], 3, "source type", minimum=1)
     _require(np.all(arrays["state_level"] >= 0), "negative state level")
     _require(np.all(arrays["state_slew_group"] >= 0), "negative slew group")
-    _range(arrays["state_slew_group"], int(arrays["state_slew_group"].max(initial=-1)) + 1, "slew group")
+    _range(
+        arrays["state_slew_group"],
+        int(arrays["state_slew_group"].max(initial=-1)) + 1,
+        "slew group",
+    )
     _require(
         np.all(arrays["state_valid"] <= 1)
         and np.all(arrays["state_seed"] <= arrays["state_valid"]),
@@ -214,7 +217,11 @@ def read_sparse_timing_view(pydb):
         and np.all(arrays["net_threshold_adjustments"][:, 2:] > 0),
         "invalid net threshold adjustments",
     )
-    for name, base_count in (("cell_edges", len(cell)), ("slew_only_cell_edges", len(cell)), ("net_edges", pin_count)):
+    for name, base_count in (
+        ("cell_edges", len(cell)),
+        ("slew_only_cell_edges", len(cell)),
+        ("net_edges", pin_count),
+    ):
         edges = arrays[name]
         _range(edges[:, 0], base_count, f"{name} base")
         _range(edges[:, 1:], states, f"{name} state")

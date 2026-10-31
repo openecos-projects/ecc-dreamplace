@@ -1,0 +1,870 @@
+"""Shadow buffer transaction for the ECC placement backend.
+
+The session owns a copy-on-write buffer overlay.  It never mutates the native
+ECC database until :meth:`PlaceIOBufferSession.commit`; commit uses the
+existing batch ``apply_buffer_actions`` primitive followed by one full
+refresh.  Tree search, candidate selection, and accept/rollback decisions stay
+in the native rebuffer planner.
+"""
+
+import hashlib
+import json
+from collections.abc import Mapping
+
+ARTIFACT = "placeio_ecc_buffer_session"
+ARTIFACT_VERSION = 1
+
+
+def action_digest(actions):
+    """Return the canonical digest used by the native batch transaction."""
+
+    serialized = json.dumps(
+        list(actions),
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _json_safe(value):
+    return json.loads(json.dumps(value, allow_nan=False, separators=(",", ":"), sort_keys=True))
+
+
+def _names(value):
+    if value is None:
+        return ()
+    return tuple(str(item) for item in list(value))
+
+
+class BufferOverlay:
+    """Copy-on-write representation of buffer insertion actions.
+
+    The overlay groups actions by net and assigns a session-local buffer id to
+    every inserted buffer.  The base PyPlaceDB is never modified.
+    """
+
+    def __init__(self, base_pydb, *, timing_model=None):
+        if base_pydb is None:
+            raise ValueError("buffer overlay requires a base pydb")
+        self.base_pydb = base_pydb
+        self.timing_model = timing_model
+        self.actions = []
+        self.net_patches = {}
+        self.epoch = 0
+        self._next_buffer_id = 0
+        self.removed_buffer_ids = set()
+        self.base_removals = []
+        self._checkpoints = {}
+        self._next_checkpoint_id = 0
+        self.native_topologies = {}
+        self.native_repair_sessions = {}
+        self.native_campaign_session = None
+        self.native_topology_events = []
+        self.projection_audit = {}
+
+    def _native_module(self):
+        if self.timing_model is None or not hasattr(self.timing_model, "_net_record"):
+            return None
+        try:
+            from dreamplace.ops.rebuffer import rebuffer_cpp
+        except ImportError:
+            return None
+        return rebuffer_cpp
+
+    def _native_state(self, net_name):
+        state = self.native_topologies.get(str(net_name))
+        if state is not None:
+            return state
+        module = self._native_module()
+        if module is None:
+            return None
+        create_overlay = getattr(self.timing_model, "create_net_overlay", None)
+        if create_overlay is not None:
+            state = create_overlay(str(net_name))
+            self.native_topologies[str(net_name)] = state
+            return state
+        try:
+            net_id = int(self.timing_model._net_id(str(net_name)))
+            record = self.timing_model._net_record(net_id)
+            tree = record["rc_tree"]
+            children = tree["children_by_node"]
+            edges = []
+            nodes = {int(record["driver_pin_id"])}
+            for parent, children_for_node in children.items():
+                parent = int(parent)
+                nodes.add(parent)
+                for child in children_for_node:
+                    child = int(child)
+                    nodes.add(child)
+                    rc = tree["edge_rc"].get((parent, child), {})
+                    edges.append(
+                        {
+                            "parent": parent,
+                            "child": child,
+                            "r": float(rc.get("r", 0.0)),
+                            "c": float(rc.get("c", 0.0)),
+                        }
+                    )
+            node_loads = {
+                int(node): [int(node)]
+                for node in tree.get("sink_nodes", ())
+                if int(node) != int(record["driver_pin_id"])
+            }
+            state = module.create_incremental_topology(
+                net_id,
+                int(record["driver_pin_id"]),
+                max(nodes, default=0) + 1,
+                {
+                    "edges": edges,
+                    "node_loads": node_loads,
+                    "coordinates": record.get("coordinates", {}),
+                },
+            )
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
+            self.native_topology_events.append(
+                {
+                    "status": "unsupported",
+                    "net_name": str(net_name),
+                    "reason": str(error),
+                }
+            )
+            return None
+        self.native_topologies[str(net_name)] = state
+        return state
+
+    def _native_repair_session(self, net_name):
+        """Return the C++ transaction boundary for one active net tree."""
+
+        name = str(net_name)
+        session = self.native_repair_sessions.get(name)
+        if session is not None:
+            return session
+        state = self._native_state(name)
+        module = self._native_module()
+        if state is None or module is None:
+            return None
+        factory = getattr(module, "create_repair_timing_session", None)
+        if factory is None:
+            return None
+        session = factory(state)
+        self.native_repair_sessions[name] = session
+        return session
+
+    def _native_campaign(self):
+        """Return the cross-net C++ transaction session, if available."""
+
+        if self.native_campaign_session is not None:
+            return self.native_campaign_session
+        module = self._native_module()
+        if module is None:
+            return None
+        factory = getattr(module, "create_repair_timing_campaign_session", None)
+        if factory is None:
+            return None
+        self.native_campaign_session = factory()
+        return self.native_campaign_session
+
+    def record_native_candidate(self, net_id, observation, state):
+        """Record a Python-TimingPropagation candidate in the native ledger."""
+
+        campaign = self._native_campaign()
+        if campaign is None:
+            return {"status": "unsupported", "reason": "native_campaign_missing"}
+        return dict(
+            campaign.record_candidate(
+                int(net_id),
+                _json_safe(dict(observation)),
+                str(state),
+            )
+            or {}
+        )
+
+    def record_native_action_state(self, net_id, action_id, state):
+        """Record an action lifecycle transition in the native ledger."""
+
+        campaign = self._native_campaign()
+        if campaign is None:
+            return {"status": "unsupported", "reason": "native_campaign_missing"}
+        return dict(
+            campaign.record_action_state(
+                int(net_id),
+                int(action_id),
+                str(state),
+            )
+            or {}
+        )
+
+    def replace_session_tree(self, net_name, actions):
+        """Atomically replace all session buffers rooted at one net."""
+
+        name = str(net_name)
+        snapshot = self._snapshot()
+        old_actions = [
+            action for action in self.actions if str(action.get("net_name")) == name
+        ]
+        try:
+            campaign = self._native_campaign()
+            state = self._native_state(name)
+            module = self._native_module()
+            replace = (
+                getattr(campaign, "replace_candidate_tree", None)
+                if campaign is not None
+                else None
+            )
+            if state is None or module is None or not callable(replace):
+                self.remove_session_buffers(name)
+                result = dict(self.apply(actions) or {})
+                result["status"] = result.get("status", "ok")
+                result["replacement_mode"] = "overlay_fallback"
+                return result
+
+            next_id = int(self._next_buffer_id)
+            normalized_actions = []
+            native_actions = []
+            for action in actions or ():
+                candidate = dict(action)
+                candidate["session_buffer_id"] = next_id
+                normalized = self._normalize_action(
+                    candidate, preserve_session_id=True
+                )
+                native_action = self._native_action(normalized)
+                if native_action is None:
+                    raise ValueError("replacement action cannot cross native boundary")
+                normalized_actions.append(normalized)
+                native_actions.append(native_action)
+                next_id += 1
+
+            campaign.attach_topology(int(state.net_id), state)
+            result = dict(
+                replace(int(state.net_id), native_actions) or {}
+            )
+            applied = list(result.get("applied", ()) or ())
+            for normalized, applied_result in zip(
+                normalized_actions, applied, strict=True
+            ):
+                for field in (
+                    "parent_node_id",
+                    "child_node_id",
+                    "split_ratio",
+                    "x_dbu",
+                    "y_dbu",
+                    "resolution_source",
+                    "projection_distance_dbu",
+                ):
+                    if field in applied_result:
+                        normalized[field] = applied_result[field]
+                if "x_dbu" in applied_result:
+                    normalized["candidate_location_x_dbu"] = int(
+                        round(applied_result["x_dbu"])
+                    )
+                if "y_dbu" in applied_result:
+                    normalized["candidate_location_y_dbu"] = int(
+                        round(applied_result["y_dbu"])
+                    )
+
+            self.actions = [
+                action
+                for action in self.actions
+                if str(action.get("net_name")) != name
+            ] + normalized_actions
+            self.removed_buffer_ids.update(
+                int(action["session_buffer_id"]) for action in old_actions
+            )
+            self._next_buffer_id = next_id
+            self._rebuild_patches()
+            self.epoch += 1
+            result.update(
+                {
+                    "replacement_mode": "native_campaign",
+                    "net_name": name,
+                    "session_buffer_ids": [
+                        int(action["session_buffer_id"])
+                        for action in normalized_actions
+                    ],
+                    "removed_session_buffer_ids": [
+                        int(action["session_buffer_id"]) for action in old_actions
+                    ],
+                    "epoch": self.epoch,
+                }
+            )
+            return result
+        except Exception:
+            self._restore_snapshot(snapshot)
+            raise
+
+    def _native_action(self, action):
+        parent = action.get("parent_node_id")
+        child = action.get("child_node_id")
+        native_geometry = hasattr(self.timing_model, "create_net_overlay")
+        if not native_geometry and (parent is None or child is None):
+            return None
+        ratio = action.get("split_ratio")
+        if not native_geometry and ratio is None:
+            return None
+        if not action.get("downstream_pin_names"):
+            return None
+        pin_ids = [
+            int(self.timing_model._pin_id(name)) for name in action.get("downstream_pin_names", ())
+        ]
+        result = {
+            "action_id": int(action["session_buffer_id"]),
+            "buffer_master_name": str(action.get("buffer_master_name", "")),
+            "downstream_pin_ids": pin_ids,
+            "x_dbu": action["candidate_location_x_dbu"],
+            "y_dbu": action["candidate_location_y_dbu"],
+        }
+        if parent is not None and child is not None:
+            result.update(parent_node_id=int(parent), child_node_id=int(child))
+        if ratio is not None:
+            result["split_ratio"] = float(ratio)
+        return result
+
+    def _apply_native_insert(self, action):
+        state = self._native_state(action.get("net_name", ""))
+        native_action = self._native_action(action)
+        if state is None or native_action is None:
+            if hasattr(self.timing_model, "create_net_overlay"):
+                raise ValueError("current native topology is required for a repair action")
+            self.native_topology_events.append(
+                {
+                    "status": "unsupported",
+                    "net_name": action.get("net_name", ""),
+                    "action_id": action.get("session_buffer_id"),
+                    "reason": "explicit_active_edge_required",
+                }
+            )
+            return {"status": "unsupported", "reason": "explicit_active_edge_required"}
+        from dreamplace.ops.rebuffer import rebuffer_cpp
+
+        native_campaign = self._native_campaign()
+        if native_campaign is not None:
+            native_campaign.attach_topology(int(state.net_id), state)
+            result = dict(
+                native_campaign.apply_candidate(int(state.net_id), native_action)
+                or {}
+            )
+            for field in (
+                "parent_node_id",
+                "child_node_id",
+                "split_ratio",
+                "x_dbu",
+                "y_dbu",
+                "resolution_source",
+                "projection_distance_dbu",
+            ):
+                if field not in result:
+                    continue
+                action[field] = result[field]
+            if "x_dbu" in result:
+                action["candidate_location_x_dbu"] = int(round(result["x_dbu"]))
+            if "y_dbu" in result:
+                action["candidate_location_y_dbu"] = int(round(result["y_dbu"]))
+            result["net_name"] = action.get("net_name", "")
+            result["action_id"] = action.get("session_buffer_id")
+            self.native_topology_events.append(result)
+            return result
+
+        native_session = self._native_repair_session(action.get("net_name", ""))
+        if native_session is not None:
+            result = dict(native_session.apply_candidate(native_action) or {})
+            for field in (
+                "parent_node_id",
+                "child_node_id",
+                "split_ratio",
+                "x_dbu",
+                "y_dbu",
+                "resolution_source",
+                "projection_distance_dbu",
+            ):
+                if field not in result:
+                    continue
+                action[field] = result[field]
+            if "x_dbu" in result:
+                action["candidate_location_x_dbu"] = int(round(result["x_dbu"]))
+            if "y_dbu" in result:
+                action["candidate_location_y_dbu"] = int(round(result["y_dbu"]))
+        else:
+            if hasattr(self.timing_model, "create_net_overlay"):
+                native_action = rebuffer_cpp.resolve_overlay_split(state, native_action)
+                for field in (
+                    "parent_node_id",
+                    "child_node_id",
+                    "split_ratio",
+                    "x_dbu",
+                    "y_dbu",
+                    "resolution_source",
+                    "projection_distance_dbu",
+                ):
+                    if field not in native_action:
+                        continue
+                    action[field] = native_action[field]
+                if "x_dbu" in native_action:
+                    action["candidate_location_x_dbu"] = int(round(native_action["x_dbu"]))
+                if "y_dbu" in native_action:
+                    action["candidate_location_y_dbu"] = int(round(native_action["y_dbu"]))
+            result = dict(rebuffer_cpp.apply_incremental_buffer_split(state, native_action) or {})
+        result["net_name"] = action.get("net_name", "")
+        result["action_id"] = action.get("session_buffer_id")
+        self.native_topology_events.append(result)
+        return result
+
+    def commit_actions(self):
+        """Export final tree depths and physical load sets from native state."""
+        if not self.actions or not hasattr(self.timing_model, "create_net_overlay"):
+            self.projection_audit = {
+                "status": "unsupported",
+                "reason": "native_projection_unavailable",
+                "projected_action_ids": [
+                    int(action["session_buffer_id"]) for action in self.actions
+                ],
+            }
+            return _json_safe(self.actions)
+        from dreamplace.ops.rebuffer import rebuffer_cpp
+
+        states = [self.native_topologies[name] for name in sorted(self.native_topologies)]
+        projected = list(
+            rebuffer_cpp.finalize_overlay_actions(
+                self.base_pydb, states, self.actions
+            )
+        )
+        native_action_ids = []
+        for state in states:
+            view = rebuffer_cpp.incremental_topology_view(state)
+            native_action_ids.extend(
+                int(buffer["action_id"])
+                for buffer in view.get("buffers", ())
+            )
+        projected_action_ids = [
+            int(action["session_buffer_id"]) for action in projected
+        ]
+        campaign = self.native_campaign_session
+        campaign_summary = (
+            dict(campaign.summary()) if campaign is not None else {}
+        )
+        self.projection_audit = {
+            "status": "ok",
+            "native_topology_action_ids": sorted(native_action_ids),
+            "projected_action_ids": projected_action_ids,
+            "native_active_count": len(native_action_ids),
+            "projected_count": len(projected_action_ids),
+            "campaign_ledger_history_count": len(
+                campaign_summary.get("ledger_history", ())
+            ),
+            "campaign_action_ledger": dict(
+                campaign_summary.get("action_ledger", {})
+            ),
+        }
+        return projected
+
+    def _remove_native_insert(self, action):
+        state = self.native_topologies.get(str(action.get("net_name", "")))
+        if state is None:
+            return {"status": "unsupported", "reason": "native_state_missing"}
+        from dreamplace.ops.rebuffer import rebuffer_cpp
+
+        native_campaign = self._native_campaign()
+        if native_campaign is not None:
+            native_campaign.attach_topology(int(state.net_id), state)
+            result = dict(
+                native_campaign.remove_candidate(
+                    int(state.net_id), int(action["session_buffer_id"])
+                )
+                or {}
+            )
+            result["net_name"] = action.get("net_name", "")
+            result["action_id"] = action.get("session_buffer_id")
+            self.native_topology_events.append(result)
+            return result
+
+        native_session = self._native_repair_session(action.get("net_name", ""))
+        if native_session is not None:
+            result = dict(
+                native_session.remove_candidate(int(action["session_buffer_id"])) or {}
+            )
+        else:
+            result = dict(
+                rebuffer_cpp.remove_incremental_buffer(
+                    state, int(action["session_buffer_id"])
+                )
+                or {}
+            )
+        result["net_name"] = action.get("net_name", "")
+        result["action_id"] = action.get("session_buffer_id")
+        self.native_topology_events.append(result)
+        return result
+
+    def _net_names(self):
+        return _names(getattr(self.base_pydb, "net_names", ()))
+
+    def _known_net(self, net_name):
+        names = self._net_names()
+        return not names or net_name in names
+
+    def _normalize_action(self, action, *, preserve_session_id=False):
+        if not isinstance(action, Mapping):
+            raise TypeError("buffer action must be a mapping")
+        normalized = _json_safe(dict(action))
+        kind = normalized.get("action_kind")
+        if kind == "buffer_remove":
+            if normalized.get("session_buffer_id") is None:
+                raise ValueError("buffer_remove requires session_buffer_id")
+            normalized["session_buffer_id"] = int(normalized["session_buffer_id"])
+            return normalized
+        if kind != "buffer_insert":
+            raise ValueError("the shadow buffer session accepts buffer_insert or buffer_remove")
+        net_name = str(normalized.get("net_name", "") or "")
+        if not net_name:
+            raise ValueError("buffer action requires net_name")
+        if not self._known_net(net_name):
+            raise ValueError(f"unknown net_name {net_name!r}")
+        if not str(normalized.get("buffer_master_name", "") or ""):
+            raise ValueError("buffer action requires buffer_master_name")
+        if not (
+            normalized.get("candidate_location_x_dbu") is not None
+            and normalized.get("candidate_location_y_dbu") is not None
+        ):
+            raise ValueError("buffer action requires candidate_location_x/y_dbu")
+        if not (
+            normalized.get("downstream_pin_names")
+            or normalized.get("downstream_pin_ids")
+            or normalized.get("load_pin_name")
+        ):
+            raise ValueError("buffer action requires a downstream load partition")
+        normalized.setdefault("parent_action_id", -1)
+        normalized.setdefault("commit_order", len(self.actions))
+        if preserve_session_id and normalized.get("session_buffer_id") is not None:
+            normalized["session_buffer_id"] = int(normalized["session_buffer_id"])
+        else:
+            normalized["session_buffer_id"] = int(self._next_buffer_id)
+        return normalized
+
+    def seed(self, actions):
+        """Rebuild a shadow topology from already verified insertions.
+
+        Seeding never touches the native IDB.  It exists for the next planner
+        round after a verified native commit, whose PyPlaceDB refresh is
+        intentionally deferred while Python ``TimingPropagation`` is the
+        timing authority.
+        """
+
+        if self.actions:
+            raise ValueError("buffer overlay can only be seeded once")
+        snapshot = self._snapshot()
+        try:
+            for action in actions or ():
+                normalized = self._normalize_action(action, preserve_session_id=True)
+                if normalized["action_kind"] != "buffer_insert":
+                    raise ValueError("seed requires buffer_insert actions")
+                if any(
+                    item["session_buffer_id"] == normalized["session_buffer_id"]
+                    for item in self.actions
+                ):
+                    raise ValueError("seeded actions contain duplicate session_buffer_id")
+                self._apply_native_insert(normalized)
+                self.actions.append(normalized)
+                self._next_buffer_id = max(
+                    self._next_buffer_id, normalized["session_buffer_id"] + 1
+                )
+        except Exception:
+            self._restore_snapshot(snapshot)
+            raise
+        self._rebuild_patches()
+        if self.actions:
+            self.epoch += 1
+        return {
+            "status": "ok",
+            "seeded_count": len(self.actions),
+            "epoch": self.epoch,
+        }
+
+    def _rebuild_patches(self):
+        self.net_patches = {}
+        for action in self.actions:
+            net_name = action["net_name"]
+            patch = self.net_patches.setdefault(
+                net_name,
+                {
+                    "inserted_buffer_ids": [],
+                    "load_pin_names": [],
+                    "action_count": 0,
+                },
+            )
+            patch["inserted_buffer_ids"].append(action["session_buffer_id"])
+            patch["load_pin_names"].extend(
+                str(value) for value in action.get("downstream_pin_names", ()) or ()
+            )
+            patch["action_count"] += 1
+
+    def apply(self, actions):
+        if not isinstance(actions, (list, tuple)):
+            raise TypeError("actions must be a list or tuple")
+        snapshot = self._snapshot()
+        try:
+            return self._apply_actions(actions)
+        except Exception:
+            self._restore_snapshot(snapshot)
+            raise
+
+    def _apply_actions(self, actions):
+        added = []
+        removed = []
+        for action in actions:
+            normalized = self._normalize_action(action)
+            if normalized.get("action_kind") == "buffer_remove":
+                target = int(normalized["session_buffer_id"])
+                index = next(
+                    (
+                        position
+                        for position, item in enumerate(self.actions)
+                        if int(item.get("session_buffer_id", -1)) == target
+                    ),
+                    None,
+                )
+                if index is None:
+                    raise ValueError(f"unknown session_buffer_id {target}")
+                existing = self.actions[index]
+                native_result = self._remove_native_insert(existing)
+                if native_result.get("status") not in {"ok", "unsupported"}:
+                    raise ValueError(native_result.get("reason", "native_remove_failed"))
+                self.actions.pop(index)
+                self.removed_buffer_ids.add(target)
+                removed.append(target)
+                continue
+            try:
+                self._apply_native_insert(normalized)
+            except Exception as error:
+                identity = {
+                    key: normalized.get(key)
+                    for key in (
+                        "net_name",
+                        "session_buffer_id",
+                        "parent_node_id",
+                        "child_node_id",
+                        "split_ratio",
+                        "candidate_location_x_dbu",
+                        "candidate_location_y_dbu",
+                        "downstream_pin_names",
+                        "segment_tree_depth",
+                        "source_parent_node_id",
+                        "source_child_node_id",
+                        "planning_partition_id",
+                        "planning_original_net_id",
+                        "resolved_state_net_id",
+                        "projection_had_active_state",
+                        "projection_simulated_bundle_state",
+                    )
+                }
+                raise ValueError(
+                    f"native buffer action failed: {identity}; reason={error}"
+                ) from error
+            self.actions.append(normalized)
+            added.append(normalized)
+            self._next_buffer_id += 1
+        self._rebuild_patches()
+        if added or removed:
+            self.epoch += 1
+        return {
+            "status": "ok",
+            "applied_count": len(added),
+            "removed_count": len(removed),
+            "epoch": self.epoch,
+            "session_buffer_ids": [item["session_buffer_id"] for item in added],
+            "removed_session_buffer_ids": removed,
+        }
+
+    def remove_base_buffers(self, instance_names, *, net_name=None):
+        """Plan removal of buffers already present in the base PyPlaceDB.
+
+        The native removal transaction is removal-only.  Commit this overlay
+        before planning inserts, then refresh and start a new session for the
+        replacement tree.
+        """
+
+        if self.actions:
+            raise ValueError(
+                "base buffer removal must be planned before inserts; "
+                "commit removals, refresh, then start a new session"
+            )
+        if isinstance(instance_names, str):
+            instance_names = [instance_names]
+        names = []
+        seen = set()
+        for value in instance_names or ():
+            name = str(value)
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            names.append(name)
+        if not names:
+            return {
+                "status": "skipped",
+                "removed_count": 0,
+                "base_remove_count": len(self.base_removals),
+                "epoch": self.epoch,
+            }
+        for name in names:
+            action = {
+                "action_kind": "buffer_remove",
+                "instance_name": name,
+            }
+            if net_name:
+                action["net_name"] = str(net_name)
+            self.base_removals.append(action)
+        self.epoch += 1
+        return {
+            "status": "ok",
+            "removed_count": len(names),
+            "base_remove_count": len(self.base_removals),
+            "epoch": self.epoch,
+        }
+
+    def remove_session_buffers(self, net_name=None):
+        """Remove session-inserted buffers, optionally restricted to one net."""
+
+        targets = [
+            int(action["session_buffer_id"])
+            for action in self.actions
+            if net_name is None or action.get("net_name") == net_name
+        ]
+        targets.reverse()
+        if not targets:
+            return {
+                "status": "skipped",
+                "removed_count": 0,
+                "epoch": self.epoch,
+            }
+        return self.apply(
+            [
+                {
+                    "action_kind": "buffer_remove",
+                    "session_buffer_id": target,
+                }
+                for target in targets
+            ]
+        )
+
+    def _snapshot(self):
+        module = self._native_module()
+        return {
+            "actions": _json_safe(self.actions),
+            "next_buffer_id": self._next_buffer_id,
+            "removed_buffer_ids": set(self.removed_buffer_ids),
+            "base_removals": _json_safe(self.base_removals),
+            "epoch": self.epoch,
+            "native_topologies": dict(self.native_topologies),
+            "native_topology_events": _json_safe(self.native_topology_events),
+            "projection_audit": _json_safe(self.projection_audit),
+            "native_checkpoints": (
+                {
+                    net_name: module.checkpoint_incremental_topology(state)
+                    for net_name, state in self.native_topologies.items()
+                }
+                if module is not None
+                else {}
+            ),
+            "native_campaign_checkpoint": (
+                self.native_campaign_session.checkpoint()
+                if self.native_campaign_session is not None
+                else None
+            ),
+        }
+
+    def checkpoint(self, label=""):
+        checkpoint_id = self._next_checkpoint_id
+        self._next_checkpoint_id += 1
+        self._checkpoints[checkpoint_id] = self._snapshot()
+        return {
+            "status": "ok",
+            "checkpoint_id": checkpoint_id,
+            "epoch": self.epoch,
+            "action_count": len(self.actions),
+        }
+
+    def _restore_snapshot(self, checkpoint):
+        self.actions = _json_safe(checkpoint["actions"])
+        self._next_buffer_id = checkpoint["next_buffer_id"]
+        self.removed_buffer_ids = set(checkpoint["removed_buffer_ids"])
+        self.base_removals = _json_safe(checkpoint["base_removals"])
+        self.native_topologies = dict(checkpoint["native_topologies"])
+        self.native_repair_sessions = {
+            name: session
+            for name, session in self.native_repair_sessions.items()
+            if name in self.native_topologies
+        }
+        campaign_checkpoint = checkpoint.get("native_campaign_checkpoint")
+        if self.native_campaign_session is not None and campaign_checkpoint is not None:
+            self.native_campaign_session.restore(campaign_checkpoint)
+        elif campaign_checkpoint is None:
+            self.native_campaign_session = None
+        self.native_topology_events = _json_safe(checkpoint["native_topology_events"])
+        self.projection_audit = _json_safe(
+            checkpoint.get("projection_audit", {})
+        )
+        native_checkpoints = checkpoint.get("native_checkpoints", {})
+        if native_checkpoints:
+            from dreamplace.ops.rebuffer import rebuffer_cpp
+
+            for net_name, native_checkpoint in native_checkpoints.items():
+                state = self.native_topologies.get(net_name)
+                if state is not None:
+                    rebuffer_cpp.restore_incremental_topology(state, native_checkpoint)
+        self._rebuild_patches()
+        self.epoch = checkpoint["epoch"]
+
+    def restore(self, checkpoint_id):
+        checkpoint = self._checkpoints.get(int(checkpoint_id))
+        if checkpoint is None:
+            raise ValueError(f"unknown checkpoint_id {checkpoint_id}")
+        self._restore_snapshot(checkpoint)
+        return {
+            "status": "ok",
+            "checkpoint_id": int(checkpoint_id),
+            "epoch": self.epoch,
+            "action_count": len(self.actions),
+        }
+
+    def rollback(self):
+        self.actions = []
+        self.net_patches = {}
+        self._next_buffer_id = 0
+        self.removed_buffer_ids = set()
+        self.base_removals = []
+        self._checkpoints = {}
+        self._next_checkpoint_id = 0
+        self.native_topologies = {}
+        self.native_repair_sessions = {}
+        self.native_campaign_session = None
+        self.native_topology_events = []
+        self.projection_audit = {}
+        self.epoch += 1
+        return {
+            "status": "rolled_back",
+            "epoch": self.epoch,
+            "action_count": 0,
+        }
+
+    def summary(self):
+        module = self._native_module()
+        return {
+            "epoch": int(self.epoch),
+            "action_count": len(self.actions),
+            "buffer_count": len(self.actions),
+            "allocated_buffer_count": int(self._next_buffer_id),
+            "removed_buffer_count": len(self.removed_buffer_ids),
+            "base_remove_count": len(self.base_removals),
+            "base_removals": _json_safe(self.base_removals),
+            "net_count": len(self.net_patches),
+            "net_patches": _json_safe(self.net_patches),
+            "action_digest": action_digest(self.actions),
+            "native_topology_events": _json_safe(self.native_topology_events),
+            "projection_audit": _json_safe(self.projection_audit),
+            "native_topologies": (
+                {
+                    net_name: module.incremental_topology_view(state)
+                    for net_name, state in self.native_topologies.items()
+                }
+                if module is not None
+                else {}
+            ),
+        }

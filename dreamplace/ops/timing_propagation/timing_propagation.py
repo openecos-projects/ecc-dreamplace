@@ -4720,6 +4720,11 @@ class TimingPropagation(nn.Module):
             scatter_timing_min,
         )
 
+    def forward_affected(self, previous, schedule, delays, impulses, caps):
+        from .affected_timing import forward_affected
+
+        return forward_affected(self, previous, schedule, delays, impulses, caps)
+
     def forward(
         self,
         pin_net_delays,
@@ -5626,7 +5631,7 @@ class TimingPropagation(nn.Module):
 
                     for idx in range(begin, end):
                         pred = int(rev_edges[idx])
-                        if pred < 0 or pred >= num_pins or pred in visited:
+                        if pred < 0 or pred >= num_pins:
                             continue
 
                         pred_slack = rslack[pred] if use_rise else fslack[pred]
@@ -5650,6 +5655,8 @@ class TimingPropagation(nn.Module):
 
                     if best_pred is None:
                         break
+                    if best_pred in visited:
+                        break
 
                     current_pin = best_pred
                     current_slack = rslack[best_pred] if use_rise else fslack[best_pred]
@@ -5663,20 +5670,42 @@ class TimingPropagation(nn.Module):
 
         if _tp_cpp is not None and hasattr(_tp_cpp, "extract_critical_paths"):
             try:
-                pin_pair_keys = _to_cpu_tensor_general(self.pin_pair_arc_keys, dtype=torch.int32)
-                pin_pair_start = _to_cpu_tensor_general(self.flat_pin_pair_arc_start, dtype=torch.int32)
-                pin_pair_indices = _to_cpu_tensor_general(self.flat_pin_pair_arc_indices, dtype=torch.int32)
+                pin_pair_keys = _to_cpu_tensor_general(
+                    self.pin_pair_arc_keys, dtype=torch.int32
+                )
+                pin_pair_start = _to_cpu_tensor_general(
+                    self.flat_pin_pair_arc_start, dtype=torch.int32
+                )
+                pin_pair_indices = _to_cpu_tensor_general(
+                    self.flat_pin_pair_arc_indices, dtype=torch.int32
+                )
+                # The pybind signature requires defined tensors even when the
+                # optional arc mapping is unavailable.  Empty tensors let the
+                # native path extractor use the reverse pin graph instead of
+                # falling back to the weaker Python reconstruction.
+                if pin_pair_keys is None:
+                    pin_pair_keys = torch.empty((0, 2), dtype=torch.int32)
+                if pin_pair_start is None:
+                    pin_pair_start = torch.empty(0, dtype=torch.int32)
+                if pin_pair_indices is None:
+                    pin_pair_indices = torch.empty(0, dtype=torch.int32)
                 paths, _ = _tp_cpp.extract_critical_paths(
                     endpoints_tensor,
                     int(K),
-                    self.start_points.cpu(),
+                    self.start_points.detach().cpu().to(torch.int32).contiguous(),
                     pin_rAAT_source.detach().cpu(),
                     pin_fAAT_source.detach().cpu(),
                     pin_rslack_source.detach().cpu(),
                     pin_fslack_source.detach().cpu(),
                     pin_slack_source.detach().cpu(),
-                    self.flat_pin_to_graph_reverse.cpu(),
-                    self.flat_pin_to_graph_start_reverse.cpu(),
+                    self.flat_pin_to_graph_reverse.detach()
+                    .cpu()
+                    .to(torch.int32)
+                    .contiguous(),
+                    self.flat_pin_to_graph_start_reverse.detach()
+                    .cpu()
+                    .to(torch.int32)
+                    .contiguous(),
                     pin_pair_keys,
                     pin_pair_start,
                     pin_pair_indices,

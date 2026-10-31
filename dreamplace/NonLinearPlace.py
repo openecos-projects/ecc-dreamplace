@@ -6342,6 +6342,16 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     steiner_input_device=str(final_global_topology["node_x"].device),
                 )
 
+            if (
+                getattr(params, "repair_buffering_enable", False)
+                and pending_joint_topology_commit_result is None
+            ):
+                from dreamplace.flows.repair_buffering import (
+                    reenter_after_repair_buffering,
+                )
+
+                return reenter_after_repair_buffering(self, params, placedb)
+
             if pending_joint_topology_commit_result is not None:
                 return self._safe_stop_after_joint_buffer_request(
                     params,

@@ -1079,9 +1079,6 @@ extract_critical_paths(
           if (pred < 0 || pred >= num_pins) {
             continue;
           }
-          if (visited.count(pred)) {
-            continue;
-          }
 
           double pred_slack = use_rise ? rslack_ptr[pred] : fslack_ptr[pred];
           double slack_gap = std::abs(pred_slack - current_slack);
@@ -1109,6 +1106,13 @@ extract_critical_paths(
         }
 
         if (best_pred < 0) {
+          break;
+        }
+        // The true critical predecessor is already on the path.  Stop here
+        // instead of following a side input: doing so produced a path that
+        // jumped from a cell output back to a non-critical input and made the
+        // planner try nets that cannot improve the endpoint.
+        if (visited.count(best_pred)) {
           break;
         }
 

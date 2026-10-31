@@ -3,7 +3,7 @@ from dataclasses import asdict, dataclass, field, replace
 from dreamplace.ops.placeio_common.backend_contract import ecc_backend_caps
 
 from .backend_caps import DEFAULT_BACKEND_CAPS
-from .export_options import PyDbExportOptions
+from .export_options import PyDbExportOptions, resolve_flag
 from .sparse_timing_schema import SparseTimingView
 from .timing_schema import validate_timing_schema
 
@@ -32,9 +32,7 @@ def _module_from_data_manager(data_manager):
     required = ("get_dmInst_ptr", "pydb", "write_placement_back", "def_save")
     missing = [name for name in required if not hasattr(module, name)]
     if missing:
-        raise TypeError(
-            "ecc backend requires ECCToolsModule methods: " + ", ".join(missing)
-        )
+        raise TypeError("ecc backend requires ECCToolsModule methods: " + ", ".join(missing))
     return module
 
 
@@ -54,12 +52,12 @@ class PlaceIOFunction:
         export_options = PyDbExportOptions.from_params(params)
         timing_inputs = dict(getattr(params, "design_inputs", {}) or {})
         timing_summary = {}
+        python_timing = with_sta and resolve_flag(params, "repair_buffering_enable")
         if with_sta:
-            prepare_timing = getattr(module, "prepare_place_timing", None)
+            method = "prepare_placement_metadata" if python_timing else "prepare_place_timing"
+            prepare_timing = getattr(module, method, None)
             if not callable(prepare_timing):
-                raise RuntimeError(
-                    "ECC-Tools timing export requires prepare_place_timing"
-                )
+                raise RuntimeError(f"ECC-Tools timing export requires {method}")
             timing_summary = dict(prepare_timing(timing_inputs) or {})
         dm_inst = module.get_dmInst_ptr()
         pydb = module.pydb(
@@ -68,19 +66,22 @@ class PlaceIOFunction:
             route_num_bins_y,
             with_routability,
             with_sta=with_sta,
+            **({"timing_metadata_only": True} if python_timing else {}),
             **asdict(export_options),
         )
+        if python_timing:
+            from .timing_carrier import CommittedTimingPyDB
+
+            pydb = CommittedTimingPyDB(pydb, pydb)
         sparse_timing_view = validate_timing_schema(pydb) if with_sta else None
-        return ECCPlaceIOBackend(
+        raw_db = ECCPlaceIOBackend(
             module=module,
             workspace=workspace,
             dm_inst=dm_inst,
             pydb=pydb,
             backend_caps=ecc_backend_caps(
                 timing=with_sta,
-                parasitics_initialization=timing_summary.get(
-                    "parasitics_initialization"
-                ),
+                parasitics_initialization=timing_summary.get("parasitics_initialization"),
             ),
             timing_enabled=with_sta,
             timing_inputs=timing_inputs,
@@ -90,6 +91,13 @@ class PlaceIOFunction:
             export_options=export_options,
             sparse_timing_view=sparse_timing_view,
         )
+        if python_timing:
+            PlaceIOFunction._promote(
+                raw_db,
+                sta_reference_role="dreamplace_timing_propagation",
+                sta_state_status="python_timing_metadata_ready",
+            )
+        return raw_db
 
     @staticmethod
     def pydb(raw_db):
@@ -143,7 +151,8 @@ class PlaceIOFunction:
             end = int(pydb.main_id_2_cell_id_start[main_id + 1])
             current_id = (
                 start + int(pydb.inst_libcell_offset[node_id])
-                if current_cell_ids is None else int(current_cell_ids[node_id])
+                if current_cell_ids is None
+                else int(current_cell_ids[node_id])
             )
             if target_id == current_id:
                 continue
@@ -158,10 +167,7 @@ class PlaceIOFunction:
         except AttributeError as exc:
             raise RuntimeError("ECC native PyPlaceDB has no sizing transaction") from exc
         summary["requested_count"] = len(node_ids)
-        if (
-            bool(summary.get("ok"))
-            and int(summary.get("accepted_count", 0) or 0) == len(node_ids)
-        ):
+        if bool(summary.get("ok")) and int(summary.get("accepted_count", 0) or 0) == len(node_ids):
             PlaceIOFunction._promote(raw_db, supports_apply_sizing=True)
         return summary
 
@@ -183,7 +189,95 @@ class PlaceIOFunction:
         return summary
 
     @staticmethod
+    def apply_repair_design(raw_db, plan, *, refresh=True):
+        """Apply one native ``repair_design`` plan.
+
+        Resizes are committed first through the existing batch sizing
+        transaction, then buffer inserts through ``apply_buffer_actions``.
+        The caller may defer ``refresh`` when it wants to evaluate a fresh DEF
+        reload instead of the in-memory re-export path.
+        """
+
+        if not raw_db.timing_enabled:
+            raise RuntimeError("ECC backend does not support repair_design commit")
+        from .timing_carrier import require_carrier_schema
+
+        require_carrier_schema(raw_db.pydb)
+        pydb = raw_db.pydb
+        resizes = list(plan.get("resizes", ()) or ())
+        actions = list(plan.get("actions", ()) or ())
+        sizing_summary = {"ok": True, "accepted_count": 0, "requested_count": 0}
+        if resizes:
+            cell_ids = []
+            for node_id, main_id in enumerate(pydb.inst_main_id):
+                main_id = int(main_id)
+                if main_id < 0:
+                    cell_ids.append(-1)
+                    continue
+                cell_ids.append(
+                    int(pydb.main_id_2_cell_id_start[main_id])
+                    + int(pydb.inst_libcell_offset[node_id])
+                )
+            for resize in resizes:
+                cell_ids[int(resize["node_id"])] = int(resize["target_cell_index"])
+            sizing_summary = PlaceIOFunction.apply_sizing(
+                raw_db,
+                cell_ids,
+                list(pydb.flat_libcell_names),
+            )
+            if not bool(sizing_summary.get("ok")) or int(
+                sizing_summary.get("accepted_count", 0)
+            ) != len(resizes):
+                return {
+                    "status": "resize_rejected",
+                    "sizing": dict(sizing_summary),
+                    "buffer": {"status": "skipped"},
+                    "refresh": {"status": "skipped"},
+                }
+
+        buffer_summary = {"status": "skipped", "accepted_count": 0}
+        if actions:
+            from .buffer_session import action_digest
+
+            buffer_summary = dict(
+                PlaceIOFunction.apply_buffer_actions(
+                    raw_db,
+                    actions,
+                    action_digest(actions),
+                )
+                or {}
+            )
+            if str(buffer_summary.get("status") or "") not in {"accepted", "ok"}:
+                return {
+                    "status": "buffer_rejected",
+                    "sizing": dict(sizing_summary),
+                    "buffer": buffer_summary,
+                    "refresh": {"status": "skipped"},
+                }
+
+        refresh_summary = {"status": "skipped"}
+        if refresh:
+            from .timing_carrier import refresh_python_timing_carrier
+
+            new_pydb, refresh_summary = refresh_python_timing_carrier(raw_db)
+            raw_db.pydb = new_pydb
+        return {
+            "status": "committed",
+            "sizing": dict(sizing_summary),
+            "buffer": buffer_summary,
+            "refresh": dict(refresh_summary or {}),
+            "requires_refresh": bool(refresh is False),
+        }
+
+    @staticmethod
     def refresh(raw_db, *, refresh_mode="full_rebuild", rebuild_mode="full_rebuild"):
+        from .timing_carrier import CommittedTimingPyDB, refresh_python_timing_carrier
+
+        if isinstance(raw_db.pydb, CommittedTimingPyDB):
+            if refresh_mode != "full_rebuild" or rebuild_mode != "full_rebuild":
+                raise ValueError("Python timing carrier refresh requires full_rebuild")
+            return refresh_python_timing_carrier(raw_db)
+
         from .refresh import RefreshController
 
         return RefreshController.refresh(

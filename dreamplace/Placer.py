@@ -460,8 +460,13 @@ class PlacementEngine:
             )
         if not reuse_existing or self.placer is None:
             timer = None
-            self.placer = NonLinearPlace.NonLinearPlace(
-                self.params, self.placedb, timer)
+            midplace = getattr(self, "midplace_repair", None)
+            if midplace is None:
+                self.placer = NonLinearPlace.NonLinearPlace(self.params, self.placedb, timer)
+            else:
+                self.placer = midplace.build_placer(
+                    lambda: NonLinearPlace.NonLinearPlace(self.params, self.placedb, timer)
+                )
             logging.info(
                 "non-linear placement initialization takes %.2f seconds"
                 % (time.time() - tt)
@@ -2968,6 +2973,11 @@ class PlacementEngine:
                 logging.info("Macro placement skipped: %s", result)
                 return result
         self.setup_placedb()
+        from dreamplace.flows.midplace_state import (
+            MidplaceBoundedStop, MidplaceRestart, create_session,
+        )
+
+        self.midplace_repair = create_session(self)
         if self._is_segment_direct_joint() and self._joint_buffer_outer_iterations() > 1:
             if int(
                 getattr(self.params, "joint_segment_virtual_window_steps", 0) or 0
@@ -2978,16 +2988,35 @@ class PlacementEngine:
         outer_window_index = 0
         post_commit_result = None
         while True:
-            if outer_window_index == 0:
-                self.place()
-            else:
-                self.place(reuse_existing=True)
+            try:
+                if outer_window_index == 0:
+                    self.place()
+                else:
+                    self.place(reuse_existing=True)
+            except MidplaceRestart:
+                self.placer = None
+                continue
+            except MidplaceBoundedStop:
+                self.last_run_result = dict(self.midplace_repair.record)
+                return self.last_run_result
+            except Exception as error:
+                if self.midplace_repair is not None:
+                    self.midplace_repair.fail(error)
+                raise
             placement_debug = dict(
                 getattr(self.placer, "last_placement_debug_summary", None) or {}
             )
             if placement_debug.get("status") == "failed":
+                if self.midplace_repair is not None:
+                    self.midplace_repair.fail(RuntimeError(placement_debug["stop_reason"]))
                 self.last_run_result = placement_debug
                 return self.last_run_result
+
+            if self.midplace_repair is not None:
+                midplace_result = self.midplace_repair.placement_finished()
+                if self.midplace_repair.config.bounded_steps:
+                    self.last_run_result = midplace_result
+                    return self.last_run_result
 
             alternating = self.placer.alternating_discrete
             if alternating is not None:
@@ -3006,6 +3035,8 @@ class PlacementEngine:
             if bool(getattr(self.params, "timing_opt_enabled", False)):
                 from dreamplace.flows.committed_topology import finalize_inflation_s5b1
 
+                if self.midplace_repair is not None:
+                    return self.midplace_repair.finish_terminal(lambda: finalize_inflation_s5b1(self))
                 return finalize_inflation_s5b1(self)
             control_result = self._post_commit_control_result()
             outer_commit_result = self._execute_pending_joint_buffer_commit(

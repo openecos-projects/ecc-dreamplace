@@ -680,6 +680,8 @@ class InflationS5B1:
 
     def before_inflation(self, model, pos, *, iteration, stage, optimizer=None):
         """Consume a window once per original attempt, before its route/snapshot."""
+        if getattr(self.params, "_midplace_objectives_pending", False):
+            return None
         schedule = getattr(self, "schedule", None)
         if schedule is not None:
             event = schedule.inflation_event(iteration=iteration, stage=stage)
@@ -708,6 +710,8 @@ class InflationS5B1:
         restarts cannot rearm them. A jump across several thresholds runs them
         in descending order, including no-op and rolled-back electrical windows.
         """
+        if getattr(self.params, "_midplace_objectives_pending", False):
+            return
         overflow = float(metric.overflow[-1])
         schedule = getattr(self, "schedule", None)
         pending = schedule.pending_milestones if schedule is not None else self.pending_milestones

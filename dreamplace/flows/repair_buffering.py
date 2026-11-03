@@ -11,6 +11,8 @@ DreamPlace ``TimingPropagation``.
 import json
 from pathlib import Path
 
+from dreamplace.ops.placeio_ecc.repair_profile import measure_phase
+
 ARTIFACT = "repair_buffering_stage"
 ARTIFACT_VERSION = 2
 
@@ -20,6 +22,14 @@ TIMING_EVALUATOR = "dreamplace_timing_propagation_after_native_commit"
 # Native ``repair_timing -setup -sequence buffer`` configuration.  These are
 # the values of the verified BM64 runs; explicit caller keys override them.
 REPAIR_TIMING_DEFAULTS = {
+    # Keep the PersistentTimingGraph production bridge opt-in until its
+    # bounded end-to-end QoR and wall-time gate passes.  The timing source
+    # remains Python DreamPlace TimingPropagation in either mode.
+    "use_persistent_graph": False,
+    "use_native_timing_graph": False,
+    "use_native_timing_queue": False,
+    "use_native_timing_evaluation": False,
+    "use_native_timing_planning": False,
     # Queue: current driver trees from a 32-endpoint window, interleaved in
     # quanta of 8 attempts, with branch-focused complete-tree requests.
     "native_tree_queue": True,
@@ -100,20 +110,31 @@ def _rebuild_placement(placedb, raw_db):
     return dict(rebuild)
 
 
-def _run_repair_design(placedb, *, config):
+def _run_repair_design(placedb, *, config, profile=None):
     from dreamplace.ops.placeio_ecc.place_io import PlaceIOFunction
     from dreamplace.ops.placeio_ecc.timing_carrier import refresh_python_timing_carrier
     from dreamplace.ops.rebuffer.repair_design import plan_repair_design_from_pydb
     from dreamplace.ops.rebuffer.timing_model import RebufferTimingModel
+    from dreamplace.ops.rebuffer.timing_profile import placement_timing_kwargs
 
     raw_db = _rawdb(placedb)
     # The placement view is scaled/shifted; repair planners and buffer
     # coordinates use the original ECC dbu database.
     pydb = raw_db.pydb
+    profile_kwargs = {"profile": profile} if profile is not None else {}
     if getattr(raw_db, "module", None) is not None:
-        pydb, _ = refresh_python_timing_carrier(raw_db)
-    timing_model = RebufferTimingModel(pydb, use_pin_offset=False)
-    plan = plan_repair_design_from_pydb(pydb, timing_model, config=config)
+        with measure_phase(profile, "input_carrier_refresh_ms"):
+            pydb, _ = refresh_python_timing_carrier(raw_db)
+    provider = str(config.get("steiner_provider", "ecc"))
+    # The selected PD profile retains the physical-pin geometry of its
+    # previous planner input; the legacy profile uses instance origins.
+    timing_kwargs = placement_timing_kwargs(config, use_pin_offset=provider == "openroad_stt")
+    with measure_phase(profile, "python_timing_model_build_ms"):
+        timing_model = RebufferTimingModel(pydb, **timing_kwargs)
+    with measure_phase(profile, "repair_plan_ms"):
+        plan = plan_repair_design_from_pydb(pydb, timing_model, config=config)
+    if profile is not None:
+        profile.plans["repair_design"] = plan
     summary = {
         "status": plan.get("status"),
         "timing_before": plan.get("baseline"),
@@ -122,29 +143,47 @@ def _run_repair_design(placedb, *, config):
         "buffer_histogram": buffer_histogram(plan.get("actions", ())),
         "plan": plan,
     }
+    if profile is not None:
+        summary["timing_profile"] = {
+            "steiner_provider": provider, "use_pin_offset": bool(timing_model.use_pin_offset),
+            "r_unit": timing_model.r_unit, "c_unit": timing_model.c_unit,
+        }
     if plan.get("status") != "ok":
         return summary
     if not plan.get("actions") and not plan.get("resizes"):
         summary.update({"status": "noop", "commit": {"status": "skipped"}})
         return summary
 
-    commit = PlaceIOFunction.apply_repair_design(raw_db, plan, refresh=False)
+    commit = PlaceIOFunction.apply_repair_design(raw_db, plan, refresh=False, **profile_kwargs)
     summary["commit"] = dict(commit)
     if str(commit.get("status") or "") != "committed":
         summary["status"] = "commit_failed"
         return summary
 
-    refreshed, refresh = refresh_python_timing_carrier(raw_db)
+    refreshed, refresh = refresh_python_timing_carrier(raw_db, **profile_kwargs)
     summary["refresh"] = dict(refresh)
-    summary["rebuild"] = _rebuild_placement(placedb, raw_db)
-    summary["timing_after"] = RebufferTimingModel(
-        refreshed, use_pin_offset=False
-    ).baseline.as_dict()
+    with measure_phase(profile, "placedb_rebuild_ms"):
+        summary["rebuild"] = _rebuild_placement(placedb, raw_db)
+    with measure_phase(profile, "python_timing_model_build_ms"):
+        after = RebufferTimingModel(refreshed, **timing_kwargs)
+    summary["timing_after"] = after.baseline.as_dict()
+    if profile is not None:
+        from dreamplace.ops.placeio_ecc.electrical_observation import electrical_observation
+
+        with profile.measure("fresh_electrical_observation_ms"):
+            summary["timing_after_electrical"] = electrical_observation(
+                after,
+                max_fanout=config.get("max_fanout", 32),
+                cap_margin=config.get("cap_margin", 0.0),
+                slew_margin=config.get("slew_margin", 0.0),
+            )
+    if provider == "openroad_stt":
+        summary["timing_after_steiner_input_identity"] = dict(after.steiner_input_identity)
     summary["status"] = "ok"
     return summary
 
 
-def _run_repair_timing(placedb, *, max_passes, config):
+def _run_repair_timing(placedb, *, max_passes, config, profile=None):
     from dreamplace.ops.placeio_ecc.buffer_session import PlaceIOBufferSession
     from dreamplace.ops.placeio_ecc.commit_verify import (
         commit_buffer_actions_verified,
@@ -152,16 +191,27 @@ def _run_repair_timing(placedb, *, max_passes, config):
     )
     from dreamplace.ops.placeio_ecc.repair_timing import plan_timing_repair
     from dreamplace.ops.rebuffer.timing_model import RebufferTimingModel
+    from dreamplace.ops.rebuffer.timing_profile import placement_timing_kwargs
 
     raw_db = _rawdb(placedb)
     # In repair_design_then_timing the design stage already refreshed
     # raw_db.pydb to the dbu database.  The session and timing model must
     # share that exact object; PlaceIOBufferSession rejects a second export.
     pydb = raw_db.pydb
-    timing_model = RebufferTimingModel(pydb, use_pin_offset=False)
+    with measure_phase(profile, "python_timing_model_build_ms"):
+        timing_model = RebufferTimingModel(
+            pydb,
+            use_persistent_graph=bool(config.get("use_persistent_graph", False)),
+            use_native_timing_graph=bool(config.get("use_native_timing_graph", False)),
+            use_native_timing_evaluation=bool(config.get("use_native_timing_evaluation", False)),
+            **placement_timing_kwargs(config),
+        )
     session = PlaceIOBufferSession(raw_db, timing_model=timing_model)
     session.begin()
-    plan = plan_timing_repair(session, timing_model, max_passes=max_passes, config=config)
+    with measure_phase(profile, "repair_plan_ms"):
+        plan = plan_timing_repair(session, timing_model, max_passes=max_passes, config=config)
+    if profile is not None:
+        profile.plans["repair_timing"] = plan
     accepted = list(plan.get("accepted_actions", ()) or ())
     summary = {
         "status": plan.get("status"),
@@ -171,6 +221,12 @@ def _run_repair_timing(placedb, *, max_passes, config):
         "buffer_histogram": buffer_histogram(accepted),
         "plan": plan,
     }
+    if profile is not None:
+        summary["timing_profile"] = {
+            "steiner_provider": str(config.get("steiner_provider", "ecc")),
+            "use_pin_offset": bool(timing_model.use_pin_offset),
+            "r_unit": timing_model.r_unit, "c_unit": timing_model.c_unit,
+        }
     if plan.get("status") != "ok":
         session.rollback()
         summary["status"] = "plan_failed"
@@ -182,14 +238,16 @@ def _run_repair_timing(placedb, *, max_passes, config):
 
     # Commit to the native IDB in chunks; each chunk rebuilds timing indices
     # from the committed connectivity and re-evaluates it with Python TP.
-    commit = commit_buffer_actions_verified(
-        raw_db,
-        accepted,
-        chunk_size=int(config["commit_verify_chunk"]),
-        wns_margin_ps=float(config["commit_verify_wns_margin_ps"]),
-        tns_margin_ps=float(config["commit_verify_tns_margin_ps"]),
-        reader=lambda current: timing_reader(current, config=config),
-    )
+    with measure_phase(profile, "repair_timing_verified_commit_ms"):
+        commit = commit_buffer_actions_verified(
+            raw_db,
+            accepted,
+            chunk_size=int(config["commit_verify_chunk"]),
+            wns_margin_ps=float(config["commit_verify_wns_margin_ps"]),
+            tns_margin_ps=float(config["commit_verify_tns_margin_ps"]),
+            reader=lambda current: timing_reader(current, config=config),
+            **({"profile": profile} if profile is not None else {}),
+        )
     session.rollback()
     summary["commit"] = dict(commit)
     summary["verified_kept_count"] = int(commit.get("kept_count", 0) or 0)
@@ -198,7 +256,8 @@ def _run_repair_timing(placedb, *, max_passes, config):
         summary["status"] = "commit_failed"
         return summary
 
-    summary["rebuild"] = _rebuild_placement(placedb, raw_db)
+    with measure_phase(profile, "placedb_rebuild_ms"):
+        summary["rebuild"] = _rebuild_placement(placedb, raw_db)
     summary["timing_after"] = dict(commit["timing_after"])
     summary["timing_after_electrical"] = dict(commit.get("timing_after_electrical") or {})
     summary["status"] = "ok"
@@ -214,6 +273,7 @@ def run_repair_buffering_stage(
     artifact_dir=None,
     placement_snapshot_digest=None,
     topology_generation=None,
+    profile=None,
 ):
     """Run one repair-buffering stage on ``placedb``.
 
@@ -244,10 +304,25 @@ def run_repair_buffering_stage(
         "stages": {},
     }
     if mode in {"repair_design", "repair_design_then_timing"}:
-        stage = _run_repair_design(placedb, config=config)
+        before = dict(profile.timings_ms) if profile is not None else {}
+        stage = _run_repair_design(placedb, config=config, profile=profile)
+        if profile is not None:
+            stage["phase_timings_ms"] = {
+                key: value - before.get(key, 0.0) for key, value in profile.timings_ms.items()
+                if value != before.get(key, 0.0)
+            }
         summary["stages"]["repair_design"] = stage
         if stage.get("status") not in {"ok", "noop"}:
             summary["status"] = "failed"
+        elif (
+            mode == "repair_design_then_timing" and artifact_dir is not None and profile is not None
+        ):
+            from dreamplace.ops.placeio_ecc.place_io import PlaceIOFunction
+
+            path = artifact_dir / "repair_design_committed.def"
+            with profile.measure("design_boundary_export_ms"):
+                PlaceIOFunction.write_def(_rawdb(placedb), str(path))
+            summary["design_committed_def"] = str(path)
     if summary["status"] == "ok" and mode in {"repair_timing", "repair_design_then_timing"}:
         try:
             timing_config = resolve_repair_timing_config(config)
@@ -256,11 +331,23 @@ def run_repair_buffering_stage(
             _write_stage_artifact(summary, artifact_dir)
             return summary
         summary["repair_timing_config"] = timing_config
-        stage = _run_repair_timing(placedb, max_passes=max_passes, config=timing_config)
+        before = dict(profile.timings_ms) if profile is not None else {}
+        stage = _run_repair_timing(
+            placedb, max_passes=max_passes, config=timing_config, profile=profile
+        )
+        if profile is not None:
+            stage["phase_timings_ms"] = {
+                key: value - before.get(key, 0.0) for key, value in profile.timings_ms.items()
+                if value != before.get(key, 0.0)
+            }
         summary["stages"]["repair_timing"] = stage
         if stage.get("status") not in {"ok", "noop"}:
             summary["status"] = "failed"
     _write_stage_artifact(summary, artifact_dir)
+    if profile is not None and artifact_dir is not None:
+        (artifact_dir / "repair_buffering_profile.json").write_text(
+            json.dumps(profile.timings_ms, indent=2, sort_keys=True) + "\n"
+        )
     return summary
 
 

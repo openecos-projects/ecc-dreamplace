@@ -140,6 +140,8 @@ class RoutabilityController:
     def inflation_triggers(
         self, params, num_area_adjust, max_area_adjust_rounds, overflow
     ):
+        if getattr(params, "_midplace_objectives_pending", False):
+            return False, False
         if (
             self._last_inflation_step is not None
             and self._gp_steps - self._last_inflation_step < self.inflation_min_interval

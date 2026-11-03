@@ -2948,9 +2948,9 @@ class PlaceObj(nn.Module):
             groups = None
         pin_sizes = size_var[pin_nodes]
         pin_vts = vt_var[pin_nodes]
-        sized_pin_cap = torch.zeros_like(pin_sizes)
-        sized_pin_rcap = torch.zeros_like(pin_sizes)
-        sized_pin_fcap = torch.zeros_like(pin_sizes)
+        sized_pin_cap = torch.zeros_like(pin_sizes, dtype=pin_cap_base.dtype)
+        sized_pin_rcap = torch.zeros_like(pin_sizes, dtype=pin_rcap_base.dtype)
+        sized_pin_fcap = torch.zeros_like(pin_sizes, dtype=pin_fcap_base.dtype)
         size_temperature = 4.0
         debug_target_pins = (
             set() if self._production_fast_loop_enabled() else {"FE_DBTC149_n_2224:A"}
@@ -9945,6 +9945,9 @@ class PlaceObj(nn.Module):
                 and len(placedb.backend_endpoint_fSlew) > 0 else None
             ),
             sparse_timing_view=getattr(data_collections, "sparse_timing_view", None),
+            recovery_rat_is_capture_deadline=bool(getattr(
+                getattr(placedb, "pydb", None), "recovery_rat_is_capture_deadline", False
+            )),
             pin_pair_arc_keys=data_collections.pin_pair_arc_keys,
             flat_pin_pair_arc_start=data_collections.flat_pin_pair_arc_start,
             flat_pin_pair_arc_indices=data_collections.flat_pin_pair_arc_indices,

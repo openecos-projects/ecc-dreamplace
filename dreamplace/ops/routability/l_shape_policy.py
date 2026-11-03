@@ -331,6 +331,9 @@ class LShapePolicy:
             )
 
     def maybe_reenable(self, model, current_overflow):
+        if getattr(self.params, "_midplace_objectives_pending", False):
+            model.enable_l_shape_routability = False
+            return
         if model.enable_l_shape_routability:
             return
         if getattr(model, "_l_shape_auto_disabled", False):

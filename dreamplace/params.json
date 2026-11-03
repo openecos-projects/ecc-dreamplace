@@ -535,6 +535,58 @@
         "description": "native repair planner configuration; acceptance defaults to endpoint_journal and timing_driver_resize defaults to true",
         "default": {}
     },
+    "repair_buffering_midplace_enable": {
+        "description": "opt-in native repair at an overflow crossing, followed by fresh global placement",
+        "default": false
+    },
+    "repair_buffering_midplace_overflow": {
+        "description": "post-step placement overflow threshold for the session's single repair request",
+        "default": 0.6
+    },
+    "repair_buffering_midplace_mode": {
+        "description": "mid-placement repair_design or repair_design_then_timing",
+        "default": "repair_design"
+    },
+    "repair_buffering_midplace_once": {
+        "description": "require a single repair request per placement session, including restarts",
+        "default": true
+    },
+    "repair_buffering_midplace_resume_policy": {
+        "description": "cold optimizer restart with cold or warm_schedule density weights",
+        "default": "cold"
+    },
+    "repair_buffering_midplace_continue": {
+        "description": "continue global placement after the mid-placement repair",
+        "default": true
+    },
+    "repair_buffering_midplace_objectives_after_repair": {
+        "description": "defer timing, routability, electrical windows and inflation until the mid-placement repair completes",
+        "default": false
+    },
+    "repair_buffering_midplace_timing_enable": {
+        "description": "explicitly authorize the native timing-repair lane after design handoff qualification",
+        "default": false
+    },
+    "repair_buffering_midplace_max_passes": {
+        "description": "maximum native timing-repair candidate attempts in the mid-placement lane",
+        "default": 20
+    },
+    "repair_buffering_midplace_initial_policy": {
+        "description": "initial overflow below threshold triggers at the first stable optimizer step",
+        "default": "first_stable_step"
+    },
+    "repair_buffering_midplace_pending_policy": {
+        "description": "latch the crossing and defer repair until placement transactions complete",
+        "default": "defer"
+    },
+    "repair_buffering_midplace_bounded_steps": {
+        "description": "stop the experimental lane after this many post-repair steps; zero continues the remaining full budget",
+        "default": 20
+    },
+    "repair_buffering_midplace_artifact": {
+        "description": "handoff artifact filename under the design's placement result directory",
+        "default": "midplace_handoff.json"
+    },
     "two_stage_density_scaler": {
         "description": "scale density weight after the macro placement stage",
         "default": 1000

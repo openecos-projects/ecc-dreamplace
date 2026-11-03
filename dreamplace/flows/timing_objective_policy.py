@@ -149,6 +149,8 @@ def diff_tdp_gate_status(params, iteration, overflow):
     }
     if not diff_tdp_enabled(params):
         return {**status, "reason": "disabled_tdp"}
+    if getattr(params, "_midplace_objectives_pending", False):
+        return {**status, "reason": "midplace_repair_pending"}
     if int(iteration) <= 0:
         return {**status, "reason": "warmup_iteration"}
     try:

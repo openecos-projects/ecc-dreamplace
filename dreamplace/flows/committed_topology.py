@@ -105,6 +105,9 @@ def finalize_discrete_window(
         )
         validate_materialized_area(physical_area, summary, accepted, area_policy)
         placedb.cooptimization_geometry = None
+        if bool(getattr(params, "repair_buffering_midplace_enable", False)):
+            summary["prelegal_def"] = stem + ".prelegal.def"
+            write_native_def(placedb, summary["prelegal_def"])
         owner.ops.steiner_topo_op.frozen_nets.segment_state = None
         owner.data.buffer_optimization_state = None
         owner.data.buffer_segment_count_state = None

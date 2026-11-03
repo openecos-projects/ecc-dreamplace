@@ -3899,7 +3899,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         # List with the available optimizers. ATTENTION: Do not add "nesterov" in this list.
         optimizers_list = ["sgd", "sgd_momentum", "sgd_nesterov", "adam", "adamax", "nadam", "adamw", "adadelta", "rmsprop", "aggmo", "qhadam", "yogi", "radam", "adabelief", "adabound", "adafactor", "diffgrad", "novograd", "cg_fr", "cg_prp", "cg_hs", "cg_cd", "cg_ls", "cg_dy", "cg_hz", "cg_hs-dy"]
 
-        iteration = 0
+        midplace = getattr(self, "midplace_repair", None)
+        if midplace is not None:
+            from dreamplace.flows.midplace_state import PlacementCursor
+
+        resume_cursor = midplace.resume_cursor if midplace is not None else None
+        iteration = resume_cursor.raw_iteration if resume_cursor is not None else 0
         all_metrics = []
         original_stop_overflow = params.stop_overflow
         if getattr(params, "macro_only", False) and getattr(
@@ -3936,6 +3941,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     self._refresh_live_timing_topology,
                 )
                 self.inflation_s5b1 = cooptimization
+        if midplace is not None:
+            midplace.runtime_ready(self, cooptimization, routability_controller)
         inflation_legalization.validate_params(params)
         validate_ggr_l_shape_topology_params(params)
 
@@ -3970,6 +3977,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
             # global placement may run in multiple stages according to user specification
             for cur_stage, global_place_params in enumerate(global_place_stages):
+                if resume_cursor is not None and cur_stage < resume_cursor.stage:
+                    continue
 
                 # we formulate each stage as a 3-nested optimization problem
                 # f_gamma(g_density(h(x) ; density weight) ; gamma)
@@ -4036,6 +4045,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 
                 density_weight = 0.0
                 model = construct_model()
+                if (
+                    midplace is not None and midplace.restarted
+                    and cur_stage == resume_cursor.stage
+                    and midplace.resume_sub_iteration is not None
+                ):
+                    model.Lsub_iteration = midplace.resume_sub_iteration
                 self.last_global_place_model = model
                 warm_schedule_state = getattr(
                     placedb,
@@ -4475,7 +4490,13 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         use_live_timing_loss=use_live_timing_loss,
                     )
 
-                if iteration == 0 or (params.macro_place_flag and cur_stage == 1):
+                if (
+                    iteration == 0 or (params.macro_place_flag and cur_stage == 1)
+                    or (
+                        midplace is not None and midplace.restarted
+                        and cur_stage == resume_cursor.stage
+                    )
+                ):
                     write_crash_stage_marker(
                         "nonlinearplace_learning_rate_initialization",
                         "start",
@@ -4772,6 +4793,13 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     _profile_t = profile_now()
                     cur_metric.evaluate(placedb, eval_ops,
                                         pos, model.data_collections)
+                    if midplace is not None:
+                        midplace.observe_initial(
+                            cur_metric, PlacementCursor(
+                                cur_stage, Lgamma_step, Llambda_density_weight_step,
+                                Lsub_step, iteration,
+                            ),
+                        )
                     model.overflow = cur_metric.overflow.data.clone()
                     coordinator = getattr(self, "joint_coordinator", None)
                     if coordinator is not None:
@@ -5363,10 +5391,13 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         or params.adjust_rudy_area_flag
                     )
                     adjust_pin_area_flag = params.adjust_pin_area_flag
-                    num_area_adjust = 0
+                    num_area_adjust = (
+                        midplace.schedule.inflation_rounds.get(cur_stage, 0)
+                        if midplace is not None else 0
+                    )
                     max_area_adjust_rounds = routability_controller.inflation.get_inflation_round_limit(params)
                     if getattr(model, "inflation_state", None) is not None:
-                        model.inflation_state.num_area_adjust = 0
+                        model.inflation_state.num_area_adjust = num_area_adjust
                     if inflation_legalization.is_enabled(params):
                         logging.info(
                             "Ordinary inflation will trigger at stop_overflow=%.6g "
@@ -5405,14 +5436,28 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         "full placement budget: disable convergence early stops"
                     )
 
-                for Lgamma_step in range(model.Lgamma_iteration):
+                full_placement_budget = full_placement_budget or (
+                    midplace is not None and midplace.needs_bounded_steps
+                )
+                for Lgamma_step in range(
+                    resume_cursor.start(cur_stage) if resume_cursor is not None else 0,
+                    model.Lgamma_iteration,
+                ):
                     Lgamma_metrics.append([])
                     Llambda_metrics = Lgamma_metrics[-1]
                     inflation_applied_this_gamma = False
-                    for Llambda_density_weight_step in range(model.Llambda_density_weight_iteration):
+                    for Llambda_density_weight_step in range(
+                        resume_cursor.start(cur_stage, Lgamma_step)
+                        if resume_cursor is not None else 0,
+                        model.Llambda_density_weight_iteration,
+                    ):
                         Llambda_metrics.append([])
                         Lsub_metrics = Llambda_metrics[-1]
-                        for Lsub_step in range(model.Lsub_iteration):
+                        for Lsub_step in range(
+                            resume_cursor.start(cur_stage, Lgamma_step, Llambda_density_weight_step)
+                            if resume_cursor is not None else 0,
+                            model.Lsub_iteration,
+                        ):
                             # divergence threshold should decrease as overflow decreases
                             # only detect divergence when overflow is relatively low but not too low
                             div_flag = check_divergence(
@@ -5434,6 +5479,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     "possible DIVERGENCE detected, roll back to the best position recorded"
                                 )
 
+                            midplace_step_started = (
+                                time.perf_counter() if midplace is not None else None
+                            )
                             try:
                                 cur_metric = one_descent_step(
                                     Lgamma_step,
@@ -5465,6 +5513,22 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     iteration,
                                 )
                                 break
+
+                            if midplace is not None:
+                                midplace.after_step(
+                                    self, model, cur_metric, eval_ops,
+                                    PlacementCursor(
+                                        cur_stage, Lgamma_step, Llambda_density_weight_step,
+                                        Lsub_step, iteration,
+                                    ),
+                                    (time.perf_counter() - midplace_step_started) * 1000.0,
+                                    pending_transaction=(
+                                        pending_joint_topology_commit_result is not None
+                                    ),
+                                )
+                                full_placement_budget = (
+                                    full_placement_budget or midplace.needs_bounded_steps
+                                )
 
                             if handoff_controller is not None:
                                 run_event = {
@@ -5514,11 +5578,14 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     Llambda_metrics[-1][-1],
                                 )
                             )
-                            if self._update_continuous_early_stop_state(
-                                continuous_early_stop_state,
-                                early_stop_loss,
-                                iteration,
-                                loss_source=early_stop_loss_source,
+                            if (
+                                not (midplace is not None and midplace.needs_bounded_steps)
+                                and self._update_continuous_early_stop_state(
+                                    continuous_early_stop_state,
+                                    early_stop_loss,
+                                    iteration,
+                                    loss_source=early_stop_loss_source,
+                                )
                             ):
                                 stop_placement = 1
                                 logging.info(

@@ -43,7 +43,7 @@ void flatRows(py::dict& out, const char* rows_name, const char* values_name,
 
 }  // namespace
 
-py::dict exportOverlayCarrier(
+OverlayCarrierProjection buildOverlayCarrierProjection(
     const py::object& base, const SteinerView& steiner,
     const std::vector<std::shared_ptr<IncrementalTopologyState>>& states,
     const py::list& actions, const double r_unit, const double c_unit)
@@ -277,6 +277,95 @@ py::dict exportOverlayCarrier(
       node_capacitance[child] += 0.5 * capacitance;
     }
   }
+  OverlayCarrierProjection data;
+  auto& design = data.design;
+  design.dbu = py::cast<int>(base.attr("dbu"));
+  design.num_nodes = nodes.size();
+  design.num_pins = physical_pins;
+  design.num_nets = nets.size();
+  design.pin_names = std::move(pin_names);
+  design.pin2node_map = std::move(pin_owner);
+  design.pin_offset_x = std::move(pin_x);
+  design.pin_offset_y = std::move(pin_y);
+  design.node_x = std::move(node_x);
+  design.node_y = std::move(node_y);
+  design.pin2net_map.assign(physical_pins, -1);
+  design.net2driver_pin_map.assign(nets.size(), -1);
+  design.flat_net2pin_start_map.push_back(0);
+  for (std::size_t net = 0; net < nets.size(); ++net) {
+    if (!topo[net].empty()) design.net2driver_pin_map[net] = topo[net].front();
+    for (const int pin : net_pins[net]) {
+      design.pin2net_map.at(pin) = net;
+      design.flat_net2pin_map.push_back(pin);
+    }
+    design.flat_net2pin_start_map.push_back(design.flat_net2pin_map.size());
+  }
+  for (const auto& row : buffers) {
+    data.buffers.push_back({row.buffer->action_id, row.cell,
+        movable + static_cast<int>(data.buffers.size()), row.input_pin, row.output_pin, row.output_net});
+  }
+  data.node_names = std::move(nodes);
+  data.node_master_names = std::move(masters);
+  data.net_names = std::move(nets);
+  data.pin_direct = std::move(pin_orient);
+  data.node_size_x = std::move(width);
+  data.node_size_y = std::move(height);
+  data.net_pins = std::move(net_pins);
+  data.topologies = std::move(topo);
+  data.children = std::move(children);
+  data.actions.original_net_by_net = std::move(original_net);
+  data.actions.state_node_by_vertex = std::move(state_node);
+  data.actions.state_net_by_vertex = std::move(state_net);
+  data.actions.state_provenance = std::move(state_provenance);
+  auto& current = data.steiner;
+  current.steiner_node_base = physical_pins;
+  current.net_ids.resize(data.net_names.size());
+  std::iota(current.net_ids.begin(), current.net_ids.end(), 0);
+  current.net_flat_topo_sort_start.push_back(0);
+  for (const auto& row : data.topologies) {
+    current.net_flat_topo_sort.insert(current.net_flat_topo_sort.end(), row.begin(), row.end());
+    current.net_flat_topo_sort_start.push_back(current.net_flat_topo_sort.size());
+  }
+  current.pin_fa = std::move(parent);
+  current.node_x = std::move(x);
+  current.node_y = std::move(y);
+  current.edge_resistance = std::move(edge_resistance);
+  current.node_capacitance = std::move(node_capacitance);
+  return data;
+}
+
+py::dict exportOverlayCarrier(
+    const py::object& base, const SteinerView& steiner,
+    const std::vector<std::shared_ptr<IncrementalTopologyState>>& states,
+    const py::list& actions, const double r_unit, const double c_unit)
+{
+  const auto data = buildOverlayCarrierProjection(base, steiner, states, actions, r_unit, c_unit);
+  const auto& nodes = data.node_names;
+  const auto& masters = data.node_master_names;
+  const auto& nets = data.net_names;
+  const auto& design = data.design;
+  const auto& node_x = design.node_x;
+  const auto& node_y = design.node_y;
+  const auto& width = data.node_size_x;
+  const auto& height = data.node_size_y;
+  const auto& pin_names = design.pin_names;
+  const auto& pin_owner = design.pin2node_map;
+  const auto& pin_x = design.pin_offset_x;
+  const auto& pin_y = design.pin_offset_y;
+  const auto& pin_orient = data.pin_direct;
+  const auto& net_pins = data.net_pins;
+  const auto& topo = data.topologies;
+  const auto& children = data.children;
+  const auto& parent = data.steiner.pin_fa;
+  const auto& x = data.steiner.node_x;
+  const auto& y = data.steiner.node_y;
+  const auto& edge_resistance = data.steiner.edge_resistance;
+  const auto& node_capacitance = data.steiner.node_capacitance;
+  const auto& original_net = data.actions.original_net_by_net;
+  const auto& state_node = data.actions.state_node_by_vertex;
+  const auto& state_net = data.actions.state_net_by_vertex;
+  const auto& state_provenance = data.actions.state_provenance;
+  const int vertex_count = x.size(), physical_pins = design.num_pins;
   py::dict physical;
   for (const char* field : {"dbu", "num_terminals", "num_terminal_NIs", "clock_net_names",
                           "xl", "yl", "xh", "yh", "row_height", "site_width", "rows", "regions"}) {

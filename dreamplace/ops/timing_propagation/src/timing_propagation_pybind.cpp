@@ -1,4 +1,5 @@
 #include "timing_propagation_paths.h"
+#include "timing_kernels.h"
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -8,6 +9,51 @@ namespace py = pybind11;
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.doc() = "Timing propagation helper bindings";
+
+  m.def("recovery_rat_from_capture_deadline", &dreamplace::recovery_rat_from_capture_deadline,
+        py::arg("rise_required"), py::arg("fall_required"), py::arg("endpoint_pins"),
+        py::arg("rise_deadlines"), py::arg("fall_deadlines"), py::arg("recovery_pins"),
+        py::arg("rise_checks"), py::arg("fall_checks"), py::arg("recovery_valid"),
+        py::arg("setup_pins"), py::arg("setup_valid"),
+        py::arg("smooth") = false, py::arg("tau") = 2.0);
+
+  m.def("cell_aat_hard_level", &dreamplace::cell_aat_hard_level,
+        py::arg("arcs"), py::arg("pin_rAAT"), py::arg("pin_fAAT"),
+        py::arg("pin_rtran"), py::arg("pin_ftran"),
+        py::arg("pin_net_cap_rise"), py::arg("pin_net_cap_fall"),
+        py::arg("tables"), py::arg("smooth_pairwise") = false,
+        py::arg("alpha") = 20.0);
+  m.def("net_aat_hard_level", &dreamplace::net_aat_hard_level,
+        py::arg("arcs"), py::arg("pin_rAAT"), py::arg("pin_fAAT"),
+        py::arg("pin_rtran"), py::arg("pin_ftran"),
+        py::arg("pin_net_delay_rise"), py::arg("pin_net_delay_fall"),
+        py::arg("pin_net_impulse_rise"), py::arg("pin_net_impulse_fall"),
+        py::arg("epsilon"));
+  m.def("cell_rat_hard_level", &dreamplace::cell_rat_hard_level,
+        py::arg("arcs"), py::arg("pin_rRAT"), py::arg("pin_fRAT"),
+        py::arg("cell_arc_rr_delays"), py::arg("cell_arc_fr_delays"),
+        py::arg("cell_arc_rf_delays"), py::arg("cell_arc_ff_delays"));
+  m.def("net_rat_hard_level", &dreamplace::net_rat_hard_level,
+        py::arg("arcs"), py::arg("pin_rRAT"), py::arg("pin_fRAT"),
+        py::arg("pin_net_delay_rise"), py::arg("pin_net_delay_fall"));
+  m.def("setup_rat_hard_level", &dreamplace::setup_rat_hard_level,
+        py::arg("arcs"), py::arg("pin_rRAT"), py::arg("pin_fRAT"),
+        py::arg("clk_pin_rtran"), py::arg("clk_pin_ftran"),
+        py::arg("pin_rtran"), py::arg("pin_ftran"), py::arg("tables"),
+        py::arg("valid"), py::arg("smooth_pairwise") = false,
+        py::arg("alpha") = 20.0);
+  m.def("recovery_rat_hard_level", &dreamplace::recovery_rat_hard_level,
+        py::arg("arcs"), py::arg("pin_rRAT"), py::arg("pin_fRAT"),
+        py::arg("pin_rtran"), py::arg("pin_ftran"),
+        py::arg("clock_rtran"), py::arg("clock_ftran"),
+        py::arg("check_data_rtran"), py::arg("check_data_ftran"),
+        py::arg("tables"), py::arg("valid"));
+  m.def("clk2q_hard_level", &dreamplace::clk2q_hard_level,
+        py::arg("arcs"), py::arg("pin_rAAT"), py::arg("pin_fAAT"),
+        py::arg("pin_rtran"), py::arg("pin_ftran"),
+        py::arg("pin_net_cap_rise"), py::arg("pin_net_cap_fall"),
+        py::arg("clock_rtran"), py::arg("clock_ftran"), py::arg("tables"),
+        py::arg("smooth_pairwise") = false, py::arg("alpha") = 20.0);
 
   py::class_<dreamplace::TraversalPruningRefreshResult>(
       m, "TraversalPruningRefreshResult")

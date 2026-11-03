@@ -299,10 +299,12 @@ def build_liberty_view_from_pydb(pydb, *, dbu=None):
             "unsupported_reasons": ["no_two_dimensional_timing_arcs"],
         }
 
+    metadata = getattr(pydb, "repair_library_metadata", None)
     return {
         "artifact": ARTIFACT,
         "artifact_version": ARTIFACT_VERSION,
         "status": "ok",
+        **({"_native_cell_metadata": metadata} if metadata is not None else {}),
         "dbu": dbu,
         "num_cells": num_cells,
         "num_arcs": len(arc_cell_id),

@@ -46,6 +46,146 @@ def test_native_queue_snapshot_ranks_path_nets_and_roots_in_cpp():
     }
 
 
+def test_native_queue_state_reuses_window_and_focus_updates():
+    timing = _timing()
+    timing["pin_slack"] = [0.0, -0.2]
+    snapshot = rebuffer_cpp.build_native_timing_queue_snapshot(
+        _design(),
+        timing,
+        _liberty(),
+        [
+            {
+                "endpoint_pin": 1,
+                "endpoint_pin_name": "load:D",
+                "slack_ps": -0.2,
+                "path_pins": [0, 1],
+                "path_timing": {},
+            }
+        ],
+        [0],
+    )
+
+    assert "_native_queue_state" in snapshot
+    selected = rebuffer_cpp.select_timing_queue_items(snapshot, {})
+    rebuffer_cpp.update_native_timing_queue_focus(
+        snapshot,
+        [
+            {
+                "endpoint_pin": 1,
+                "root_net_id": 0,
+                "tree_key": "0:0",
+                "focus_net_ids": [0, 3],
+            }
+        ],
+    )
+    assert selected[0]["focus_net_ids"] == [0, 3]
+
+
+def test_native_queue_state_builder_omits_large_legacy_item_list():
+    timing = _timing()
+    timing["pin_slack"] = [0.0, -0.2]
+    snapshot = rebuffer_cpp.build_native_timing_queue_state(
+        _design(),
+        timing,
+        _liberty(),
+        [
+            {
+                "endpoint_pin": 1,
+                "endpoint_pin_name": "load:D",
+                "slack_ps": -0.2,
+                "path_pins": [0, 1],
+                "path_timing": {},
+            }
+        ],
+        [0],
+    )
+
+    assert "items" not in snapshot
+    assert snapshot["snapshot_statistics"]["item_count"] == 1
+    assert rebuffer_cpp.select_timing_queue_items(snapshot, {})[0]["root_net_id"] == 0
+
+
+def test_native_queue_state_update_merges_only_endpoint_delta():
+    design = _design()
+    liberty = _liberty()
+    timing = _timing()
+    record = {
+        "endpoint_pin": 1,
+        "endpoint_pin_name": "load:D",
+        "slack_ps": -0.2,
+        "path_pins": [0, 1],
+        "path_timing": {},
+    }
+    previous = rebuffer_cpp.build_native_timing_queue_state(
+        design, timing, liberty, [record], [0]
+    )
+    updated = rebuffer_cpp.update_native_timing_queue_state(
+        design,
+        timing,
+        liberty,
+        previous,
+        [{**record, "slack_ps": -0.4}],
+        [1],
+        [1],
+        [0],
+    )
+    selected = rebuffer_cpp.select_timing_queue_items(updated, {})
+    assert selected[0]["slack_ps"] == -0.4
+    assert updated["queue_context_reused"] is True
+    assert updated["queue_design_reused"] is True
+    assert updated["queue_liberty_reused"] is True
+
+    removed = rebuffer_cpp.update_native_timing_queue_state(
+        design, timing, _liberty(), updated, [], [], [1], [0]
+    )
+    assert rebuffer_cpp.select_timing_queue_items(removed, {}) == []
+
+
+def test_native_queue_snapshot_update_replaces_only_changed_endpoint_items():
+    design = _design()
+    liberty = _liberty()
+    timing = _timing()
+    record = {
+        "endpoint_pin": 1,
+        "endpoint_pin_name": "load:D",
+        "slack_ps": -0.2,
+        "path_pins": [0, 1],
+        "path_timing": {},
+    }
+    previous = rebuffer_cpp.build_native_timing_queue_snapshot(
+        design, timing, liberty, [record], [0]
+    )
+    changed = {**record, "slack_ps": -0.4}
+    updated = rebuffer_cpp.update_native_timing_queue_snapshot(
+        design,
+        timing,
+        liberty,
+        previous,
+        [changed],
+        [1],
+        [1],
+        [0],
+    )
+    assert updated["items"][0]["slack_ps"] == -0.4
+    assert updated["snapshot_statistics"]["item_count"] == 1
+    assert updated["queue_context_reused"] is True
+    assert updated["queue_design_reused"] is True
+    assert updated["queue_liberty_reused"] is True
+
+    removed = rebuffer_cpp.update_native_timing_queue_snapshot(
+        design,
+        timing,
+        liberty,
+        previous,
+        [],
+        [],
+        [1],
+        [0],
+    )
+    assert removed["items"] == []
+    assert removed["snapshot_statistics"]["item_count"] == 0
+
+
 def test_native_queue_snapshot_emits_each_ranked_path_driver_root():
     design = _design()
     design.update(

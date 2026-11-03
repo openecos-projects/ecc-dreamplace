@@ -18,7 +18,7 @@ def _extension():
     return native
 
 
-def characterize_buffers_from_pydb(pydb):
+def characterize_buffers_from_pydb(pydb, *, canonical_target_load=False):
     """Characterize buffers with the native OpenROAD-compatible search."""
 
     liberty = build_liberty_view_from_pydb(pydb)
@@ -32,7 +32,8 @@ def characterize_buffers_from_pydb(pydb):
             ),
             "liberty_summary": dict(liberty.get("summary", {})),
         }
-    result = dict(_extension().characterize_buffers(liberty))
+    native_options = {"canonical_target_load": True} if canonical_target_load else {}
+    result = dict(_extension().characterize_buffers(liberty, **native_options))
     result.update(
         {
             "artifact": ARTIFACT,

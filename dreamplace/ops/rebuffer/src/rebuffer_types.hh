@@ -31,6 +31,10 @@ struct DesignView
   // Optional electrical metadata.  Empty vectors mean the caller did not
   // provide the field; the native planner must fail closed rather than guess.
   std::vector<double> pin_cap_limit;
+  // Library pin capacitance indexed by the flattened Liberty pin id.  This is
+  // optional for the legacy planner and required by the opt-in local repair
+  // state update when a resized cell changes an upstream load.
+  std::vector<double> pin_cap;
   std::vector<double> pin_slew_limit;
   std::vector<double> pin_drive_resistance;
   std::vector<int> inst_main_id;

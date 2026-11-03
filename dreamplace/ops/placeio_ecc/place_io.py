@@ -52,7 +52,10 @@ class PlaceIOFunction:
         export_options = PyDbExportOptions.from_params(params)
         timing_inputs = dict(getattr(params, "design_inputs", {}) or {})
         timing_summary = {}
-        python_timing = with_sta and resolve_flag(params, "repair_buffering_enable")
+        python_timing = with_sta and (
+            resolve_flag(params, "repair_buffering_enable")
+            or resolve_flag(params, "repair_buffering_midplace_enable")
+        )
         if with_sta:
             method = "prepare_placement_metadata" if python_timing else "prepare_place_timing"
             prepare_timing = getattr(module, method, None)
@@ -70,9 +73,11 @@ class PlaceIOFunction:
             **asdict(export_options),
         )
         if python_timing:
+            from .library_metadata import attach_repair_library_source
             from .timing_carrier import CommittedTimingPyDB
 
-            pydb = CommittedTimingPyDB(pydb, pydb)
+            pydb = CommittedTimingPyDB(pydb, pydb, recovery_rat_is_capture_deadline=True)
+            attach_repair_library_source(pydb, params, timing_inputs)
         sparse_timing_view = validate_timing_schema(pydb) if with_sta else None
         raw_db = ECCPlaceIOBackend(
             module=module,
@@ -140,6 +145,8 @@ class PlaceIOFunction:
             raise ValueError("sizing source count does not match target nodes")
         node_ids = []
         target_names = []
+        cross_family_sources = []
+        cross_family_targets = []
         for node_id, target_id in enumerate(cell_ids):
             target_id = int(target_id)
             main_id = int(pydb.inst_main_id[node_id])
@@ -149,19 +156,27 @@ class PlaceIOFunction:
                 continue
             start = int(pydb.main_id_2_cell_id_start[main_id])
             end = int(pydb.main_id_2_cell_id_start[main_id + 1])
-            current_id = (
-                start + int(pydb.inst_libcell_offset[node_id])
-                if current_cell_ids is None
-                else int(current_cell_ids[node_id])
-            )
+            source_id = start + int(pydb.inst_libcell_offset[node_id])
+            current_id = source_id if current_cell_ids is None else int(current_cell_ids[node_id])
             if target_id == current_id:
                 continue
-            if not start <= target_id < end or target_id >= len(cell_master_names):
+            if target_id < 0 or target_id >= len(cell_master_names):
                 raise ValueError(f"node {node_id} sizing target is outside its Liberty family")
+            if not start <= target_id < end:
+                if current_id != source_id:
+                    raise ValueError("cross-family buffer sizing requires the current PyDB source")
+                cross_family_sources.append(source_id)
+                cross_family_targets.append(target_id)
             node_ids.append(node_id)
             target_names.append(cell_master_names[target_id])
         if not node_ids:
             return {"ok": True, "accepted_count": 0, "requested_count": 0, "rejected_count": 0}
+        if cross_family_sources:
+            from .library_metadata import validate_buffer_resize_pairs
+
+            validate_buffer_resize_pairs(
+                pydb, cross_family_sources, cross_family_targets, cell_master_names
+            )
         try:
             summary = dict(pydb.apply_sizing(node_ids, target_names) or {})
         except AttributeError as exc:
@@ -189,7 +204,7 @@ class PlaceIOFunction:
         return summary
 
     @staticmethod
-    def apply_repair_design(raw_db, plan, *, refresh=True):
+    def apply_repair_design(raw_db, plan, *, refresh=True, profile=None):
         """Apply one native ``repair_design`` plan.
 
         Resizes are committed first through the existing batch sizing
@@ -200,6 +215,7 @@ class PlaceIOFunction:
 
         if not raw_db.timing_enabled:
             raise RuntimeError("ECC backend does not support repair_design commit")
+        from .repair_profile import measure_phase
         from .timing_carrier import require_carrier_schema
 
         require_carrier_schema(raw_db.pydb)
@@ -220,11 +236,14 @@ class PlaceIOFunction:
                 )
             for resize in resizes:
                 cell_ids[int(resize["node_id"])] = int(resize["target_cell_index"])
-            sizing_summary = PlaceIOFunction.apply_sizing(
-                raw_db,
-                cell_ids,
-                list(pydb.flat_libcell_names),
-            )
+            with measure_phase(profile, "native_sizing_commit_ms"):
+                sizing_summary = PlaceIOFunction.apply_sizing(
+                    raw_db,
+                    cell_ids,
+                    list(pydb.flat_libcell_names),
+                )
+            if profile is not None:
+                profile.commits["sizing"] = dict(sizing_summary)
             if not bool(sizing_summary.get("ok")) or int(
                 sizing_summary.get("accepted_count", 0)
             ) != len(resizes):
@@ -239,14 +258,17 @@ class PlaceIOFunction:
         if actions:
             from .buffer_session import action_digest
 
-            buffer_summary = dict(
-                PlaceIOFunction.apply_buffer_actions(
-                    raw_db,
-                    actions,
-                    action_digest(actions),
+            with measure_phase(profile, "native_buffer_commit_ms"):
+                buffer_summary = dict(
+                    PlaceIOFunction.apply_buffer_actions(
+                        raw_db,
+                        actions,
+                        action_digest(actions),
+                    )
+                    or {}
                 )
-                or {}
-            )
+            if profile is not None:
+                profile.commits["buffer"] = buffer_summary
             if str(buffer_summary.get("status") or "") not in {"accepted", "ok"}:
                 return {
                     "status": "buffer_rejected",

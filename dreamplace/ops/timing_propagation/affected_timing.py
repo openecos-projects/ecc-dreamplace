@@ -170,6 +170,9 @@ def forward_affected(timing, previous, schedule, delays, impulses, caps):
             for name, values in zip(("rr", "fr", "rf", "ff"), cell_delays, strict=True)
         },
     )
+    timing.last_incremental_changed_pins = torch.unique(
+        torch.cat((fwd, bwd), dim=0)
+    ).detach()
     timing.last_incremental_profile = {
         "forward_pins": fwd.numel(),
         "backward_pins": bwd.numel(),

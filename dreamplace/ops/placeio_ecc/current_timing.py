@@ -1,11 +1,13 @@
 """Transport native current partitions into the existing Python timing ops."""
 
+import os
 import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 
 from .buffer_overlay import action_digest
 from .incremental_timing import IncrementalTimingState
+from .persistent_timing import _PersistentTimingOwner
 from .timing_carrier import CommittedTimingPyDB
 
 
@@ -14,6 +16,228 @@ class CurrentTimingGraph:
     model: object
     payload: dict
     key: tuple
+
+
+class PersistentGraphBridge:
+    """Guarded bridge from an overlay transaction to the native graph handle.
+
+    The bridge owns the persistent C++ graph and shares each overlay's native
+    topology state with it.  Python still constructs the exported carrier and
+    runs ``TimingPropagation``; this keeps the timing source and verified
+    commit boundary unchanged while making the 4a callback contract testable.
+    """
+
+    def __init__(self, owner, base_pydb):
+        from dreamplace.ops.rebuffer import rebuffer_cpp
+        from dreamplace.ops.rebuffer.payloads import steiner_payload
+
+        self.owner = owner
+        self.base_pydb = base_pydb
+        self.graph = rebuffer_cpp.create_persistent_timing_graph(base_pydb)
+        self._states = {}
+        self._initial_checkpoint = self.graph.checkpoint()
+        self._base_steiner = steiner_payload(base_pydb, owner)
+
+    def attach_state(self, state):
+        if state is None:
+            raise ValueError("persistent graph bridge cannot attach a null topology")
+        net_id = int(state.net_id)
+        previous = self._states.get(net_id)
+        if previous is not None and previous is not state:
+            raise ValueError("persistent graph bridge received a replacement topology state")
+        if previous is None:
+            self.graph.attach_net_topology_state(net_id, state)
+            self._states[net_id] = state
+
+    def attach_overlay(self, overlay):
+        for name in sorted(overlay.native_topologies):
+            self.attach_state(overlay.native_topologies[name])
+
+    def checkpoint(self):
+        # BufferOverlay already checkpoints each mutable IncrementalTopologyState
+        # before applying a candidate.  The bridge only attaches those shared
+        # states; it does not mutate PersistentTimingGraph's timing-state
+        # journal on the production path.  Avoid copying every topology a
+        # second time for every candidate.  Restore clears the graph's binding
+        # map and reattaches the overlay's already-restored state objects.
+        if callable(getattr(self.graph, "clear_net_topologies", None)):
+            return {
+                "mode": "bindings_only",
+                "attached_net_ids": tuple(sorted(self._states)),
+            }
+        return {
+            "mode": "full",
+            "graph": self.graph.checkpoint(),
+            "attached_net_ids": tuple(sorted(self._states)),
+        }
+
+    def restore(self, checkpoint, overlay=None):
+        if checkpoint is None:
+            raise ValueError("persistent graph bridge restore requires a checkpoint")
+        binding_only = (
+            isinstance(checkpoint, dict)
+            and checkpoint.get("mode") == "bindings_only"
+        )
+        graph_checkpoint = (
+            checkpoint.get("graph") if isinstance(checkpoint, dict) else checkpoint
+        )
+        if binding_only:
+            result = dict(self.graph.clear_net_topologies() or {})
+        elif graph_checkpoint is not None:
+            result = dict(self.graph.restore(graph_checkpoint) or {})
+        else:
+            result = {"status": "ok", "net_count": 0}
+        attached_net_ids = set(
+            int(net_id)
+            for net_id in (
+                checkpoint.get("attached_net_ids", ())
+                if isinstance(checkpoint, dict)
+                else ()
+            )
+        )
+        self._states = {}
+        if overlay is not None:
+            for name in sorted(overlay.native_topologies):
+                state = overlay.native_topologies[name]
+                net_id = int(state.net_id)
+                if binding_only or net_id not in attached_net_ids:
+                    self.graph.attach_net_topology_state(net_id, state)
+                self._states[net_id] = state
+        return result
+
+    def reset(self):
+        result = dict(self.graph.restore(self._initial_checkpoint) or {})
+        self._states = {}
+        return result
+
+    def apply_buffer_split(self, state, action):
+        self.attach_state(state)
+        return dict(self.graph.apply_buffer_split(int(state.net_id), action) or {})
+
+    def remove_buffer(self, state, action_id):
+        self.attach_state(state)
+        return dict(self.graph.remove_buffer(int(state.net_id), int(action_id)) or {})
+
+    def finalize_actions(self, actions, overlay=None):
+        # Commit-time projection may be reached before the last evaluate
+        # callback (for example after a native no-op). Attach the live
+        # topology states here so the graph-owned finalizer sees the same
+        # transaction state as the overlay.
+        if overlay is not None:
+            self.attach_overlay(overlay)
+        return list(self.graph.finalize_actions(list(actions)))
+
+    def export(self, overlay):
+        self.attach_overlay(overlay)
+        return dict(
+            self.graph.export_carrier(
+                self._base_steiner,
+                list(overlay.actions),
+                float(self.owner.r_unit),
+                float(self.owner.c_unit),
+            )
+        )
+
+
+def _evaluate_persistent_graph_overlay(owner, base_pydb, overlay):
+    from types import SimpleNamespace
+
+    from dreamplace.ops.rebuffer.timing_model import RebufferTimingModel
+
+    key = overlay_key(overlay)
+    history = owner._overlay_runtime_history
+    cached = history.pop(key, None)
+    if cached is not None:
+        if (
+            getattr(owner, "_overlay_runtime", None) is None
+            or owner._overlay_runtime.key != key
+        ):
+            if hasattr(owner, "invalidate_native_setup_path_cache"):
+                owner.invalidate_native_setup_path_cache()
+        owner._overlay_runtime = cached
+        owner.model = cached.model.model
+        if getattr(owner, "use_persistent_graph", False):
+            history[key] = cached
+        return {
+            "status": "ok",
+            "action_count": len(overlay.actions),
+            "net_count": len(overlay.native_topologies),
+            "topology_source": "persistent_graph_bridge_cached",
+            **cached.model.baseline.as_dict(),
+        }
+
+    bridge = getattr(owner, "_persistent_graph_bridge", None)
+    if bridge is None or bridge.base_pydb is not base_pydb:
+        bridge = PersistentGraphBridge(owner, base_pydb)
+        owner._persistent_graph_bridge = bridge
+    exported = bridge.export(overlay)
+    carrier = CommittedTimingPyDB(
+        base_pydb,
+        SimpleNamespace(**exported["physical"]),
+        validate_schema=False,
+    )
+    steiner_view = (
+        exported["steiner"]
+        if os.environ.get("REBUFFER_USE_OVERLAY_STEINER", "") == "1"
+        else None
+    )
+    model = RebufferTimingModel(
+        carrier,
+        r_unit=owner.r_unit,
+        c_unit=owner.c_unit,
+        scale_factor=owner.scale_factor,
+        use_pin_offset=False,
+        arcs_info=getattr(owner, "_arcs_info", None),
+        # The graph bridge controls physical carrier export. Reusing its
+        # native Steiner view is a separate opt-in experiment because it can
+        # change the Python FLUTE path and therefore the accepted trajectory.
+        # Keep the canonical Python Steiner path unless that experiment is
+        # explicitly enabled.
+        steiner_view=steiner_view,
+        steiner_provider=owner.steiner_provider if steiner_view is None else "ecc",
+    )
+    owner.model = model.model
+    owner._overlay_runtime = CurrentTimingGraph(model, exported, key)
+    # Replacing the carrier also replaces the timing graph used by native
+    # critical-path extraction. Do not let a baseline path snapshot survive
+    # the overlay transition; that would omit newly inserted synthetic pins
+    # from the next queue snapshot and change the repair trajectory.
+    if hasattr(owner, "invalidate_native_setup_path_cache"):
+        owner.invalidate_native_setup_path_cache()
+    owner._persistent_timing_runtime = None
+    history[key] = owner._overlay_runtime
+    while len(history) > owner._overlay_runtime_history_limit:
+        history.popitem(last=False)
+    return {
+        "status": "ok",
+        "action_count": len(overlay.actions),
+        "net_count": len(overlay.native_topologies),
+        "topology_source": "persistent_graph_bridge",
+        **model.baseline.as_dict(),
+    }
+
+
+def _persistent_timing_statistics(owner):
+    statistics = getattr(owner, "_persistent_timing_statistics", None)
+    if statistics is None:
+        statistics = {
+            "delta_attempts": 0,
+            "delta_successes": 0,
+            "delta_failures": 0,
+            "delta_parent_key_misses": 0,
+            "delta_history_hits": 0,
+            "delta_state_shape_skips": 0,
+            "delta_key_examples": [],
+            "same_net_attempts": 0,
+            "same_net_successes": 0,
+            "same_net_failures": 0,
+            "schedule_cache_requests": 0,
+            "schedule_cache_hits": 0,
+            "full_overlay_fallbacks": 0,
+            "last_error": None,
+        }
+        owner._persistent_timing_statistics = statistics
+    return statistics
 
 
 def overlay_key(overlay):
@@ -32,6 +256,7 @@ def evaluate_current_overlay(owner, base_pydb, overlay):
 
     if base_pydb is not owner.pydb:
         return {"status": "unsupported", "reason": "base_pydb_mismatch"}
+    persistent_statistics = _persistent_timing_statistics(owner)
     if not overlay.actions and not getattr(
         owner, "_force_materialize_empty_overlay", False
     ):
@@ -62,6 +287,8 @@ def evaluate_current_overlay(owner, base_pydb, overlay):
             owner.invalidate_native_setup_path_cache()
         owner._overlay_runtime = cached
         owner.model = cached.model.model
+        if getattr(owner, "use_persistent_graph", False):
+            history[key] = cached
         return {
             "status": "ok",
             "action_count": len(overlay.actions),
@@ -91,7 +318,13 @@ def evaluate_current_overlay(owner, base_pydb, overlay):
     # their separate one-new-net path below.
     persistent = getattr(owner, "_persistent_timing_runtime", None)
     if persistent is not None and runtime is not None and len(overlay.actions) > 1:
+        persistent_statistics["delta_attempts"] += 1
         parent_key = action_digest(list(overlay.actions[:-1]))
+        parent_runtime = runtime
+        if runtime.key != parent_key:
+            parent_runtime = history.get(parent_key)
+            if parent_runtime is not None:
+                persistent_statistics["delta_history_hits"] += 1
         action = overlay.actions[-1]
         state = overlay.native_topologies.get(str(action.get("net_name", "")))
         state_buffers = ()
@@ -102,34 +335,31 @@ def evaluate_current_overlay(owner, base_pydb, overlay):
                 "buffers", ()
             )
         if (
-            runtime.key == parent_key
+            parent_runtime is not None
             and state is not None
             and len(state_buffers) == 1
-            and not bool(getattr(runtime.model.pydb, "_compact_timing_graph", False))
         ):
             try:
                 snapshot, current = persistent.evaluate_delta(
-                    runtime, overlay, action, state
+                    parent_runtime, overlay, action, state
                 )
             except (RuntimeError, ValueError, LookupError, TypeError, AttributeError) as error:
                 owner._persistent_timing_error = repr(error)
+                persistent_statistics["delta_failures"] += 1
+                persistent_statistics["last_error"] = repr(error)
             else:
+                persistent_statistics["delta_successes"] += 1
                 if hasattr(owner, "invalidate_native_setup_path_cache"):
                     owner.invalidate_native_setup_path_cache()
-                history[runtime.key] = runtime
+                history[parent_runtime.key] = parent_runtime
                 key = overlay_key(overlay)
-                owner.model = current.model
-                runtime_model = SimpleNamespace(
-                    model=current.model,
-                    pydb=current.pydb,
-                    baseline=snapshot,
-                    delays=current.delays,
-                    loads=current.loads,
-                    impulses=current.impulses,
-                    lib_pin_caps=current.lib_pin_caps,
-                    pin_max_slew=current.pin_max_slew,
-                    pin_max_cap=current.pin_max_cap,
+                runtime_model = _PersistentTimingOwner(
+                    parent_runtime.model,
+                    current,
+                    snapshot,
+                    dict(persistent.payload),
                 )
+                owner.model = current.model
                 owner._overlay_runtime = CurrentTimingGraph(
                     runtime_model,
                     dict(persistent.payload),
@@ -142,6 +372,19 @@ def evaluate_current_overlay(owner, base_pydb, overlay):
                     "topology_source": "native_session_parent_delta_patch",
                     **snapshot.as_dict(),
                 }
+        elif parent_runtime is None:
+            persistent_statistics["delta_parent_key_misses"] += 1
+            examples = persistent_statistics["delta_key_examples"]
+            if len(examples) < 5:
+                examples.append(
+                    {
+                        "action_count": len(overlay.actions),
+                        "runtime_key": runtime.key,
+                        "parent_key": parent_key,
+                    }
+                )
+        else:
+            persistent_statistics["delta_state_shape_skips"] += 1
     same_net_persistent = False
     if persistent is not None and overlay.actions:
         same_net_persistent = (
@@ -149,30 +392,30 @@ def evaluate_current_overlay(owner, base_pydb, overlay):
             and len(overlay.native_topologies) == 1
         )
     if persistent is not None and same_net_persistent:
+        persistent_statistics["same_net_attempts"] += 1
         try:
             snapshot = persistent.evaluate(overlay)
         except (RuntimeError, ValueError, LookupError, TypeError, AttributeError) as error:
             # Unsupported graph shape or Liberty contract must retain the
             # exact carrier path as the correctness fallback.
             owner._persistent_timing_error = repr(error)
+            persistent_statistics["same_net_failures"] += 1
+            persistent_statistics["last_error"] = repr(error)
             persistent = None
         else:
+            persistent_statistics["same_net_successes"] += 1
             if hasattr(owner, "invalidate_native_setup_path_cache"):
                 owner.invalidate_native_setup_path_cache()
             key = overlay_key(overlay)
             owner.model = persistent.slot_model
+            runtime_model = _PersistentTimingOwner(
+                owner,
+                persistent.current,
+                snapshot,
+                dict(persistent.payload),
+            )
             owner._overlay_runtime = CurrentTimingGraph(
-                SimpleNamespace(
-                    model=persistent.slot_model,
-                    pydb=persistent.current.pydb,
-                    baseline=snapshot,
-                    delays=persistent.current.delays,
-                    loads=persistent.current.loads,
-                    impulses=persistent.current.impulses,
-                    lib_pin_caps=persistent.current.lib_pin_caps,
-                    pin_max_slew=persistent.current.pin_max_slew,
-                    pin_max_cap=persistent.current.pin_max_cap,
-                ),
+                runtime_model,
                 persistent.payload,
                 key,
             )
@@ -184,20 +427,35 @@ def evaluate_current_overlay(owner, base_pydb, overlay):
                 **snapshot.as_dict(),
             }
     if runtime is None or runtime.key != key:
+        persistent_statistics["full_overlay_fallbacks"] += 1
         if hasattr(owner, "invalidate_native_setup_path_cache"):
             owner.invalidate_native_setup_path_cache()
         if runtime is not None and "steiner" in runtime.payload:
             history[runtime.key] = runtime
         states = [overlay.native_topologies[name] for name in sorted(overlay.native_topologies)]
         started = time.perf_counter()
-        payload = rebuffer_cpp.export_overlay_carrier(
-            base_pydb,
-            steiner_payload(base_pydb, owner),
-            states,
-            list(overlay.actions),
-            owner.r_unit,
-            owner.c_unit,
+        # The graph bridge owns the first physical export for the overlay.
+        # Once a runtime exists, keep the canonical exporter as the carrier
+        # predecessor for insertion-monotonic reconstruction; replacing that
+        # predecessor with a new bridge wrapper increases full fallbacks.
+        use_bridge_export = (
+            getattr(owner, "use_persistent_graph", False) and runtime is None
         )
+        if use_bridge_export:
+            bridge = getattr(owner, "_persistent_graph_bridge", None)
+            if bridge is None or bridge.base_pydb is not base_pydb:
+                bridge = PersistentGraphBridge(owner, base_pydb)
+                owner._persistent_graph_bridge = bridge
+            payload = bridge.export(overlay)
+        else:
+            payload = rebuffer_cpp.export_overlay_carrier(
+                base_pydb,
+                steiner_payload(base_pydb, owner),
+                states,
+                list(overlay.actions),
+                owner.r_unit,
+                owner.c_unit,
+            )
         exported = time.perf_counter()
         previous_pydb = None if runtime is None else runtime.model.pydb
         if previous_pydb is not None and (
@@ -237,16 +495,24 @@ def evaluate_current_overlay(owner, base_pydb, overlay):
             and not bool(getattr(runtime.model.pydb, "_compact_timing_graph", False))
         ):
             previous_timing_owner = runtime.model
+        steiner_view = (
+            payload.get("steiner")
+            if os.environ.get("REBUFFER_USE_OVERLAY_STEINER", "") == "1"
+            else None
+        )
         model = RebufferTimingModel(
             carrier,
             r_unit=owner.r_unit,
             c_unit=owner.c_unit,
             scale_factor=owner.scale_factor,
             use_pin_offset=owner.use_pin_offset,
+            arcs_info=getattr(owner, "_arcs_info", None),
             # The exported partition tree preserves native action identity for
-            # projection. Timing uses a fresh ECC Steiner/RC build over the
-            # physical overlay, matching the post-commit PyPlaceDB path.
-            steiner_view=None,
+            # projection. Keep the fresh Python Steiner build as the default
+            # compatibility path; the opt-in view reuses the native current
+            # Steiner/RC topology already produced for this overlay.
+            steiner_view=steiner_view,
+            steiner_provider=owner.steiner_provider if steiner_view is None else "ecc",
             incremental_state=(
                 None
                 if runtime is not None and previous_timing_owner is None

@@ -4,7 +4,10 @@ from types import SimpleNamespace
 
 import numpy as np
 from dreamplace.ops.rebuffer import rebuffer_cpp
-from dreamplace.ops.rebuffer.payloads import current_tree_topology_payload
+from dreamplace.ops.rebuffer.payloads import (
+    _pin_rank_from_timing_model,
+    current_tree_topology_payload,
+)
 from dreamplace.ops.rebuffer.timing_model_payload import _pin_pair_arc_mapping
 
 
@@ -49,6 +52,25 @@ def test_current_tree_topology_reuses_tp_csr_ids_and_coordinates():
         "node_x": [11.0, 22.0, 33.0, 44.0, 55.0, 66.0],
         "node_y": [12.0, 23.0, 34.0, 45.0, 56.0, 67.0],
     }
+
+
+def test_pin_rank_payload_uses_timing_propagation_output_levels():
+    pydb = SimpleNamespace(pin_names=["p0", "p1", "p2", "p3", "p4"])
+    timing_model = SimpleNamespace(
+        model=SimpleNamespace(
+            flat_inst_arcs_by_level=np.array(
+                [[0, 2, 0, 0], [2, 3, 0, 1], [3, 4, 0, 2]],
+                dtype=np.int64,
+            ),
+            flat_inst_arcs_by_level_start=np.array([0, 1, 2, 3], dtype=np.int64),
+        )
+    )
+
+    result = _pin_rank_from_timing_model(pydb, timing_model)
+
+    np.testing.assert_array_equal(result, [0, 0, 0, 1, 2])
+    assert result.dtype == np.int32
+    assert result.flags.c_contiguous
 
 
 def test_pin_capacitance_resolves_current_master_and_transition_specific_output_loads():

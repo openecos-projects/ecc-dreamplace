@@ -2,6 +2,7 @@
 // Native current driver-tree import/export for placement-RC buffering.
 
 #include "rebuffer_driver_tree.hh"
+#include "rebuffer_driver_tree_links.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -27,14 +28,7 @@ rebuffer::LibertyView libertyFromDict(const py::dict& values);
 namespace rebuffer {
 namespace {
 
-struct BufferLink
-{
-  int instance_id = -1;
-  int input_pin_id = -1;
-  int output_pin_id = -1;
-  int input_net_id = -1;
-  int output_net_id = -1;
-};
+using BufferLink = CurrentDriverBufferLink;
 
 using NetSlice = std::vector<int>;
 using NodeKey = std::pair<int, int>;
@@ -196,73 +190,6 @@ bool pinCoordinate(const DesignView& design,
   if (node < static_cast<int>(design.pin_offset_y.size())) {
     y += design.pin_offset_y[node];
   }
-  return true;
-}
-
-bool collectBufferLinks(const DesignView& design,
-                        std::vector<BufferLink>& links,
-                        std::unordered_map<int, BufferLink>& by_input_pin,
-                        std::string& reason)
-{
-  std::vector<std::vector<int>> pins_by_instance(design.num_nodes);
-  for (int pin = 0; pin < design.num_pins; ++pin) {
-    const int instance = design.pin2node_map[pin];
-    if (instance < 0 || instance >= design.num_nodes) {
-      reason = "pin_instance_out_of_range";
-      return false;
-    }
-    pins_by_instance[instance].push_back(pin);
-  }
-  for (int instance = 0; instance < design.num_nodes; ++instance) {
-    if (design.node_is_buffer[instance] == 0) {
-      continue;
-    }
-    const auto& pins = pins_by_instance[instance];
-    if (pins.size() != 2) {
-      reason = "buffer_instance_must_have_two_signal_pins";
-      return false;
-    }
-    int input_pin = -1;
-    int output_pin = -1;
-    for (const int pin : pins) {
-      const int net_id = design.pin2net_map[pin];
-      if (net_id < 0 || net_id >= design.num_nets) {
-        reason = "buffer_pin_net_out_of_range";
-        return false;
-      }
-      if (design.net2driver_pin_map[net_id] == pin) {
-        if (output_pin >= 0) {
-          reason = "buffer_has_multiple_output_pins";
-          return false;
-        }
-        output_pin = pin;
-      } else {
-        if (input_pin >= 0) {
-          reason = "buffer_has_multiple_input_pins";
-          return false;
-        }
-        input_pin = pin;
-      }
-    }
-    if (input_pin < 0 || output_pin < 0) {
-      reason = "buffer_input_output_pin_not_identified";
-      return false;
-    }
-    const BufferLink link{instance,
-                          input_pin,
-                          output_pin,
-                          design.pin2net_map[input_pin],
-                          design.pin2net_map[output_pin]};
-    if (!by_input_pin.emplace(input_pin, link).second) {
-      reason = "duplicate_buffer_input_pin";
-      return false;
-    }
-    links.push_back(link);
-  }
-  std::sort(links.begin(), links.end(), [](const BufferLink& lhs, const BufferLink& rhs) {
-    return std::tie(lhs.input_net_id, lhs.input_pin_id, lhs.output_net_id)
-           < std::tie(rhs.input_net_id, rhs.input_pin_id, rhs.output_net_id);
-  });
   return true;
 }
 
@@ -523,7 +450,7 @@ bool importCurrentDriverTree(const DesignView& design,
 
   std::vector<BufferLink> buffer_links;
   std::unordered_map<int, BufferLink> buffer_by_input;
-  if (!collectBufferLinks(design, buffer_links, buffer_by_input, reason)) {
+  if (!collectCurrentDriverBufferLinks(design, buffer_links, buffer_by_input, reason)) {
     return false;
   }
   std::vector<int> net_order;

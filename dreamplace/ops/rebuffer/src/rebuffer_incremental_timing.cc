@@ -5,8 +5,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
+#include <functional>
 #include <queue>
+#include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace py = pybind11;
 namespace rebuffer {
@@ -31,12 +35,86 @@ TimingArcIdentity TimingGraphIndex::key(int id) const
 
 void TimingGraphIndex::build()
 {
+  pin_ids.clear();
+  arc_ids.clear();
+  if (!cell_active.empty() && cell_active.size() != cells.size()) {
+    throw py::value_error("timing graph active cell slots do not align");
+  }
+  if (!net_active.empty() && net_active.size() != nets.size()) {
+    throw py::value_error("timing graph active net slots do not align");
+  }
   pin_ids.reserve(pins.size()); arc_ids.reserve(cells.size());
   for (int pin = 0; pin < static_cast<int>(pins.size()); ++pin) {
     if (!pin_ids.emplace(pins[pin], pin).second) throw py::value_error("duplicate timing pin");
   }
   for (int id = 0; id < static_cast<int>(cells.size()); ++id) {
+    if (!cell_active.empty() && !cell_active[id]) continue;
     if (!arc_ids.emplace(key(id), id).second) throw py::value_error("duplicate timing arc");
+  }
+
+  const int pin_count = static_cast<int>(pins.size());
+  rank.assign(pin_count, 0);
+  path_level.assign(pin_count, 0);
+  successors.assign(pin_count, {});
+  cell_out.assign(pin_count, {});
+  cell_in.assign(pin_count, {});
+  net_out.assign(pin_count, {});
+  net_in.assign(pin_count, {});
+  std::vector<int> indegree(pin_count, 0);
+  for (int id = 0; id < static_cast<int>(cells.size()); ++id) {
+    if (!cell_active.empty() && !cell_active[id]) continue;
+    const int source_pin = source(id);
+    const int sink_pin = cells[id][1];
+    if (source_pin < 0 || source_pin >= pin_count
+        || sink_pin < 0 || sink_pin >= pin_count) {
+      throw py::value_error("timing graph arc pin is out of range");
+    }
+    cell_out[source_pin].push_back(id);
+    cell_in[sink_pin].push_back(id);
+    if (id >= clock_end) {
+      successors[source_pin].push_back(sink_pin);
+      ++indegree[sink_pin];
+    }
+  }
+  for (int id = 0; id < static_cast<int>(nets.size()); ++id) {
+    if (!net_active.empty() && !net_active[id]) continue;
+    const int source_pin = nets[id][0];
+    const int sink_pin = nets[id][1];
+    if (source_pin < 0 || source_pin >= pin_count
+        || sink_pin < 0 || sink_pin >= pin_count) {
+      throw py::value_error("timing graph net pin is out of range");
+    }
+    net_out[source_pin].push_back(id);
+    net_in[sink_pin].push_back(id);
+    successors[source_pin].push_back(sink_pin);
+    ++indegree[sink_pin];
+  }
+  std::queue<int> ready;
+  for (int pin = 0; pin < pin_count; ++pin) {
+    if (indegree[pin] == 0) ready.push(pin);
+  }
+  int visited = 0;
+  while (!ready.empty()) {
+    const int pin = ready.front();
+    ready.pop();
+    ++visited;
+    for (int id : cell_out[pin]) {
+      if (id >= clock_end) {
+        const int sink = cells[id][1];
+        path_level[sink] = std::max(path_level[sink], path_level[pin] + 1);
+      }
+    }
+    for (int id : net_out[pin]) {
+      const int sink = nets[id][1];
+      path_level[sink] = std::max(path_level[sink], path_level[pin]);
+    }
+    for (const int next : successors[pin]) {
+      rank[next] = std::max(rank[next], rank[pin] + 1);
+      if (--indegree[next] == 0) ready.push(next);
+    }
+  }
+  if (visited != pin_count) {
+    throw py::value_error("incremental timing requires a combinational DAG");
   }
 }
 
@@ -50,16 +128,111 @@ std::shared_ptr<TimingGraphIndex> makeTimingGraphIndex(
   return graph;
 }
 
-std::shared_ptr<TimingGraphIndex> timingGraphIndex(const py::object& db)
+namespace {
+
+void mixHash(std::uint64_t& state, const std::uint64_t value)
 {
-  if (py::hasattr(db, "timing_graph_index")) return db.attr("timing_graph_index").cast<std::shared_ptr<TimingGraphIndex>>();
+  state ^= value + UINT64_C(0x9e3779b97f4a7c15) + (state << 6) + (state >> 2);
+}
+
+void hashValue(std::uint64_t& state, const int value)
+{
+  mixHash(state, static_cast<std::uint64_t>(static_cast<std::int64_t>(value)));
+}
+
+void hashValue(std::uint64_t& state, const std::string& value)
+{
+  mixHash(state, static_cast<std::uint64_t>(std::hash<std::string>{}(value)));
+}
+
+template <std::size_t Width>
+void hashValue(std::uint64_t& state, const std::array<int, Width>& value)
+{
+  for (const int item : value) hashValue(state, item);
+}
+
+template <typename T>
+void hashVector(std::uint64_t& state, const std::vector<T>& values)
+{
+  mixHash(state, static_cast<std::uint64_t>(values.size()));
+  for (const auto& value : values) hashValue(state, value);
+}
+
+std::uint64_t graphFingerprint(
+    const std::vector<std::string>& pins,
+    const std::vector<TimingCellArc>& cells,
+    const std::vector<TimingNetArc>& nets,
+    const std::vector<int>& clocks,
+    const int clock_end)
+{
+  std::uint64_t state = UINT64_C(0x243f6a8885a308d3);
+  hashVector(state, pins);
+  hashVector(state, cells);
+  hashVector(state, nets);
+  hashVector(state, clocks);
+  hashValue(state, clock_end);
+  return state;
+}
+
+bool sameGraph(
+    const TimingGraphIndex& graph,
+    const std::vector<std::string>& pins,
+    const std::vector<TimingCellArc>& cells,
+    const std::vector<TimingNetArc>& nets,
+    const std::vector<int>& clocks,
+    const int clock_end)
+{
+  return graph.pins == pins && graph.cells == cells && graph.nets == nets
+      && graph.clocks == clocks && graph.clock_end == clock_end;
+}
+
+}  // namespace
+
+std::shared_ptr<TimingGraphIndex> timingGraphIndex(
+    const py::object& db, bool* cache_hit)
+{
   const auto cells = db.attr("flat_inst_arcs_by_level").cast<std::vector<TimingCellArc>>();
   const auto offsets = carrierArray<int>(db, "flat_inst_arcs_by_level_start");
   if (offsets.size() < 2 || offsets[0] != 0 || offsets[1] < 0 || offsets[1] > static_cast<int>(cells.size())) {
     throw py::value_error("incremental timing requires a valid clock arc level");
   }
-  return makeTimingGraphIndex(carrierArray<std::string>(db, "pin_names"), cells,
-      db.attr("net_flat_arcs").cast<std::vector<TimingNetArc>>(), carrierArray<int>(db, "clock_pins"), offsets[1]);
+  const auto pins = carrierArray<std::string>(db, "pin_names");
+  const auto nets = db.attr("net_flat_arcs").cast<std::vector<TimingNetArc>>();
+  const auto clocks = carrierArray<int>(db, "clock_pins");
+  if (cache_hit != nullptr) *cache_hit = false;
+  if (py::hasattr(db, "timing_graph_index")) {
+    const auto cached = db.attr("timing_graph_index").cast<std::shared_ptr<TimingGraphIndex>>();
+    // Compact persistent views may forward untouched attributes to their base
+    // carrier. Never reuse that cached index after the graph arrays changed.
+    if (sameGraph(*cached, pins, cells, nets, clocks, offsets[1])) {
+      if (cache_hit != nullptr) *cache_hit = true;
+      return cached;
+    }
+  }
+  // Compact persistent views cannot safely receive a pybind object as a new
+  // Python attribute: ordinary PyDB test doubles and carrier snapshots rely
+  // on deepcopy/pickle of their __dict__. Keep a bounded structural cache so
+  // separate compact wrappers with the same immutable timing graph share the
+  // same native index. The fingerprint is only a lookup accelerator; every
+  // candidate is still compared element by element before reuse.
+  struct CacheEntry {
+    std::uint64_t fingerprint = 0;
+    std::shared_ptr<TimingGraphIndex> graph;
+  };
+  static std::vector<CacheEntry> cache;
+  const auto fingerprint = graphFingerprint(pins, cells, nets, clocks, offsets[1]);
+  for (auto& entry : cache) {
+    if (entry.fingerprint != fingerprint) continue;
+    if (sameGraph(*entry.graph, pins, cells, nets, clocks, offsets[1])) {
+      if (cache_hit != nullptr) *cache_hit = true;
+      return entry.graph;
+    }
+  }
+  if (cache.size() >= 32) cache.erase(cache.begin());
+  cache.push_back({
+      fingerprint,
+      makeTimingGraphIndex(pins, cells, nets, clocks, offsets[1])});
+  return cache.back().graph;
 }
 
 namespace {
@@ -77,6 +250,20 @@ py::array_t<int64_t> indices(const std::vector<T>& values)
   return output;
 }
 
+void exportCsr(py::dict& output,
+               const char* prefix,
+               const std::vector<std::vector<int>>& rows)
+{
+  std::vector<int> offsets{0};
+  std::vector<int> values;
+  for (const auto& row : rows) {
+    values.insert(values.end(), row.begin(), row.end());
+    offsets.push_back(static_cast<int>(values.size()));
+  }
+  output[(std::string(prefix) + "_start").c_str()] = indices(offsets);
+  output[(std::string(prefix) + "_ids").c_str()] = indices(values);
+}
+
 void closeCone(std::vector<unsigned char>& marked, const std::vector<std::vector<int>>& edges)
 {
   std::queue<int> pending;
@@ -85,6 +272,37 @@ void closeCone(std::vector<unsigned char>& marked, const std::vector<std::vector
     const int pin = pending.front(); pending.pop();
     for (const int next : edges[pin]) {
       if (!marked[next]) { marked[next] = 1; pending.push(next); }
+    }
+  }
+}
+
+void closeBackwardCone(
+    std::vector<unsigned char>& marked,
+    const TimingGraphIndex& graph,
+    const std::vector<unsigned char>& required_net_sink)
+{
+  std::queue<int> pending;
+  for (int pin = 0; pin < static_cast<int>(marked.size()); ++pin) {
+    if (marked[pin]) pending.push(pin);
+  }
+  while (!pending.empty()) {
+    const int pin = pending.front();
+    pending.pop();
+    for (const int arc_id : graph.cell_in[pin]) {
+      if (arc_id < graph.clock_end) continue;
+      const int previous = graph.source(arc_id);
+      if (!marked[previous]) {
+        marked[previous] = 1;
+        pending.push(previous);
+      }
+    }
+    if (!required_net_sink[pin]) continue;
+    for (const int net_id : graph.net_in[pin]) {
+      const int previous = graph.nets[net_id][0];
+      if (!marked[previous]) {
+        marked[previous] = 1;
+        pending.push(previous);
+      }
     }
   }
 }
@@ -127,7 +345,10 @@ py::dict affectedTimingSchedule(
     const py::array_t<double, py::array::c_style | py::array::forcecast>& current_rc,
     const py::object& changed_pins)
 {
-  const auto old_owner = timingGraphIndex(previous), current_owner = timingGraphIndex(current);
+  bool previous_cache_hit = false;
+  bool current_cache_hit = false;
+  const auto old_owner = timingGraphIndex(previous, &previous_cache_hit);
+  const auto current_owner = timingGraphIndex(current, &current_cache_hit);
   const auto& old = *old_owner; const auto& graph = *current_owner;
   const int count = graph.pins.size();
   if (previous_rc.ndim() != 2 || current_rc.ndim() != 2 || previous_rc.shape(0) != 6 || current_rc.shape(0) != 6
@@ -163,13 +384,9 @@ py::dict affectedTimingSchedule(
     }
   }
   std::vector<unsigned char> matched(old.cells.size(), 0);
-  std::vector<std::vector<int>> successors(count), predecessors(count);
-  std::vector<int> indegree(count, 0), rank(count, 0);
-  auto connect = [&](int source, int sink, bool required = true) {
-    successors.at(source).push_back(sink);
-    if (required) predecessors.at(sink).push_back(source);
-    ++indegree.at(sink);
-  };
+  std::vector<unsigned char> reverse_seed(count, 0);
+  const auto& successors = graph.successors;
+  const auto& rank = graph.rank;
   // Full TimingPropagation propagates net RAT from endpoints and data-cell
   // inputs, never from an unused/clock-only electrical leaf.
   std::vector<unsigned char> required_net_sink(count, 0);
@@ -182,16 +399,37 @@ py::dict affectedTimingSchedule(
     else { arc_map[id] = found->second; matched[found->second] = 1; }
     if (id >= graph.clock_end) {
       required_net_sink.at(graph.source(id)) = 1;
-      connect(graph.source(id), graph.cells[id][1]);
     }
   }
   for (int id = 0; id < static_cast<int>(old.cells.size()); ++id) {
     if (matched[id]) continue;
     const auto found = graph.pin_ids.find(old.pins.at(old.cells[id][1]));
     if (found != graph.pin_ids.end()) forward[found->second] = 1;
+    if (id < old.clock_end) continue;
+    const int old_source = old.source(id);
+    const auto source = graph.pin_ids.find(old.pins.at(old_source));
+    if (source != graph.pin_ids.end()) reverse_seed[source->second] = 1;
   }
-  for (const auto& edge : graph.nets) {
-    connect(edge[0], edge[1], required_net_sink.at(edge[1]));
+  // Graph successors, ranks, and CSR adjacency are immutable for this
+  // carrier and were built once by TimingGraphIndex::build().
+  // A split or a restore can remove an old net edge while leaving its driver
+  // pin alive. The forward cone reaches the new sinks, but it cannot reach
+  // that driver through the new graph. Export the driver as an explicit
+  // reverse seed so the Python event pass can discard the stale RAT value.
+  auto edgeKey = [](int source, int sink) {
+    return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(source)) << 32)
+           | static_cast<std::uint32_t>(sink);
+  };
+  std::unordered_set<std::uint64_t> current_net_edges;
+  current_net_edges.reserve(graph.nets.size());
+  for (const auto& edge : graph.nets) current_net_edges.insert(edgeKey(edge[0], edge[1]));
+  for (const auto& edge : old.nets) {
+    const auto source = graph.pin_ids.find(old.pins.at(edge[0]));
+    const auto sink = graph.pin_ids.find(old.pins.at(edge[1]));
+    if (source == graph.pin_ids.end() || sink == graph.pin_ids.end()) continue;
+    if (!current_net_edges.count(edgeKey(source->second, sink->second))) {
+      reverse_seed[source->second] = 1;
+    }
   }
   if (!use_changed_pins) {
     std::vector<std::vector<std::string>> old_drivers(old.pins.size());
@@ -206,20 +444,10 @@ py::dict affectedTimingSchedule(
       if (drivers[pin] != previous_drivers) forward[pin] = 1;
     }
   }
-  std::queue<int> ready;
-  for (int pin = 0; pin < count; ++pin) if (!indegree[pin]) ready.push(pin);
-  int visited = 0;
-  while (!ready.empty()) {
-    const int pin = ready.front(); ready.pop(); ++visited;
-    for (const int next : successors[pin]) {
-      rank[next] = std::max(rank[next], rank[pin] + 1);
-      if (!--indegree[next]) ready.push(next);
-    }
-  }
-  if (visited != count) throw py::value_error("incremental timing requires a combinational DAG");
+  const std::vector<int> forward_seeds = selected(forward);
   closeCone(forward, successors);
   backward = forward;
-  closeCone(backward, predecessors);
+  closeBackwardCone(backward, graph, required_net_sink);
   const int levels = rank.empty() ? 1 : *std::max_element(rank.begin(), rank.end()) + 1;
   Worklist fwd(levels), bwd(levels);
   std::vector<int> clock_rows;
@@ -241,7 +469,14 @@ py::dict affectedTimingSchedule(
   out["pin_from_previous"] = indices(pin_map);
   out["arc_from_previous"] = indices(arc_map);
   out["forward_pins"] = indices(selected(forward));
+  out["forward_seed_pins"] = indices(forward_seeds);
+  out["reverse_seed_pins"] = indices(selected(reverse_seed));
   out["backward_pins"] = indices(selected(backward));
+  out["pin_rank"] = indices(rank);
+  exportCsr(out, "cell_out", graph.cell_out);
+  exportCsr(out, "cell_in", graph.cell_in);
+  exportCsr(out, "net_out", graph.net_out);
+  exportCsr(out, "net_in", graph.net_in);
   out["clock_rows"] = indices(clock_rows);
   auto selectedRows = [&](const char* name, int pin_column, const std::vector<unsigned char>& mask) {
     std::vector<int> rows;
@@ -262,6 +497,8 @@ py::dict affectedTimingSchedule(
   fwd.exportTo(out, "forward", false); bwd.exportTo(out, "backward", true);
   out["total_pins"] = count;
   out["total_cell_arcs"] = graph.cells.size();
+  out["timing_graph_cache_hit_previous"] = previous_cache_hit;
+  out["timing_graph_cache_hit_current"] = current_cache_hit;
   return out;
 }
 

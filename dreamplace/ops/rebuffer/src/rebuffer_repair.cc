@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "rebuffer_repair.hh"
+#include "rebuffer_driver_input_slew.hh"
+#include "rebuffer_cell_selection.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -163,13 +165,16 @@ std::string portName(const std::string& pin)
   return separator == std::string::npos ? pin : pin.substr(separator + 1);
 }
 
+bool isCellLoadPin(const DesignView& design, int pin);
+
 bool driverInputSlew(const DesignView& design,
                      const TimingView& timing,
                      const LibertyView& liberty,
                      const std::vector<std::vector<int>>& node_pins,
                      int driver,
                      double& input_slew_rise,
-                     double& input_slew_fall)
+                     double& input_slew_fall,
+                     int cell_index_override = -1)
 {
   if (driver < 0 || driver >= design.num_pins
       || driver >= static_cast<int>(design.pin2node_map.size())) {
@@ -179,42 +184,217 @@ bool driverInputSlew(const DesignView& design,
   if (node < 0 || node >= static_cast<int>(node_pins.size())) {
     return false;
   }
-  const int cell_index = cellIndexForNode(design, node);
+  const int cell_index = cell_index_override >= 0
+                             ? cell_index_override
+                             : cellIndexForNode(design, node);
   if (cell_index < 0
       || cell_index >= static_cast<int>(liberty.cells.size())) {
     return false;
   }
   const auto& cell = liberty.cells[cell_index];
-  bool found = false;
-  double rise = 0.0;
-  double fall = 0.0;
-  for (const int pin : node_pins[node]) {
-    if (pin == driver || pin < 0 || pin >= design.num_pins) {
+  return driverInputSlewFromPins(driver, design.num_pins, cell, node_pins[node],
+      timing.pin_slew_rise, timing.pin_slew_fall,
+      [&](const TimingArcView& arc, int pin) {
+        const int offset = design.pin_2_libpin_offset[pin];
+        const std::string pin_port = pin < static_cast<int>(design.pin_names.size())
+            ? portName(design.pin_names[pin]) : std::string();
+        return !arc.source_name.empty() && !pin_port.empty()
+            ? arc.source_name == pin_port : arc.source == offset;
+      },
+      [&](int pin) { return isCellLoadPin(design, pin); },
+      input_slew_rise, input_slew_fall);
+}
+
+bool cellPinCap(const DesignView& design,
+                int cell_index,
+                int pin,
+                double& cap)
+{
+  if (cell_index < 0
+      || cell_index + 1
+             >= static_cast<int>(design.cell_id_2_libpin_id_start.size())
+      || pin < 0 || pin >= static_cast<int>(design.pin_2_libpin_offset.size())
+      || design.pin_cap.empty()) {
+    return false;
+  }
+  const int lib_pin = design.cell_id_2_libpin_id_start[cell_index]
+                      + design.pin_2_libpin_offset[pin];
+  if (lib_pin < 0 || lib_pin >= static_cast<int>(design.pin_cap.size())) {
+    return false;
+  }
+  cap = design.pin_cap[lib_pin];
+  return std::isfinite(cap) && cap >= 0.0;
+}
+
+bool isCellLoadPin(const DesignView& design, int pin)
+{
+  if (pin < 0 || pin >= static_cast<int>(design.pin2net_map.size())) {
+    return false;
+  }
+  const int net = design.pin2net_map[pin];
+  return net >= 0 && net < static_cast<int>(design.net2driver_pin_map.size())
+         && design.net2driver_pin_map[net] != pin;
+}
+
+bool refreshDriverOutputSlew(
+    const DesignView& design,
+    const LibertyView& liberty,
+    const std::vector<std::vector<int>>& node_pins,
+    const std::vector<int>& node_cell_indices,
+    int driver,
+    TimingView& timing)
+{
+  if (driver < 0 || driver >= design.num_pins
+      || driver >= static_cast<int>(design.pin2node_map.size())
+      || driver >= static_cast<int>(timing.pin_load.size())) {
+    return false;
+  }
+  const int node = design.pin2node_map[driver];
+  if (node < 0 || node >= static_cast<int>(node_cell_indices.size())) {
+    return false;
+  }
+  const int cell_index = node_cell_indices[node];
+  if (cell_index < 0 || cell_index >= static_cast<int>(liberty.cells.size())) {
+    return false;
+  }
+  double input_rise = timing.pin_slew_rise[driver];
+  double input_fall = timing.pin_slew_fall[driver];
+  driverInputSlew(design,
+                  timing,
+                  liberty,
+                  node_pins,
+                  driver,
+                  input_rise,
+                  input_fall,
+                  cell_index);
+  const auto& cell = liberty.cells[cell_index];
+  const double output_rise = cellOutputSlewRise(
+      cell, input_rise, timing.pin_load[driver]);
+  const double output_fall = cellOutputSlewFall(
+      cell, input_fall, timing.pin_load[driver]);
+  timing.pin_slew_rise[driver] = output_rise;
+  timing.pin_slew_fall[driver] = output_fall;
+
+  if (driver >= static_cast<int>(design.pin2net_map.size())) {
+    return true;
+  }
+  const int net = design.pin2net_map[driver];
+  if (net < 0 || net + 1 >= static_cast<int>(design.flat_net2pin_start_map.size())) {
+    return true;
+  }
+  const int begin = design.flat_net2pin_start_map[net];
+  const int end = design.flat_net2pin_start_map[net + 1];
+  for (int index = begin; index < end; ++index) {
+    if (index < 0 || index >= static_cast<int>(design.flat_net2pin_map.size())) {
       continue;
     }
-    const int offset = design.pin_2_libpin_offset[pin];
-    const std::string pin_port
-        = pin < static_cast<int>(design.pin_names.size())
-              ? portName(design.pin_names[pin])
-              : std::string();
-    for (const auto& arc : cell.arcs) {
-      const bool matches
-          = !arc.source_name.empty() && !pin_port.empty()
-                ? arc.source_name == pin_port
-                : arc.source == offset;
-      if (matches) {
-        rise = std::max(rise, timing.pin_slew_rise[pin]);
-        fall = std::max(fall, timing.pin_slew_fall[pin]);
-        found = true;
-        break;
+    const int pin = design.flat_net2pin_map[index];
+    if (pin < 0 || pin >= design.num_pins || pin == driver) {
+      continue;
+    }
+    timing.pin_slew_rise[pin] = output_rise;
+    timing.pin_slew_fall[pin] = output_fall;
+  }
+  return true;
+}
+
+bool updateResizedCellState(
+    const DesignView& design,
+    const LibertyView& liberty,
+    const std::vector<std::vector<int>>& node_pins,
+    const std::vector<int>& node_cell_indices,
+    int node,
+    int old_cell_index,
+    int new_cell_index,
+    TimingView& timing)
+{
+  if (node < 0 || node >= static_cast<int>(node_pins.size())) {
+    return false;
+  }
+  for (const int pin : node_pins[node]) {
+    if (!isCellLoadPin(design, pin)) {
+      continue;
+    }
+    double old_cap = 0.0;
+    double new_cap = 0.0;
+    if (!cellPinCap(design, old_cell_index, pin, old_cap)
+        || !cellPinCap(design, new_cell_index, pin, new_cap)) {
+      return false;
+    }
+    const double delta = new_cap - old_cap;
+    if (pin >= 0 && pin < static_cast<int>(timing.pin_cap.size())) {
+      timing.pin_cap[pin] = new_cap;
+    }
+    const int net = pin < static_cast<int>(design.pin2net_map.size())
+                        ? design.pin2net_map[pin]
+                        : -1;
+    if (net < 0 || net >= static_cast<int>(design.net2driver_pin_map.size())) {
+      continue;
+    }
+    const int upstream_driver = design.net2driver_pin_map[net];
+    if (upstream_driver < 0
+        || upstream_driver >= static_cast<int>(timing.pin_load.size())) {
+      continue;
+    }
+    timing.pin_load[upstream_driver] += delta;
+    const int upstream_node = upstream_driver < design.num_pins
+                                  && upstream_driver
+                                         < static_cast<int>(design.pin2node_map.size())
+                              ? design.pin2node_map[upstream_driver]
+                              : -1;
+    // A primary port can drive a resized cell input but has no Liberty cell
+    // whose output slew can be recomputed.  The load delta still belongs to
+    // the upstream net; only the cell-specific slew refresh is unavailable.
+    if (upstream_node < 0
+        || upstream_node >= static_cast<int>(node_cell_indices.size())
+        || node_cell_indices[upstream_node] < 0) {
+      continue;
+    }
+    if (!refreshDriverOutputSlew(design,
+                                 liberty,
+                                 node_pins,
+                                 node_cell_indices,
+                                 upstream_driver,
+                                 timing)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void annotateRepairDesignLoadSlew(const DesignView& design,
+                                  TimingView& timing)
+{
+  for (int net_id = 0; net_id < design.num_nets; ++net_id) {
+    if (net_id + 1
+        >= static_cast<int>(design.flat_net2pin_start_map.size())) {
+      continue;
+    }
+    const int driver = design.net2driver_pin_map[net_id];
+    const int begin = design.flat_net2pin_start_map[net_id];
+    const int end = design.flat_net2pin_start_map[net_id + 1];
+    for (int index = begin; index < end; ++index) {
+      if (index < 0
+          || index >= static_cast<int>(design.flat_net2pin_map.size())) {
+        continue;
+      }
+      const int pin = design.flat_net2pin_map[index];
+      if (pin < 0 || pin >= design.num_pins || pin == driver
+          || pin >= static_cast<int>(timing.pin_max_slew.size())) {
+        continue;
+      }
+      const double max_slew = timing.pin_max_slew[pin];
+      if (!(max_slew > 0.0) || !std::isfinite(max_slew)) {
+        continue;
+      }
+      if (timing.pin_slew_rise[pin] > max_slew) {
+        timing.pin_slew_rise[pin] = max_slew;
+      }
+      if (timing.pin_slew_fall[pin] > max_slew) {
+        timing.pin_slew_fall[pin] = max_slew;
       }
     }
   }
-  if (found) {
-    input_slew_rise = rise;
-    input_slew_fall = fall;
-  }
-  return found;
 }
 
 double cellOutputDelay(const LibertyCellView& cell,
@@ -232,32 +412,6 @@ double cellOutputDelay(const LibertyCellView& cell,
         lutFindValue(arc.fall_delay, input_slew_fall, load_cap));
   }
   return worst;
-}
-
-double targetLoadForCell(const LibertyCellView& cell,
-                         double target_slew_rise,
-                         double target_slew_fall)
-{
-  const double target_slew = std::max(target_slew_rise, target_slew_fall);
-  if (cell.max_cap <= 0.0 || target_slew <= 0.0) {
-    return 0.0;
-  }
-  if (cellOutputSlew(cell, target_slew_rise, target_slew_fall, 0.0)
-      >= target_slew) {
-    return 0.0;
-  }
-  double low = 0.0;
-  double high = cell.max_cap * 2.0;
-  for (int iteration = 0; iteration < 48; ++iteration) {
-    const double middle = 0.5 * (low + high);
-    if (cellOutputSlew(cell, target_slew_rise, target_slew_fall, middle)
-        < target_slew) {
-      low = middle;
-    } else {
-      high = middle;
-    }
-  }
-  return 0.5 * (low + high);
 }
 
 SubtreeLoad subtreeLoad(const DesignView& design,
@@ -293,94 +447,149 @@ SubtreeLoad subtreeLoad(const DesignView& design,
   return result;
 }
 
-int chooseBufferCell(const LibertyView& liberty,
-                     const CharacterizationResult& characterization,
-                     double input_slew_rise,
-                     double input_slew_fall,
-                     double downstream_load)
+void splitFanoutRegion(const SteinerView& steiner,
+                       std::vector<int> pins,
+                       int max_fanout,
+                       std::vector<std::vector<int>>& leaves)
 {
-  const auto& candidates = characterization.filtered_buffers.empty()
-                               ? characterization.fast_buffers
-                               : characterization.filtered_buffers;
-  if (candidates.empty()) {
-    return -1;
+  if (max_fanout <= 0 || static_cast<int>(pins.size()) <= max_fanout) {
+    leaves.push_back(std::move(pins));
+    return;
   }
-
-  int lowest_main_id = -1;
-  int lowest_vt = -1;
-  if (characterization.lowest_drive_index >= 0
-      && characterization.lowest_drive_index
-             < static_cast<int>(characterization.filtered_buffers.size())) {
-    const int cell_index = characterization.filtered_buffers[
-        characterization.lowest_drive_index].cell_index;
-    if (cell_index >= 0 && cell_index < static_cast<int>(liberty.cells.size())) {
-      lowest_main_id = liberty.cells[cell_index].main_id;
-      lowest_vt = liberty.cells[cell_index].vt;
+  double min_x = kInf;
+  double max_x = -kInf;
+  double min_y = kInf;
+  double max_y = -kInf;
+  for (const int pin : pins) {
+    if (pin >= 0 && pin < static_cast<int>(steiner.node_x.size())) {
+      min_x = std::min(min_x, steiner.node_x[pin]);
+      max_x = std::max(max_x, steiner.node_x[pin]);
+      min_y = std::min(min_y, steiner.node_y[pin]);
+      max_y = std::max(max_y, steiner.node_y[pin]);
     }
   }
-
-  auto select = [&](auto&& candidate_cells) {
-    int best = -1;
-    double best_dist = kInf;
-    double best_delay = kInf;
-    int fallback = -1;
-    double fallback_cap = -1.0;
-    for (const auto* cell : candidate_cells) {
-      if (cell == nullptr || !cell->is_buffer) {
-        continue;
-      }
-      if (cell->max_cap > 0.0 && downstream_load > cell->max_cap) {
-        continue;
-      }
-      const double output_slew = cellOutputSlew(
-          *cell, input_slew_rise, input_slew_fall, downstream_load);
-      if (cell->max_slew > 0.0 && output_slew > cell->max_slew) {
-        continue;
-      }
-      if (cell->max_cap > fallback_cap) {
-        fallback_cap = cell->max_cap;
-        fallback = static_cast<int>(cell - liberty.cells.data());
-      }
-      const double target_load = targetLoadForCell(
-          *cell, characterization.target_slew[0], characterization.target_slew[1]);
-      const double distance = std::abs(downstream_load - target_load);
-      const double delay = cellOutputDelay(
-          *cell, input_slew_rise, input_slew_fall, downstream_load);
-      if (best < 0
-          || (delay < best_delay && distance < best_dist * 1.1)
-          || (distance < best_dist && delay < best_delay * 1.1)) {
-        best = static_cast<int>(cell - liberty.cells.data());
-        best_dist = distance;
-        best_delay = delay;
-      }
+  const bool split_x = (max_x - min_x) >= (max_y - min_y);
+  std::stable_sort(pins.begin(), pins.end(), [&](int lhs, int rhs) {
+    const double lhs_primary
+        = lhs >= 0 && lhs < static_cast<int>(steiner.node_x.size())
+              ? (split_x ? steiner.node_x[lhs] : steiner.node_y[lhs])
+              : 0.0;
+    const double rhs_primary
+        = rhs >= 0 && rhs < static_cast<int>(steiner.node_x.size())
+              ? (split_x ? steiner.node_x[rhs] : steiner.node_y[rhs])
+              : 0.0;
+    if (lhs_primary != rhs_primary) {
+      return lhs_primary < rhs_primary;
     }
-    return best >= 0 ? best : fallback;
-  };
-
-  if (lowest_main_id >= 0) {
-    std::vector<const LibertyCellView*> family;
-    family.reserve(liberty.cells.size());
-    for (const auto& cell : liberty.cells) {
-      if (cell.main_id == lowest_main_id
-          && (lowest_vt < 0 || cell.vt == lowest_vt)) {
-        family.push_back(&cell);
-      }
+    const double lhs_secondary
+        = lhs >= 0 && lhs < static_cast<int>(steiner.node_x.size())
+              ? (split_x ? steiner.node_y[lhs] : steiner.node_x[lhs])
+              : 0.0;
+    const double rhs_secondary
+        = rhs >= 0 && rhs < static_cast<int>(steiner.node_x.size())
+              ? (split_x ? steiner.node_y[rhs] : steiner.node_x[rhs])
+              : 0.0;
+    if (lhs_secondary != rhs_secondary) {
+      return lhs_secondary < rhs_secondary;
     }
-    const int selected = select(family);
-    if (selected >= 0) {
-      return selected;
+    return lhs < rhs;
+  });
+  const auto middle = pins.begin() + static_cast<std::ptrdiff_t>(pins.size() / 2);
+  std::vector<int> left(pins.begin(), middle);
+  std::vector<int> right(middle, pins.end());
+  splitFanoutRegion(steiner, std::move(left), max_fanout, leaves);
+  splitFanoutRegion(steiner, std::move(right), max_fanout, leaves);
+}
+
+bool repairFanoutRegions(const DesignView& design,
+                         const TimingView& timing,
+                         const SteinerView& steiner,
+                         const LibertyView& liberty,
+                         const CharacterizationResult& characterization,
+                         const RepairConfig& config,
+                         int net_id,
+                         int driver,
+                         int pin_begin,
+                         int pin_end,
+                         std::vector<BufferAction>& actions)
+{
+  if (config.max_fanout <= 0) {
+    return false;
+  }
+  std::vector<int> loads;
+  for (int index = pin_begin; index < pin_end; ++index) {
+    if (index < 0 || index >= static_cast<int>(design.flat_net2pin_map.size())) {
+      continue;
+    }
+    const int pin = design.flat_net2pin_map[index];
+    if (pin >= 0 && pin < design.num_pins && pin != driver) {
+      loads.push_back(pin);
     }
   }
-
-  std::vector<const LibertyCellView*> filtered;
-  filtered.reserve(candidates.size());
-  for (const auto& buffer : candidates) {
-    if (buffer.cell_index >= 0
-        && buffer.cell_index < static_cast<int>(liberty.cells.size())) {
-      filtered.push_back(&liberty.cells[buffer.cell_index]);
-    }
+  if (static_cast<int>(loads.size()) <= config.max_fanout) {
+    return false;
   }
-  return select(filtered);
+  std::vector<std::vector<int>> regions;
+  splitFanoutRegion(steiner, std::move(loads), config.max_fanout, regions);
+  double input_slew_rise = timing.pin_slew_rise[driver];
+  double input_slew_fall = timing.pin_slew_fall[driver];
+  double driver_x = 0.0;
+  double driver_y = 0.0;
+  if (driver >= 0 && driver < static_cast<int>(steiner.node_x.size())) {
+    driver_x = steiner.node_x[driver];
+    driver_y = steiner.node_y[driver];
+  }
+  bool inserted = false;
+  for (const auto& region : regions) {
+    if (region.empty()) {
+      continue;
+    }
+    double load = 0.0;
+    double x = 0.0;
+    double y = 0.0;
+    int coordinate_count = 0;
+    for (const int pin : region) {
+      if (pin >= 0 && pin < static_cast<int>(timing.pin_cap.size())) {
+        load += timing.pin_cap[pin];
+      }
+      if (pin >= 0 && pin < static_cast<int>(steiner.node_x.size())) {
+        x += steiner.node_x[pin];
+        y += steiner.node_y[pin];
+        ++coordinate_count;
+      }
+    }
+    const int buffer_cell = rebufferChooseBufferCell(
+        liberty, characterization, input_slew_rise, input_slew_fall, load,
+        config.repair_design_target_cell_math,
+        config.repair_design_target_cell_selection);
+    if (buffer_cell < 0) {
+      continue;
+    }
+    if (coordinate_count > 0) {
+      x /= coordinate_count;
+      y /= coordinate_count;
+    } else {
+      x = 0.5 * (driver_x + x);
+      y = 0.5 * (driver_y + y);
+    }
+    BufferAction action;
+    action.net_id = net_id;
+    action.driver_pin = driver;
+    action.downstream_pins = region;
+    action.buffer_cell_index = buffer_cell;
+    action.x_dbu = static_cast<int>(std::lround(x));
+    action.y_dbu = static_cast<int>(std::lround(y));
+    action.downstream_load = load;
+    action.target_load = rebufferTargetLoadForCell(
+        liberty.cells[buffer_cell],
+        characterization.target_slew[0],
+        characterization.target_slew[1],
+        config.repair_design_target_cell_math);
+    action.reason = "fanout";
+    actions.push_back(std::move(action));
+    inserted = true;
+  }
+  return inserted;
 }
 
 bool isClockPin(const TimingView& timing, int pin)
@@ -566,23 +775,6 @@ bool rebufferDriverInputSlew(const DesignView& design,
                          input_slew_fall);
 }
 
-double rebufferTargetLoadForCell(const LibertyCellView& cell,
-                                 double target_slew_rise,
-                                 double target_slew_fall)
-{
-  return targetLoadForCell(cell, target_slew_rise, target_slew_fall);
-}
-
-int rebufferChooseBufferCell(const LibertyView& liberty,
-                             const CharacterizationResult& characterization,
-                             double input_slew_rise,
-                             double input_slew_fall,
-                             double downstream_load)
-{
-  return chooseBufferCell(
-      liberty, characterization, input_slew_rise, input_slew_fall, downstream_load);
-}
-
 bool planRepairDesign(const DesignView& design,
                       const TimingView& timing,
                       const SteinerView& steiner,
@@ -604,6 +796,48 @@ bool planRepairDesign(const DesignView& design,
     reason = "missing_design_electrical_metadata";
     return false;
   }
+  if (config.repair_design_reverse_topological) {
+    if (timing.pin_rank.size() != static_cast<std::size_t>(design.num_pins)) {
+      reason = "missing_repair_design_pin_rank";
+      return false;
+    }
+    for (const int rank : timing.pin_rank) {
+      if (rank < 0) {
+        reason = "invalid_repair_design_pin_rank";
+        return false;
+      }
+    }
+  }
+  if (config.repair_design_load_slew_annotation
+      && !config.repair_design_reverse_topological) {
+    reason = "repair_design_load_slew_annotation_requires_reverse_topological";
+    return false;
+  }
+  if (config.repair_design_local_update
+      && !config.repair_design_reverse_topological) {
+    reason = "repair_design_local_update_requires_reverse_topological";
+    return false;
+  }
+  if (config.repair_design_local_update) {
+    if (design.pin_cap.empty()
+        || design.cell_id_2_libpin_id_start.empty()
+        || design.pin_cap.size()
+               < static_cast<std::size_t>(
+                   design.cell_id_2_libpin_id_start.back())) {
+      reason = "missing_repair_design_pin_cap_payload";
+      return false;
+    }
+  }
+  if (config.repair_design_openroad_repeater_resize
+      && !config.repair_net_tree) {
+    reason = "repair_design_openroad_repeater_resize_requires_repair_net_tree";
+    return false;
+  }
+  if (config.repair_design_target_cell_selection
+      && (!config.repair_design_target_cell_math || !liberty.cell_metadata)) {
+    reason = "repair_design_target_cell_selection_requires_math_and_library_metadata";
+    return false;
+  }
 
   std::vector<std::vector<int>> node_pins(design.num_nodes);
   for (int pin = 0; pin < design.num_pins; ++pin) {
@@ -611,6 +845,15 @@ bool planRepairDesign(const DesignView& design,
     if (node >= 0 && node < design.num_nodes) {
       node_pins[node].push_back(pin);
     }
+  }
+
+  TimingView working_timing = timing;
+  std::vector<int> node_cell_indices(design.num_nodes, -1);
+  for (int node = 0; node < design.num_nodes; ++node) {
+    node_cell_indices[node] = cellIndexForNode(design, node);
+  }
+  if (config.repair_design_load_slew_annotation) {
+    annotateRepairDesignLoadSlew(design, working_timing);
   }
 
   std::unordered_map<int, int> net_index_by_id;
@@ -625,8 +868,37 @@ bool planRepairDesign(const DesignView& design,
     }
   }
 
-  int action_count = 0;
+  std::vector<int> net_order;
+  net_order.reserve(design.num_nets);
   for (int net_id = 0; net_id < design.num_nets; ++net_id) {
+    net_order.push_back(net_id);
+  }
+  if (config.repair_design_reverse_topological) {
+    const auto rankForNet = [&](int net_id) {
+      if (net_id < 0
+          || net_id >= static_cast<int>(design.net2driver_pin_map.size())) {
+        return std::numeric_limits<int>::min();
+      }
+      const int driver = design.net2driver_pin_map[net_id];
+      if (driver < 0
+          || driver >= static_cast<int>(working_timing.pin_rank.size())) {
+        return std::numeric_limits<int>::min();
+      }
+      return working_timing.pin_rank[driver];
+    };
+    // net_order starts in physical net-id order, so stable_sort gives the
+    // deterministic net-id tie-break used by the native planner.
+    std::stable_sort(
+        net_order.begin(),
+        net_order.end(),
+        [&](int lhs, int rhs) { return rankForNet(lhs) > rankForNet(rhs); });
+  }
+
+  int action_count = 0;
+  const bool use_repair_net_tree
+      = config.repair_net_tree
+        || config.repair_design_max_wire_length_um > 0.0;
+  for (const int net_id : net_order) {
     if (action_count >= config.max_actions) {
       break;
     }
@@ -634,7 +906,7 @@ bool planRepairDesign(const DesignView& design,
     if (driver < 0 || driver >= design.num_pins) {
       continue;
     }
-    if (isClockPin(timing, driver)) {
+    if (isClockPin(working_timing, driver)) {
       continue;
     }
     const int pin_begin = design.flat_net2pin_start_map[net_id];
@@ -642,21 +914,63 @@ bool planRepairDesign(const DesignView& design,
     if (pin_end - pin_begin < 2) {
       continue;
     }
+    int load_pin_count = 0;
+    for (int index = pin_begin; index < pin_end; ++index) {
+      if (index < 0 || index >= static_cast<int>(design.flat_net2pin_map.size())) {
+        continue;
+      }
+      const int pin = design.flat_net2pin_map[index];
+      if (pin >= 0 && pin < design.num_pins && pin != driver) {
+        ++load_pin_count;
+      }
+    }
+    const bool fanout_violation
+        = config.repair_design_fanout_repair
+          && config.max_fanout > 0 && load_pin_count > config.max_fanout;
+    bool clock_net = isClockPin(working_timing, driver);
+    if (!clock_net) {
+      for (int index = pin_begin; index < pin_end; ++index) {
+        if (index < 0
+            || index >= static_cast<int>(design.flat_net2pin_map.size())) {
+          continue;
+        }
+        if (isClockPin(working_timing, design.flat_net2pin_map[index])) {
+          clock_net = true;
+          break;
+        }
+      }
+    }
 
-    const double driver_slew = std::max(
-        timing.pin_slew_rise[driver], timing.pin_slew_fall[driver]);
-    const double driver_load = timing.pin_load[driver];
-    const double driver_max_slew = timing.pin_max_slew[driver];
-    const double driver_max_cap = timing.pin_max_cap[driver];
-    double input_slew_rise = timing.pin_slew_rise[driver];
-    double input_slew_fall = timing.pin_slew_fall[driver];
+    const double driver_load = working_timing.pin_load[driver];
+    const double driver_max_slew = working_timing.pin_max_slew[driver];
+    const double driver_max_cap = working_timing.pin_max_cap[driver];
+    double input_slew_rise = working_timing.pin_slew_rise[driver];
+    double input_slew_fall = working_timing.pin_slew_fall[driver];
+    const int driver_node = design.pin2node_map[driver];
+    const int initial_cell_index =
+        driver_node >= 0 && driver_node < static_cast<int>(node_cell_indices.size())
+            ? node_cell_indices[driver_node]
+            : -1;
     driverInputSlew(design,
-                    timing,
+                    working_timing,
                     liberty,
                     node_pins,
                     driver,
                     input_slew_rise,
-                    input_slew_fall);
+                    input_slew_fall,
+                    initial_cell_index);
+    if (config.repair_design_local_update
+        || config.repair_design_load_slew_annotation) {
+      refreshDriverOutputSlew(design,
+                              liberty,
+                              node_pins,
+                              node_cell_indices,
+                              driver,
+                              working_timing);
+    }
+    const double driver_slew = std::max(
+        working_timing.pin_slew_rise[driver],
+        working_timing.pin_slew_fall[driver]);
 
     bool driver_slew_violation
         = driver_max_slew > 0.0
@@ -672,13 +986,14 @@ bool planRepairDesign(const DesignView& design,
       if (pin == driver || pin < 0 || pin >= design.num_pins) {
         continue;
       }
-      const double max_slew = timing.pin_max_slew[pin];
+      const double max_slew = working_timing.pin_max_slew[pin];
       if (max_slew > 0.0
-          && std::max(timing.pin_slew_rise[pin], timing.pin_slew_fall[pin])
+          && std::max(working_timing.pin_slew_rise[pin],
+                      working_timing.pin_slew_fall[pin])
                  > max_slew * (1.0 - config.slew_margin)) {
         load_slew_violation = true;
       }
-      const double max_cap = timing.pin_max_cap[pin];
+      const double max_cap = working_timing.pin_max_cap[pin];
       if (max_cap > 0.0
           && driver_load > max_cap * (1.0 - config.cap_margin)) {
         load_cap_violation = true;
@@ -698,75 +1013,162 @@ bool planRepairDesign(const DesignView& design,
       ++result.load_cap_violations;
     }
     if (!driver_slew_violation && !driver_cap_violation
-        && !load_slew_violation && !load_cap_violation) {
+        && !load_slew_violation && !load_cap_violation
+        && !fanout_violation
+        && config.repair_design_max_wire_length_um <= 0.0) {
       continue;
     }
 
     bool repaired = false;
+    if (fanout_violation && !clock_net && config.insert_buffers) {
+      std::vector<BufferAction> fanout_actions;
+      if (repairFanoutRegions(design,
+                              working_timing,
+                              steiner,
+                              liberty,
+                              characterization,
+                              config,
+                              net_id,
+                              driver,
+                              pin_begin,
+                              pin_end,
+                              fanout_actions)) {
+        for (auto& action : fanout_actions) {
+          if (action_count >= config.max_actions) {
+            break;
+          }
+          result.actions.push_back(std::move(action));
+          ++action_count;
+          repaired = true;
+        }
+      }
+    }
+
+    int current_cell_index = initial_cell_index;
     const bool resize_slew_violation
         = driver_max_slew > 0.0
           && driver_slew
-                 > driver_max_slew * (1.0 + config.resize_slew_threshold);
+                 > driver_max_slew
+                       * (config.repair_design_openroad_driver_resize
+                              ? (1.0 - config.slew_margin)
+                              : (1.0 + config.resize_slew_threshold));
     if (resize_slew_violation && config.resize_drivers) {
-      const int current_cell_index = cellIndexForNode(
-          design, design.pin2node_map[driver]);
       if (current_cell_index >= 0
           && current_cell_index < static_cast<int>(liberty.cells.size())) {
         const auto& current_cell = liberty.cells[current_cell_index];
-        int best_cell = -1;
-        double best_area = kInf;
-        int fallback_cell = -1;
-        double fallback_area = -1.0;
+        int selected = -1;
         const int main_id = current_cell.main_id;
         if (main_id >= 0
             && main_id + 1
                    < static_cast<int>(design.main_id_2_cell_id_start.size())) {
           const int begin = design.main_id_2_cell_id_start[main_id];
           const int end = design.main_id_2_cell_id_start[main_id + 1];
-          for (int cell_id = begin; cell_id < end; ++cell_id) {
-            if (cell_id < 0
-                || cell_id >= static_cast<int>(liberty.cells.size())) {
-              continue;
+          if (config.repair_design_openroad_driver_resize
+              && config.repair_design_target_cell_selection
+              && current_cell.is_buffer) {
+            selected = findBufferSlewRepairCell(liberty, current_cell_index,
+                input_slew_rise, input_slew_fall, driver_load, config.slew_margin);
+          } else if (config.repair_design_openroad_driver_resize) {
+            double best_violation = kInf;
+            double best_area = kInf;
+            for (int cell_id = begin; cell_id < end; ++cell_id) {
+              if (cell_id < 0
+                  || cell_id >= static_cast<int>(liberty.cells.size())) {
+                continue;
+              }
+              const auto& cell = liberty.cells[cell_id];
+              const double output_slew = cellOutputSlew(
+                  cell, input_slew_rise, input_slew_fall, driver_load);
+              const double limit = cell.max_slew > 0.0
+                                       ? cell.max_slew
+                                             * (1.0 - config.slew_margin)
+                                       : kInf;
+              const double violation
+                  = std::isfinite(limit)
+                        ? std::max(0.0, output_slew - limit)
+                        : 0.0;
+              const bool both_good = violation == 0.0
+                                     && best_violation == 0.0;
+              if (selected < 0 || violation < best_violation
+                  || (both_good
+                      && (cell.area < best_area
+                          || (cell.area == best_area && cell_id < selected)))) {
+                selected = cell_id;
+                best_violation = violation;
+                best_area = cell.area;
+              }
             }
-            const auto& cell = liberty.cells[cell_id];
-            if (cell.vt != current_cell.vt) {
-              continue;
+          } else {
+            double best_area = kInf;
+            double fallback_area = -1.0;
+            int best_cell = -1;
+            int fallback_cell = -1;
+            for (int cell_id = begin; cell_id < end; ++cell_id) {
+              if (cell_id < 0
+                  || cell_id >= static_cast<int>(liberty.cells.size())) {
+                continue;
+              }
+              const auto& cell = liberty.cells[cell_id];
+              if (cell.vt != current_cell.vt) {
+                continue;
+              }
+              if (cell.size <= current_cell.size) {
+                continue;
+              }
+              if (cell.max_cap > 0.0
+                  && driver_load > cell.max_cap * (1.0 - config.cap_margin)) {
+                continue;
+              }
+              const double output_slew = cellOutputSlew(
+                  cell, input_slew_rise, input_slew_fall, driver_load);
+              if (cell.max_slew > 0.0
+                  && output_slew
+                         > cell.max_slew * (1.0 - config.slew_margin)) {
+                continue;
+              }
+              if (cell.area < best_area) {
+                best_area = cell.area;
+                best_cell = cell_id;
+              }
+              if (cell.area > fallback_area) {
+                fallback_area = cell.area;
+                fallback_cell = cell_id;
+              }
             }
-            if (cell.size <= current_cell.size) {
-              continue;
-            }
-            if (cell.max_cap > 0.0
-                && driver_load > cell.max_cap * (1.0 - config.cap_margin)) {
-              continue;
-            }
-            const double output_slew = cellOutputSlew(
-                cell, input_slew_rise, input_slew_fall, driver_load);
-            if (cell.max_slew > 0.0
-                && output_slew
-                       > cell.max_slew * (1.0 - config.slew_margin)) {
-              continue;
-            }
-            if (cell.area < best_area) {
-              best_area = cell.area;
-              best_cell = cell_id;
-            }
-            if (cell.area > fallback_area) {
-              fallback_area = cell.area;
-              fallback_cell = cell_id;
-            }
+            selected = best_cell >= 0 ? best_cell : fallback_cell;
           }
         }
-        const int selected = best_cell >= 0 ? best_cell : fallback_cell;
         if (selected >= 0 && selected != current_cell_index) {
           result.resizes.push_back(
               ResizeAction{design.pin2node_map[driver], selected});
           repaired = true;
           const auto& selected_cell = liberty.cells[selected];
-          const double selected_slew = cellOutputSlew(
+          const double selected_slew_rise = cellOutputSlewRise(
+              selected_cell, input_slew_rise, driver_load);
+          const double selected_slew_fall = cellOutputSlewFall(
+              selected_cell, input_slew_fall, driver_load);
+          if (config.repair_design_local_update) {
+            if (!updateResizedCellState(design,
+                                        liberty,
+                                        node_pins,
+                                        node_cell_indices,
+                                        driver_node,
+                                        current_cell_index,
+                                        selected,
+                                        working_timing)) {
+              reason = "repair_design_local_resize_update_failed";
+              return false;
+            }
+            node_cell_indices[driver_node] = selected;
+            working_timing.pin_slew_rise[driver] = selected_slew_rise;
+            working_timing.pin_slew_fall[driver] = selected_slew_fall;
+          }
+          current_cell_index = selected;
+          const double selected_slew_check = cellOutputSlew(
               selected_cell, input_slew_rise, input_slew_fall, driver_load);
           driver_slew_violation
               = selected_cell.max_slew > 0.0
-                && selected_slew
+                && selected_slew_check
                        > selected_cell.max_slew
                              * (1.0 - config.slew_margin);
           driver_cap_violation
@@ -777,8 +1179,6 @@ bool planRepairDesign(const DesignView& design,
       }
     }
 
-    const int current_cell_index = cellIndexForNode(
-        design, design.pin2node_map[driver]);
     double max_cap = kInf;
     if (current_cell_index >= 0
         && current_cell_index < static_cast<int>(liberty.cells.size())) {
@@ -796,7 +1196,8 @@ bool planRepairDesign(const DesignView& design,
     const bool needs_buffer
         = driver_cap_violation || load_slew_violation || load_cap_violation
           || (driver_slew_violation && std::isfinite(max_cap)
-              && max_cap > 0.0);
+              && max_cap > 0.0)
+          || config.repair_design_max_wire_length_um > 0.0;
     if (needs_buffer && config.insert_buffers) {
       const auto net_it = net_index_by_id.find(net_id);
       if (net_it == net_index_by_id.end()) {
@@ -819,11 +1220,11 @@ bool planRepairDesign(const DesignView& design,
         continue;
       }
 
-      if (config.repair_net_tree) {
+      if (use_repair_net_tree) {
         std::vector<BufferAction> net_actions;
         std::string tree_reason;
         if (repairNetTree(design,
-                          timing,
+                          working_timing,
                           steiner,
                           liberty,
                           characterization,
@@ -831,6 +1232,7 @@ bool planRepairDesign(const DesignView& design,
                           net_id,
                           max_cap,
                           driver,
+                          current_cell_index,
                           children,
                           net_actions,
                           tree_reason)) {
@@ -855,7 +1257,7 @@ bool planRepairDesign(const DesignView& design,
       SubtreeLoad selected_subtree;
       for (const int child : children[driver]) {
         const auto subtree = subtreeLoad(
-            design, timing, steiner, config, children, child, driver);
+            design, working_timing, steiner, config, children, child, driver);
         if (subtree.sinks.empty()) {
           continue;
         }
@@ -868,12 +1270,14 @@ bool planRepairDesign(const DesignView& design,
         continue;
       }
 
-      const int buffer_cell = chooseBufferCell(
+      const int buffer_cell = rebufferChooseBufferCell(
           liberty,
           characterization,
-          timing.pin_slew_rise[driver],
-          timing.pin_slew_fall[driver],
-          selected_subtree.load);
+          working_timing.pin_slew_rise[driver],
+          working_timing.pin_slew_fall[driver],
+          selected_subtree.load,
+          config.repair_design_target_cell_math,
+          config.repair_design_target_cell_selection);
       if (buffer_cell < 0) {
         continue;
       }
@@ -915,14 +1319,29 @@ bool planRepairDesign(const DesignView& design,
       action.x_dbu = x_dbu;
       action.y_dbu = y_dbu;
       action.downstream_load = selected_subtree.load;
-      action.target_load = targetLoadForCell(
+      action.target_load = rebufferTargetLoadForCell(
           liberty.cells[buffer_cell],
           characterization.target_slew[0],
-          characterization.target_slew[1]);
+          characterization.target_slew[1],
+          config.repair_design_target_cell_math);
       action.reason = "load_slew";
       result.actions.push_back(std::move(action));
       ++action_count;
       repaired = true;
+      if (config.repair_design_local_update
+          && buffer_cell >= 0
+          && buffer_cell < static_cast<int>(liberty.cells.size())) {
+        working_timing.pin_load[driver] = std::max(
+            0.0,
+            working_timing.pin_load[driver] - selected_subtree.load
+                + liberty.cells[buffer_cell].input_cap);
+        refreshDriverOutputSlew(design,
+                                liberty,
+                                node_pins,
+                                node_cell_indices,
+                                driver,
+                                working_timing);
+      }
       }
     }
 

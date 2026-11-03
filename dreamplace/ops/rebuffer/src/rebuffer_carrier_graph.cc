@@ -2,6 +2,7 @@
 // Build level schedules and adjacency from the committed physical netlist.
 #include "rebuffer_carrier.hh"
 #include "rebuffer_incremental_timing.hh"
+#include "rebuffer_arc_identity.hh"
 
 #include <algorithm>
 #include <array>
@@ -50,51 +51,18 @@ void compileCarrierGraph(const py::object& base, TimingCarrierView& state)
   const auto& base_arcs = base_graph->cells;
   const auto base_levels = carrierArray<int>(base, "flat_inst_arcs_by_level_start");
   if (base_levels.size() < 2) throw py::value_error("timing carrier requires a clock arc level");
-  struct LibraryArc {
-    std::string source, sink;
-    int sense, trigger;
-  };
   // Import each used Liberty row once, rather than query Python per cell arc.
-  std::unordered_map<int, LibraryArc> library;
-  auto libraryArc = [&](int lut) -> const LibraryArc& {
+  std::unordered_map<int, TimingLibraryArc> library;
+  auto libraryArc = [&](int lut) -> const TimingLibraryArc& {
     const auto found = library.find(lut);
     if (found != library.end()) return found->second;
     const auto info = lib_arcs[lut].cast<py::sequence>();
-    return library.emplace(lut, LibraryArc{py::cast<std::string>(info[0]),
+    return library.emplace(lut, TimingLibraryArc{py::cast<std::string>(info[0]),
         py::cast<std::string>(info[1]), py::cast<int>(info[4]), py::cast<int>(info[5])}).first->second;
   };
-  // Equivalent masters need not store their Liberty arcs in the same order.
-  auto sameSignature = [&](const LibraryArc& a, const LibraryArc& b) {
-    return a.source == b.source && a.sink == b.sink && a.sense == b.sense
-           && a.trigger == b.trigger;
-  };
   auto currentArc = [&](int cell, int old_lut, int old_offset) {
-    if (old_lut >= state.cell_arc_start.at(cell) && old_lut < state.cell_arc_start.at(cell + 1)) {
-      return old_lut;
-    }
-    const auto previous = libraryArc(old_lut);
-    // Equivalent masters can repeat a port/sense/trigger signature (state
-    // dependent `when` arcs).  Masters of one family list those repeats in
-    // the same order, so map the k-th repeat of the old master to the k-th
-    // repeat of the current one.
-    int rank = 0;
-    if (old_offset >= 0) {
-      for (int lut = old_lut - old_offset; lut < old_lut; ++lut) {
-        if (sameSignature(libraryArc(lut), previous)) ++rank;
-      }
-    }
-    std::vector<int> matches;
-    for (int lut = state.cell_arc_start.at(cell); lut < state.cell_arc_start.at(cell + 1); ++lut) {
-      if (sameSignature(libraryArc(lut), previous)) matches.push_back(lut);
-    }
-    if (matches.empty()) throw py::value_error("current master does not contain the timing arc");
-    if (matches.size() > 1 && old_offset < 0) {
-      throw py::value_error("ambiguous equivalent master timing arc");
-    }
-    if (rank >= static_cast<int>(matches.size())) {
-      throw py::value_error("current master has fewer repeated timing arcs");
-    }
-    return matches[rank];
+    return equivalentTimingArc(state.cell_arc_start.at(cell),
+        state.cell_arc_start.at(cell + 1), old_lut, old_offset, libraryArc);
   };
   std::vector<Arc> arcs;
   std::vector<bool> is_clock;

@@ -42,6 +42,7 @@ std::shared_ptr<IncrementalTopologyState> incrementalTopologyFromSteiner(
   }
   auto state = std::make_shared<IncrementalTopologyState>();
   state->net_id = net_id;
+  state->source_net_id = net_id;
   state->driver_pin_id = driver_pin_id;
   for (int offset = begin; offset < end; ++offset) {
     const int node = steiner.net_flat_topo_sort[offset];
@@ -53,6 +54,7 @@ std::shared_ptr<IncrementalTopologyState> incrementalTopologyFromSteiner(
     }
     state->next_node_id = std::max(state->next_node_id, node + 1);
     state->coordinates[node] = {steiner.node_x[node], steiner.node_y[node]};
+    state->source_node_by_node[node] = node;
     if (node == driver_pin_id) continue;
     const int parent = steiner.pin_fa[node];
     if (nodes.count(parent) == 0) {
@@ -64,6 +66,13 @@ std::shared_ptr<IncrementalTopologyState> incrementalTopologyFromSteiner(
   }
   std::string reason;
   if (!validateIncrementalTopology(*state, reason)) throw std::invalid_argument(reason);
+  state->base_edges = state->edges;
+  state->base_node_loads = state->node_loads;
+  state->base_coordinates = state->coordinates;
+  state->base_source_node_by_node = state->source_node_by_node;
+  state->base_next_node_id = state->next_node_id;
+  state->base_epoch = state->epoch;
+  state->base_captured = true;
   return state;
 }
 

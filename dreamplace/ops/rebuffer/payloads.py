@@ -6,7 +6,7 @@ Steiner arrays into contiguous numpy buffers and nothing else.
 
 import numpy as np
 
-from .steiner_payload import build_openroad_steiner_payload
+from .steiner_payload import steiner_input_identity
 from .timing_model_payload import timing_pin_slack
 
 
@@ -20,9 +20,51 @@ def _numpy(value, dtype=np.float64):
     return np.ascontiguousarray(np.asarray(value, dtype=dtype))
 
 
-def timing_payload(pydb, timing_model, *, path_context=None):
+def _pin_rank_from_timing_model(pydb, timing_model):
+    """Convert TimingPropagation cell-arc levels to a physical-pin rank.
+
+    ``flat_inst_arcs_by_level`` is already the schedule consumed by Python
+    TimingPropagation.  Its second column is the cell-arc output pin; assigning
+    that pin the containing level gives the native repair_design planner the
+    same coarse reverse-topological order without introducing a second STA
+    graph or a Python repair algorithm.
+    """
+
+    pin_count = len(pydb.pin_names)
+    model = timing_model.model
+    flat_arcs = getattr(model, "flat_inst_arcs_by_level", None)
+    level_start = getattr(model, "flat_inst_arcs_by_level_start", None)
+    if flat_arcs is None or level_start is None:
+        return None
+    arcs = _numpy(flat_arcs, np.int64)
+    starts = _numpy(level_start, np.int64).reshape(-1)
+    if arcs.ndim != 2 or arcs.shape[1] < 2 or starts.ndim != 1 or len(starts) < 2:
+        return None
+    if starts[0] < 0 or starts[-1] > len(arcs) or np.any(starts[1:] < starts[:-1]):
+        return None
+
+    rank = np.zeros(pin_count, dtype=np.int32)
+    for level, (begin, end) in enumerate(zip(starts[:-1], starts[1:])):
+        begin = int(begin)
+        end = int(end)
+        outputs = arcs[begin:end, 1]
+        valid = (outputs >= 0) & (outputs < pin_count)
+        if np.any(valid):
+            rank[outputs[valid]] = np.maximum(rank[outputs[valid]], level)
+    return rank
+
+
+def timing_payload(
+    pydb, timing_model, *, path_context=None, include_pin_rank=False, max_transition_load=False
+):
     if path_context:
-        return _timing_payload(pydb, timing_model, path_context=path_context)
+        return _timing_payload(
+            pydb,
+            timing_model,
+            path_context=path_context,
+            include_pin_rank=include_pin_rank,
+            max_transition_load=max_transition_load,
+        )
     # Every driver payload of one snapshot reads the same timing state. Each
     # forward (full or affected) replaces these tensors, so their identity is
     # the state version; the cache holds them so ids cannot be reused. Callers
@@ -37,16 +79,26 @@ def timing_payload(pydb, timing_model, *, path_context=None):
         getattr(model, "pin_slack_live_snapshot", None),
         getattr(model, "last_endpoint_slack_tensor", None),
         getattr(model, "pin_rAAT_live_snapshot", None),
+        bool(include_pin_rank),
+        bool(max_transition_load),
+        timing_model.loads["fall"] if max_transition_load else None,
+        timing_model.lib_pin_rcaps if max_transition_load else None,
+        timing_model.lib_pin_fcaps if max_transition_load else None,
     )
     cache = getattr(timing_model, "_timing_payload_cache", None)
     if cache is not None and all(a is b for a, b in zip(cache[0], sources)):
         return dict(cache[1])
-    payload = _timing_payload(pydb, timing_model)
+    payload = _timing_payload(
+        pydb, timing_model, include_pin_rank=include_pin_rank,
+        max_transition_load=max_transition_load,
+    )
     timing_model._timing_payload_cache = (sources, payload)
     return dict(payload)
 
 
-def _timing_payload(pydb, timing_model, *, path_context=None):
+def _timing_payload(
+    pydb, timing_model, *, path_context=None, include_pin_rank=False, max_transition_load=False
+):
     payload = {
         "pin_slew_rise": _numpy(timing_model.model.pin_rtran_live),
         "pin_slew_fall": _numpy(timing_model.model.pin_ftran_live),
@@ -57,6 +109,14 @@ def _timing_payload(pydb, timing_model, *, path_context=None):
         "pin_slack": _numpy(timing_pin_slack(timing_model.model))[: len(pydb.pin_names)],
         "clock_pins": _numpy(getattr(pydb, "clock_pins", ()), np.int32),
     }
+    if max_transition_load:
+        from . import rebuffer_cpp
+
+        pin_count = len(pydb.pin_names)
+        payload.update(rebuffer_cpp.repair_design_electrical_payload(
+            payload["pin_load"], _numpy(timing_model.loads["fall"])[:pin_count],
+            _numpy(timing_model.lib_pin_rcaps), _numpy(timing_model.lib_pin_fcaps),
+        ))
     for field, snapshot in (
         ("pin_arrival_rise", "pin_rAAT_live_snapshot"),
         ("pin_arrival_fall", "pin_fAAT_live_snapshot"),
@@ -66,6 +126,10 @@ def _timing_payload(pydb, timing_model, *, path_context=None):
         values = getattr(timing_model.model, snapshot, None)
         if values is not None:
             payload[field] = _numpy(values)[: len(pydb.pin_names)]
+    if include_pin_rank:
+        pin_rank = _pin_rank_from_timing_model(pydb, timing_model)
+        if pin_rank is not None:
+            payload["pin_rank"] = pin_rank
     if path_context:
         for key in (
             "path_driver_input_pin",
@@ -114,9 +178,16 @@ def steiner_arrays(timing_model, steiner_view=None):
     else:
         owner = steiner_view
         source = "active_timing_propagation_patch_steiner"
-        fields = {name: steiner_view[name] for name in (
-            "net_flat_topo_sort_start", "net_flat_topo_sort", "pin_fa", "node_x", "node_y"
-        )}
+        fields = {
+            name: steiner_view[name]
+            for name in (
+                "net_flat_topo_sort_start",
+                "net_flat_topo_sort",
+                "pin_fa",
+                "node_x",
+                "node_y",
+            )
+        }
     cache = getattr(timing_model, "_steiner_array_cache", None)
     identity = tuple(id(value) for value in fields.values())
     if cache is not None and cache[0] is owner and cache[1] == identity:
@@ -154,16 +225,33 @@ def current_tree_topology_payload(pydb, timing_model, net_ids, *, steiner_view=N
     }
 
 
-def steiner_payload(pydb, timing_model, *, provider="ecc", r_unit=0.914):
-    if provider == "openroad_stt":
-        return build_openroad_steiner_payload(pydb, r_unit=r_unit, dbu=getattr(pydb, "dbu", 0))
-    if provider != "ecc":
+def steiner_payload(pydb, timing_model, *, provider=None, r_unit=None):
+    active_provider = getattr(timing_model, "steiner_provider", "ecc")
+    provider = active_provider if provider is None else provider
+    if provider not in ("ecc", "openroad_stt"):
         return {
             "status": "unsupported",
             "unsupported_reasons": [f"unknown_steiner_provider:{provider}"],
         }
+    if provider != active_provider:
+        raise ValueError("Steiner provider does not match its timing model")
+    if provider == "openroad_stt":
+        if timing_model.pydb is not pydb:
+            raise ValueError("selected Steiner tree belongs to another PyPlaceDB")
+        if r_unit is not None and float(r_unit) != timing_model.r_unit:
+            raise ValueError("Steiner r_unit does not match its timing model")
+        identity = steiner_input_identity(
+            pydb,
+            dbu=timing_model.dbu,
+            r_unit=timing_model.r_unit,
+            c_unit=timing_model.c_unit,
+            scale_factor=timing_model.scale_factor,
+            use_pin_offset=timing_model.use_pin_offset,
+        )
+        if identity != timing_model.steiner_input_identity:
+            raise ValueError("Steiner input identity is stale; rebuild Python TP")
     steiner = timing_model.steiner
-    return {
+    result = {
         "status": "ok",
         "steiner_node_base": int(len(pydb.pin_names)),
         "net_ids": list(range(len(pydb.net_names))),
@@ -177,6 +265,9 @@ def steiner_payload(pydb, timing_model, *, provider="ecc", r_unit=0.914):
         "edge_resistance": _numpy(timing_model.rc.flat_pin_to_res),
         "node_capacitance": _numpy(timing_model.rc.net_cap),
     }
+    if provider == "openroad_stt":
+        result.update(provider=provider, input_identity=identity)
+    return result
 
 
 __all__ = ["current_tree_topology_payload", "steiner_payload", "timing_payload"]

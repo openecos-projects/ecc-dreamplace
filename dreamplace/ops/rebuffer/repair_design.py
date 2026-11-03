@@ -26,6 +26,16 @@ DEFAULT_CONFIG = {
     "insert_buffers": True,
     "resize_drivers": True,
     "resize_slew_threshold": 0.03,
+    "repair_design_reverse_topological": False,
+    "repair_design_local_update": False,
+    "repair_design_load_slew_annotation": False,
+    "repair_design_openroad_driver_resize": False,
+    "repair_design_fanout_repair": False,
+    "repair_design_target_cell_math": False,
+    "repair_design_target_cell_selection": False,
+    "repair_design_openroad_repeater_resize": False,
+    "repair_design_max_transition_load": False,
+    "repair_design_max_wire_length_um": 0.0,
     "steiner_provider": "ecc",
 }
 
@@ -86,6 +96,10 @@ def plan_repair_design_from_pydb(pydb, timing_model=None, *, config=None):
             "actions": [],
             "resizes": [],
         }
+    if bool((config or {}).get("repair_design_target_cell_selection", False)):
+        from dreamplace.ops.placeio_ecc.library_metadata import ensure_repair_library_metadata
+
+        ensure_repair_library_metadata(pydb)
     liberty = build_liberty_view_from_pydb(pydb)
     if liberty.get("status") != "ok":
         return {
@@ -98,7 +112,12 @@ def plan_repair_design_from_pydb(pydb, timing_model=None, *, config=None):
             "actions": [],
             "resizes": [],
         }
-    characterization = characterize_buffers_from_pydb(pydb)
+    characterization_options = (
+        {"canonical_target_load": True}
+        if bool((config or {}).get("repair_design_target_cell_math", False))
+        else {}
+    )
+    characterization = characterize_buffers_from_pydb(pydb, **characterization_options)
     if characterization.get("status") != "ok":
         return {
             "artifact": ARTIFACT,
@@ -113,9 +132,35 @@ def plan_repair_design_from_pydb(pydb, timing_model=None, *, config=None):
             "resizes": [],
         }
 
-    model = timing_model if timing_model is not None else RebufferTimingModel(pydb)
     merged_config = dict(DEFAULT_CONFIG)
     merged_config.update(config or {})
+    if timing_model is None:
+        provider_options = (
+            {"steiner_provider": merged_config["steiner_provider"]}
+            if merged_config["steiner_provider"] != "ecc"
+            else {}
+        )
+        model = RebufferTimingModel(
+            pydb,
+            r_unit=merged_config["r_unit"],
+            c_unit=merged_config["c_unit"],
+            **provider_options,
+        )
+    else:
+        model = timing_model
+        if "steiner_provider" not in (config or {}):
+            merged_config["steiner_provider"] = getattr(model, "steiner_provider", "ecc")
+        for key in ("r_unit", "c_unit"):
+            value = float(getattr(model, key))
+            if key in (config or {}) and float(config[key]) != value:
+                raise ValueError(f"repair_design {key} does not match its timing model")
+            merged_config[key] = value
+    if "repair_design_max_wire_length_um" not in (config or {}) and "max_wire_length" in (
+        config or {}
+    ):
+        merged_config["repair_design_max_wire_length_um"] = float(
+            config["max_wire_length"]
+        )
     steiner_values = steiner_payload(
         pydb,
         model,
@@ -141,7 +186,18 @@ def plan_repair_design_from_pydb(pydb, timing_model=None, *, config=None):
     result = dict(
         rebuffer_cpp.plan_repair_design(
             design,
-            timing_payload(pydb, model),
+            timing_payload(
+                pydb,
+                model,
+                max_transition_load=bool(merged_config["repair_design_max_transition_load"]),
+                include_pin_rank=bool(
+                    merged_config.get("repair_design_reverse_topological", False)
+                    or merged_config.get("repair_design_local_update", False)
+                    or merged_config.get(
+                        "repair_design_load_slew_annotation", False
+                    )
+                ),
+            ),
             steiner_values,
             liberty,
             characterization,
@@ -156,6 +212,10 @@ def plan_repair_design_from_pydb(pydb, timing_model=None, *, config=None):
             "baseline": model.baseline.as_dict(),
         }
     )
+    if merged_config["repair_design_target_cell_selection"]:
+        result["library_metadata"] = dict(pydb.repair_library_metadata.summary())
+    if merged_config["steiner_provider"] == "openroad_stt":
+        result["steiner_input_identity"] = dict(steiner_values["input_identity"])
     if result.get("status") != "ok":
         result.setdefault("actions", [])
         result.setdefault("resizes", [])

@@ -111,6 +111,65 @@ def test_incremental_topology_keeps_buffer_master_metadata(branch_state):
     ]
 
 
+def test_remap_incremental_topology_shifts_non_pin_namespace(branch_state):
+    action = _split(101, 1, 2, [20])
+    action["buffer_master_name"] = "BUF_X4"
+    rebuffer_cpp.apply_incremental_buffer_split(branch_state, action)
+
+    original = rebuffer_cpp.incremental_topology_view(branch_state)
+    remapped = rebuffer_cpp.remap_incremental_topology(branch_state, 2, 4)
+    current = rebuffer_cpp.incremental_topology_view(remapped)
+
+    assert current["net_id"] == original["net_id"]
+    assert current["driver_pin_id"] == original["driver_pin_id"]
+    assert current["node_loads"] == {
+        int(node) + 4 if int(node) >= 2 else int(node): pins
+        for node, pins in original["node_loads"].items()
+    }
+    assert current["coordinates"] == {
+        int(node) + 4 if int(node) >= 2 else int(node): point
+        for node, point in original["coordinates"].items()
+    }
+    assert current["edges"] == [
+        {
+            **edge,
+            "parent": int(edge["parent"]) + (4 if int(edge["parent"]) >= 2 else 0),
+            "child": int(edge["child"]) + (4 if int(edge["child"]) >= 2 else 0),
+        }
+        for edge in original["edges"]
+    ]
+    original_buffer = original["buffers"][0]
+    remapped_buffer = current["buffers"][0]
+    assert remapped_buffer["input_node"] == original_buffer["input_node"] + 4
+    assert remapped_buffer["output_node"] == original_buffer["output_node"] + 4
+    assert remapped_buffer["original_parent"] == original_buffer["original_parent"]
+    assert remapped_buffer["original_child"] == original_buffer["original_child"] + 4
+
+
+def test_remap_incremental_topology_preserves_source_identity_with_explicit_mapping(branch_state):
+    original = rebuffer_cpp.incremental_topology_view(branch_state)
+    remapped = rebuffer_cpp.remap_incremental_topology(
+        branch_state,
+        2,
+        4,
+        19,
+        -1,
+        {2: 50, 3: 51},
+    )
+    current = rebuffer_cpp.incremental_topology_view(remapped)
+
+    assert current["net_id"] == 19
+    assert current["source_net_id"] == 7
+    assert current["source_node_by_node"] == {0: 0, 1: 1, 50: 2, 51: 3}
+    assert current["edges"] == [
+        {"parent": 0, "child": 1, "r": 10.0, "c": 2.0},
+        {"parent": 1, "child": 50, "r": 5.0, "c": 1.0},
+        {"parent": 1, "child": 51, "r": 6.0, "c": 1.0},
+    ]
+    assert current["node_loads"] == {50: [20], 51: [30]}
+    assert original["source_node_by_node"] == {0: 0, 1: 1, 2: 2, 3: 3}
+
+
 def test_incremental_topology_supports_same_net_chain_and_reverse_remove(branch_state):
     first = rebuffer_cpp.apply_incremental_buffer_split(branch_state, _split(101, 0, 1, [20, 30]))
     second = rebuffer_cpp.apply_incremental_buffer_split(
@@ -140,6 +199,40 @@ def test_incremental_topology_checkpoint_restores_partition(branch_state):
     assert view["epoch"] == 0
     assert view["buffers"] == []
     assert view["node_loads"] == {2: [20], 3: [30]}
+
+
+def test_incremental_topology_checkpoint_redoes_after_last_buffer_was_removed(
+    branch_state,
+):
+    result = rebuffer_cpp.apply_incremental_buffer_split(
+        branch_state, _split(101, 0, 1, [20, 30])
+    )
+    checkpoint = rebuffer_cpp.checkpoint_incremental_topology(branch_state)
+    expected = rebuffer_cpp.incremental_topology_view(branch_state)
+
+    rebuffer_cpp.remove_incremental_buffer(branch_state, 101)
+    rebuffer_cpp.restore_incremental_topology(branch_state, checkpoint)
+
+    restored = rebuffer_cpp.incremental_topology_view(branch_state)
+    assert restored == expected
+    assert restored["buffers"][0]["input_node"] == result["input_node"]
+
+
+def test_incremental_topology_checkpoint_rebuilds_after_history_diverges(
+    branch_state,
+):
+    rebuffer_cpp.apply_incremental_buffer_split(
+        branch_state, _split(101, 0, 1, [20, 30])
+    )
+    checkpoint = rebuffer_cpp.checkpoint_incremental_topology(branch_state)
+    rebuffer_cpp.remove_incremental_buffer(branch_state, 101)
+    rebuffer_cpp.apply_incremental_buffer_split(
+        branch_state, _split(202, 0, 1, [20, 30])
+    )
+
+    rebuffer_cpp.restore_incremental_topology(branch_state, checkpoint)
+    buffers = rebuffer_cpp.incremental_topology_view(branch_state)["buffers"]
+    assert [buffer["action_id"] for buffer in buffers] == [101]
 
 
 def test_incremental_topology_rejects_stale_edge_and_cross_branch_load(branch_state):

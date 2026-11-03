@@ -4,10 +4,13 @@
 #pragma once
 
 #include <array>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace rebuffer {
+
+struct RepairLibraryMetadata;
 
 struct LutTable
 {
@@ -56,6 +59,9 @@ struct LibertyView
 {
   int dbu = 0;
   std::vector<LibertyCellView> cells;
+  std::shared_ptr<const RepairLibraryMetadata> cell_metadata;
+  // Ordered once at import, using the source-library order for exact ties.
+  std::vector<int> buffer_equivalent_order;
 };
 
 struct CharacterizedBuffer
@@ -87,9 +93,15 @@ double lutFindValue(const LutTable& table, double input_slew, double load_cap);
 
 double cellDriveResistance(const LibertyCellView& cell);
 double cellIntrinsicDelay(const LibertyCellView& cell);
+double cellTargetLoad(const LibertyCellView& cell,
+                      const std::array<double, 2>& target_slew);
+double cellTargetSlewDelay(const LibertyCellView& cell,
+                           const std::array<double, 2>& target_slew,
+                           double load_cap);
 
 bool characterizeBuffers(const LibertyView& liberty,
                          CharacterizationResult& result,
-                         std::string& reason);
+                         std::string& reason,
+                         bool canonical_target_load = false);
 
 }  // namespace rebuffer

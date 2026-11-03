@@ -11,6 +11,8 @@
 #include "pybind11/pybind11.h"
 #include "pybind11/stl.h"
 #include "rebuffer_liberty.hh"
+#include "rebuffer_library_metadata.hh"
+#include "rebuffer_cell_selection.hh"
 #include "rebuffer_repair.hh"
 #include "rebuffer_types.hh"
 #include "rebuffer_python_views.hh"
@@ -77,6 +79,7 @@ rebuffer::DesignView designFromDict(const py::dict& values)
   design.node_y = asVector<double>(values["node_y"], "node_y");
   design.pin_cap_limit
       = optionalVector<double>(values, "flat_lib_pin_cap_limit");
+  design.pin_cap = optionalVector<double>(values, "flat_lib_pin_cap");
   design.pin_slew_limit
       = optionalVector<double>(values, "flat_lib_pin_slew_limit");
   design.pin_drive_resistance
@@ -357,6 +360,10 @@ rebuffer::LibertyView libertyFromDict(const py::dict& values)
                                 ? rebuffer::cellDriveResistance(cell)
                                 : drive_resistance[cell_index];
   }
+  if (values.contains("_native_cell_metadata") && !values["_native_cell_metadata"].is_none()) {
+    liberty.cell_metadata = values["_native_cell_metadata"].cast<std::shared_ptr<rebuffer::RepairLibraryMetadata>>();
+    rebuffer::initializeBufferCellSelection(liberty);
+  }
   return liberty;
 }
 
@@ -424,6 +431,7 @@ rebuffer::TimingView timingFromDict(const py::dict& values)
   timing.pin_required_rise = optionalVector<double>(values, "pin_required_rise");
   timing.pin_required_fall = optionalVector<double>(values, "pin_required_fall");
   timing.clock_pins = optionalVector<int>(values, "clock_pins");
+  timing.pin_rank = optionalVector<int>(values, "pin_rank");
   if (values.contains("path_driver_input_pin")) {
     timing.path_driver_input_pin = py::cast<int>(values["path_driver_input_pin"]);
   }
@@ -511,6 +519,31 @@ rebuffer::RepairConfig configFromDict(const py::dict& values)
   config.resize_drivers = boolean("resize_drivers", config.resize_drivers);
   config.resize_slew_threshold
       = number("resize_slew_threshold", config.resize_slew_threshold);
+  config.repair_design_reverse_topological = boolean(
+      "repair_design_reverse_topological",
+      config.repair_design_reverse_topological);
+  config.repair_design_local_update = boolean(
+      "repair_design_local_update", config.repair_design_local_update);
+  config.repair_design_load_slew_annotation = boolean(
+      "repair_design_load_slew_annotation",
+      config.repair_design_load_slew_annotation);
+  config.repair_design_openroad_driver_resize = boolean(
+      "repair_design_openroad_driver_resize",
+      config.repair_design_openroad_driver_resize);
+  config.repair_design_fanout_repair = boolean(
+      "repair_design_fanout_repair", config.repair_design_fanout_repair);
+  config.repair_design_target_cell_math = boolean(
+      "repair_design_target_cell_math", config.repair_design_target_cell_math);
+  config.repair_design_target_cell_selection = boolean(
+      "repair_design_target_cell_selection", config.repair_design_target_cell_selection);
+  config.repair_design_openroad_repeater_resize = boolean(
+      "repair_design_openroad_repeater_resize",
+      config.repair_design_openroad_repeater_resize);
+  config.repair_design_max_wire_length_um = values.contains(
+      "repair_design_max_wire_length_um")
+      ? number("repair_design_max_wire_length_um",
+               config.repair_design_max_wire_length_um)
+      : number("max_wire_length", config.repair_design_max_wire_length_um);
   config.repair_net_tree = boolean("repair_net_tree", config.repair_net_tree);
   config.slew_rc_factor = number("slew_rc_factor", config.slew_rc_factor);
   config.slew_shape_factor
@@ -538,6 +571,8 @@ rebuffer::RepairConfig configFromDict(const py::dict& values)
       || !std::isfinite(config.r_unit) || config.r_unit < 0.0
       || !std::isfinite(config.c_unit) || config.c_unit < 0.0
       || !std::isfinite(config.tree_max_wire_length_um) || config.tree_max_wire_length_um < 0.0
+      || !std::isfinite(config.repair_design_max_wire_length_um)
+             || config.repair_design_max_wire_length_um < 0.0
       || config.slew_shape_factor <= 0.0 || !std::isfinite(config.slew_shape_factor)
       || !std::isfinite(config.cap_margin) || config.cap_margin < 0.0 || config.cap_margin >= 100.0
       || !std::isfinite(config.slew_margin) || config.slew_margin < 0.0 || config.slew_margin >= 100.0) {
@@ -648,6 +683,10 @@ py::dict bufferActionDict(const rebuffer::BufferAction& action)
   row["downstream_load"]
       = std::round(action.downstream_load * 1.0e12) / 1.0e12;
   row["target_load"] = std::round(action.target_load * 1.0e12) / 1.0e12;
+  if (action.initial_buffer_cell_index >= 0) {
+    row["initial_buffer_cell_index"] = action.initial_buffer_cell_index;
+    row["initial_downstream_load"] = action.initial_downstream_load;
+  }
   row["reason"] = action.reason;
   return row;
 }

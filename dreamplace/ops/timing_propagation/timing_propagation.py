@@ -659,6 +659,7 @@ class TimingPropagation(nn.Module):
                  backend_endpoint_rSlew=None,
                  backend_endpoint_fSlew=None,
                  sparse_timing_view=None,
+                 recovery_rat_is_capture_deadline=False,
                  ):
         super(TimingPropagation, self).__init__()
         write_crash_stage_marker(
@@ -702,6 +703,7 @@ class TimingPropagation(nn.Module):
         self.endpoints_timing_check_max_valid = endpoints_timing_check_max_valid
         self.backend_endpoint_rSlew = backend_endpoint_rSlew
         self.backend_endpoint_fSlew = backend_endpoint_fSlew
+        self.recovery_rat_is_capture_deadline = bool(recovery_rat_is_capture_deadline)
         self.endpoint_max_valid_by_pin = None
         if endpoints_max_valid is not None:
             self.endpoint_max_valid_by_pin = torch.zeros((self.num_pins, 2), dtype=torch.bool, device=end_points.device)
@@ -1185,7 +1187,44 @@ class TimingPropagation(nn.Module):
         max_depth,
         residual_tolerance_ps,
         include_recovery,
+        endpoint_pins=None,
     ):
+        if endpoint_pins is not None:
+            requested = torch.as_tensor(
+                list(endpoint_pins), dtype=torch.long, device=self.end_points.device
+            )
+            if requested.numel():
+                requested = torch.unique(requested)
+                snapshot = dict(snapshot)
+                setup_mask = torch.isin(snapshot["endpoint_pins"].long(), requested)
+                for name in (
+                    "endpoint_pins",
+                    "endpoint_test_ids",
+                    "endpoint_rise_slack",
+                    "endpoint_fall_slack",
+                ):
+                    snapshot[name] = snapshot[name][setup_mask]
+                for name in (
+                    "recovery_endpoint_pins",
+                    "recovery_endpoint_rise_slack",
+                    "recovery_endpoint_fall_slack",
+                ):
+                    if name in snapshot:
+                        recovery_mask = torch.isin(snapshot[name].long(), requested)
+                        snapshot[name] = snapshot[name][recovery_mask]
+            else:
+                snapshot = dict(snapshot)
+                for name in (
+                    "endpoint_pins",
+                    "endpoint_test_ids",
+                    "endpoint_rise_slack",
+                    "endpoint_fall_slack",
+                    "recovery_endpoint_pins",
+                    "recovery_endpoint_rise_slack",
+                    "recovery_endpoint_fall_slack",
+                ):
+                    if name in snapshot:
+                        snapshot[name] = snapshot[name][:0]
         if getattr(self, "sparse_timing_view", None) is not None:
             return self._sparse_runtime.extract_paths(
                 snapshot, global_k=global_k, max_depth=max_depth,
@@ -1273,6 +1312,7 @@ class TimingPropagation(nn.Module):
         global_k=0,
         max_depth=0,
         residual_tolerance_ps=1.0e-3,
+        endpoint_pins=None,
     ):
         snapshot = self.consume_critical_path_snapshot()
         return self._extract_critical_paths_from_snapshot(
@@ -1281,6 +1321,7 @@ class TimingPropagation(nn.Module):
             max_depth=max_depth,
             residual_tolerance_ps=residual_tolerance_ps,
             include_recovery=False,
+            endpoint_pins=endpoint_pins,
         )
 
     def extract_pin2pin_critical_paths(
@@ -2955,6 +2996,7 @@ class TimingPropagation(nn.Module):
     def _begin_forward_runtime_state(self):
         self._surrogate_runtime_state_active = True
         self._surrogate_state_cache = None
+        self.last_incremental_changed_pins = None
 
     def _end_forward_runtime_state(self):
         self._surrogate_runtime_state_active = False
@@ -4761,6 +4803,12 @@ class TimingPropagation(nn.Module):
         )
 
     def forward_affected(self, previous, schedule, delays, impulses, caps):
+        import os
+
+        if os.environ.get("REBUFFER_EVENT_PROPAGATION", "") == "1":
+            from .affected_timing_events import forward_event_affected
+
+            return forward_event_affected(self, previous, schedule, delays, impulses, caps)
         from .affected_timing import forward_affected
 
         return forward_affected(self, previous, schedule, delays, impulses, caps)

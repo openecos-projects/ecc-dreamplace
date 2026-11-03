@@ -121,7 +121,8 @@ double bufferDelay(const LibertyCellView& cell,
 double findTargetLoad(const LibertyCellView& cell,
                       const TimingArcView& arc,
                       bool rise,
-                      double target_slew)
+                      double target_slew,
+                      double initial_load_cap)
 {
   const LutTable& transition
       = rise ? arc.rise_transition : arc.fall_transition;
@@ -132,7 +133,7 @@ double findTargetLoad(const LibertyCellView& cell,
     return lutFindValue(transition, target_slew, load_cap) - target_slew;
   };
   double cap1 = 0.0;
-  double cap2 = 1.0e-12;
+  double cap2 = initial_load_cap;
   const double tolerance = 0.01;
   double diff1 = objective(cap1);
   if (diff1 > 0.0) {
@@ -203,13 +204,14 @@ double findBufferLoadLimitImpliedByDriverSlew(const LibertyCellView& cell,
 }
 
 double findTargetLoad(const LibertyCellView& cell,
-                      const std::array<double, 2>& target_slew)
+                      const std::array<double, 2>& target_slew,
+                      double initial_load_cap)
 {
   double sum = 0.0;
   int count = 0;
   for (const auto& arc : cell.arcs) {
-    sum += findTargetLoad(cell, arc, false, target_slew[1]);
-    sum += findTargetLoad(cell, arc, true, target_slew[0]);
+    sum += findTargetLoad(cell, arc, false, target_slew[1], initial_load_cap);
+    sum += findTargetLoad(cell, arc, true, target_slew[0], initial_load_cap);
     count += 2;
   }
   return count == 0 ? 0.0 : sum / count;
@@ -336,9 +338,25 @@ double cellIntrinsicDelay(const LibertyCellView& cell)
   return delay;
 }
 
+double cellTargetLoad(const LibertyCellView& cell,
+                      const std::array<double, 2>& target_slew)
+{
+  // OpenROAD starts at 1e-12 F. LibertyView capacitance is already in pF,
+  // so the same 1% bisection must start at 1 pF, including its bracket grid.
+  return findTargetLoad(cell, target_slew, 1.0);
+}
+
+double cellTargetSlewDelay(const LibertyCellView& cell,
+                           const std::array<double, 2>& target_slew,
+                           double load_cap)
+{
+  return bufferDelay(cell, target_slew, load_cap);
+}
+
 bool characterizeBuffers(const LibertyView& liberty,
                          CharacterizationResult& result,
-                         std::string& reason)
+                         std::string& reason,
+                         bool canonical_target_load)
 {
   if (liberty.cells.empty()) {
     reason = "empty_liberty";
@@ -444,7 +462,11 @@ bool characterizeBuffers(const LibertyView& liberty,
 
   for (auto& buffer : result.filtered_buffers) {
     const auto& cell = liberty.cells[buffer.cell_index];
-    buffer.target_load = findTargetLoad(cell, result.target_slew);
+    // Keep the historical characterization for existing timing consumers;
+    // repair_design's opt-in canonical math uses the physical 1 pF bound.
+    buffer.target_load = canonical_target_load
+        ? cellTargetLoad(cell, result.target_slew)
+        : findTargetLoad(cell, result.target_slew, 1.0e-12);
     const double implied
         = findBufferLoadLimitImpliedByDriverSlew(
             cell,

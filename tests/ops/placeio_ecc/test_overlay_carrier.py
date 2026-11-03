@@ -41,6 +41,7 @@ def _insert(state, *, action_id=0, parent=None, child=3, ratio=0.5, master="BUF2
             "downstream_pin_ids": [3],
             "x_dbu": point[0],
             "y_dbu": point[1],
+            "buffer_master_name": master,
         },
     )
     return {
@@ -75,8 +76,196 @@ def test_force_full_overlay_runtime_materializes_empty_native_carrier():
     runtime = timing.force_full_overlay_runtime()
 
     assert runtime is not None
+    assert runtime.model._arcs_info is timing._arcs_info
     assert runtime.payload["original_net_by_net"] == [0, 1]
     assert timing.current_graph() is runtime
+
+
+def test_persistent_graph_bridge_owns_commit_projection(monkeypatch):
+    from dreamplace.ops.placeio_ecc.buffer_overlay import BufferOverlay
+
+    class Bridge:
+        def __init__(self):
+            self.calls = []
+
+        def finalize_actions(self, actions, *, overlay):
+            self.calls.append((list(actions), overlay))
+            return [{"projected": True, **dict(actions[0])}]
+
+    timing = SimpleNamespace(
+        use_persistent_graph=True,
+        _persistent_graph_bridge=Bridge(),
+        create_net_overlay=lambda _name: object(),
+        _net_record=lambda _net_id: {},
+    )
+    monkeypatch.setenv("REBUFFER_PERSISTENT_GRAPH_FINALIZE", "1")
+    base = _base()
+    overlay = BufferOverlay(base, timing_model=timing)
+    overlay.actions = [
+        {
+            "action_kind": "buffer_insert",
+            "session_buffer_id": 0,
+            "net_name": "n1",
+            "buffer_master_name": "BUF2",
+            "candidate_location_x_dbu": 50000,
+            "candidate_location_y_dbu": 0,
+            "downstream_pin_names": ["OUT"],
+        }
+    ]
+    state = _state(_model(base))
+    overlay.native_topologies["n1"] = state
+
+    monkeypatch.setattr(
+        rebuffer_cpp,
+        "incremental_topology_view",
+        lambda _state: {"buffers": [{"action_id": 0}]},
+    )
+    projected = overlay.commit_actions()
+
+    assert projected[0]["projected"] is True
+    assert timing._persistent_graph_bridge.calls[0][1] is overlay
+    assert overlay.projection_audit["projection_source"] == "persistent_graph"
+
+
+def test_persistent_graph_projection_falls_back_to_canonical_finalizer(monkeypatch):
+    from dreamplace.ops.placeio_ecc.buffer_overlay import BufferOverlay
+
+    class Bridge:
+        def finalize_actions(self, actions, *, overlay):
+            raise ValueError("stale graph state")
+
+    timing = SimpleNamespace(
+        use_persistent_graph=True,
+        _persistent_graph_bridge=Bridge(),
+        create_net_overlay=lambda _name: object(),
+        _net_record=lambda _net_id: {},
+    )
+    monkeypatch.setenv("REBUFFER_PERSISTENT_GRAPH_FINALIZE", "1")
+    base = _base()
+    overlay = BufferOverlay(base, timing_model=timing)
+    overlay.actions = [
+        {
+            "action_kind": "buffer_insert",
+            "session_buffer_id": 0,
+            "net_name": "n1",
+            "buffer_master_name": "BUF2",
+            "candidate_location_x_dbu": 50000,
+            "candidate_location_y_dbu": 0,
+            "downstream_pin_names": ["OUT"],
+        }
+    ]
+    overlay.native_topologies["n1"] = _state(_model(base))
+    monkeypatch.setattr(
+        rebuffer_cpp,
+        "incremental_topology_view",
+        lambda _state: {"buffers": [{"action_id": 0}]},
+    )
+    monkeypatch.setattr(
+        rebuffer_cpp,
+        "finalize_overlay_actions",
+        lambda _base, _states, actions: [{"canonical": True, **dict(actions[0])}],
+    )
+
+    projected = overlay.commit_actions()
+
+    assert projected[0]["canonical"] is True
+    assert overlay.projection_audit["projection_source"] == "native_overlay"
+    assert "stale graph state" in overlay.projection_audit["persistent_graph_fallback"]
+
+
+def test_persistent_graph_keeps_canonical_projection_by_default(monkeypatch):
+    from dreamplace.ops.placeio_ecc.buffer_overlay import BufferOverlay
+
+    class Bridge:
+        def finalize_actions(self, actions, *, overlay):
+            raise AssertionError("diagnostic graph finalizer must stay disabled")
+
+    timing = SimpleNamespace(
+        use_persistent_graph=True,
+        _persistent_graph_bridge=Bridge(),
+        create_net_overlay=lambda _name: object(),
+        _net_record=lambda _net_id: {},
+    )
+    base = _base()
+    overlay = BufferOverlay(base, timing_model=timing)
+    overlay.actions = [
+        {
+            "action_kind": "buffer_insert",
+            "session_buffer_id": 0,
+            "net_name": "n1",
+            "buffer_master_name": "BUF2",
+            "candidate_location_x_dbu": 50000,
+            "candidate_location_y_dbu": 0,
+            "downstream_pin_names": ["OUT"],
+        }
+    ]
+    overlay.native_topologies["n1"] = _state(_model(base))
+    monkeypatch.setattr(
+        rebuffer_cpp,
+        "incremental_topology_view",
+        lambda _state: {"buffers": [{"action_id": 0}]},
+    )
+    monkeypatch.setattr(
+        rebuffer_cpp,
+        "finalize_overlay_actions",
+        lambda _base, _states, actions: [{"canonical": True, **dict(actions[0])}],
+    )
+
+    projected = overlay.commit_actions()
+
+    assert projected[0]["canonical"] is True
+    assert overlay.projection_audit["projection_source"] == "native_overlay"
+
+
+def test_persistent_graph_bridge_tracks_overlay_checkpoint_restore():
+    from dreamplace.ops.placeio_ecc.buffer_overlay import BufferOverlay
+
+    base = _base()
+    timing = _model(base, use_persistent_graph=True)
+    overlay = BufferOverlay(base, timing_model=timing)
+    timing.bind_overlay(overlay)
+
+    first = {
+        "action_kind": "buffer_insert",
+        "net_name": "n1",
+        "driver_pin_name": "u/Y",
+        "downstream_pin_names": ["OUT"],
+        "buffer_master_name": "BUF2",
+        "candidate_location_x_dbu": 50000,
+        "candidate_location_y_dbu": 0,
+        "split_ratio": 0.5,
+    }
+    overlay.apply([first])
+    timing._native_setup_path_cache = {"stale": True}
+    timing._native_setup_path_cache_epoch = 0
+    timing.evaluate(base, overlay)
+    assert timing._native_setup_path_cache is None
+    checkpoint = overlay.checkpoint("persistent-graph-prefix")
+    assert checkpoint["checkpoint_id"] >= 0
+    bridge_checkpoint = timing._persistent_graph_bridge.checkpoint()
+    assert bridge_checkpoint["mode"] == "bindings_only"
+    assert timing._persistent_graph_bridge.graph.summary()["net_count"] == 1
+    assert len(timing._persistent_graph_bridge.graph.topology_view(1)["buffers"]) == 1
+
+    second = {
+        **first,
+        "candidate_location_x_dbu": 75000,
+        "session_buffer_id": 1,
+    }
+    overlay.apply([second])
+    timing.evaluate(base, overlay)
+    assert len(timing._persistent_graph_bridge.graph.topology_view(1)["buffers"]) == 2
+
+    overlay.restore(checkpoint["checkpoint_id"])
+
+    assert len(overlay.actions) == 1
+    assert len(timing._persistent_graph_bridge.graph.topology_view(1)["buffers"]) == 1
+    assert timing._persistent_graph_bridge.graph.summary()["net_count"] == 1
+    assert timing.evaluate(base, overlay)["topology_source"] == "native_current_partitions_cached_snapshot"
+    assert timing.evaluate(base, overlay)["topology_source"] == "native_current_partitions_cached_snapshot"
+
+    overlay.rollback()
+    assert timing._persistent_graph_bridge.graph.summary()["net_count"] == 0
 
 
 def test_current_partition_timing_matches_independent_graph_without_flute_rebuild(monkeypatch):
@@ -166,7 +355,7 @@ def test_second_split_remove_and_checkpoint_restore_use_current_partitions():
     )
 
 
-def test_parent_delta_patch_matches_full_carrier_for_cross_net_action():
+def test_parent_delta_patch_matches_full_carrier_for_cross_net_action(monkeypatch):
     from dreamplace.ops.placeio_ecc.buffer_session import PlaceIOBufferSession
 
     base = _base()
@@ -197,7 +386,15 @@ def test_parent_delta_patch_matches_full_carrier_for_cross_net_action():
         "split_ratio": 0.5,
     }
     session.apply([second])
+    monkeypatch.setattr(
+        rebuffer_cpp,
+        "export_overlay_carrier",
+        lambda *args, **kwargs: pytest.fail(
+            "cross-net parent delta rebuilt the full overlay carrier"
+        ),
+    )
     delta = session.evaluate()
+    monkeypatch.undo()
 
     states = [
         session.overlay.native_topologies[name]
@@ -249,6 +446,77 @@ def test_parent_delta_patch_matches_full_carrier_for_cross_net_action():
     restored = session.evaluate()
     assert restored["wns_ps"] == pytest.approx(parent["wns_ps"], abs=1e-8, rel=0)
     assert restored["tns_ps"] == pytest.approx(parent["tns_ps"], abs=1e-8, rel=0)
+
+
+def test_compact_parent_delta_can_be_reused_for_second_cross_net_action(monkeypatch):
+    from dreamplace.ops.placeio_ecc.buffer_session import PlaceIOBufferSession
+    from test_incremental_timing import _join_base
+
+    base = _join_base()
+    timing = _model(base)
+    session = PlaceIOBufferSession(SimpleNamespace(pydb=base), timing_model=timing)
+    session.begin()
+
+    def action(net_name, driver, load, x, y=0):
+        return {
+            "action_kind": "buffer_insert",
+            "net_name": net_name,
+            "driver_pin_name": driver,
+            "downstream_pin_names": [load],
+            "buffer_master_name": "BUF1",
+            "candidate_location_x_dbu": x,
+            "candidate_location_y_dbu": y,
+            "split_ratio": 0.5,
+        }
+
+    session.apply([action("n1", "u/Y", "a:A", 55000)])
+    session.evaluate()
+    session.apply([action("n0", "IN", "u:A", 5000)])
+    parent = session.evaluate()
+    parent_runtime = timing.current_graph()
+    assert parent["topology_source"] == "native_session_parent_delta_patch"
+    assert parent_runtime is not None
+    assert parent_runtime.model.pydb._compact_timing_graph is True
+    assert callable(parent_runtime.model._pin_id)
+    assert parent_runtime.model.new_x.numel() > 0
+    assert hasattr(parent_runtime.model, "steiner")
+    assert hasattr(parent_runtime.model, "rc")
+
+    monkeypatch.setattr(
+        rebuffer_cpp,
+        "export_overlay_carrier",
+        lambda *args, **kwargs: pytest.fail(
+            "second compact parent delta rebuilt the full overlay carrier"
+        ),
+    )
+    session.apply([action("n2", "IN2", "a:B", 50000, 5000)])
+    delta = session.evaluate()
+    monkeypatch.undo()
+
+    states = [
+        session.overlay.native_topologies[name]
+        for name in sorted(session.overlay.native_topologies)
+    ]
+    reference_base = _model(base)
+    payload = rebuffer_cpp.export_overlay_carrier(
+        base,
+        steiner_payload(base, reference_base),
+        states,
+        list(session.overlay.actions),
+    )
+    reference = _model(
+        CommittedTimingPyDB(base, SimpleNamespace(**payload["physical"])),
+        steiner_view=payload["steiner"],
+    ).baseline.as_dict()
+
+    assert delta["topology_source"] == "native_session_parent_delta_patch"
+    assert delta["wns_ps"] == pytest.approx(reference["wns_ps"], abs=1e-8, rel=0)
+    assert delta["tns_ps"] == pytest.approx(reference["tns_ps"], abs=1e-8, rel=0)
+    assert delta["endpoint_count"] == reference["endpoint_count"]
+    runtime = timing.current_graph()
+    assert runtime is not None
+    assert runtime.model.pydb._compact_timing_graph is True
+    assert len(runtime.model.pydb.pin_names) == len(set(runtime.model.pydb.pin_names))
 
 
 def test_cross_net_strip_uses_incremental_carrier_removal(monkeypatch):

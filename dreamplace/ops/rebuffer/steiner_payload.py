@@ -6,8 +6,8 @@ performed by ``rebuffer_steiner_cpp`` and repair decisions remain in
 ``rebuffer_cpp``.
 """
 
-from __future__ import annotations
-
+import hashlib
+import json
 from collections import defaultdict
 
 import numpy as np
@@ -18,15 +18,64 @@ ARTIFACT = "rebuffer_openroad_steiner_payload"
 ARTIFACT_VERSION = 1
 
 
-def _pin_coordinates(pydb):
+def _pin_coordinates(pydb, *, use_pin_offset=True):
     pin2node = np.asarray(pydb.pin2node_map, dtype=np.int64)
     node_x = np.asarray(pydb.node_x, dtype=np.float64)
     node_y = np.asarray(pydb.node_y, dtype=np.float64)
-    pin_offset_x = np.asarray(pydb.pin_offset_x, dtype=np.float64)
-    pin_offset_y = np.asarray(pydb.pin_offset_y, dtype=np.float64)
-    x = np.rint(node_x[pin2node] + pin_offset_x).astype(np.int64)
-    y = np.rint(node_y[pin2node] + pin_offset_y).astype(np.int64)
+    x, y = node_x[pin2node], node_y[pin2node]
+    if use_pin_offset:
+        x = x + np.asarray(pydb.pin_offset_x, dtype=np.float64)
+        y = y + np.asarray(pydb.pin_offset_y, dtype=np.float64)
+    x = np.rint(x).astype(np.int64)
+    y = np.rint(y).astype(np.int64)
     return x, y
+
+
+def steiner_input_identity(pydb, *, dbu, r_unit, c_unit, scale_factor, use_pin_offset):
+    """Identify the immutable PyDB geometry/connectivity used by selected TP.
+
+    Hash the transported array contents, rather than Python object ids. Master
+    identities are included because an in-place resize also invalidates TP.
+    """
+    digest = hashlib.sha256()
+    for field in (
+        "dbu",
+        "node_x",
+        "node_y",
+        "pin_offset_x",
+        "pin_offset_y",
+        "pin2node_map",
+        "flat_net2pin_map",
+        "flat_net2pin_start_map",
+        "net2driver_pin_map",
+        "inst_main_id",
+        "inst_libcell_offset",
+        "pin_2_libpin_offset",
+        "flat_lib_pin_cap",
+        "flat_lib_pin_rcap",
+        "flat_lib_pin_fcap",
+        "flat_lib_pin_cap_limit",
+        "flat_lib_pin_slew_limit",
+        "outcaps",
+    ):
+        values = np.ascontiguousarray(getattr(pydb, field), dtype=np.float64)
+        digest.update(field.encode())
+        digest.update(np.asarray(values.shape, dtype=np.int64).tobytes())
+        digest.update(values.tobytes())
+    for field in ("out_rcaps", "out_fcaps"):
+        digest.update(field.encode())
+        digest.update(np.asarray(getattr(pydb, field, ()), dtype=np.float64).tobytes())
+    for field in ("node_names", "pin_names", "net_names"):
+        digest.update(json.dumps([str(value) for value in getattr(pydb, field)]).encode())
+    return {
+        "provider": "openroad_stt",
+        "source_sha256": digest.hexdigest(),
+        "dbu": float(dbu),
+        "r_unit": float(r_unit),
+        "c_unit": float(c_unit),
+        "scale_factor": float(scale_factor),
+        "use_pin_offset": bool(use_pin_offset),
+    }
 
 
 def _empty_payload(pydb, reason):
@@ -44,6 +93,7 @@ def _empty_payload(pydb, reason):
         "pin_fa": [-1] * num_pins,
         "flat_pin_to_start": [0] * (num_pins + 1),
         "flat_pin_to": [],
+        "flat_pin_from": [],
         "node_x": [0.0] * num_pins,
         "node_y": [0.0] * num_pins,
         "edge_resistance": [0.0] * num_pins,
@@ -51,7 +101,7 @@ def _empty_payload(pydb, reason):
     }
 
 
-def build_openroad_steiner_payload(pydb, *, r_unit=0.914, dbu=None):
+def build_openroad_steiner_payload(pydb, *, r_unit=0.914, dbu=None, use_pin_offset=True):
     """Return a ``SteinerView``-compatible payload using OpenROAD STT.
 
     Pin nodes keep their global pin ids.  Synthetic Steiner nodes are
@@ -70,7 +120,7 @@ def build_openroad_steiner_payload(pydb, *, r_unit=0.914, dbu=None):
     if num_pins <= 0 or num_nets <= 0:
         return _empty_payload(pydb, "empty_design")
 
-    pin_x, pin_y = _pin_coordinates(pydb)
+    pin_x, pin_y = _pin_coordinates(pydb, use_pin_offset=use_pin_offset)
     flat_map = np.asarray(pydb.flat_net2pin_map, dtype=np.int64)
     flat_start = np.asarray(pydb.flat_net2pin_start_map, dtype=np.int64)
     drivers = np.asarray(pydb.net2driver_pin_map, dtype=np.int64)
@@ -102,17 +152,17 @@ def build_openroad_steiner_payload(pydb, *, r_unit=0.914, dbu=None):
         ys = [int(pin_y[pin]) for pin in pins]
         tree = build_openroad_stt_tree(xs, ys, driver_index, alpha=0.3)
         edges = tree.get("edges", ())
-        if not edges:
-            return _empty_payload(pydb, "openroad_stt_empty_tree")
 
         coord_pins = defaultdict(list)
         for pin in pins:
             coord_pins[(int(pin_x[pin]), int(pin_y[pin]))].append(pin)
+        # A buffer at its driver produces a valid zero-wire net. The
+        # coincident-pin edges below still preserve every terminal and cap.
+        if not edges and len(coord_pins) > 1:
+            return _empty_payload(pydb, "openroad_stt_empty_tree")
         coord_node = {}
         for coord, coord_pin_ids in coord_pins.items():
-            coord_node[coord] = (
-                driver if driver in coord_pin_ids else coord_pin_ids[0]
-            )
+            coord_node[coord] = driver if driver in coord_pin_ids else coord_pin_ids[0]
         for x1, y1, x2, y2 in edges:
             for coord in ((int(x1), int(y1)), (int(x2), int(y2))):
                 if coord in coord_node:
@@ -160,12 +210,8 @@ def build_openroad_steiner_payload(pydb, *, r_unit=0.914, dbu=None):
 
         for node in order:
             for child in children[node]:
-                length = abs(node_x[node] - node_x[child]) + abs(
-                    node_y[node] - node_y[child]
-                )
-                edge_resistance[child] = (
-                    float(length) / float(dbu) * float(r_unit)
-                )
+                length = abs(node_x[node] - node_x[child]) + abs(node_y[node] - node_y[child])
+                edge_resistance[child] = float(length) / float(dbu) * float(r_unit)
         topo.extend(order)
         topo_start.append(len(topo))
         net_ids.append(net_id)
@@ -201,6 +247,8 @@ def build_openroad_steiner_payload(pydb, *, r_unit=0.914, dbu=None):
         "pin_fa": pin_fa,
         "flat_pin_to_start": flat_pin_to_start,
         "flat_pin_to": flat_pin_to,
+        # Expanded CSR sources, aligned with flat_pin_to (not pin_fa).
+        "flat_pin_from": np.repeat(np.arange(size), np.diff(flat_pin_to_start)).tolist(),
         "node_x": node_x_values,
         "node_y": node_y_values,
         "edge_resistance": edge_resistance_values,

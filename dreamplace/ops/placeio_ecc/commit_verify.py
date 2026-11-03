@@ -5,6 +5,7 @@ only the existing placeio_ecc database and TimingPropagation boundaries.
 """
 
 from .buffer_session import action_digest
+from .repair_profile import measure_phase
 from .timing_carrier import refresh_python_timing_carrier, require_carrier_schema
 
 ARTIFACT = "placeio_ecc_commit_verified_buffers"
@@ -14,10 +15,11 @@ ARTIFACT_VERSION = 2
 def timing_reader(pydb, *, config=None):
     """Evaluate a fresh physical timing carrier with Python TimingPropagation."""
     from ..rebuffer.timing_model import RebufferTimingModel
+    from ..rebuffer.timing_profile import placement_timing_kwargs
     from .electrical_observation import electrical_observation
 
-    model = RebufferTimingModel(pydb, use_pin_offset=False)
     resolved = dict(config or {})
+    model = RebufferTimingModel(pydb, **placement_timing_kwargs(resolved))
     return {
         **model.baseline.as_dict(),
         "electrical": electrical_observation(
@@ -30,17 +32,26 @@ def timing_reader(pydb, *, config=None):
 
 
 def commit_buffer_actions_verified(
-    raw_db, actions, *, chunk_size=0, wns_margin_ps=0.0, tns_margin_ps=0.0, reader=timing_reader
+    raw_db,
+    actions,
+    *,
+    chunk_size=0,
+    wns_margin_ps=0.0,
+    tns_margin_ps=0.0,
+    reader=timing_reader,
+    profile=None,
 ):
     """Verify complete native trees, preserving chains across source nets."""
     from ..rebuffer import rebuffer_cpp
     from .place_io import PlaceIOFunction
 
     def apply(values):
-        return dict(PlaceIOFunction.apply_buffer_actions(raw_db, values, action_digest(values)))
+        with measure_phase(profile, "native_buffer_commit_ms"):
+            return dict(PlaceIOFunction.apply_buffer_actions(raw_db, values, action_digest(values)))
 
     def refresh():
-        _, summary = refresh_python_timing_carrier(raw_db)
+        kwargs = {"profile": profile} if profile is not None else {}
+        _, summary = refresh_python_timing_carrier(raw_db, **kwargs)
         return dict(summary)
 
     def counts():

@@ -100,6 +100,67 @@ def test_retired_endpoints_release_their_window_slot():
     assert rebuffer_cpp.select_timing_queue_items(snapshot, config) == [items[2]]
 
 
+def test_gradient_reject_limit_refreshes_native_snapshot():
+    state = {"checkpoints": [], "provider_calls": 0, "snapshots": 0}
+
+    def snapshot():
+        state["snapshots"] += 1
+        return {
+            "status": "ok",
+            "items": [
+                {
+                    **_item(10, 0, -10.0),
+                    "endpoint_pin_name": "target:D",
+                    "gradient_score": 1.0,
+                },
+                {**_item(20, 1, -9.0), "gradient_score": 0.5},
+            ],
+        }
+
+    def provider(_request):
+        state["provider_calls"] += 1
+        return {
+            "status": "ok",
+            "candidate_key": f"gradient_candidate_{state['provider_calls']}",
+            "actions": [{"action_id": state["provider_calls"]}],
+        }
+
+    def checkpoint(label):
+        state["checkpoints"].append(label)
+        return {"checkpoint_id": len(state["checkpoints"]) - 1}
+
+    def restore(_token):
+        return None
+
+    def evaluate():
+        return {
+            "status": "ok",
+            "wns_ps": -10.0,
+            "tns_ps": -20.0,
+            "endpoint_slacks_by_name": {"target:D": -10.0},
+        }
+
+    result = rebuffer_cpp.run_repair_timing_queue_operator(
+        snapshot,
+        provider,
+        checkpoint,
+        lambda _actions: None,
+        evaluate,
+        restore,
+        {
+            "max_passes": 4,
+            "acceptance": "endpoint_journal",
+            "allow_decreasing_slack": True,
+            "gradient_ordering": True,
+            "gradient_reject_limit": 2,
+        },
+    )
+
+    assert result["gradient_reject_limit"] == 2
+    assert result["gradient_refresh_count"] >= 1
+    assert state["snapshots"] >= 2
+
+
 def _strict_endpoint_run(after_slacks):
     design, _tree, native_tree = _unbuffered_tree()
     timing = _timing()

@@ -5,10 +5,12 @@
 
 #include "rebuffer_carrier.hh"
 #include "rebuffer_incremental_timing.hh"
+#include "rebuffer_topology_partitions.hh"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <queue>
@@ -88,34 +90,55 @@ struct PatchBaseCache
   std::shared_ptr<TimingGraphIndex> timing_index;
 };
 
-std::shared_ptr<PatchBaseCache> patchBaseCache(const py::object& base)
+std::shared_ptr<PatchBaseCache> patchBaseCache(
+    const py::object& base, bool* cache_hit)
 {
-  static std::unordered_map<PyObject*, std::shared_ptr<PatchBaseCache>> cache;
-  const auto key = base.ptr();
-  const auto found = cache.find(key);
-  if (found != cache.end()) return found->second;
+  if (cache_hit != nullptr) *cache_hit = false;
+  const auto timing_index = timingGraphIndex(base);
+  const auto net_starts = carrierArray<int>(base, "net_flat_arcs_start");
+  const auto net_drivers = carrierArray<int>(base, "net2driver_pin_map");
+  const auto pin_net = carrierArray<int>(base, "pin2net_map");
+  const auto cell_names = carrierArray<std::string>(base, "flat_libcell_names");
+  const auto cell_arc_starts = carrierArray<int>(base, "cell_id_2_arc_id_start");
+  const auto timing_level_starts = carrierArray<int>(base, "flat_inst_arcs_by_level_start");
+
+  struct CacheEntry {
+    TimingGraphIndex* graph = nullptr;
+    std::shared_ptr<PatchBaseCache> value;
+  };
+  static std::vector<CacheEntry> cache;
+  for (const auto& entry : cache) {
+    if (entry.graph != timing_index.get()) continue;
+    const auto& candidate = *entry.value;
+    if (candidate.net_starts == net_starts
+        && candidate.net_drivers == net_drivers
+        && candidate.pin_net == pin_net
+        && candidate.cell_names == cell_names
+        && candidate.cell_arc_starts == cell_arc_starts
+        && candidate.timing_level_starts == timing_level_starts) {
+      if (cache_hit != nullptr) *cache_hit = true;
+      return entry.value;
+    }
+  }
+
   auto value = std::make_shared<PatchBaseCache>();
-  value->pins = carrierArray<std::string>(base, "pin_names");
+  value->pins = timing_index->pins;
   value->nets = carrierArray<std::string>(base, "net_names");
-  value->net_starts = carrierArray<int>(base, "net_flat_arcs_start");
-  value->net_arcs = carrierArray<NetArc>(base, "net_flat_arcs");
-  value->net_drivers = carrierArray<int>(base, "net2driver_pin_map");
-  value->pin_net = carrierArray<int>(base, "pin2net_map");
-  value->cell_names = carrierArray<std::string>(base, "flat_libcell_names");
-  value->cell_arc_starts = carrierArray<int>(base, "cell_id_2_arc_id_start");
-  value->timing_rows = carrierArray<CellArc>(base, "flat_inst_arcs_by_level");
-  value->timing_level_starts = carrierArray<int>(base, "flat_inst_arcs_by_level_start");
-  value->clock_pins = carrierArray<int>(base, "clock_pins");
+  value->net_starts = net_starts;
+  value->net_arcs = timing_index->nets;
+  value->net_drivers = net_drivers;
+  value->pin_net = pin_net;
+  value->cell_names = cell_names;
+  value->cell_arc_starts = cell_arc_starts;
+  value->timing_rows = timing_index->cells;
+  value->timing_level_starts = timing_level_starts;
+  value->clock_pins = timing_index->clocks;
   if (value->timing_level_starts.size() < 2) {
     throw py::value_error("base timing arc schedule is missing its clock level");
   }
-  value->timing_index = makeTimingGraphIndex(
-      value->pins,
-      value->timing_rows,
-      value->net_arcs,
-      value->clock_pins,
-      value->timing_level_starts[1]);
-  cache.emplace(key, value);
+  value->timing_index = timing_index;
+  if (cache.size() >= 32) cache.erase(cache.begin());
+  cache.push_back({timing_index.get(), value});
   return value;
 }
 
@@ -139,6 +162,29 @@ void closePatchCone(
   }
 }
 
+template <typename Edge>
+std::pair<std::vector<int>, std::vector<int>> buildCsr(
+    const std::vector<Edge>& edges,
+    int pin_count,
+    bool incoming)
+{
+  std::vector<int> offsets(pin_count + 1, 0);
+  for (const auto& edge : edges) {
+    const int pin = edge[incoming ? 1 : 0];
+    if (pin >= 0 && pin < pin_count) ++offsets[pin + 1];
+  }
+  for (int pin = 1; pin <= pin_count; ++pin) {
+    offsets[pin] += offsets[pin - 1];
+  }
+  std::vector<int> ids(offsets.back(), -1);
+  std::vector<int> cursor = offsets;
+  for (int id = 0; id < static_cast<int>(edges.size()); ++id) {
+    const int pin = edges[id][incoming ? 1 : 0];
+    if (pin >= 0 && pin < pin_count) ids[cursor[pin]++] = id;
+  }
+  return {std::move(offsets), std::move(ids)};
+}
+
 py::dict buildPatchSchedule(
     const PatchBaseCache& base,
     const int current_pin_count,
@@ -149,10 +195,35 @@ py::dict buildPatchSchedule(
     const py::object& endpoints,
     const py::object& starts,
     const py::object& setup_arcs,
-    const py::object& check_arcs)
+    const py::object& check_arcs,
+    IncrementalTopologyState* topology_state,
+    const int slot)
 {
   const auto& old = *base.timing_index;
   const int count = current_pin_count;
+  const char* schedule_env = std::getenv("REBUFFER_PATCH_EVENT_SCHEDULE");
+  const bool export_event_schedule =
+      schedule_env != nullptr && std::string(schedule_env) == "1";
+  const char* cache_env = std::getenv("REBUFFER_PATCH_SCHEDULE_CACHE");
+  const bool schedule_cache_enabled =
+      cache_env != nullptr && std::string(cache_env) == "1";
+  if (schedule_cache_enabled && topology_state != nullptr
+      && topology_state->schedule_cache_epoch == topology_state->epoch
+      && topology_state->schedule_cache_slot == slot
+      && topology_state->schedule_cache_pin_count == count
+      && topology_state->schedule_cache_row_count
+          == static_cast<int>(current_rows.size())
+      && topology_state->schedule_cache_net_count
+          == static_cast<int>(current_nets.size())
+      && topology_state->schedule_cache_event
+          == static_cast<int>(export_event_schedule)
+      && topology_state->schedule_cache_changed_pins == changed_pins
+      && py::len(topology_state->schedule_cache) > 0) {
+    py::dict cached =
+        topology_state->schedule_cache.attr("copy")().cast<py::dict>();
+    cached["schedule_cache_hit"] = true;
+    return cached;
+  }
   if (count < static_cast<int>(old.pins.size())) {
     throw py::value_error("incremental patch timing graph cannot remove base pins");
   }
@@ -165,10 +236,11 @@ py::dict buildPatchSchedule(
     throw py::value_error("incremental patch cannot change the clock arc level");
   }
   std::vector<int> pin_map(count, -1), arc_map(current_rows.size(), -1);
+  std::vector<unsigned char> matched(old.cells.size(), 0);
   for (int pin = 0; pin < static_cast<int>(old.pins.size()); ++pin) {
     pin_map[pin] = pin;
   }
-  std::vector<unsigned char> forward(count, 0), backward(count, 0);
+  std::vector<unsigned char> forward(count, 0), backward(count, 0), reverse_seed(count, 0);
   for (const int pin : changed_pins) {
     if (pin < 0 || pin >= count) throw py::value_error("changed timing pin is out of range");
     forward[pin] = 1;
@@ -186,7 +258,10 @@ py::dict buildPatchSchedule(
     const std::array<int, 6> key{
         source(id), row[1], row[3], row[4], row[5], id < clock_end};
     const auto found = old.arc_ids.find(key);
-    if (found != old.arc_ids.end()) arc_map[id] = found->second;
+    if (found != old.arc_ids.end()) {
+      arc_map[id] = found->second;
+      matched[found->second] = 1;
+    }
     else if (row[1] >= 0) forward.at(row[1]) = 1;
     if (id >= clock_end) {
       const int cell_source = row[0];
@@ -195,6 +270,37 @@ py::dict buildPatchSchedule(
       successors.at(cell_source).push_back(sink);
       predecessors.at(sink).push_back(cell_source);
       ++indegree[sink];
+    }
+  }
+  if (export_event_schedule) {
+    // A removed cell arc can leave its source pin alive while disappearing
+    // from the current graph. Export that source as an explicit reverse seed
+    // so the event path does not retain a stale RAT winner.
+    for (int id = 0; id < static_cast<int>(old.cells.size()); ++id) {
+      if (matched[id]) continue;
+      const int sink = old.cells[id][1];
+      if (sink >= 0 && sink < count) forward[sink] = 1;
+      if (id >= old.clock_end) {
+        const int old_source = old.source(id);
+        if (old_source >= 0 && old_source < count) reverse_seed[old_source] = 1;
+      }
+    }
+    auto edgeKey = [](int source_pin, int sink_pin) {
+      return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(source_pin)) << 32)
+             | static_cast<std::uint32_t>(sink_pin);
+    };
+    std::unordered_set<std::uint64_t> current_net_edges;
+    current_net_edges.reserve(current_nets.size());
+    for (const auto& edge : current_nets) {
+      current_net_edges.insert(edgeKey(edge[0], edge[1]));
+    }
+    // A split removes an old net edge without necessarily changing the driver
+    // pin identity. Seed that driver for reverse propagation as well.
+    for (const auto& edge : old.nets) {
+      if (edge[0] < 0 || edge[0] >= count || edge[1] < 0 || edge[1] >= count) continue;
+      if (!current_net_edges.count(edgeKey(edge[0], edge[1]))) {
+        reverse_seed[edge[0]] = 1;
+      }
     }
   }
   for (const auto& edge : current_nets) {
@@ -215,6 +321,13 @@ py::dict buildPatchSchedule(
     }
   }
   if (visited != count) throw py::value_error("incremental patch timing graph is not a DAG");
+  const std::vector<int> forward_seed_pins = [&]() {
+    std::vector<int> values;
+    for (int pin = 0; pin < count; ++pin) {
+      if (forward[pin]) values.push_back(pin);
+    }
+    return values;
+  }();
   closePatchCone(forward, successors);
   backward = forward;
   closePatchCone(backward, predecessors);
@@ -239,6 +352,16 @@ py::dict buildPatchSchedule(
     if (backward[edge[0]] && required_net_sink[edge[1]]) {
       backward_nets[rank[edge[0]]].push_back(id);
     }
+  }
+  // The patch already owns the current graph and its topological ranks.  Keep
+  // the event adapter on this one native graph walk by exporting its CSR view
+  // here instead of calling affected_timing_schedule again from Python.
+  std::pair<std::vector<int>, std::vector<int>> cell_out, cell_in, net_out, net_in;
+  if (export_event_schedule) {
+    cell_out = buildCsr(current_rows, count, false);
+    cell_in = buildCsr(current_rows, count, true);
+    net_out = buildCsr(current_nets, count, false);
+    net_in = buildCsr(current_nets, count, true);
   }
   auto exportWorklist = [](const std::vector<std::vector<int>>& cells,
                            const std::vector<std::vector<int>>& nets,
@@ -285,6 +408,25 @@ py::dict buildPatchSchedule(
   }
   output["forward_pins"] = intArray(forward_selected);
   output["backward_pins"] = intArray(backward_selected);
+  if (export_event_schedule) {
+    output["forward_seed_pins"] = intArray(forward_seed_pins);
+    output["reverse_seed_pins"] = intArray([&]() {
+      std::vector<int> values;
+      for (int pin = 0; pin < count; ++pin) {
+        if (reverse_seed[pin]) values.push_back(pin);
+      }
+      return values;
+    }());
+    output["pin_rank"] = intArray(rank);
+    output["cell_out_start"] = intArray(cell_out.first);
+    output["cell_out_ids"] = intArray(cell_out.second);
+    output["cell_in_start"] = intArray(cell_in.first);
+    output["cell_in_ids"] = intArray(cell_in.second);
+    output["net_out_start"] = intArray(net_out.first);
+    output["net_out_ids"] = intArray(net_out.second);
+    output["net_in_start"] = intArray(net_in.first);
+    output["net_in_ids"] = intArray(net_in.second);
+  }
   output["clock_rows"] = intArray(clock_rows);
   output["forward_start_rows"] = intArray(selectedPins(starts, forward));
   output["backward_endpoint_rows"] = intArray(selectedPins(endpoints, backward));
@@ -292,6 +434,17 @@ py::dict buildPatchSchedule(
   output["check_rows"] = intArray(selectedRows(check_arcs, backward));
   exportWorklist(forward_cells, forward_nets, false, output, "forward");
   exportWorklist(backward_cells, backward_nets, true, output, "backward");
+  output["schedule_cache_hit"] = false;
+  if (schedule_cache_enabled && topology_state != nullptr) {
+    topology_state->schedule_cache = output;
+    topology_state->schedule_cache_changed_pins = changed_pins;
+    topology_state->schedule_cache_epoch = topology_state->epoch;
+    topology_state->schedule_cache_slot = slot;
+    topology_state->schedule_cache_pin_count = count;
+    topology_state->schedule_cache_row_count = current_rows.size();
+    topology_state->schedule_cache_net_count = current_nets.size();
+    topology_state->schedule_cache_event = static_cast<int>(export_event_schedule);
+  }
   return output;
 }
 
@@ -377,7 +530,8 @@ py::dict buildIncrementalTimingPatch(
     throw py::value_error("incremental timing patch action/state identity mismatch");
   }
 
-  const auto base_cache = patchBaseCache(base);
+  bool patch_base_cache_hit = false;
+  const auto base_cache = patchBaseCache(base, &patch_base_cache_hit);
   const auto& base_pins = base_cache->pins;
   const auto& base_nets = base_cache->nets;
   const int pin_count = static_cast<int>(base_pins.size());
@@ -426,10 +580,6 @@ py::dict buildIncrementalTimingPatch(
   std::vector<int> pin_net = base_cache->pin_net;
   requireSize(pin_net, static_cast<std::size_t>(pin_count), "pin2net_map");
 
-  std::unordered_map<int, std::vector<int>> children;
-  for (const auto& edge : state->edges) {
-    children[edge.parent].push_back(edge.child);
-  }
   std::unordered_map<int, int> output_slot;
   std::unordered_map<int, int> input_slot;
   for (int slot_index = 0; slot_index < buffer_count; ++slot_index) {
@@ -440,42 +590,9 @@ py::dict buildIncrementalTimingPatch(
     }
   }
 
-  // Assign every physical RC node to its electrical partition.  The edge
-  // input->output of a buffer is a logical cell edge; the output node starts
-  // the next child net.  This makes a same-net chain a forest of B+1 timing
-  // nets instead of pretending that all buffers share one RC slot.
-  std::unordered_map<int, int> node_partition;
-  std::vector<std::pair<int, int>> pending_nodes{{state->driver_pin_id, 0}};
-  while (!pending_nodes.empty()) {
-    const auto [node, incoming_partition] = pending_nodes.back();
-    pending_nodes.pop_back();
-    int partition = incoming_partition;
-    const auto output = output_slot.find(node);
-    if (output != output_slot.end()) {
-      partition = output->second + 1;
-    }
-    const auto found = node_partition.find(node);
-    if (found != node_partition.end() && found->second != partition) {
-      throw py::value_error("incremental timing patch node has multiple partitions");
-    }
-    node_partition[node] = partition;
-    for (const int child : children[node]) {
-      pending_nodes.emplace_back(child, partition);
-    }
-  }
-  if (node_partition.size() != state->coordinates.size()) {
-    throw py::value_error("incremental timing patch topology is disconnected");
-  }
-
-  std::vector<std::vector<int>> partition_loads(buffer_count + 1);
-  for (const auto& [node, loads] : state->node_loads) {
-    const auto partition = node_partition.find(node);
-    if (partition == node_partition.end()) {
-      throw py::value_error("incremental timing patch load node is disconnected");
-    }
-    auto& target = partition_loads.at(partition->second);
-    target.insert(target.end(), loads.begin(), loads.end());
-  }
+  const auto partitions = topologyPartitions(*state);
+  const auto& node_partition = partitions.node_partition;
+  auto partition_loads = partitions.loads;
   for (int slot_index = 0; slot_index < buffer_count; ++slot_index) {
     const auto& buffer = state->buffers[slot_index];
     const auto partition = node_partition.find(buffer.input_node);
@@ -829,6 +946,7 @@ py::dict buildIncrementalTimingPatch(
 
   py::dict output;
   output["status"] = "ok";
+  output["patch_base_cache_hit"] = patch_base_cache_hit;
   output["graph"] = graph;
   output["rc"] = rc;
   std::vector<int> slot_pin_ids;
@@ -860,7 +978,9 @@ py::dict buildIncrementalTimingPatch(
       base.attr("end_points"),
       base.attr("start_points"),
       base.attr("endpoints_constraint_arcs"),
-      base.attr("endpoints_timing_check_arcs"));
+      base.attr("endpoints_timing_check_arcs"),
+      state.get(),
+      slot);
   py::dict buffer_caps;
   py::list slots;
   for (const auto& info : slot_libs) {
@@ -878,138 +998,6 @@ py::dict buildIncrementalTimingPatch(
     buffer_caps["output"] = slot_libs.front().output_caps;
   }
   output["buffer_caps"] = buffer_caps;
-  return output;
-}
-
-py::dict evaluateIncrementalRc(
-    const py::dict& rc,
-    const py::array_t<double, py::array::c_style | py::array::forcecast>& generic_caps,
-    const py::array_t<double, py::array::c_style | py::array::forcecast>& rise_caps,
-    const py::array_t<double, py::array::c_style | py::array::forcecast>& fall_caps,
-    const py::dict& buffer_caps,
-    const int pin_count)
-{
-  const auto global_parent = rc["parent"].cast<std::vector<int>>();
-  const auto global_child_start = rc["child_start"].cast<std::vector<int>>();
-  const auto global_children = rc["child"].cast<std::vector<int>>();
-  const auto global_topo_start = rc["topo_start"].cast<std::vector<int>>();
-  const auto global_topo = rc["topo"].cast<std::vector<int>>();
-  const auto global_resistance = rc["edge_resistance"].cast<std::vector<double>>();
-  const auto global_edge_cap = rc["edge_capacitance"].cast<std::vector<double>>();
-  const auto affected = rc["affected_nodes"].cast<std::vector<int>>();
-  std::unordered_map<int, int> local;
-  local.reserve(affected.size());
-  for (int index = 0; index < static_cast<int>(affected.size()); ++index) {
-    local.emplace(affected[index], index);
-  }
-  std::vector<int> parent(affected.size(), -1);
-  std::vector<std::vector<int>> children(affected.size());
-  for (int index = 0; index < static_cast<int>(affected.size()); ++index) {
-    parent[index] = local.at(global_parent[affected[index]]);
-    const int begin = global_child_start[affected[index]];
-    const int end = global_child_start[affected[index] + 1];
-    for (int offset = begin; offset < end; ++offset) {
-      children[index].push_back(local.at(global_children[offset]));
-    }
-  }
-  std::vector<std::vector<int>> topologies;
-  for (int index = 0; index + 1 < static_cast<int>(global_topo_start.size()); ++index) {
-    std::vector<int> topology;
-    for (int offset = global_topo_start[index]; offset < global_topo_start[index + 1]; ++offset) {
-      topology.push_back(local.at(global_topo[offset]));
-    }
-    topologies.push_back(std::move(topology));
-  }
-  std::vector<double> wire_cap(affected.size(), 0.0);
-  for (int index = 0; index < static_cast<int>(affected.size()); ++index) {
-    const int global_node = affected[index];
-    if (global_parent[global_node] == global_node) continue;
-    const double half = global_edge_cap[global_node] * 0.5;
-    wire_cap[index] += half;
-    wire_cap[parent[index]] += half;
-  }
-  auto modeCaps = [&](const py::array_t<double, py::array::c_style | py::array::forcecast>& base,
-                      const char* mode) {
-    std::vector<double> caps(affected.size(), 0.0);
-    const auto values = base.unchecked<1>();
-    std::vector<std::vector<double>> slot_inputs;
-    std::vector<std::vector<double>> slot_outputs;
-    if (buffer_caps.contains("slots")) {
-      for (const auto& item : buffer_caps["slots"].cast<py::sequence>()) {
-        const auto slot = item.cast<py::dict>();
-        slot_inputs.push_back(slot["input"].cast<std::vector<double>>());
-        slot_outputs.push_back(slot["output"].cast<std::vector<double>>());
-      }
-    } else {
-      slot_inputs.push_back(buffer_caps["input"].cast<std::vector<double>>());
-      slot_outputs.push_back(buffer_caps["output"].cast<std::vector<double>>());
-    }
-    const int mode_index = std::string(mode) == "generic" ? 0 : std::string(mode) == "rise" ? 1 : 2;
-    for (int index = 0; index < static_cast<int>(affected.size()); ++index) {
-      const int node = affected[index];
-      if (node < pin_count && node < values.shape(0)) caps[index] = values(node);
-      else if (node >= pin_count) {
-        const int offset = node - pin_count;
-        const int slot_index = offset / 2;
-        if (slot_index >= 0 && slot_index < static_cast<int>(slot_inputs.size())) {
-          const auto& lane = (offset % 2 == 0)
-                                 ? slot_inputs.at(slot_index)
-                                 : slot_outputs.at(slot_index);
-          caps[index] = lane.at(mode_index);
-        }
-      }
-      caps[index] += wire_cap[index];
-    }
-    return caps;
-  };
-  auto evaluateMode = [&](const std::vector<double>& caps) {
-    const int count = affected.size();
-    std::vector<double> load(count), delay(count), ldelay(count), beta(count), impulse(count);
-    for (const auto& topology : topologies) {
-      for (auto it = topology.rbegin(); it != topology.rend(); ++it) {
-        const int node = *it;
-        double value = caps[node];
-        for (const int child : children[node]) value += load[child];
-        load[node] = value;
-      }
-      for (const int node : topology) {
-        if (parent[node] == node) {
-          delay[node] = 0.0;
-          continue;
-        }
-        delay[node] = delay[parent[node]] + global_resistance[affected[node]] * load[node];
-      }
-      for (auto it = topology.rbegin(); it != topology.rend(); ++it) {
-        const int node = *it;
-        double value = caps[node] * delay[node];
-        for (const int child : children[node]) value += ldelay[child];
-        ldelay[node] = value;
-      }
-      for (const int node : topology) {
-        if (parent[node] == node) {
-          beta[node] = 0.0;
-        } else {
-          beta[node] = beta[parent[node]] + global_resistance[affected[node]] * ldelay[node];
-        }
-        impulse[node] = 2.0 * beta[node] - delay[node] * delay[node];
-      }
-    }
-    return std::array<std::vector<double>, 3>{load, delay, impulse};
-  };
-  const auto generic = evaluateMode(modeCaps(generic_caps, "generic"));
-  const auto rise = evaluateMode(modeCaps(rise_caps, "rise"));
-  const auto fall = evaluateMode(modeCaps(fall_caps, "fall"));
-  py::dict output;
-  output["affected_nodes"] = intArray(affected);
-  output["loads_generic"] = generic[0];
-  output["delays_generic"] = generic[1];
-  output["impulses_generic"] = generic[2];
-  output["loads_rise"] = rise[0];
-  output["delays_rise"] = rise[1];
-  output["impulses_rise"] = rise[2];
-  output["loads_fall"] = fall[0];
-  output["delays_fall"] = fall[1];
-  output["impulses_fall"] = fall[2];
   return output;
 }
 

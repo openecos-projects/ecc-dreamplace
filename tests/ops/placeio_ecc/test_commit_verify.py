@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 from dreamplace.ops.placeio_ecc import commit_verify
 from dreamplace.ops.placeio_ecc.place_io import PlaceIOFunction
+from dreamplace.ops.placeio_ecc.repair_profile import RepairProfile
 
 
 class FakePydb:
@@ -127,6 +128,34 @@ def test_commit_verify_keeps_every_improving_chunk(monkeypatch):
     assert [chunk["status"] for chunk in result["chunks"]] == ["kept", "kept"]
     assert result["reverted_count"] == 0
     assert result["timing_after"] == {"wns_ps": -90.0, "tns_ps": -900.0}
+
+
+def test_profile_accounts_for_verified_refresh_without_changing_commit_results(monkeypatch):
+    baseline = {"wns_ps": -100.0, "tns_ps": -1000.0}
+    deltas = {0: (5.0, 50.0), 1: (5.0, 50.0)}
+    actions = [_action(0), _action(1)]
+    before = FakeBackend(baseline, deltas)
+    _install(monkeypatch, before)
+    expected = commit_verify.commit_buffer_actions_verified(
+        before, actions, chunk_size=1, reader=lambda pydb: dict(pydb.timing)
+    )
+    after = FakeBackend(baseline, deltas)
+    _install(monkeypatch, after)
+    measured = RepairProfile()
+    refresh_profiles = []
+
+    def refresh(raw_db, *, profile):
+        refresh_profiles.append(profile)
+        with profile.measure("physical_pydb_export_ms"):
+            return raw_db.refresh()
+
+    monkeypatch.setattr(commit_verify, "refresh_python_timing_carrier", refresh)
+    actual = commit_verify.commit_buffer_actions_verified(
+        after, actions, chunk_size=1, reader=lambda pydb: dict(pydb.timing), profile=measured
+    )
+    assert actual == expected
+    assert refresh_profiles == [measured, measured]
+    assert set(measured.timings_ms) == {"physical_pydb_export_ms", "native_buffer_commit_ms"}
 
 
 def test_commit_verify_without_chunking_verifies_one_transaction(monkeypatch):

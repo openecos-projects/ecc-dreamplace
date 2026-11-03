@@ -14,6 +14,8 @@ PHYSICAL_FIELDS = frozenset(
         "num_nodes",
         "num_terminals",
         "num_terminal_NIs",
+        "native_mutation_epoch",
+        "native_state_dirty",
         "node_names",
         "node_name2id_map",
         "node_master_names",
@@ -77,13 +79,20 @@ class CommittedTimingPyDB:
         *,
         previous_pydb=None,
         validate_schema=True,
+        recovery_rat_is_capture_deadline=False,
     ):
         from dreamplace.ops.rebuffer import rebuffer_cpp
 
         require_carrier_schema(base_pydb)
+        self.recovery_rat_is_capture_deadline = bool(
+            recovery_rat_is_capture_deadline
+            or getattr(base_pydb, "recovery_rat_is_capture_deadline", False)
+        )
         self._metadata = (
             base_pydb._metadata if isinstance(base_pydb, CommittedTimingPyDB) else base_pydb
         )
+        self.repair_library_source = getattr(base_pydb, "repair_library_source", None)
+        self.repair_library_metadata = getattr(base_pydb, "repair_library_metadata", None)
         self._physical = physical_pydb
         # Liberty/SDC qualification and endpoint rows belong to the immutable
         # metadata owner.  Reusing a previously committed carrier as the C++
@@ -117,24 +126,27 @@ class CommittedTimingPyDB:
         return self._physical.apply_sizing(node_ids, masters)
 
 
-def refresh_python_timing_carrier(raw_db):
+def refresh_python_timing_carrier(raw_db, *, profile=None):
     """Read committed IDB connectivity and rebuild graph metadata in C++."""
 
     from .place_io import PlaceIOFunction
+    from .repair_profile import measure_phase
 
     old_pydb = raw_db.pydb
     options = getattr(raw_db, "export_options", PyDbExportOptions())
     native = getattr(raw_db.module, "ecc", raw_db.module)
-    physical = native.pydb(
-        raw_db.dm_inst,
-        raw_db.route_num_bins_x,
-        raw_db.route_num_bins_y,
-        raw_db.with_routability,
-        with_sta=False,
-        include_clock_nets=True,
-        **asdict(options),
-    )
-    carrier = CommittedTimingPyDB(old_pydb, physical)
+    with measure_phase(profile, "physical_pydb_export_ms"):
+        physical = native.pydb(
+            raw_db.dm_inst,
+            raw_db.route_num_bins_x,
+            raw_db.route_num_bins_y,
+            raw_db.with_routability,
+            with_sta=False,
+            include_clock_nets=True,
+            **asdict(options),
+        )
+    with measure_phase(profile, "timing_carrier_rebuild_ms"):
+        carrier = CommittedTimingPyDB(old_pydb, physical)
     raw_db.pydb = carrier
     raw_db.sparse_timing_view = None
     raw_db.refresh_generation += 1

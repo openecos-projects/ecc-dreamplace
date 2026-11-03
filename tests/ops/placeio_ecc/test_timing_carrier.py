@@ -144,6 +144,26 @@ def _physical_after():
     )
 
 
+def test_native_mutation_state_follows_the_live_physical_owner():
+    base, physical = _base(), _physical_after()
+    base.native_mutation_epoch, base.native_state_dirty = 7, False
+    physical.native_mutation_epoch, physical.native_state_dirty = 1, True
+    carrier = CommittedTimingPyDB(base, physical)
+    assert (carrier.native_mutation_epoch, carrier.native_state_dirty) == (1, True)
+    physical.native_mutation_epoch, physical.native_state_dirty = 2, False
+    assert (carrier.native_mutation_epoch, carrier.native_state_dirty) == (2, False)
+
+
+@pytest.mark.parametrize("capture_deadline", [False, True])
+def test_recovery_reference_convention_survives_carrier_rebuild(capture_deadline):
+    base, physical = _base(), _physical_after()
+    first = CommittedTimingPyDB(base, physical, recovery_rat_is_capture_deadline=capture_deadline)
+    rebuilt = CommittedTimingPyDB(first, physical)
+    assert (first.recovery_rat_is_capture_deadline, rebuilt.recovery_rat_is_capture_deadline) == (
+        capture_deadline, capture_deadline,
+    )
+
+
 def test_output_sdc_load_is_included_in_rise_and_fall_rc_and_python_timing():
     base = _base()
     unloaded = RebufferTimingModel(base, use_pin_offset=False)
@@ -160,7 +180,8 @@ def test_output_sdc_load_is_included_in_rise_and_fall_rc_and_python_timing():
     assert loaded.baseline.wns_ps < unloaded.baseline.wns_ps
 
 
-def test_repair_read_and_refresh_use_python_carrier_without_ecc_sta():
+@pytest.mark.parametrize("trigger", ["repair_buffering_enable", "repair_buffering_midplace_enable"])
+def test_repair_read_and_refresh_use_python_carrier_without_ecc_sta(trigger):
     from dreamplace.ops.placeio_ecc.place_io import PlaceIOFunction
 
     calls = []
@@ -185,7 +206,7 @@ def test_repair_read_and_refresh_use_python_carrier_without_ecc_sta():
             pass
 
     raw = PlaceIOFunction.read(
-        SimpleNamespace(with_sta=True, repair_buffering_enable=True), MetadataModule()
+        SimpleNamespace(with_sta=True, **{trigger: True}), MetadataModule()
     )
     assert isinstance(raw.pydb, CommittedTimingPyDB)
     assert raw.backend_caps.sta_reference_role == "dreamplace_timing_propagation"

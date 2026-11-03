@@ -79,9 +79,10 @@ def calculate_recovery_rat(timing, pin_rRAT, pin_fRAT, pin_rtran, pin_ftran, sca
         recovery = recovery & valid.any(dim=1)
     if not torch.any(recovery):
         return pin_rRAT, pin_fRAT
-    # Rebuilt carriers have no native STA endpoint slews for their new graph;
-    # their owners opt into the live-slew check (``native == live``) instead.
-    if not getattr(timing, "recovery_check_uses_live_slew", False):
+    # SDC capture deadlines require a live check, without a backend STA slew.
+    # Legacy checked RATs retain their original reference-slew contract.
+    capture_deadline = getattr(timing, "recovery_rat_is_capture_deadline", False)
+    if not capture_deadline and not getattr(timing, "recovery_check_uses_live_slew", False):
         _validate_native_endpoint_slew_contract(timing)
 
     rows = arcs[recovery]
@@ -98,11 +99,56 @@ def calculate_recovery_rat(timing, pin_rRAT, pin_fRAT, pin_rtran, pin_ftran, sca
     clock_r_slew = torch.where(clock_type < 0, clock_f[clock_pins], clock_r[clock_pins])
     clock_f_slew = torch.where(clock_type < 0, clock_f[clock_pins], clock_r[clock_pins])
 
+    if capture_deadline:
+        from . import timing_propagation_cpp
+
+        rise_check = timing.lut_entry_vectorized(
+            lib_cells,
+            clock_r_slew,
+            pin_rtran[endpoint_pins],
+            lib_arcs,
+            timing.arcs_info.r_check_luts,
+        )
+        fall_check = timing.lut_entry_vectorized(
+            lib_cells,
+            clock_f_slew,
+            pin_ftran[endpoint_pins],
+            lib_arcs,
+            timing.arcs_info.f_check_luts,
+        )
+        recovery_valid = (
+            torch.ones((rows.size(0), 2), dtype=torch.bool, device=rows.device)
+            if valid is None
+            else valid[recovery]
+        )
+        setup = timing.endpoints_constraint_arcs
+        setup_pins = setup[:, 1].long()
+        setup_valid = getattr(timing, "endpoints_constraint_max_valid", None)
+        if setup_valid is None:
+            setup_valid = torch.ones((setup.size(0), 2), dtype=torch.bool, device=rows.device)
+        return tuple(
+            timing_propagation_cpp.recovery_rat_from_capture_deadline(
+                pin_rRAT,
+                pin_fRAT,
+                timing.end_points.long(),
+                timing.endpoints_rRAT,
+                timing.endpoints_fRAT,
+                endpoint_pins,
+                rise_check,
+                fall_check,
+                recovery_valid,
+                setup_pins,
+                setup_valid,
+                timing.timing_aggregation_mode == "smooth",
+                float(timing.timing_aggregation_tau_ps),
+            )
+        )
+
     native_r = pin_rtran[endpoint_pins]
     native_f = pin_ftran[endpoint_pins]
-    if getattr(timing, "timing_metric_scope", "setup_plus_recovery") == "setup_plus_recovery" and not getattr(
-        timing, "recovery_check_uses_live_slew", False
-    ):
+    if getattr(
+        timing, "timing_metric_scope", "setup_plus_recovery"
+    ) == "setup_plus_recovery" and not getattr(timing, "recovery_check_uses_live_slew", False):
         native_r_by_pin = torch.zeros(timing.num_pins, device=timing.device, dtype=timing.dtype)
         native_f_by_pin = torch.zeros_like(native_r_by_pin)
         native_r_by_pin[timing.end_points.long()] = timing.backend_endpoint_rSlew

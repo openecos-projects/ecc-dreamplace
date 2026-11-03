@@ -68,10 +68,13 @@ def build_timing_model(owner):
     for index, name in enumerate(pydb.net_names):
         owner._net_name_to_id.setdefault(str(name), int(index))
     owner._net_record_cache = {}
-    if owner._incremental_state is None:
+    if owner._arcs_info is not None:
+        arcs_info = owner._arcs_info
+    elif owner._incremental_state is None:
         arcs_info = _arcs_info(pydb, ARCS_INFO, LUTS_INFO)
     else:
         arcs_info = owner._incremental_state.arcs_info
+    owner._arcs_info = arcs_info
 
     reusable = {
         "inrdelays",
@@ -175,6 +178,9 @@ def build_timing_model(owner):
         # pin at the 2e8 sentinel, which makes the DP blind to critical
         # nets.
         production_fast_loop=False,
+        recovery_rat_is_capture_deadline=bool(
+            getattr(owner.pydb, "recovery_rat_is_capture_deadline", False)
+        ),
         sparse_timing_view=owner.sparse_timing_view,
         **qualification,
     )
@@ -195,8 +201,8 @@ def build_timing_model(owner):
     )
     if owner._incremental_state is None or not can_rebind:
         owner.model = TimingPropagation(**timing_kwargs)
-        # The carrier withholds stale native endpoint slews (timing_carrier.py),
-        # so recovery checks keep the exported required-time anchor.
+        # Metadata carriers identify their SDC capture deadlines explicitly.
+        # Older overlay carriers retain their live reference-slew convention.
         owner.model.recovery_check_uses_live_slew = True
         if owner._incremental_state is not None and not can_rebind:
             # The previous delay cache is indexed by a different scheduled
@@ -247,6 +253,28 @@ def build_timing_model(owner):
         owner.model._traversal_pruner_topology_source = None
         owner.model._setup_critical_path_extractor = None
         owner.model._setup_critical_path_extractor_epoch = None
+
+    if owner.steiner_provider == "openroad_stt":
+        from .steiner_payload import build_openroad_steiner_payload, steiner_input_identity
+
+        owner.steiner_input_identity = steiner_input_identity(
+            pydb,
+            dbu=owner.dbu,
+            r_unit=owner.r_unit,
+            c_unit=owner.c_unit,
+            scale_factor=owner.scale_factor,
+            use_pin_offset=owner.use_pin_offset,
+        )
+        owner.steiner_view = build_openroad_steiner_payload(
+            pydb,
+            r_unit=owner.r_unit,
+            dbu=owner.dbu,
+            use_pin_offset=owner.use_pin_offset,
+        )
+        if owner.steiner_view["status"] != "ok":
+            raise ValueError(
+                f"selected Steiner tree unavailable: {owner.steiner_view['unsupported_reasons']}"
+            )
 
     pin2node = np.asarray(pydb.pin2node_map, dtype=np.int64)
     pin_x = np.asarray(pydb.node_x, dtype=np.float64)[pin2node]

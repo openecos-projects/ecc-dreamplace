@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "rebuffer_native_planner.hh"
+#include "rebuffer_timing_planning.hh"
 
 #include <algorithm>
 #include <sstream>
@@ -94,14 +95,11 @@ std::string actionKey(const py::dict& action)
   return key.str();
 }
 
-py::dict planFromPayload(const py::dict& request,
-                         const py::dict& payload,
-                         const py::dict& outer_config)
+}  // namespace
+
+py::dict planNativeCurrentTree(const py::dict& request,
+    const NativeTreePlannerViews& input, const py::dict& outer_config)
 {
-  if (payload.contains("status")
-      && py::cast<std::string>(payload["status"]) != "ok") {
-    return copyDict(payload);
-  }
   py::list actions;
   py::list candidate_frontier;
   py::dict tree_search;
@@ -111,35 +109,17 @@ py::dict planFromPayload(const py::dict& request,
   int focus_net_id = -1;
   std::string source_tree_digest;
 
-  if (!payload.contains("current_tree")) {
-    return unsupported("native_tree_payload_missing_tree");
-  }
   {
-    if (!payload.contains("design") || !payload.contains("timing")
-        || !payload.contains("liberty")
-        || !payload.contains("characterization")) {
-      return unsupported("native_tree_payload_missing_view");
-    }
     try {
-      const auto tree = payload["current_tree"]
-                            .cast<std::shared_ptr<CurrentDriverTree>>();
-      if (tree == nullptr) {
-        return unsupported("native_tree_payload_missing_tree");
-      }
+      const auto& tree = input.tree;
+      if (tree == nullptr) return unsupported("native_tree_payload_missing_tree");
       source_tree_digest = tree->tree_digest;
       py::dict planner_config = copyDict(outer_config);
-      if (payload.contains("config")
-          && py::isinstance<py::dict>(payload["config"])) {
-        mergeConfig(planner_config, payload["config"].cast<py::dict>());
-      }
-      const auto design = rebuffer_python::designFromDict(
-          payload["design"].cast<py::dict>());
-      const auto timing = rebuffer_python::timingFromDict(
-          payload["timing"].cast<py::dict>());
-      const auto liberty = rebuffer_python::libertyFromDict(
-          payload["liberty"].cast<py::dict>());
-      const auto characterization = rebuffer_python::characterizationFromDict(
-          payload["characterization"].cast<py::dict>());
+      mergeConfig(planner_config, input.config);
+      const auto& design = input.design;
+      const auto& timing = input.timing;
+      const auto& liberty = input.liberty;
+      const auto& characterization = input.characterization;
       const auto config = rebuffer_python::configFromDict(planner_config);
       if (!timingBufferMoveEligible(design, tree->root_net_id, config)) {
         return unsupported("timing_buffer_move_fanout");
@@ -156,17 +136,8 @@ py::dict planFromPayload(const py::dict& request,
                                  reason)) {
         return unsupported(reason.c_str());
       }
-      const int requested_variant
-          = payload.contains("candidate_variant")
-                ? py::cast<int>(payload["candidate_variant"])
-                : (request.contains("candidate_variant")
-                       ? py::cast<int>(request["candidate_variant"])
-                       : 0);
-      focus_net_id = payload.contains("focus_net_id")
-                         ? py::cast<int>(payload["focus_net_id"])
-                         : (request.contains("focus_net_id")
-                                ? py::cast<int>(request["focus_net_id"])
-                                : -1);
+      const int requested_variant = input.candidate_variant;
+      focus_net_id = input.focus_net_id;
       std::vector<const TreeVgdpCandidate*> focused;
       std::vector<const TreeVgdpCandidate*> unfocused;
       for (const auto& candidate : result.candidates) {
@@ -204,9 +175,7 @@ py::dict planFromPayload(const py::dict& request,
       tree_search["timing_round_count"] = result.timing_round_count;
       tree_search["recovery_attempt_count"] = result.recovery_attempt_count;
       tree_search["recovered_buffer_count"] = result.recovered_buffer_count;
-      if (payload.contains("net_name")) {
-        net_name = py::cast<std::string>(payload["net_name"]);
-      }
+      net_name = input.net_name;
     } catch (const std::exception& error) {
       return unsupported(error.what());
     }
@@ -220,11 +189,9 @@ py::dict planFromPayload(const py::dict& request,
     candidate["tree_search"] = tree_search;
   }
   candidate["net_id"] = request.contains("net_id") ? request["net_id"]
-                                                    : payload["net_id"];
+                                                    : py::int_(input.tree->root_net_id);
   if (!net_name.empty()) {
     candidate["net_name"] = net_name;
-  } else if (payload.contains("net_name")) {
-    candidate["net_name"] = payload["net_name"];
   }
   if (request.contains("endpoint_pin")) {
     candidate["endpoint_pin"] = request["endpoint_pin"];
@@ -269,6 +236,41 @@ py::dict planFromPayload(const py::dict& request,
   return candidate;
 }
 
+
+namespace {
+py::dict planFromPayload(const py::dict& request, const py::dict& payload,
+                         const py::dict& outer_config)
+{
+  if (payload.contains("status") && payload["status"].cast<std::string>() != "ok") {
+    return copyDict(payload);
+  }
+  if (!payload.contains("current_tree")) return unsupported("native_tree_payload_missing_tree");
+  if (!payload.contains("design") || !payload.contains("timing")
+      || !payload.contains("liberty") || !payload.contains("characterization")) {
+    return unsupported("native_tree_payload_missing_view");
+  }
+  try {
+    const auto tree = payload["current_tree"].cast<std::shared_ptr<CurrentDriverTree>>();
+    const auto design = rebuffer_python::designFromDict(payload["design"].cast<py::dict>());
+    const auto timing = rebuffer_python::timingFromDict(payload["timing"].cast<py::dict>());
+    const auto liberty = rebuffer_python::libertyFromDict(payload["liberty"].cast<py::dict>());
+    const auto characterization = rebuffer_python::characterizationFromDict(
+        payload["characterization"].cast<py::dict>());
+    const auto config = payload.contains("config") && py::isinstance<py::dict>(payload["config"])
+        ? payload["config"].cast<py::dict>() : py::dict();
+    NativeTreePlannerViews views{design, timing, liberty, characterization, config, tree,
+        payload.contains("net_name") ? payload["net_name"].cast<std::string>() : "",
+        payload.contains("focus_net_id") ? payload["focus_net_id"].cast<int>()
+            : (request.contains("focus_net_id") ? request["focus_net_id"].cast<int>() : -1)};
+    views.candidate_variant = payload.contains("candidate_variant")
+        ? payload["candidate_variant"].cast<int>()
+        : (request.contains("candidate_variant") ? request["candidate_variant"].cast<int>() : 0);
+    return planNativeCurrentTree(request, views, outer_config);
+  } catch (const std::exception& error) {
+    return unsupported(error.what());
+  }
+}
+
 }  // namespace
 
 py::dict runRepairTimingNativeSnapshotOperator(
@@ -303,7 +305,9 @@ py::dict runRepairTimingNativeSnapshotOperator(
       result["snapshot_statistics"] = std::move(statistics);
     }
     int planner_payload_rows = 0;
-    if (snapshot.contains("planner_payloads")
+    if (snapshot.contains("_native_planning_state")) {
+      planner_payload_rows = snapshot["planner_payload_rows"].cast<int>();
+    } else if (snapshot.contains("planner_payloads")
         && py::isinstance<py::list>(snapshot["planner_payloads"])) {
       planner_payload_rows = py::len(snapshot["planner_payloads"]);
     }
@@ -328,6 +332,15 @@ py::dict runRepairTimingNativeSnapshotOperator(
       [latest_snapshot, config, payload_hits, payload_misses](
           const py::object& request_value) {
         const py::dict request = request_value.cast<py::dict>();
+        if (latest_snapshot->contains("_native_planning_state")) {
+          ++(*payload_hits);
+          try {
+            return (*latest_snapshot)["_native_planning_state"]
+                .cast<std::shared_ptr<NativeTimingPlanningSnapshot>>()->plan(request, config);
+          } catch (const std::exception& error) {
+            return unsupported(error.what());
+          }
+        }
         if (!latest_snapshot->contains("planner_payloads")
             || !py::isinstance<py::list>(
                 (*latest_snapshot)["planner_payloads"])) {

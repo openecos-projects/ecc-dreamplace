@@ -35,7 +35,12 @@ class RebufferTimingModel:
         use_pin_offset=True,
         sparse_timing_view=None,
         steiner_view=None,
+        steiner_provider="ecc",
         incremental_state=None,
+        arcs_info=None,
+        use_persistent_graph=False,
+        use_native_timing_graph=False,
+        use_native_timing_evaluation=False,
     ):
         if pydb is None:
             raise ValueError("timing model requires a pydb")
@@ -47,8 +52,24 @@ class RebufferTimingModel:
         self.c_unit = float(c_unit)
         self.scale_factor = float(scale_factor)
         self.use_pin_offset = bool(use_pin_offset)
+        if steiner_provider not in ("ecc", "openroad_stt"):
+            raise ValueError(f"unknown Steiner provider: {steiner_provider}")
+        if steiner_view is not None and steiner_provider != "ecc":
+            raise ValueError("supply a Steiner view or select a provider, not both")
+        self.steiner_provider = steiner_provider
+        self.steiner_input_identity = None
         self.steiner_view = steiner_view
         self._incremental_state = incremental_state
+        self.use_native_timing_graph = bool(use_native_timing_graph)
+        self.use_native_timing_evaluation = bool(use_native_timing_evaluation)
+        if self.use_native_timing_evaluation and not self.use_native_timing_graph:
+            raise ValueError("native timing evaluation requires a native timing graph")
+        self.use_persistent_graph = bool(use_persistent_graph) or self.use_native_timing_graph
+        self._persistent_graph_bridge = None
+        # Liberty LUT metadata is immutable for one repair campaign.  The
+        # current overlay may replace the carrier graph, but it must not pad
+        # the same LUTs again just because its PyPlaceDB object is new.
+        self._arcs_info = arcs_info
         from dreamplace.ops.placeio_ecc.timing_schema import validate_timing_schema
 
         schema_view = validate_timing_schema(pydb)
@@ -120,7 +141,7 @@ class RebufferTimingModel:
             violating_endpoint_count=int(np.count_nonzero(endpoint_slack < 0.0)),
         )
 
-    def native_setup_path_details(self):
+    def native_setup_path_details(self, endpoint_pins=None):
         """Return native transition/arc-aware setup paths for the current state.
 
         The timing propagation operator already owns a C++ predecessor
@@ -131,6 +152,9 @@ class RebufferTimingModel:
         """
 
         model = self.model
+        requested_endpoints = None if endpoint_pins is None else {
+            int(pin) for pin in endpoint_pins
+        }
         if self._native_setup_path_cache is not None:
             current_epoch = getattr(model, "critical_path_topology_epoch", None)
             if (
@@ -141,7 +165,13 @@ class RebufferTimingModel:
                 self.invalidate_native_setup_path_cache()
             else:
                 self._native_setup_path_stats["cache_hit_count"] += 1
-                return self._native_setup_path_cache
+                if requested_endpoints is None:
+                    return self._native_setup_path_cache
+                return {
+                    endpoint: self._native_setup_path_cache[endpoint]
+                    for endpoint in requested_endpoints
+                    if endpoint in self._native_setup_path_cache
+                }
         required = (
             getattr(model, "request_critical_path_snapshot", None),
             getattr(model, "extract_setup_critical_paths", None),
@@ -157,11 +187,14 @@ class RebufferTimingModel:
             if not (callable(capture) and capture()):
                 model.request_critical_path_snapshot()
                 self._forward()
-            batch = model.extract_setup_critical_paths(
-                global_k=0,
-                max_depth=0,
-                residual_tolerance_ps=1.0e-3,
-            )
+            extraction_kwargs = {
+                "global_k": 0,
+                "max_depth": 0,
+                "residual_tolerance_ps": 1.0e-3,
+            }
+            if requested_endpoints is not None:
+                extraction_kwargs["endpoint_pins"] = requested_endpoints
+            batch = model.extract_setup_critical_paths(**extraction_kwargs)
         except (RuntimeError, ValueError, LookupError, TypeError, AttributeError) as error:
             clear_request = getattr(model, "clear_critical_path_snapshot_request", None)
             if callable(clear_request):
@@ -241,8 +274,9 @@ class RebufferTimingModel:
             previous = details.get(int(endpoint))
             if previous is None or candidate["endpoint_slack"] < previous["endpoint_slack"]:
                 details[int(endpoint)] = candidate
-        self._native_setup_path_cache = details
-        self._native_setup_path_cache_epoch = int(batch.topology_epoch)
+        if requested_endpoints is None:
+            self._native_setup_path_cache = details
+            self._native_setup_path_cache_epoch = int(batch.topology_epoch)
         self._native_setup_path_stats["extraction_count"] += 1
         extraction_stats = getattr(model, "last_critical_path_extraction_stats", None)
         self._native_setup_path_stats["last_extraction"] = (
@@ -384,7 +418,26 @@ class RebufferTimingModel:
         return self.pydb if self._overlay_runtime is None else self._overlay_runtime.model.pydb
 
     def bind_overlay(self, overlay):
+        if self.use_native_timing_graph and (
+            overlay.timing_model is not self or overlay.base_pydb is not self.pydb
+        ):
+            raise ValueError("native timing campaign requires its model and base PyPlaceDB")
         self._bound_overlay = overlay
+        if self.use_native_timing_graph:
+            from dreamplace.ops.placeio_ecc.native_timing import NativeTimingBridge
+
+            if overlay.native_timing_bridge is None:
+                overlay.native_timing_bridge = NativeTimingBridge(self, overlay.base_pydb)
+                overlay.native_campaign_session = overlay.native_timing_bridge.campaign
+            self._persistent_graph_bridge = overlay.native_timing_bridge
+        elif self.use_persistent_graph:
+            from dreamplace.ops.placeio_ecc.current_timing import PersistentGraphBridge
+
+            bridge = getattr(self, "_persistent_graph_bridge", None)
+            if bridge is None or bridge.base_pydb is not overlay.base_pydb:
+                self._persistent_graph_bridge = PersistentGraphBridge(
+                    self, overlay.base_pydb
+                )
 
     def current_graph(self):
         if self._bound_overlay is not None:
@@ -394,8 +447,13 @@ class RebufferTimingModel:
             if (self._overlay_runtime is not None or overlay.actions) and (
                 self._overlay_runtime is None or self._overlay_runtime.key != overlay_key(overlay)
             ):
-                self.evaluate(self.pydb, overlay)
+                self._materialize_overlay(overlay)
         return self._overlay_runtime
+
+    def _materialize_overlay(self, overlay):
+        if self.use_native_timing_evaluation:
+            return overlay.native_timing_bridge.materialize(overlay)
+        return self.evaluate(self.pydb, overlay)
 
     def force_full_overlay_runtime(self):
         """Materialize the bound overlay before native planning needs its carrier."""
@@ -410,7 +468,7 @@ class RebufferTimingModel:
         self._overlay_runtime = None
         self._force_materialize_empty_overlay = True
         try:
-            self.evaluate(self.pydb, overlay)
+            self._materialize_overlay(overlay)
         finally:
             self._force_materialize_empty_overlay = False
         return self._overlay_runtime
@@ -421,8 +479,23 @@ class RebufferTimingModel:
     def evaluate(self, base_pydb, overlay):
         from dreamplace.ops.placeio_ecc.current_timing import evaluate_current_overlay
 
-        self._bound_overlay = overlay
-        return evaluate_current_overlay(self, base_pydb, overlay)
+        self.bind_overlay(overlay)
+        if self.use_native_timing_evaluation:
+            if base_pydb is not self.pydb:
+                raise ValueError("native timing evaluation requires its base PyPlaceDB")
+            native = overlay.native_timing_bridge.evaluate(overlay)
+            return {
+                "status": "ok",
+                "action_count": len(overlay.actions),
+                "net_count": len(overlay.native_topologies),
+                "topology_source": "native_timing_graph",
+                **native["metrics"],
+                "native_timing_graph": native,
+            }
+        result = evaluate_current_overlay(self, base_pydb, overlay)
+        if self.use_native_timing_graph:
+            result["native_timing_graph"] = overlay.native_timing_bridge.evaluate(overlay)
+        return result
 
     def evaluate_action(self, action):
         from dreamplace.ops.placeio_ecc.buffer_overlay import BufferOverlay

@@ -11,7 +11,7 @@ def test_driver_rank_validates_pin_ids_against_pin_count():
     assert rebuffer_cpp.rank_path_driver_pins(design, timing, liberty, [0, 1]) == [1]
 
 
-def test_driver_rank_prefers_path_load_dependent_delay_over_total_cell_delay():
+def _path_load_inputs():
     design, timing, _steiner, _liberty, _characterization = _dp_inputs()
     design.update(
         {
@@ -74,9 +74,28 @@ def test_driver_rank_prefers_path_load_dependent_delay_over_total_cell_delay():
         + arc_values(1.0, 13.0),
     }
 
+    return design, timing, liberty
+
+
+def test_driver_rank_prefers_path_load_dependent_delay_over_total_cell_delay():
+    design, timing, liberty = _path_load_inputs()
     assert rebuffer_cpp.rank_path_driver_pins(
         design, timing, liberty, [0, 1, 2]
     ) == [2, 1]
+
+
+def test_openroad_intrinsic_uses_zero_slew_not_current_input_slew():
+    design, timing, liberty = _path_load_inputs()
+    timing.update(pin_slew_rise=[100.0] * 3, pin_slew_fall=[100.0] * 3)
+    liberty["arc_trans_axis"] = [0.0, 100.0] * 3
+    liberty["arc_values"] = [0.0] * 16 + [0.0, 4.0, 10.0, 14.0] * 4 + [1.0, 13.0, 1.0, 13.0] * 4
+    # Actual path delays are 12 and 7 ps. At current slew, intrinsic terms
+    # are 10 and 1: scores 2 and 6. OpenSTA evaluates intrinsic at (0, 0),
+    # so scores are instead 12 and 6 and the first driver must lead.
+    assert rebuffer_cpp.rank_path_driver_pins(design, timing, liberty, [0, 1, 2]) == [2, 1]
+    assert rebuffer_cpp.rank_path_driver_pins(
+        design, timing, liberty, [0, 1, 2], openroad_intrinsic=True
+    ) == [1, 2]
 
 
 

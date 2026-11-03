@@ -8,10 +8,14 @@
 #include "pybind11/pybind11.h"
 #include "pybind11/stl.h"
 #include "rebuffer_liberty.hh"
+#include "rebuffer_library_metadata.hh"
+#include "rebuffer_cell_selection.hh"
 #include "rebuffer_incremental_topology.hh"
 #include "rebuffer_incremental_timing.hh"
 #include "rebuffer_incremental_carrier.hh"
 #include "rebuffer_incremental_patch.hh"
+#include "rebuffer_timing_graph.hh"
+#include "rebuffer_timing_planning.hh"
 #include "rebuffer_timing_payload.hh"
 #include "rebuffer_python_views.hh"
 #include "rebuffer_path_policy.hh"
@@ -40,7 +44,108 @@ PYBIND11_MODULE(rebuffer_cpp, module)
   module.doc() = "Native rebuffer design and Steiner forest skeleton";
   rebuffer::registerVerifiedCommitBindings(module);
   rebuffer::registerElectricalObservationBindings(module);
+  rebuffer::registerRepairLibraryMetadata(module);
+  rebuffer::registerCellSelectionBindings(module);
   py::class_<rebuffer::TimingGraphIndex, std::shared_ptr<rebuffer::TimingGraphIndex>>(module, "TimingGraphIndex");
+  py::class_<rebuffer::PersistentTimingGraphCheckpoint,
+             std::shared_ptr<rebuffer::PersistentTimingGraphCheckpoint>>(
+      module, "PersistentTimingGraphCheckpoint");
+  py::class_<rebuffer::PersistentTimingGraph,
+             std::shared_ptr<rebuffer::PersistentTimingGraph>>(
+      module, "PersistentTimingGraph")
+      .def("summary", &rebuffer::PersistentTimingGraph::summary)
+      .def_property_readonly("epoch", &rebuffer::PersistentTimingGraph::epoch)
+      .def("state_view", &rebuffer::PersistentTimingGraph::stateView,
+           py::arg("copy") = true)
+      .def("state_view_statistics", &rebuffer::PersistentTimingGraph::stateViewStatistics)
+      .def("set_state", &rebuffer::PersistentTimingGraph::setState)
+      .def("timing_state_schema", &rebuffer::PersistentTimingGraph::timingStateSchema)
+      .def("initialize_propagation", &rebuffer::PersistentTimingGraph::initializePropagation,
+           py::arg("values"))
+      .def("propagate", &rebuffer::PersistentTimingGraph::propagate)
+      .def("propagate_incremental", &rebuffer::PersistentTimingGraph::propagateIncremental)
+      .def("setup_path_details", &rebuffer::PersistentTimingGraph::setupPathDetails,
+           py::arg("endpoint_pins") = py::none(), py::arg("global_k") = 0,
+           py::arg("max_depth") = 0, py::arg("residual_tolerance_ps") = 1e-3)
+      .def("initialize_queue", &rebuffer::PersistentTimingGraph::initializeQueue,
+           py::arg("liberty"), py::arg("original_node_is_buffer"))
+      .def("timing_queue_state", &rebuffer::PersistentTimingGraph::timingQueueState,
+           py::arg("original_net_by_net"), py::arg("use_path_context") = false)
+      .def("timing_queue_state_for_carrier",
+           &rebuffer::PersistentTimingGraph::timingQueueStateForCarrier,
+           py::arg("original_net_by_net"), py::arg("carrier"),
+           py::arg("use_path_context") = false)
+      .def("evaluation_observation", &rebuffer::PersistentTimingGraph::evaluationObservation,
+           py::arg("max_fanout") = 32, py::arg("cap_margin") = 0.0, py::arg("slew_margin") = 0.0)
+      .def("initialize_planning", &rebuffer::PersistentTimingGraph::initializePlanning,
+           py::arg("design"), py::arg("characterization"), py::arg("steiner"),
+           py::arg("config"), py::arg("r_unit"), py::arg("c_unit"))
+      .def("planning_snapshot", &rebuffer::PersistentTimingGraph::planningSnapshot,
+           py::arg("actions"), py::arg("config"))
+      .def("initialize_mutations", &rebuffer::PersistentTimingGraph::initializeMutations)
+      .def("mutation_view", &rebuffer::PersistentTimingGraph::mutationView)
+      .def("mutation_statistics", &rebuffer::PersistentTimingGraph::mutationStatistics)
+      .def("mutation_index_oracle", &rebuffer::PersistentTimingGraph::mutationIndexOracle)
+      .def("compact", &rebuffer::PersistentTimingGraph::compact)
+      .def("resize_cell", &rebuffer::PersistentTimingGraph::resizeCell,
+           py::arg("instance_name"), py::arg("master_name"))
+      .def("initialize_timing_state",
+           &rebuffer::PersistentTimingGraph::initializeTimingState,
+           py::arg("state"))
+      .def("attach_net_topology",
+           &rebuffer::PersistentTimingGraph::attachNetTopology,
+           py::arg("net_id"), py::arg("driver_pin_id"),
+           py::arg("next_node_id"), py::arg("topology_values"))
+      .def("attach_net_topology_state",
+           &rebuffer::PersistentTimingGraph::attachNetTopologyState,
+           py::arg("net_id"), py::arg("state"))
+      .def("clear_net_topologies",
+           &rebuffer::PersistentTimingGraph::clearNetTopologies)
+      .def("apply_buffer_split",
+           &rebuffer::PersistentTimingGraph::applyBufferSplit,
+           py::arg("net_id"), py::arg("action"))
+      .def("remove_buffer", &rebuffer::PersistentTimingGraph::removeBuffer,
+           py::arg("net_id"), py::arg("action_id"))
+      .def("resize_buffer", &rebuffer::PersistentTimingGraph::resizeBuffer,
+           py::arg("net_id"), py::arg("action"))
+      .def("topology_view", &rebuffer::PersistentTimingGraph::topologyView,
+           py::arg("net_id"))
+      .def("relevelize_net", &rebuffer::PersistentTimingGraph::relevelizeNet,
+           py::arg("net_id"))
+      .def("compact_net_topology",
+           &rebuffer::PersistentTimingGraph::compactNetTopology,
+           py::arg("net_id"))
+      .def("critical_path_subset",
+           &rebuffer::PersistentTimingGraph::criticalPathSubset,
+           py::arg("path_details"), py::arg("endpoint_pins"))
+      .def("finalize_actions", &rebuffer::PersistentTimingGraph::finalizeActions,
+           py::arg("actions"))
+      .def("build_net_rc", &rebuffer::PersistentTimingGraph::buildNetRc,
+           py::arg("net_id"))
+      .def("build_timing_patch",
+           &rebuffer::PersistentTimingGraph::buildTimingPatch,
+           py::arg("net_id"), py::arg("action"),
+           py::arg("base_vertex_count"), py::arg("slot"))
+      .def("export_carrier", &rebuffer::PersistentTimingGraph::exportCarrier,
+           py::arg("steiner"), py::arg("actions"),
+           py::arg("r_unit"), py::arg("c_unit"))
+      .def("evaluate_net_rc",
+           &rebuffer::PersistentTimingGraph::evaluateNetRc,
+           py::arg("net_id"), py::arg("rc"), py::arg("generic_caps"),
+           py::arg("rise_caps"), py::arg("fall_caps"),
+           py::arg("buffer_caps"), py::arg("pin_count"))
+      .def("checkpoint", &rebuffer::PersistentTimingGraph::checkpoint)
+      .def("restore", &rebuffer::PersistentTimingGraph::restore)
+      .def("commit", &rebuffer::PersistentTimingGraph::commit);
+  module.def("create_persistent_timing_graph",
+             &rebuffer::createPersistentTimingGraph,
+             py::arg("carrier"));
+  module.def("persistent_timing_state_schema",
+             &rebuffer::persistentTimingStateSchema,
+             py::arg("pin_count"), py::arg("cell_arc_count"));
+  py::class_<rebuffer::NativeTimingQueueSnapshot,
+             std::shared_ptr<rebuffer::NativeTimingQueueSnapshot>>(
+      module, "NativeTimingQueueSnapshot");
   module.def("affected_timing_schedule", &rebuffer::affectedTimingSchedule,
              py::arg("previous"), py::arg("current"), py::arg("previous_rc"),
              py::arg("current_rc"), py::arg("changed_pins") = py::none());
@@ -61,10 +166,41 @@ PYBIND11_MODULE(rebuffer_cpp, module)
              py::arg("liberty"),
              py::arg("endpoint_records"),
              py::arg("original_net_by_net"));
+  module.def("build_native_timing_queue_state",
+             &rebuffer::buildNativeTimingQueueState,
+             py::arg("design"),
+             py::arg("timing"),
+             py::arg("liberty"),
+             py::arg("endpoint_records"),
+             py::arg("original_net_by_net"));
+  module.def("update_native_timing_queue_snapshot",
+             &rebuffer::updateNativeTimingQueueSnapshot,
+             py::arg("design"),
+             py::arg("timing"),
+             py::arg("liberty"),
+             py::arg("previous_snapshot"),
+             py::arg("changed_endpoint_records"),
+             py::arg("active_endpoint_pins"),
+             py::arg("changed_endpoint_pins"),
+             py::arg("original_net_by_net"));
+  module.def("update_native_timing_queue_state",
+             &rebuffer::updateNativeTimingQueueState,
+             py::arg("design"),
+             py::arg("timing"),
+             py::arg("liberty"),
+             py::arg("previous_snapshot"),
+             py::arg("changed_endpoint_records"),
+             py::arg("active_endpoint_pins"),
+             py::arg("changed_endpoint_pins"),
+             py::arg("original_net_by_net"));
   module.def("select_timing_queue_items",
              &rebuffer::selectTimingQueueItems,
              py::arg("snapshot"),
              py::arg("config"));
+  module.def("update_native_timing_queue_focus",
+             &rebuffer::updateNativeTimingQueueFocus,
+             py::arg("snapshot"),
+             py::arg("focus_updates"));
   module.def("run_repair_timing_native_snapshot_operator",
              &rebuffer::runRepairTimingNativeSnapshotOperator,
              py::arg("timing_snapshot"),
@@ -78,18 +214,22 @@ PYBIND11_MODULE(rebuffer_cpp, module)
       [](const py::dict& design_values,
          const py::dict& timing_values,
          const py::dict& liberty_values,
-         const std::vector<int>& path) {
+         const std::vector<int>& path,
+         bool openroad_intrinsic) {
         return rebuffer::rankPathDriverPins(
             designFromDict(design_values),
             timingFromDict(timing_values),
             libertyFromDict(liberty_values),
-            path);
+            path, openroad_intrinsic);
       },
       py::arg("design"),
       py::arg("timing"),
       py::arg("liberty"),
-      py::arg("path"));
+      py::arg("path"), py::arg("openroad_intrinsic") = false);
   module.def("timing_pin_capacitance", &rebuffer::timingPinCapacitance);
+  module.def("repair_design_electrical_payload", &rebuffer::repairDesignElectricalPayload,
+             py::arg("rise_load"), py::arg("fall_load"),
+             py::arg("rise_cap"), py::arg("fall_cap"));
   module.def("rebuild_timing_carrier_incremental", &rebuffer::rebuildTimingCarrierIncremental,
              py::arg("base_pydb"), py::arg("previous_pydb"), py::arg("physical_pydb"));
   module.def("build_incremental_timing_patch", &rebuffer::buildIncrementalTimingPatch,
@@ -121,6 +261,13 @@ PYBIND11_MODULE(rebuffer_cpp, module)
       },
       py::arg("steiner"), py::arg("net_id"), py::arg("driver_pin_id"),
       py::arg("r_unit"), py::arg("c_unit"));
+  module.def(
+      "remap_incremental_topology",
+      &rebuffer::remapIncrementalTopology,
+      py::arg("state"), py::arg("original_pin_count"), py::arg("node_shift"),
+      py::arg("target_net_id") = -1,
+      py::arg("synthetic_node_base") = -1,
+      py::arg("source_node_mapping") = py::dict());
   py::class_<rebuffer::IncrementalTopologyState,
              std::shared_ptr<rebuffer::IncrementalTopologyState>>(
       module, "IncrementalTopologyState")
@@ -169,9 +316,11 @@ PYBIND11_MODULE(rebuffer_cpp, module)
            &rebuffer::RepairTimingCampaignSession::recordActionState)
       .def("checkpoint", &rebuffer::RepairTimingCampaignSession::checkpoint)
       .def("restore", &rebuffer::RepairTimingCampaignSession::restore)
-      .def("summary", &rebuffer::RepairTimingCampaignSession::summary);
+      .def("summary", &rebuffer::RepairTimingCampaignSession::summary)
+      .def_property_readonly("timing_graph", &rebuffer::RepairTimingCampaignSession::timingGraph);
   module.def("create_repair_timing_campaign_session",
-             &rebuffer::createRepairTimingCampaignSession);
+             &rebuffer::createRepairTimingCampaignSession,
+             py::arg("timing_graph") = nullptr);
   module.def(
       "create_incremental_topology",
       [](const int net_id,
@@ -225,6 +374,23 @@ PYBIND11_MODULE(rebuffer_cpp, module)
       py::arg("state"),
       py::arg("action_id"));
   module.def(
+      "resize_incremental_buffer",
+      [](const std::shared_ptr<rebuffer::IncrementalTopologyState>& state,
+         const py::dict& action) {
+        if (state == nullptr) {
+          throw py::value_error("topology state is null");
+        }
+        std::string reason;
+        py::dict result;
+        if (!rebuffer::resizeIncrementalBuffer(
+                *state, action, reason, result)) {
+          throw py::value_error(reason);
+        }
+        return result;
+      },
+      py::arg("state"),
+      py::arg("action"));
+  module.def(
       "checkpoint_incremental_topology",
       [](const std::shared_ptr<rebuffer::IncrementalTopologyState>& state) {
         if (state == nullptr) {
@@ -274,13 +440,23 @@ PYBIND11_MODULE(rebuffer_cpp, module)
       },
       py::arg("state"));
   module.def(
+      "clone_incremental_topology",
+      [](const std::shared_ptr<rebuffer::IncrementalTopologyState>& state) {
+        if (state == nullptr) {
+          throw py::value_error("topology state is null");
+        }
+        return std::make_shared<rebuffer::IncrementalTopologyState>(*state);
+      },
+      py::arg("state"));
+  module.def(
       "characterize_buffers",
-      [](const py::dict& liberty_values) {
+      [](const py::dict& liberty_values, bool canonical_target_load) {
         rebuffer::CharacterizationResult result;
         std::string reason;
         try {
           const auto liberty = libertyFromDict(liberty_values);
-          if (!rebuffer::characterizeBuffers(liberty, result, reason)) {
+          if (!rebuffer::characterizeBuffers(liberty, result, reason,
+                                             canonical_target_load)) {
             py::dict output;
             output["status"] = "unsupported";
             py::list reasons;
@@ -298,7 +474,7 @@ PYBIND11_MODULE(rebuffer_cpp, module)
         }
         return characterizationResult(result);
       },
-      py::arg("liberty"));
+      py::arg("liberty"), py::arg("canonical_target_load") = false);
   module.def(
       "build_forest",
       [](const py::dict& design_values, const py::dict& topology_values) {
@@ -574,6 +750,7 @@ PYBIND11_MODULE(rebuffer_cpp, module)
              &rebuffer::createCurrentDriverTreeTransaction,
              py::arg("tree"));
   rebuffer::registerTreeSearchBindings(module);
+  rebuffer::registerTimingPlanningBindings(module);
   module.def(
       "plan_repair_design",
       [](const py::dict& design_values,

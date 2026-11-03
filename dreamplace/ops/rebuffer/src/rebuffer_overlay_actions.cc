@@ -263,25 +263,19 @@ py::list projectOverlayActions(
     const std::vector<std::shared_ptr<IncrementalTopologyState>>& states,
     const py::list& actions)
 {
-  std::map<int, std::shared_ptr<IncrementalTopologyState>> working_by_net;
-  for (const auto& state : states) {
-    if (state == nullptr) throw py::value_error("null overlay topology state");
-    working_by_net[state->net_id]
-        = std::make_shared<IncrementalTopologyState>(*state);
-  }
-  const auto original_net = payload["original_net_by_net"].cast<std::vector<int>>();
-  const auto state_node = payload["state_node_by_vertex"].cast<std::vector<int>>();
-  const auto state_net = payload["state_net_by_vertex"].cast<std::vector<int>>();
-  const bool has_partition_provenance = payload.contains("state_provenance");
-  std::map<std::pair<int, int>, std::pair<int, int>> partition_provenance;
-  if (has_partition_provenance) {
+  OverlayActionProjection projection;
+  projection.original_net_by_net = payload["original_net_by_net"].cast<std::vector<int>>();
+  projection.state_node_by_vertex = payload["state_node_by_vertex"].cast<std::vector<int>>();
+  projection.state_net_by_vertex = payload["state_net_by_vertex"].cast<std::vector<int>>();
+  projection.has_partition_provenance = payload.contains("state_provenance");
+  if (projection.has_partition_provenance) {
     for (const auto& item : payload["state_provenance"].cast<py::sequence>()) {
       const auto row = item.cast<py::dict>();
       const int partition_id = py::cast<int>(row["partition_id"]);
       const int vertex_id = py::cast<int>(row["vertex_id"]);
       const int state_net_id = py::cast<int>(row["state_net_id"]);
       const int state_node_id = py::cast<int>(row["state_node_id"]);
-      const auto inserted = partition_provenance.emplace(
+      const auto inserted = projection.state_provenance.emplace(
           std::make_pair(partition_id, vertex_id),
           std::make_pair(state_net_id, state_node_id));
       if (!inserted.second && inserted.first->second
@@ -290,6 +284,24 @@ py::list projectOverlayActions(
       }
     }
   }
+  return projectOverlayActionsFromProjection(base, projection, states, actions);
+}
+
+py::list projectOverlayActionsFromProjection(
+    const py::object& base, const OverlayActionProjection& projection,
+    const std::vector<std::shared_ptr<IncrementalTopologyState>>& states,
+    const py::list& actions)
+{
+  std::map<int, std::shared_ptr<IncrementalTopologyState>> working_by_net;
+  for (const auto& state : states) {
+    if (state == nullptr) throw py::value_error("null overlay topology state");
+    working_by_net[state->net_id] = std::make_shared<IncrementalTopologyState>(*state);
+  }
+  const auto& original_net = projection.original_net_by_net;
+  const auto& state_node = projection.state_node_by_vertex;
+  const auto& state_net = projection.state_net_by_vertex;
+  const auto& partition_provenance = projection.state_provenance;
+  const bool has_partition_provenance = projection.has_partition_provenance;
   const auto cells = carrierArray<std::string>(base, "flat_libcell_names");
   const auto pins = carrierArray<std::string>(base, "pin_names");
   const auto nets = carrierArray<std::string>(base, "net_names");

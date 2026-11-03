@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <stdexcept>
 #include <vector>
 
 #include "pybind11/numpy.h"
@@ -105,6 +106,29 @@ py::dict timingPinCapacitance(const py::object& db)
     out[fields[0]] = array(gathered);
   }
   return out;
+}
+
+py::dict repairDesignElectricalPayload(
+    const TimingPayloadArray& rise_load, const TimingPayloadArray& fall_load,
+    const TimingPayloadArray& rise_cap, const TimingPayloadArray& fall_cap)
+{
+  const auto count = rise_load.size();
+  for (const auto* values : {&rise_load, &fall_load, &rise_cap, &fall_cap}) {
+    if (values->ndim() != 1 || values->size() != count) {
+      throw std::invalid_argument("repair electrical transition arrays do not align");
+    }
+  }
+  std::vector<double> load(count), cap(count);
+  for (py::ssize_t pin = 0; pin < count; ++pin) {
+    load[pin] = std::max(rise_load.data()[pin], fall_load.data()[pin]);
+    // BufferedNet load ports use LibertyPort::capacitance(), the maximum
+    // over transitions. Keep that tree value distinct from max(net loads).
+    cap[pin] = std::max(rise_cap.data()[pin], fall_cap.data()[pin]);
+  }
+  py::dict result;
+  result["pin_load"] = array(load);
+  result["pin_cap"] = array(cap);
+  return result;
 }
 
 }  // namespace rebuffer

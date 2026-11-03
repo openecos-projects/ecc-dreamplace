@@ -136,6 +136,97 @@ def test_repair_design_stage_commits_refreshes_and_rebuilds(tmp_path, monkeypatc
     assert (tmp_path / "repair_buffering_stage.json").is_file()
 
 
+def test_repair_design_uses_configured_wire_rc_before_and_after_commit(monkeypatch):
+    _install_common(monkeypatch)
+    _install_design_plan(monkeypatch)
+    captured = []
+
+    def model_factory(pydb, **kwargs):
+        captured.append((pydb, kwargs))
+        return SimpleNamespace(baseline=SimpleNamespace(as_dict=lambda: {}))
+
+    monkeypatch.setattr(
+        "dreamplace.ops.rebuffer.timing_model.RebufferTimingModel", model_factory
+    )
+    wire_rc = {"r_unit": 0.653, "c_unit": 1.8889e-4}
+
+    result = repair_buffering.run_repair_buffering_stage(
+        _Placedb(), mode="repair_design", config=wire_rc
+    )
+
+    assert result["status"] == "ok"
+    assert captured == [
+        ("base", {"use_pin_offset": False, **wire_rc}),
+        ("refreshed", {"use_pin_offset": False, **wire_rc}),
+    ]
+
+
+def test_repair_timing_and_fresh_commit_reader_share_configured_wire_rc(monkeypatch):
+    _install_common(monkeypatch)
+    _, verified_calls = _install_timing_plan(monkeypatch, [_ACTION])
+    captured = []
+
+    def model_factory(pydb, **kwargs):
+        captured.append((pydb, kwargs))
+        return SimpleNamespace(baseline=SimpleNamespace(as_dict=lambda: {}))
+
+    monkeypatch.setattr(
+        "dreamplace.ops.rebuffer.timing_model.RebufferTimingModel", model_factory
+    )
+    monkeypatch.setattr(
+        "dreamplace.ops.placeio_ecc.electrical_observation.electrical_observation",
+        lambda model, **kwargs: {},
+    )
+    wire_rc = {"r_unit": 0.653, "c_unit": 1.8889e-4}
+
+    result = repair_buffering.run_repair_buffering_stage(
+        _Placedb(), mode="repair_timing", config=wire_rc
+    )
+    observation = verified_calls[0][1]["reader"]("committed")
+
+    assert result["status"] == "ok"
+    assert observation == {"electrical": {}}
+    assert captured == [
+        (
+            "base",
+            {
+                "use_pin_offset": False,
+                "use_persistent_graph": False,
+                "use_native_timing_graph": False,
+                "use_native_timing_evaluation": False,
+                **wire_rc,
+            },
+        ),
+        ("committed", {"use_pin_offset": False, **wire_rc}),
+    ]
+
+
+def test_design_selected_tree_profile_reaches_initial_and_fresh_python_tp(monkeypatch):
+    _install_common(monkeypatch)
+    calls = _install_design_plan(monkeypatch)
+    captured = []
+
+    def model_factory(pydb, **kwargs):
+        captured.append((pydb, kwargs))
+        return SimpleNamespace(
+            baseline=SimpleNamespace(as_dict=lambda: {}),
+            steiner_input_identity={"source": pydb, **kwargs},
+        )
+
+    monkeypatch.setattr("dreamplace.ops.rebuffer.timing_model.RebufferTimingModel", model_factory)
+    config = {"steiner_provider": "openroad_stt", "r_unit": 0.653, "c_unit": 1.8889e-4}
+    result = repair_buffering.run_repair_buffering_stage(
+        _Placedb(), mode="repair_design", config=config
+    )
+    expected = {"use_pin_offset": True, **config}
+    assert captured == [("base", expected), ("refreshed", expected)]
+    assert calls[0][1].steiner_input_identity == {"source": "base", **expected}
+    assert result["stages"]["repair_design"]["timing_after_steiner_input_identity"] == {
+        "source": "refreshed",
+        **expected,
+    }
+
+
 def test_repair_timing_uses_the_verified_native_defaults(tmp_path, monkeypatch):
     placedb = _Placedb()
     _install_common(monkeypatch)
@@ -173,6 +264,32 @@ def test_repair_timing_explicit_config_overrides_defaults(monkeypatch):
         }
     ]
     assert verified_calls[0][1]["chunk_size"] == 4
+
+
+@pytest.mark.parametrize(
+    "option", ["use_persistent_graph", "use_native_timing_graph", "use_native_timing_evaluation"]
+)
+def test_repair_timing_passes_graph_opt_in_to_model(monkeypatch, option):
+    captured = []
+
+    def model_factory(pydb, **kwargs):
+        captured.append((pydb, kwargs))
+        return SimpleNamespace(baseline=SimpleNamespace(as_dict=lambda: {}))
+
+    monkeypatch.setattr(
+        "dreamplace.ops.rebuffer.timing_model.RebufferTimingModel", model_factory
+    )
+    _install_timing_plan(monkeypatch, [_ACTION])
+
+    result = repair_buffering.run_repair_buffering_stage(
+        _Placedb(),
+        mode="repair_timing",
+        config={option: True},
+    )
+
+    assert result["status"] == "ok"
+    assert captured[0][1]["use_pin_offset"] is False
+    assert captured[0][1][option] is True
 
 
 def test_repair_timing_without_accepted_actions_is_noop(monkeypatch):

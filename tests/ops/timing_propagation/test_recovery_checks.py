@@ -144,6 +144,76 @@ class RecoveryChecksTest(unittest.TestCase):
         )
         torch.testing.assert_close(result, required)
 
+    def test_metadata_deadline_uses_live_check_value_and_gradient_without_native_sta(self):
+        for mode in ("hard", "smooth"):
+            with self.subTest(mode=mode):
+                op = self._recovery_fixture(native_r=False, native_f=False)
+                op.recovery_rat_is_capture_deadline = True
+                op.timing_aggregation_mode = mode
+                op.endpoints_rRAT = torch.tensor([100.0])
+                op.endpoints_fRAT = torch.tensor([100.0])
+                op.endpoints_constraint_arcs = torch.empty((0, 8), dtype=torch.long)
+                op.endpoints_constraint_max_valid = torch.empty((0, 2), dtype=torch.bool)
+                rise = torch.tensor([0.0, 7.0], requires_grad=True)
+                fall = torch.tensor([0.0, 9.0], requires_grad=True)
+                result = calculate_recovery_rat(
+                    op,
+                    torch.tensor([100.0, 100.0]),
+                    torch.tensor([100.0, 100.0]),
+                    rise,
+                    fall,
+                    scatter_timing_min,
+                )
+                torch.testing.assert_close(
+                    result, (torch.tensor([100.0, 92.7]), torch.tensor([100.0, 90.7]))
+                )
+                gradients = torch.autograd.grad(result[0][1] + result[1][1], (rise, fall))
+                torch.testing.assert_close(
+                    gradients, (torch.tensor([0.0, -1.0]), torch.tensor([0.0, -1.0]))
+                )
+
+    def test_metadata_recovery_preserves_a_stricter_setup_requirement(self):
+        op = self._recovery_fixture(native_r=False, native_f=False)
+        op.recovery_rat_is_capture_deadline = True
+        op.endpoints_rRAT = torch.tensor([100.0])
+        op.endpoints_fRAT = torch.tensor([100.0])
+        op.endpoints_constraint_arcs = torch.tensor([[0, 1, 0, 0, 1, 1, 1, 0]])
+        op.endpoints_constraint_max_valid = torch.tensor([[True, False]])
+        result = calculate_recovery_rat(
+            op,
+            torch.tensor([100.0, 90.0]),
+            torch.tensor([100.0, 100.0]),
+            torch.tensor([0.0, 7.0]),
+            torch.tensor([0.0, 9.0]),
+            scatter_timing_min,
+        )
+        torch.testing.assert_close(
+            result, (torch.tensor([100.0, 90.0]), torch.tensor([100.0, 90.7]))
+        )
+
+    def test_metadata_negative_recovery_check_can_relax_past_capture_deadline(self):
+        op = self._recovery_fixture(native_r=False, native_f=False)
+        op.recovery_rat_is_capture_deadline = True
+        op.endpoints_rRAT = op.endpoints_fRAT = torch.tensor([100.0])
+        op.endpoints_constraint_arcs = torch.empty((0, 8), dtype=torch.long)
+        op.endpoints_constraint_max_valid = torch.empty((0, 2), dtype=torch.bool)
+        op.lut_entry_vectorized = lambda _cells, _clock, data, _arcs, _luts: -data
+        rise = torch.tensor([0.0, 2.0], requires_grad=True)
+        fall = torch.tensor([0.0, 3.0], requires_grad=True)
+        result = calculate_recovery_rat(
+            op,
+            torch.tensor([100.0, 100.0]),
+            torch.tensor([100.0, 100.0]),
+            rise,
+            fall,
+            scatter_timing_min,
+        )
+        torch.testing.assert_close(
+            result, (torch.tensor([100.0, 102.0]), torch.tensor([100.0, 103.0]))
+        )
+        gradients = torch.autograd.grad(result[0][1] + result[1][1], (rise, fall))
+        torch.testing.assert_close(gradients, (torch.tensor([0.0, 1.0]), torch.tensor([0.0, 1.0])))
+
     def test_setup_only_accepts_recovery_arcs_without_native_slews(self):
         op = self._recovery_fixture(
             native_r=False, native_f=False, timing_metric_scope="setup_only"

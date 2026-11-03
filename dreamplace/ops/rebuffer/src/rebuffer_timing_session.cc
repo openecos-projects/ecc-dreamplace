@@ -3,10 +3,12 @@
 #include "rebuffer_timing_session.hh"
 
 #include <algorithm>
+#include <optional>
 #include <string>
 
 #include "pybind11/stl.h"
 #include "rebuffer_overlay_actions.hh"
+#include "rebuffer_timing_graph.hh"
 
 namespace py = pybind11;
 
@@ -23,6 +25,12 @@ RepairTimingSession::RepairTimingSession(
 
 py::dict RepairTimingSession::applyCandidate(const py::dict& action)
 {
+  return applyCandidateImpl(action, nullptr);
+}
+
+py::dict RepairTimingSession::applyCandidateImpl(const py::dict& action,
+                                                PersistentTimingGraph* timing_graph)
+{
   // Lightweight fixtures and legacy callers may provide an explicit active
   // edge without coordinates.  In that contract there is nothing to resolve;
   // production placement overlays carry coordinates and use the active-edge
@@ -36,7 +44,9 @@ py::dict RepairTimingSession::applyCandidate(const py::dict& action)
   }
   std::string reason;
   py::dict result;
-  if (!applyIncrementalBufferSplit(*topology_, resolved, reason, result)) {
+  if (timing_graph != nullptr) {
+    result = timing_graph->applyBufferSplit(topology_->net_id, resolved);
+  } else if (!applyIncrementalBufferSplit(*topology_, resolved, reason, result)) {
     throw py::value_error(reason);
   }
   for (const char* field : {"parent_node_id",
@@ -95,6 +105,13 @@ std::shared_ptr<RepairTimingSession> createRepairTimingSession(
   return std::make_shared<RepairTimingSession>(topology);
 }
 
+RepairTimingCampaignSession::RepairTimingCampaignSession(
+    std::shared_ptr<PersistentTimingGraph> timing_graph)
+    : timing_graph_(std::move(timing_graph))
+{
+  if (timing_graph_) timing_graph_->requireTimingMutationOwner();
+}
+
 void RepairTimingCampaignSession::attachTopology(
     const int net_id,
     const std::shared_ptr<IncrementalTopologyState>& topology)
@@ -105,6 +122,9 @@ void RepairTimingCampaignSession::attachTopology(
   if (topology->net_id != net_id) {
     throw py::value_error("campaign net id does not match topology state");
   }
+  const auto found = topologies_.find(net_id);
+  if (found != topologies_.end() && found->second == topology) return;
+  if (timing_graph_) timing_graph_->attachNetTopologyState(net_id, topology);
   topologies_[net_id] = topology;
 }
 
@@ -188,7 +208,8 @@ py::dict RepairTimingCampaignSession::applyCandidate(
   if (found == topologies_.end()) {
     throw py::value_error("campaign topology is not attached");
   }
-  py::dict result = RepairTimingSession(found->second).applyCandidate(action);
+  py::dict result = RepairTimingSession(found->second).applyCandidateImpl(
+      action, timing_graph_.get());
   if (result.contains("action_id")) {
     recordActionState(
         net_id, py::cast<int>(result["action_id"]), "active");
@@ -204,7 +225,9 @@ py::dict RepairTimingCampaignSession::removeCandidate(
   if (found == topologies_.end()) {
     throw py::value_error("campaign topology is not attached");
   }
-  py::dict result = RepairTimingSession(found->second).removeCandidate(action_id);
+  py::dict result = timing_graph_
+      ? timing_graph_->removeBuffer(net_id, action_id)
+      : RepairTimingSession(found->second).removeCandidate(action_id);
   recordActionState(net_id, action_id, "retired");
   return result;
 }
@@ -218,19 +241,26 @@ py::dict RepairTimingCampaignSession::replaceCandidateTree(
     throw py::value_error("campaign topology is not attached");
   }
 
-  const IncrementalTopologyState topology_before = *found->second;
+  std::optional<IncrementalTopologyState> topology_before;
+  std::shared_ptr<RepairTimingCampaignCheckpoint> graph_checkpoint;
+  if (timing_graph_) {
+    graph_checkpoint = checkpoint();
+  } else {
+    topology_before = *found->second;
+  }
   const auto ledger_before = action_ledger_;
   std::vector<int> removed_action_ids;
   py::list applied;
   try {
-    // IncrementalTopologyState intentionally removes the most recently
-    // inserted buffer only. Reverse order keeps replacement atomic without
-    // weakening the ordinary remove invariant.
+    // Reverse order retains the legacy removal contract and also handles
+    // graph-owned trees whose earlier edits used general removal.
     while (!found->second->buffers.empty()) {
       const int action_id = found->second->buffers.back().action_id;
       std::string reason;
       py::dict remove_result;
-      if (!removeIncrementalBuffer(
+      if (timing_graph_) {
+        remove_result = timing_graph_->removeBuffer(net_id, action_id);
+      } else if (!removeIncrementalBuffer(
               *found->second, action_id, reason, remove_result)) {
         throw py::value_error(reason);
       }
@@ -239,12 +269,16 @@ py::dict RepairTimingCampaignSession::replaceCandidateTree(
 
     for (const auto& item : actions) {
       const py::dict action = item.cast<py::dict>();
-      py::dict apply_result
-          = RepairTimingSession(found->second).applyCandidate(action);
+      py::dict apply_result = RepairTimingSession(found->second).applyCandidateImpl(
+          action, timing_graph_.get());
       applied.append(apply_result);
     }
   } catch (...) {
-    *found->second = topology_before;
+    if (timing_graph_) {
+      restore(graph_checkpoint);
+    } else {
+      *found->second = *topology_before;
+    }
     action_ledger_ = ledger_before;
     throw;
   }
@@ -276,6 +310,11 @@ RepairTimingCampaignSession::checkpoint() const
   auto result = std::make_shared<RepairTimingCampaignCheckpoint>();
   result->topologies = topologies_;
   result->action_ledger = action_ledger_;
+  if (timing_graph_) {
+    result->timing_graph = timing_graph_->checkpoint();
+    result->campaign_identity = checkpoint_identity_;
+    return result;
+  }
   for (const auto& [net_id, topology] : topologies_) {
     result->checkpoints[net_id] = checkpointIncrementalTopology(*topology);
   }
@@ -287,6 +326,19 @@ py::dict RepairTimingCampaignSession::restore(
 {
   if (checkpoint == nullptr) {
     throw py::value_error("repair timing campaign checkpoint is required");
+  }
+  if (static_cast<bool>(timing_graph_)
+      != static_cast<bool>(checkpoint->timing_graph)) {
+    throw py::value_error("campaign checkpoint timing owner does not match");
+  }
+  if (timing_graph_) {
+    if (checkpoint->campaign_identity.lock() != checkpoint_identity_) {
+      throw py::value_error("campaign checkpoint belongs to another timing campaign");
+    }
+    timing_graph_->restore(checkpoint->timing_graph);
+    topologies_ = checkpoint->topologies;
+    action_ledger_ = checkpoint->action_ledger;
+    return summary();
   }
   std::map<int, std::shared_ptr<IncrementalTopologyState>> restored;
   for (const auto& [net_id, topology_checkpoint] : checkpoint->checkpoints) {
@@ -334,9 +386,10 @@ py::dict RepairTimingCampaignSession::summary() const
 }
 
 std::shared_ptr<RepairTimingCampaignSession>
-createRepairTimingCampaignSession()
+createRepairTimingCampaignSession(
+    const std::shared_ptr<PersistentTimingGraph>& timing_graph)
 {
-  return std::make_shared<RepairTimingCampaignSession>();
+  return std::make_shared<RepairTimingCampaignSession>(timing_graph);
 }
 
 }  // namespace rebuffer

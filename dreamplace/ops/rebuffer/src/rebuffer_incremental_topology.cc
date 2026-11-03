@@ -2,6 +2,7 @@
 // Mutable per-net topology state for native rebuffer transactions.
 
 #include "rebuffer_incremental_topology.hh"
+#include "rebuffer_topology_history.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -115,6 +116,17 @@ py::list edgeList(const std::vector<IncrementalEdge>& edges)
   return result;
 }
 
+void captureBaseTopology(IncrementalTopologyState& state)
+{
+  state.base_edges = state.edges;
+  state.base_node_loads = state.node_loads;
+  state.base_coordinates = state.coordinates;
+  state.base_source_node_by_node = state.source_node_by_node;
+  state.base_next_node_id = state.next_node_id;
+  state.base_epoch = state.epoch;
+  state.base_captured = true;
+}
+
 }  // namespace
 
 std::shared_ptr<IncrementalTopologyState> createIncrementalTopology(
@@ -126,6 +138,7 @@ std::shared_ptr<IncrementalTopologyState> createIncrementalTopology(
 {
   auto state = std::make_shared<IncrementalTopologyState>();
   state->net_id = net_id;
+  state->source_net_id = net_id;
   state->driver_pin_id = driver_pin_id;
   state->next_node_id = next_node_id;
   state->edges = edgesFromDict(topology_values);
@@ -136,10 +149,140 @@ std::shared_ptr<IncrementalTopologyState> createIncrementalTopology(
           = py::cast<std::array<double, 2>>(item.second);
     }
   }
+  for (const auto& edge : state->edges) {
+    state->source_node_by_node.emplace(edge.parent, edge.parent);
+    state->source_node_by_node.emplace(edge.child, edge.child);
+  }
   if (!validateIncrementalTopology(*state, reason)) {
     return nullptr;
   }
+  captureBaseTopology(*state);
   return state;
+}
+
+std::shared_ptr<IncrementalTopologyState> remapIncrementalTopology(
+    const std::shared_ptr<IncrementalTopologyState>& source,
+    const int original_pin_count,
+    const int node_shift,
+    const int target_net_id,
+    const int synthetic_node_base,
+    const py::dict& source_node_mapping)
+{
+  if (!source) throw std::invalid_argument("cannot_remap_null_topology");
+  if (original_pin_count < 0 || node_shift < 0) {
+    throw std::invalid_argument("invalid_topology_node_namespace");
+  }
+  auto mapped = std::make_shared<IncrementalTopologyState>(*source);
+  if (target_net_id >= 0) mapped->net_id = target_net_id;
+  std::unordered_map<int, int> explicit_nodes;
+  explicit_nodes.reserve(py::len(source_node_mapping));
+  for (const auto& item : source_node_mapping) {
+    explicit_nodes.emplace(
+        py::cast<int>(item.first), py::cast<int>(item.second));
+  }
+  std::unordered_map<int, int> synthetic_nodes;
+  if (synthetic_node_base >= 0) {
+    for (std::size_t slot = 0; slot < source->buffers.size(); ++slot) {
+      const auto& buffer = source->buffers[slot];
+      synthetic_nodes[buffer.input_node]
+          = synthetic_node_base + static_cast<int>(2 * slot);
+      synthetic_nodes[buffer.output_node]
+          = synthetic_node_base + static_cast<int>(2 * slot + 1);
+    }
+  }
+  const auto remap_node = [&](const int node) {
+    if (node < 0 || node < original_pin_count) return node;
+    const auto synthetic = synthetic_nodes.find(node);
+    if (synthetic != synthetic_nodes.end()) return synthetic->second;
+    const auto source_node = source->source_node_by_node.find(node);
+    if (source_node != source->source_node_by_node.end()) {
+      const auto mapped_source = explicit_nodes.find(source_node->second);
+      if (mapped_source != explicit_nodes.end()) return mapped_source->second;
+    }
+    const auto mapped_direct = explicit_nodes.find(node);
+    if (mapped_direct != explicit_nodes.end()) return mapped_direct->second;
+    return node + node_shift;
+  };
+  const auto remap_edge = [&](IncrementalEdge& edge) {
+    edge.parent = remap_node(edge.parent);
+    edge.child = remap_node(edge.child);
+  };
+  auto remap_edges = [&](std::vector<IncrementalEdge>& edges) {
+    for (auto& edge : edges) remap_edge(edge);
+  };
+  auto remap_load_map = [&](std::unordered_map<int, std::vector<int>>& loads) {
+    std::unordered_map<int, std::vector<int>> remapped;
+    remapped.reserve(loads.size());
+    for (auto& [node, pins] : loads) {
+      remapped.emplace(remap_node(node), std::move(pins));
+    }
+    loads = std::move(remapped);
+  };
+  auto remap_coordinates =
+      [&](std::unordered_map<int, std::array<double, 2>>& coordinates) {
+        std::unordered_map<int, std::array<double, 2>> remapped;
+        remapped.reserve(coordinates.size());
+        for (const auto& [node, point] : coordinates) {
+          remapped.emplace(remap_node(node), point);
+        }
+        coordinates = std::move(remapped);
+      };
+  auto remap_source_nodes = [&](const auto& source_nodes) {
+    std::unordered_map<int, int> remapped;
+    remapped.reserve(source_nodes.size());
+    for (const auto& [node, source_node] : source_nodes) {
+      remapped[remap_node(node)] = source_node;
+    }
+    return remapped;
+  };
+
+  mapped->next_node_id = remap_node(mapped->next_node_id);
+  mapped->base_next_node_id = remap_node(mapped->base_next_node_id);
+  if (synthetic_node_base >= 0) {
+    const int minimum_next = synthetic_node_base
+        + static_cast<int>(2 * source->buffers.size());
+    mapped->next_node_id = std::max(mapped->next_node_id, minimum_next);
+    mapped->base_next_node_id = std::max(mapped->base_next_node_id, minimum_next);
+  }
+  remap_edges(mapped->edges);
+  remap_edges(mapped->base_edges);
+  remap_load_map(mapped->node_loads);
+  remap_load_map(mapped->base_node_loads);
+  remap_coordinates(mapped->coordinates);
+  remap_coordinates(mapped->base_coordinates);
+  mapped->source_node_by_node = remap_source_nodes(source->source_node_by_node);
+  mapped->base_source_node_by_node = remap_source_nodes(source->base_source_node_by_node);
+  for (auto& buffer : mapped->buffers) {
+    buffer.input_node = remap_node(buffer.input_node);
+    buffer.output_node = remap_node(buffer.output_node);
+    buffer.original_parent = remap_node(buffer.original_parent);
+    buffer.original_child = remap_node(buffer.original_child);
+    buffer.upstream_node = remap_node(buffer.upstream_node);
+    buffer.downstream_node = remap_node(buffer.downstream_node);
+    remap_edge(buffer.original_edge);
+  }
+
+  int max_mapped_node = mapped->driver_pin_id;
+  for (const auto& edge : mapped->edges) {
+    max_mapped_node = std::max(max_mapped_node, edge.parent);
+    max_mapped_node = std::max(max_mapped_node, edge.child);
+  }
+  for (const auto& [node, _point] : mapped->coordinates) {
+    max_mapped_node = std::max(max_mapped_node, node);
+  }
+  mapped->next_node_id = std::max(mapped->next_node_id, max_mapped_node + 1);
+  mapped->base_next_node_id = std::max(
+      mapped->base_next_node_id, max_mapped_node + 1);
+
+  // The structural cache belongs to the old node namespace.  A remapped
+  // state must rebuild it under the caller's compact graph identity.
+  invalidateIncrementalTopologyCaches(*mapped);
+
+  std::string reason;
+  if (!validateIncrementalTopology(*mapped, reason)) {
+    throw std::invalid_argument("remapped_topology_invalid:" + reason);
+  }
+  return mapped;
 }
 
 bool validateIncrementalTopology(
@@ -323,6 +466,7 @@ bool applyIncrementalBufferSplit(
     reason = "downstream_partition_does_not_match_edge_subtree";
     return false;
   }
+  invalidateIncrementalTopologyCaches(state);
   std::array<double, 2> location{};
   if (!state.coordinates.empty()) {
     const auto& from = state.coordinates.at(parent);
@@ -352,8 +496,13 @@ bool applyIncrementalBufferSplit(
   buffer.split_ratio = ratio;
   buffer.next_node_before = state.next_node_id;
   buffer.epoch_before = state.epoch;
-  buffer.edges_before = state.edges;
-  buffer.loads_before = state.node_loads;
+  buffer.original_edge = *edge_it;
+  buffer.original_edge_index = static_cast<std::size_t>(
+      std::distance(state.edges.begin(), edge_it));
+  if (!state.coordinates.empty()) {
+    buffer.has_coordinates = true;
+    buffer.split_location = location;
+  }
   buffer.input_node = state.next_node_id++;
   buffer.output_node = state.next_node_id++;
   buffer.upstream_node = buffer.input_node;
@@ -378,15 +527,14 @@ bool applyIncrementalBufferSplit(
     state.coordinates[buffer.input_node] = location;
     state.coordinates[buffer.output_node] = location;
   }
+  state.source_node_by_node[buffer.input_node] = buffer.input_node;
+  state.source_node_by_node[buffer.output_node] = buffer.output_node;
   ++state.epoch;
 
   if (!validateIncrementalTopology(state, reason)) {
-    state.edges = buffer.edges_before;
-    state.node_loads = buffer.loads_before;
-    state.next_node_id = buffer.next_node_before;
-    state.epoch = buffer.epoch_before;
-    state.coordinates.erase(buffer.input_node);
-    state.coordinates.erase(buffer.output_node);
+    if (!undoLastTopologySplit(state, buffer, reason)) {
+      return false;
+    }
     return false;
   }
   state.buffers.push_back(buffer);
@@ -411,13 +559,17 @@ bool removeIncrementalBuffer(
     reason = "only_last_buffer_can_be_removed_without_rebuild";
     return false;
   }
+  invalidateIncrementalTopologyCaches(state);
+  if (state.general_removal) {
+    return removeIncrementalBufferAnywhere(state, action_id, reason, result);
+  }
   const auto buffer = state.buffers.back();
-  state.edges = buffer.edges_before;
-  state.node_loads = buffer.loads_before;
-  state.next_node_id = buffer.next_node_before;
+  if (!undoLastTopologySplit(state, buffer, reason)) {
+    return false;
+  }
+  // Preserve the historical epoch contract: removing a buffer is itself a
+  // topology mutation, even though the journal restores the pre-split graph.
   state.epoch = buffer.epoch_before + 1;
-  state.coordinates.erase(buffer.input_node);
-  state.coordinates.erase(buffer.output_node);
   state.buffers.pop_back();
   if (!validateIncrementalTopology(state, reason)) {
     return false;
@@ -430,21 +582,48 @@ bool removeIncrementalBuffer(
   return true;
 }
 
-std::shared_ptr<IncrementalTopologyCheckpoint> checkpointIncrementalTopology(
-    const IncrementalTopologyState& state)
-{
-  auto checkpoint = std::make_shared<IncrementalTopologyCheckpoint>();
-  checkpoint->state = state;
-  return checkpoint;
-}
-
-bool restoreIncrementalTopology(
+bool resizeIncrementalBuffer(
     IncrementalTopologyState& state,
-    const IncrementalTopologyCheckpoint& checkpoint,
-    std::string& reason)
+    const py::dict& action,
+    std::string& reason,
+    py::dict& result)
 {
-  state = checkpoint.state;
-  return validateIncrementalTopology(state, reason);
+  const int id = actionId(action);
+  if (id < 0 || !action.contains("buffer_master_name")) {
+    reason = "resize_action_requires_buffer_master";
+    return false;
+  }
+  const std::string master
+      = py::cast<std::string>(action["buffer_master_name"]);
+  if (master.empty()) {
+    reason = "resize_buffer_master_is_empty";
+    return false;
+  }
+  auto found = std::find_if(
+      state.buffers.begin(), state.buffers.end(),
+      [&](const IncrementalBuffer& buffer) { return buffer.action_id == id; });
+  if (found == state.buffers.end()) {
+    reason = "resize_buffer_action_not_found";
+    return false;
+  }
+  if (found->master_name == master) {
+    result["status"] = "noop";
+    result["action_id"] = id;
+    result["buffer_master_name"] = master;
+    result["epoch"] = state.epoch;
+    return true;
+  }
+  invalidateIncrementalTopologyCaches(state);
+  const std::string previous = found->master_name;
+  found->master_name = master;
+  ++state.epoch;
+  result["status"] = "ok";
+  result["action_id"] = id;
+  result["previous_buffer_master_name"] = previous;
+  result["buffer_master_name"] = master;
+  result["epoch"] = state.epoch;
+  result["partition_count"] = state.buffers.size() + 1;
+  return true;
 }
 
 py::dict incrementalTopologyView(const IncrementalTopologyState& state)
@@ -452,6 +631,7 @@ py::dict incrementalTopologyView(const IncrementalTopologyState& state)
   py::dict result;
   result["status"] = "ok";
   result["net_id"] = state.net_id;
+  result["source_net_id"] = state.source_net_id >= 0 ? state.source_net_id : state.net_id;
   result["driver_pin_id"] = state.driver_pin_id;
   result["next_node_id"] = state.next_node_id;
   result["epoch"] = state.epoch;
@@ -468,6 +648,12 @@ py::dict incrementalTopologyView(const IncrementalTopologyState& state)
     coordinates[py::int_(node)] = point;
   }
   result["coordinates"] = coordinates;
+  py::dict source_nodes;
+  for (const auto& [node, source_node] : std::map<int, int>(
+           state.source_node_by_node.begin(), state.source_node_by_node.end())) {
+    source_nodes[py::int_(node)] = source_node;
+  }
+  result["source_node_by_node"] = source_nodes;
   // A zero-RC cell edge is a logical connection, not a wire. Each buffer
   // output starts a new electrical net; its input loads the upstream net.
   std::unordered_map<int, int> buffer_inputs;

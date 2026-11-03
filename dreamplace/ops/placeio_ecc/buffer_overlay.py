@@ -108,8 +108,11 @@ class BufferOverlay:
         self.native_topologies = {}
         self.native_repair_sessions = {}
         self.native_campaign_session = None
+        self.native_timing_bridge = None
         self.native_topology_events = []
         self.projection_audit = {}
+        if getattr(timing_model, "use_native_timing_graph", False):
+            timing_model.bind_overlay(self)
 
     @property
     def actions(self):
@@ -484,11 +487,47 @@ class BufferOverlay:
         from dreamplace.ops.rebuffer import rebuffer_cpp
 
         states = [self.native_topologies[name] for name in sorted(self.native_topologies)]
-        projected = list(
-            rebuffer_cpp.finalize_overlay_actions(
-                self.base_pydb, states, self.actions
-            )
+        projection_source = "native_overlay"
+        projection_error = None
+        bridge = self.native_timing_bridge or getattr(
+            self.timing_model, "_persistent_graph_bridge", None
         )
+        use_graph_bridge = bool(
+            getattr(self.timing_model, "use_persistent_graph", False)
+            and os.environ.get("REBUFFER_PERSISTENT_GRAPH_FINALIZE", "") == "1"
+            and bridge is not None
+            and callable(getattr(bridge, "finalize_actions", None))
+        )
+        if self.native_timing_bridge is not None:
+            projected = list(bridge.finalize_actions(self.actions, overlay=self))
+            projection_source = "native_timing_graph"
+        elif use_graph_bridge:
+            try:
+                projected = list(bridge.finalize_actions(self.actions, overlay=self))
+                projection_source = "persistent_graph"
+            except (
+                AttributeError,
+                KeyError,
+                LookupError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ) as error:
+                # The opt-in graph is a guarded projection accelerator. A
+                # graph-owned state mismatch retains the canonical native
+                # finalizer so it cannot weaken commit correctness.
+                projection_error = repr(error)
+                projected = list(
+                    rebuffer_cpp.finalize_overlay_actions(
+                        self.base_pydb, states, self.actions
+                    )
+                )
+        else:
+            projected = list(
+                rebuffer_cpp.finalize_overlay_actions(
+                    self.base_pydb, states, self.actions
+                )
+            )
         native_action_ids = []
         for state in states:
             view = rebuffer_cpp.incremental_topology_view(state)
@@ -505,6 +544,7 @@ class BufferOverlay:
         )
         self.projection_audit = {
             "status": "ok",
+            "projection_source": projection_source,
             "native_topology_action_ids": sorted(native_action_ids),
             "projected_action_ids": projected_action_ids,
             "native_active_count": len(native_action_ids),
@@ -516,6 +556,8 @@ class BufferOverlay:
                 campaign_summary.get("action_ledger", {})
             ),
         }
+        if projection_error is not None:
+            self.projection_audit["persistent_graph_fallback"] = projection_error
         return projected
 
     def _remove_native_insert(self, action):
@@ -764,6 +806,8 @@ class BufferOverlay:
                 "base_remove_count": len(self.base_removals),
                 "epoch": self.epoch,
             }
+        if self.native_timing_bridge is not None:
+            raise ValueError("native timing campaign does not support base buffer removal")
         for name in names:
             action = {
                 "action_kind": "buffer_remove",
@@ -807,6 +851,7 @@ class BufferOverlay:
 
     def _snapshot(self):
         module = self._native_module()
+        bridge = getattr(self.timing_model, "_persistent_graph_bridge", None)
         return {
             "actions": _json_safe(self.actions),
             "next_buffer_id": self._next_buffer_id,
@@ -821,12 +866,26 @@ class BufferOverlay:
                     net_name: module.checkpoint_incremental_topology(state)
                     for net_name, state in self.native_topologies.items()
                 }
-                if module is not None
+                if module is not None and self.native_timing_bridge is None
                 else {}
             ),
             "native_campaign_checkpoint": (
                 self.native_campaign_session.checkpoint()
                 if self.native_campaign_session is not None
+                and self.native_timing_bridge is None
+                else None
+            ),
+            "native_timing_checkpoint": (
+                self.native_timing_bridge.checkpoint()
+                if self.native_timing_bridge is not None
+                else None
+            ),
+            "persistent_graph_checkpoint": (
+                bridge.checkpoint()
+                if getattr(self.timing_model, "use_persistent_graph", False)
+                and self.native_timing_bridge is None
+                and bridge is not None
+                and callable(getattr(bridge, "checkpoint", None))
                 else None
             ),
         }
@@ -843,6 +902,11 @@ class BufferOverlay:
         }
 
     def _restore_snapshot(self, checkpoint):
+        native_timing_checkpoint = checkpoint.get("native_timing_checkpoint")
+        if native_timing_checkpoint is not None:
+            if self.native_timing_bridge is None:
+                raise ValueError("native timing checkpoint has no campaign owner")
+            self.native_timing_bridge.restore(native_timing_checkpoint)
         self.actions = _json_safe(checkpoint["actions"])
         self._next_buffer_id = checkpoint["next_buffer_id"]
         self.removed_buffer_ids = set(checkpoint["removed_buffer_ids"])
@@ -853,15 +917,11 @@ class BufferOverlay:
             for name, session in self.native_repair_sessions.items()
             if name in self.native_topologies
         }
-        campaign_checkpoint = checkpoint.get("native_campaign_checkpoint")
-        if self.native_campaign_session is not None and campaign_checkpoint is not None:
-            self.native_campaign_session.restore(campaign_checkpoint)
-        elif campaign_checkpoint is None:
-            self.native_campaign_session = None
-        self.native_topology_events = _json_safe(checkpoint["native_topology_events"])
-        self.projection_audit = _json_safe(
-            checkpoint.get("projection_audit", {})
-        )
+        # Native checkpoints now use journal metadata and restore the state
+        # object in place.  Restore those topology objects before the campaign
+        # ledger, because the campaign checkpoint retains the same shared
+        # topology pointers; a prior remove may otherwise make the checkpoint
+        # appear to come from a future state.
         native_checkpoints = checkpoint.get("native_checkpoints", {})
         if native_checkpoints:
             from dreamplace.ops.rebuffer import rebuffer_cpp
@@ -869,7 +929,26 @@ class BufferOverlay:
             for net_name, native_checkpoint in native_checkpoints.items():
                 state = self.native_topologies.get(net_name)
                 if state is not None:
-                    rebuffer_cpp.restore_incremental_topology(state, native_checkpoint)
+                    rebuffer_cpp.restore_incremental_topology(
+                        state, native_checkpoint
+                    )
+        bridge = getattr(self.timing_model, "_persistent_graph_bridge", None)
+        persistent_graph_checkpoint = checkpoint.get("persistent_graph_checkpoint")
+        if (
+            persistent_graph_checkpoint is not None
+            and bridge is not None
+            and callable(getattr(bridge, "restore", None))
+        ):
+            bridge.restore(persistent_graph_checkpoint, overlay=self)
+        campaign_checkpoint = checkpoint.get("native_campaign_checkpoint")
+        if self.native_campaign_session is not None and campaign_checkpoint is not None:
+            self.native_campaign_session.restore(campaign_checkpoint)
+        elif campaign_checkpoint is None and self.native_timing_bridge is None:
+            self.native_campaign_session = None
+        self.native_topology_events = _json_safe(checkpoint["native_topology_events"])
+        self.projection_audit = _json_safe(
+            checkpoint.get("projection_audit", {})
+        )
         self._rebuild_patches()
         self.epoch = checkpoint["epoch"]
 
@@ -886,6 +965,15 @@ class BufferOverlay:
         }
 
     def rollback(self):
+        bridge = self.native_timing_bridge or getattr(
+            self.timing_model, "_persistent_graph_bridge", None
+        )
+        if (
+            getattr(self.timing_model, "use_persistent_graph", False)
+            and bridge is not None
+            and callable(getattr(bridge, "reset", None))
+        ):
+            bridge.reset()
         self.actions = []
         self.net_patches = {}
         self._next_buffer_id = 0
@@ -895,7 +983,11 @@ class BufferOverlay:
         self._next_checkpoint_id = 0
         self.native_topologies = {}
         self.native_repair_sessions = {}
-        self.native_campaign_session = None
+        self.native_campaign_session = (
+            self.native_timing_bridge.campaign
+            if self.native_timing_bridge is not None
+            else None
+        )
         self.native_topology_events = []
         self.projection_audit = {}
         self.epoch += 1

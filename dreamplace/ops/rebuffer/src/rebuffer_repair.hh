@@ -26,6 +26,10 @@ struct TimingView
   std::vector<double> pin_required_rise;
   std::vector<double> pin_required_fall;
   std::vector<int> clock_pins;
+  // Optional Python TimingPropagation topological level for each physical
+  // pin.  repair_design consumes this only when its reverse-topological mode
+  // is explicitly enabled; the default planner keeps net-id order.
+  std::vector<int> pin_rank;
   // Optional path-specific context supplied by the Python native path
   // extractor.  A value below zero means that the planner should use the
   // legacy all-arc fallback.
@@ -75,6 +79,21 @@ struct RepairConfig
   bool insert_buffers = true;
   bool resize_drivers = true;
   double resize_slew_threshold = 0.03;
+  bool repair_design_reverse_topological = false;
+  bool repair_design_local_update = false;
+  bool repair_design_load_slew_annotation = false;
+  bool repair_design_openroad_driver_resize = false;
+  bool repair_design_fanout_repair = false;
+  // Isolate the canonical per-arc target load and target-slew delay math.
+  // Candidate eligibility, traversal and electrical filters remain legacy.
+  bool repair_design_target_cell_math = false;
+  // Model OpenROAD makeRepeater(resize=true) by selecting the repeater from
+  // the actual post-split downstream load rather than the pre-split tree load.
+  // This is deliberately opt-in until the physical commit path is qualified.
+  bool repair_design_target_cell_selection = false;
+  bool repair_design_openroad_repeater_resize = false;
+  // Maximum driver-rooted wire length in microns.  Zero disables the check.
+  double repair_design_max_wire_length_um = 0.0;
   bool repair_net_tree = false;
   double slew_rc_factor = 1.864;
   // OpenROAD's Elmore transition shape factor.  The legacy repair_design
@@ -133,6 +152,11 @@ struct BufferAction
   double split_ratio = -1.0;
   double downstream_load = 0.0;
   double target_load = 0.0;
+  // The source of the insertion resize, before findTargetCell runs again.
+  // Export only for the opt-in target-cell selector. Repeating selection
+  // from the final cell is a different operation even at the same load.
+  int initial_buffer_cell_index = -1;
+  double initial_downstream_load = 0.0;
   std::string reason;
 };
 
@@ -202,12 +226,27 @@ bool rebufferDriverInputSlew(const DesignView& design,
                              double& input_slew_fall);
 double rebufferTargetLoadForCell(const LibertyCellView& cell,
                                  double target_slew_rise,
-                                 double target_slew_fall);
+                                 double target_slew_fall,
+                                 bool target_cell_math = false);
 int rebufferChooseBufferCell(const LibertyView& liberty,
                              const CharacterizationResult& characterization,
                              double input_slew_rise,
                              double input_slew_fall,
-                             double downstream_load);
+                             double downstream_load,
+                             bool target_cell_math = false,
+                             bool target_cell_selection = false,
+                             int initial_cell = -1);
+struct RepeaterCellSelection
+{
+  int cell_index = -1;
+  int initial_cell_index = -1;
+};
+
+RepeaterCellSelection rebufferChooseRepeaterCell(const LibertyView& liberty,
+                               const CharacterizationResult& characterization,
+                               double input_slew_rise, double input_slew_fall,
+                               double initial_load, double repeater_load,
+                               const RepairConfig& config);
 
 bool repairNetTree(const DesignView& design,
                    const TimingView& timing,
@@ -218,6 +257,7 @@ bool repairNetTree(const DesignView& design,
                    int net_id,
                    double max_cap,
                    int driver,
+                   int driver_cell_index,
                    const std::vector<std::vector<int>>& children,
                    std::vector<BufferAction>& actions,
                    std::string& reason);

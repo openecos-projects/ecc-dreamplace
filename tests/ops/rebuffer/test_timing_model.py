@@ -299,6 +299,9 @@ def test_native_setup_path_details_returns_none_when_native_api_is_unsupported()
 
 def test_empty_overlay_restores_live_timing_state_instead_of_only_cached_metrics():
     model = object.__new__(RebufferTimingModel)
+    model.use_native_timing_graph = False
+    model.use_native_timing_evaluation = False
+    model.use_persistent_graph = False
     model.pydb = SimpleNamespace()
     model._base_operator = None
     model._overlay_runtime = None

@@ -11,6 +11,35 @@ import numpy as np
 import torch
 
 
+def persistent_timing_state_payload(timing_model):
+    """Copy the current Python TP state into the native physical-pin schema.
+
+    RC inputs may include a trailing Steiner suffix. The graph owns timing
+    state on physical pins; the native RC forest owns the Steiner domain.
+    Field names and source attributes come from the native schema.
+    """
+    from . import rebuffer_cpp
+
+    timing = timing_model.model
+    if timing.num_pins != len(timing_model.pydb.pin_names):
+        raise ValueError("persistent timing state requires the current matching carrier")
+    schema = rebuffer_cpp.persistent_timing_state_schema(
+        len(timing_model.pydb.pin_names), len(timing.flat_inst_arcs_by_level)
+    )
+    values = {}
+    for name, spec in schema["fields"].items():
+        source = getattr(timing, spec["source"], None)
+        if source is None:
+            raise ValueError(f"Python TP state is unavailable: {spec['source']}")
+        if source.device.type != "cpu" or source.dtype != torch.float64:
+            raise ValueError(f"{spec['source']} requires CPU float64 Python TP state")
+        array = source.detach().numpy()
+        if name.startswith("pin_net_"):
+            array = array[: spec["length"]]
+        values[name] = np.array(array, dtype=np.float64, order="C", copy=True)
+    return values
+
+
 def timing_pin_slack(timing):
     """Transport the operator's qualified endpoint projection to its pin view."""
     slack = timing.get_pin_slack().detach().clone()

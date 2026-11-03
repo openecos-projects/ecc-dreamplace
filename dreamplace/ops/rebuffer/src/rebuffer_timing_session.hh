@@ -14,6 +14,10 @@
 
 namespace rebuffer {
 
+class PersistentTimingGraph;
+class RepairTimingCampaignSession;
+class PersistentTimingGraphCheckpoint;
+
 struct RepairTimingSessionCheckpoint
 {
   std::shared_ptr<IncrementalTopologyCheckpoint> topology;
@@ -38,6 +42,9 @@ class RepairTimingSession
   }
 
  private:
+  friend class RepairTimingCampaignSession;
+  pybind11::dict applyCandidateImpl(const pybind11::dict& action,
+      PersistentTimingGraph* timing_graph);
   std::shared_ptr<IncrementalTopologyState> topology_;
 };
 
@@ -49,6 +56,8 @@ struct RepairTimingCampaignCheckpoint
   std::map<int, std::shared_ptr<IncrementalTopologyState>> topologies;
   std::map<int, std::shared_ptr<IncrementalTopologyCheckpoint>> checkpoints;
   std::map<int, std::string> action_ledger;
+  std::shared_ptr<PersistentTimingGraphCheckpoint> timing_graph;
+  std::weak_ptr<const unsigned char> campaign_identity;
 };
 
 // Candidate and action lifecycle records are kept in the native campaign
@@ -74,6 +83,8 @@ struct RepairTimingLedgerEntry
 class RepairTimingCampaignSession
 {
  public:
+  explicit RepairTimingCampaignSession(
+      std::shared_ptr<PersistentTimingGraph> timing_graph = nullptr);
   void attachTopology(
       int net_id, const std::shared_ptr<IncrementalTopologyState>& topology);
   pybind11::dict applyCandidate(int net_id, const pybind11::dict& action);
@@ -90,6 +101,10 @@ class RepairTimingCampaignSession
   pybind11::dict restore(
       const std::shared_ptr<RepairTimingCampaignCheckpoint>& checkpoint);
   pybind11::dict summary() const;
+  const std::shared_ptr<PersistentTimingGraph>& timingGraph() const
+  {
+    return timing_graph_;
+  }
 
  private:
   void appendLedgerEntry(RepairTimingLedgerEntry entry);
@@ -98,9 +113,13 @@ class RepairTimingCampaignSession
   std::map<int, std::string> action_ledger_;
   std::vector<RepairTimingLedgerEntry> ledger_history_;
   int next_ledger_sequence_ = 0;
+  std::shared_ptr<PersistentTimingGraph> timing_graph_;
+  std::shared_ptr<const unsigned char> checkpoint_identity_
+      = std::make_shared<const unsigned char>(0);
 };
 
 std::shared_ptr<RepairTimingCampaignSession>
-createRepairTimingCampaignSession();
+createRepairTimingCampaignSession(
+    const std::shared_ptr<PersistentTimingGraph>& timing_graph = nullptr);
 
 }  // namespace rebuffer

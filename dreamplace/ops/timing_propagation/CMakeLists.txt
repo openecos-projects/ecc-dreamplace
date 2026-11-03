@@ -16,6 +16,7 @@ set(LINK_LIBS utility_cxx
 
 file(GLOB CPP_SOURCES
   src/timing_propagation_paths.cpp
+  src/timing_kernels.cpp
   src/timing_propagation_pybind.cpp
   )
 add_pytorch_extension(${TARGET_NAME}_cpp 

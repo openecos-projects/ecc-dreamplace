@@ -1,7 +1,10 @@
 from types import SimpleNamespace
 
+import pytest
+
 from dreamplace.ops.placeio_ecc.backend_caps import DEFAULT_BACKEND_CAPS
 from dreamplace.ops.placeio_ecc.place_io import PlaceIOFunction
+from dreamplace.ops.placeio_ecc.repair_profile import RepairProfile
 
 
 class _FakePyDB:
@@ -14,7 +17,8 @@ class _FakePyDB:
         self.flat_libcell_names = ["A", "B", "C"]
 
 
-def test_apply_repair_design_keeps_unchanged_nodes_at_current_cell(monkeypatch):
+@pytest.mark.parametrize("profiled", [False, True])
+def test_apply_repair_design_keeps_unchanged_nodes_at_current_cell(monkeypatch, profiled):
     captured = {}
 
     def fake_apply_sizing(raw_db, cell_ids, cell_master_names, **kwargs):
@@ -33,6 +37,7 @@ def test_apply_repair_design_keeps_unchanged_nodes_at_current_cell(monkeypatch):
         backend_caps=DEFAULT_BACKEND_CAPS,
     )
 
+    profile = RepairProfile() if profiled else None
     result = PlaceIOFunction.apply_repair_design(
         raw_db,
         {
@@ -40,6 +45,7 @@ def test_apply_repair_design_keeps_unchanged_nodes_at_current_cell(monkeypatch):
             "actions": [],
         },
         refresh=False,
+        profile=profile,
     )
 
     assert captured["cell_ids"] == [0, 0, 2]
@@ -51,3 +57,6 @@ def test_apply_repair_design_keeps_unchanged_nodes_at_current_cell(monkeypatch):
         "refresh": {"status": "skipped"},
         "requires_refresh": True,
     }
+    if profile is not None:
+        assert profile.commits == {"sizing": result["sizing"]}
+        assert profile.timings_ms["native_sizing_commit_ms"] >= 0

@@ -272,6 +272,11 @@ py::dict runRepairTimingQueueOperator(const py::object& timing_snapshot,
   std::set<int> snapshot_endpoints;
   std::set<int> snapshot_roots;
   std::set<int> snapshot_drivers;
+  const bool gradient_ordering = configBool(config, "gradient_ordering", false);
+  const int gradient_reject_limit = gradient_ordering
+                                        ? configInt(config, "gradient_reject_limit", 0)
+                                        : 0;
+  int gradient_refresh_count = 0;
   std::string stop_reason = "max_passes";
   const bool round_robin = configBool(config, "native_tree_round_robin", false);
   int round_robin_endpoint = -1;
@@ -346,6 +351,8 @@ py::dict runRepairTimingQueueOperator(const py::object& timing_snapshot,
     }
 
     bool accepted_this_epoch = false;
+    bool gradient_refresh_requested = false;
+    int gradient_rejections = 0;
     bool provider_done = false;
     std::vector<int> item_order = timingQueueWindow(items, config, retired_endpoints);
     if (round_robin && !items.empty()
@@ -716,6 +723,11 @@ py::dict runRepairTimingQueueOperator(const py::object& timing_snapshot,
           restore(restore_callback, token);
           row["status"] = "rejected";
           if (!state_key.empty()) rejected_in_state.insert(state_key);
+          ++gradient_rejections;
+          if (gradient_reject_limit > 0
+              && gradient_rejections >= gradient_reject_limit) {
+            gradient_refresh_requested = true;
+          }
         }
       } catch (const std::exception& error) {
         restore(restore_callback, token);
@@ -727,7 +739,7 @@ py::dict runRepairTimingQueueOperator(const py::object& timing_snapshot,
       row["selected_frontier_rank"] = frontier.selected_rank;
       row["frontier_trials"] = frontier.trials;
       history.append(std::move(row));
-      if (accepted_this_epoch) {
+      if (accepted_this_epoch || gradient_refresh_requested) {
         break;
       }
     }
@@ -735,6 +747,14 @@ py::dict runRepairTimingQueueOperator(const py::object& timing_snapshot,
       break;
     }
     if (accepted_this_epoch) {
+      continue;
+    }
+    if (gradient_refresh_requested) {
+      ++gradient_refresh_count;
+      attempted.clear();
+      candidate_keys.clear();
+      rejected_in_state.clear();
+      stop_reason = "gradient_reject_limit";
       continue;
     }
     stop_reason = evaluationBudgetExhausted() ? "max_tp_evaluations"
@@ -780,6 +800,8 @@ py::dict runRepairTimingQueueOperator(const py::object& timing_snapshot,
   result["skipped_rejected_in_state"] = skipped_rejected;
   result["evaluation_calls"] = evaluation_calls;
   result["attempt_count"] = attempt_count;
+  result["gradient_reject_limit"] = gradient_reject_limit;
+  result["gradient_refresh_count"] = gradient_refresh_count;
   result["stop_reason"] = stop_reason;
   result["queue_coverage"] = std::move(coverage);
   py::dict snapshot_statistics;

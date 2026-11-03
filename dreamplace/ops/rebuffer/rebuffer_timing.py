@@ -5,9 +5,11 @@ choice; this module only marshals the active Python TimingPropagation views
 and maps native ids back to ECC names.
 """
 
+from types import SimpleNamespace
+
 from .characterization import characterize_buffers_from_pydb
 from .liberty import build_liberty_view_from_pydb
-from .payloads import timing_payload
+from .payloads import steiner_payload, timing_payload
 from .pydb_adapter import build_rebuffer_design_from_pydb
 from .repair_design import DEFAULT_CONFIG as REPAIR_DESIGN_CONFIG
 from .repair_design import map_buffer_actions
@@ -41,6 +43,37 @@ def _net_id(pydb, net):
     return net_id if 0 <= net_id < len(pydb.net_names) else None
 
 
+def _base_runtime_view(pydb, timing_model):
+    """Return a read-only runtime identity for the unmodified carrier.
+
+    Native projection needs the same provenance fields as an overlay runtime,
+    but the first candidate should not require exporting an empty full carrier.
+    The base TimingPropagation Steiner view already contains stable physical
+    node identities, so construct only those transport arrays here.
+    """
+
+    steiner = steiner_payload(pydb, timing_model)
+    starts = [int(value) for value in steiner["net_flat_topo_sort_start"]]
+    topo = [int(value) for value in steiner["net_flat_topo_sort"]]
+    vertex_count = len(steiner["node_x"])
+    state_node_by_vertex = [-1] * vertex_count
+    state_net_by_vertex = [-1] * vertex_count
+    for net_id in range(len(starts) - 1):
+        for node in topo[starts[net_id] : starts[net_id + 1]]:
+            if 0 <= node < vertex_count:
+                state_node_by_vertex[node] = node
+                state_net_by_vertex[node] = net_id
+    return SimpleNamespace(
+        model=timing_model,
+        payload={
+            "steiner": steiner,
+            "original_net_by_net": list(range(len(pydb.net_names))),
+            "state_node_by_vertex": state_node_by_vertex,
+            "state_net_by_vertex": state_net_by_vertex,
+        },
+    )
+
+
 class RebufferPlanContext:
     """Cached native payloads for repeated current-tree planning.
 
@@ -52,6 +85,7 @@ class RebufferPlanContext:
     def __init__(self, pydb, timing_model=None, *, config=None):
         self.pydb = pydb
         self.model = timing_model if timing_model is not None else RebufferTimingModel(pydb)
+        self._base_runtime = _base_runtime_view(pydb, self.model)
         # A complete tree may require a chain or several branch buffers, so
         # current-tree planning keeps the repair_design action budget.
         self.config = {**REPAIR_DESIGN_CONFIG, **dict(config or {})}
@@ -80,6 +114,8 @@ class RebufferPlanContext:
         when its payload lacks ``required_key``."""
 
         runtime = self.model.current_graph()
+        if runtime is None:
+            runtime = self._base_runtime
         if runtime is not None and required_key not in runtime.payload:
             runtime = self.model.force_full_overlay_runtime()
         return runtime
@@ -109,13 +145,17 @@ class RebufferPlanContext:
             self._buffer_links = (key, buffer_net_links(pydb, design.get("node_is_buffer")))
         return self._buffer_links[1]
 
-    def set_path_context(self, path):
+    def set_path_context(self, path, path_details=None):
         """Bind one native critical path for path-specific scoring."""
 
         self._path_detail = None
         if not path:
             return
-        snapshot = self.model.native_setup_path_details()
+        snapshot = (
+            path_details
+            if path_details is not None
+            else self.model.native_setup_path_details()
+        )
         if not isinstance(snapshot, dict):
             return
         candidate = snapshot.get(int(path[-1]))
@@ -160,12 +200,12 @@ class RebufferPlanContext:
             "path_transitions": transitions,
         }
 
-    def native_path_context(self, path):
+    def native_path_context(self, path, path_details=None):
         """Export path arc data for the C++ queue ranking policy."""
 
         runtime = self._runtime()
         active_pydb = self.pydb if runtime is None else runtime.model.pydb
-        self.set_path_context(path)
+        self.set_path_context(path, path_details=path_details)
         return self._path_rank_context(active_pydb, path) or {}
 
     def native_queue_views(self):
@@ -192,6 +232,31 @@ class RebufferPlanContext:
             "liberty": self.liberty,
             "original_net_by_net": original_net_by_net,
         }
+
+    def timing_gradient_scores(self):
+        """Return opt-in Python-TP scores for native queue ordering."""
+
+        from dreamplace.ops.placeio_ecc.gradient_order import (
+            compute_timing_gradient_scores,
+        )
+
+        # A stale-gradient reject limit intentionally requests a fresh score
+        # at the same overlay state. Do not content-cache this opt-in probe.
+        return compute_timing_gradient_scores(self.model)
+
+    def timing_gradient_ranking_oracle(self, path, *, path_details=None, gradient_result=None):
+        """Compare native path-driver order with the Python TP score map."""
+
+        from dreamplace.ops.placeio_ecc.gradient_order import (
+            compare_path_driver_ranking,
+        )
+
+        return compare_path_driver_ranking(
+            self,
+            path,
+            path_details=path_details,
+            gradient_result=gradient_result,
+        )
 
     def native_current_tree_payload(
         self,
@@ -236,7 +301,10 @@ class RebufferPlanContext:
             active_pydb,
             active,
             reachable_net_ids,
-            steiner_view=None if hasattr(active, "steiner") else runtime.payload["steiner"],
+            # The projector resolves source vertex IDs through this carrier's
+            # provenance. A Python Steiner rebuild may reuse those integers
+            # for other junctions, even when the physical tree is unchanged.
+            steiner_view=runtime.payload["steiner"],
         )
         if topology.get("status") != "ok":
             return _unsupported(

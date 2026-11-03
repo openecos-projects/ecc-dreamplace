@@ -39,10 +39,6 @@ double excess(double value, double limit, double margin)
 py::dict electricalSnapshot(const py::object& db, const py::dict& timing,
                              int max_fanout, double cap_margin, double slew_margin)
 {
-  if (!std::isfinite(cap_margin) || !std::isfinite(slew_margin)
-      || cap_margin < 0.0 || cap_margin >= 100.0 || slew_margin < 0.0 || slew_margin >= 100.0) {
-    throw py::value_error("electrical margins must be in [0, 100)");
-  }
   const auto names = carrierArray<std::string>(db, "pin_names");
   const int count = names.size();
   const auto drivers = carrierArray<int>(db, "net2driver_pin_map");
@@ -85,21 +81,39 @@ py::dict electricalSnapshot(const py::object& db, const py::dict& timing,
       if (clock_nets.count(net_names.at(net))) clock[pins[index]] = true;
     }
   }
+  std::vector<ElectricalPinObservation> observations;
+  observations.reserve(count);
+  for (int pin = 0; pin < count; ++pin) {
+    observations.push_back({names[pin], rise[pin], fall[pin], rise_load[pin], fall_load[pin],
+                            max_slew[pin], max_cap[pin], fanout[pin], driver[pin], clock[pin]});
+  }
+  return observeElectricalPins(observations, max_fanout, cap_margin, slew_margin);
+}
+
+}  // namespace
+
+py::dict observeElectricalPins(const std::vector<ElectricalPinObservation>& pins,
+                               int max_fanout, double cap_margin, double slew_margin)
+{
+  if (!std::isfinite(cap_margin) || !std::isfinite(slew_margin)
+      || cap_margin < 0.0 || cap_margin >= 100.0 || slew_margin < 0.0 || slew_margin >= 100.0) {
+    throw py::value_error("electrical margins must be in [0, 100)");
+  }
   py::dict violations;
   std::array<int, 3> checked{0, 0, 0}, violation_count{0, 0, 0};
   std::array<double, 3> total{0.0, 0.0, 0.0};
-  for (int pin = 0; pin < count; ++pin) {
-    if ((max_slew[pin] > 0.0 && std::isfinite(max_slew[pin])
-         && (!std::isfinite(rise[pin]) || !std::isfinite(fall[pin])))
-        || (driver[pin] && max_cap[pin] > 0.0 && std::isfinite(max_cap[pin])
-            && (!std::isfinite(rise_load[pin]) || !std::isfinite(fall_load[pin])))) {
+  for (const auto& pin : pins) {
+    if ((pin.max_slew > 0.0 && std::isfinite(pin.max_slew)
+         && (!std::isfinite(pin.slew_rise) || !std::isfinite(pin.slew_fall)))
+        || (pin.driver && pin.max_cap > 0.0 && std::isfinite(pin.max_cap)
+            && (!std::isfinite(pin.load_rise) || !std::isfinite(pin.load_fall)))) {
       throw py::value_error("nonfinite electrical transition/load observation");
     }
-    if (clock[pin]) continue;
-    const std::array<double, 3> limit{max_slew[pin], driver[pin] ? max_cap[pin] : 0.0,
-                                    driver[pin] ? static_cast<double>(max_fanout) : 0.0};
-    const std::array<double, 3> observed{std::max(rise[pin], fall[pin]),
-        std::max(rise_load[pin], fall_load[pin]), static_cast<double>(fanout[pin])};
+    if (pin.clock) continue;
+    const std::array<double, 3> limit{pin.max_slew, pin.driver ? pin.max_cap : 0.0,
+                                    pin.driver ? static_cast<double>(max_fanout) : 0.0};
+    const std::array<double, 3> observed{std::max(pin.slew_rise, pin.slew_fall),
+        std::max(pin.load_rise, pin.load_fall), static_cast<double>(pin.fanout)};
     const std::array<double, 3> margin{slew_margin, cap_margin, 0.0};
     py::dict row;
     bool violates = false;
@@ -114,7 +128,7 @@ py::dict electricalSnapshot(const py::object& db, const py::dict& timing,
       }
     }
     if (violates) {
-      auto name = names[pin];
+      std::string name(pin.name);
       std::replace(name.begin(), name.end(), '/', ':');
       if (violations.contains(name.c_str())) throw py::value_error("ambiguous electrical pin name");
       violations[name.c_str()] = row;
@@ -122,7 +136,7 @@ py::dict electricalSnapshot(const py::object& db, const py::dict& timing,
   }
   py::dict result;
   result["violations_by_pin"] = violations;
-  result["pin_count"] = count;
+  result["pin_count"] = pins.size();
   result["configured_max_fanout"] = max_fanout;
   result["cap_margin_percent"] = cap_margin;
   result["slew_margin_percent"] = slew_margin;
@@ -134,8 +148,6 @@ py::dict electricalSnapshot(const py::object& db, const py::dict& timing,
   }
   return result;
 }
-
-}  // namespace
 
 py::dict compareElectricalObservations(const py::dict& before, const py::dict& after)
 {

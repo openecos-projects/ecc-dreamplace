@@ -4559,7 +4559,7 @@ class TimingPropagation(nn.Module):
         net_arcs_starts = self.net_flat_arcs_start[curnets]
         net_arcs_ends = self.net_flat_arcs_start[curnets + 1]
         num_net_fopins = net_arcs_ends - net_arcs_starts
-        if num_net_fopins.numel() == 0:
+        if num_net_fopins.numel() == 0 or not bool(torch.any(num_net_fopins > 0)):
             return pin_rAAT, pin_fAAT, pin_rtran, pin_ftran
 
         # Pack the CSR ranges in net order without padding to maximum fanout.

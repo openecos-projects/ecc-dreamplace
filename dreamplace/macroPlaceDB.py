@@ -4425,6 +4425,63 @@ class MacroPlaceDB(object):
             weights[num_pins_in_net == k] = weights_dict[k]
         self.net_weights *= weights
 
+    def apply_clock_net_weight_policy(self, params, *, restore_default_if_enabled=False):
+        if self.net_weights is None or len(self.net_weights) == 0:
+            return
+        from dreamplace.ops.buffer_insertion.net_eligibility import clock_net_ids
+
+        clk_ids = [
+            int(net_id)
+            for net_id in clock_net_ids(self)
+            if 0 <= int(net_id) < len(self.net_weights)
+        ]
+        if not clk_ids:
+            return
+        if bool(getattr(params, "zero_clock_net_weight_flag", 0)):
+            self.net_weights[clk_ids] = 0.0
+        elif restore_default_if_enabled:
+            for net_id in clk_ids:
+                if self.net_weights[net_id] == 0.0:
+                    self.net_weights[net_id] = 1.0
+
+    def _exclude_clock_nets_from_timing_arcs(self):
+        from dreamplace.ops.buffer_insertion.net_eligibility import clock_net_ids
+
+        net_starts = getattr(self, "net_flat_arcs_start", None)
+        net_arcs = getattr(self, "net_flat_arcs", None)
+        if net_starts is None or net_arcs is None or len(net_starts) <= 1:
+            return
+        clk_ids = {
+            int(net_id)
+            for net_id in clock_net_ids(self)
+            if 0 <= int(net_id) < len(net_starts) - 1
+        }
+        if not clk_ids:
+            return
+        net2driver = getattr(self, "net2driver_pin_map", None)
+        if net2driver is not None:
+            for net_id in clk_ids:
+                if 0 <= net_id < len(net2driver):
+                    net2driver[net_id] = -1
+        if not any(int(net_starts[net_id + 1]) > int(net_starts[net_id]) for net_id in clk_ids):
+            return
+        num_nets = len(net_starts) - 1
+        kept_slices = []
+        new_starts = np.zeros(num_nets + 1, dtype=net_starts.dtype)
+        cursor = 0
+        for net_id in range(num_nets):
+            begin = int(net_starts[net_id])
+            end = int(net_starts[net_id + 1])
+            if net_id not in clk_ids and end > begin:
+                kept_slices.append(net_arcs[begin:end])
+                cursor += end - begin
+            new_starts[net_id + 1] = cursor
+        self.net_flat_arcs_start = new_starts
+        if kept_slices:
+            self.net_flat_arcs = np.concatenate(kept_slices, axis=0).astype(net_arcs.dtype, copy=False)
+        else:
+            self.net_flat_arcs = np.zeros((0, 2), dtype=net_arcs.dtype)
+
     def get_inhomogeneous_list_to_ndarray(self, inhomogeneous_list, dtype=np.int32):
         res = inhomogeneous_list.copy()
         for i in range(len(res)):
@@ -4770,6 +4827,7 @@ class MacroPlaceDB(object):
             self.net_flat_arcs_start = np.array(
                 pydb.net_flat_arcs_start, dtype=np.int32)
             self.net_flat_arcs = np.array(pydb.net_flat_arcs, dtype=np.int32)
+            self._exclude_clock_nets_from_timing_arcs()
             self.inst_flat_arcs_start = np.array(
                 pydb.inst_flat_arcs_start, dtype=np.int32)
             self.inst_flat_arcs = np.array(pydb.inst_flat_arcs, dtype=np.int32)
@@ -4784,6 +4842,7 @@ class MacroPlaceDB(object):
                     "Skipping diff optimizer metadata initialization for backend=%s; backend_caps.has_diff_sizing_metadata=False",
                     dict(getattr(self, "backend_caps", {}) or {}).get("backend", "unknown"),
                 )
+        self.apply_clock_net_weight_policy(params, restore_default_if_enabled=True)
 
     def _supports_diff_optimizer_metadata(self):
         caps = dict(getattr(self, "backend_caps", {}) or {})
@@ -5123,6 +5182,7 @@ class MacroPlaceDB(object):
         # set net weights for improved HPWL % RSMT correlation
         if params.risa_weights == 1:
             self.set_net_weights()
+        self.apply_clock_net_weight_policy(params)
 
         # pin density inflation
         self.pin_density_inflation(params.pin_density)

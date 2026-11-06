@@ -51,14 +51,20 @@ def _iter_requested_net_ids(flat_net2pin_start, net_ids, max_nets):
 
 
 def _collect_pydb_net_pin_groups(pydb, *, net_ids=None, max_nets=None, max_net_degree=None):
+    from dreamplace.ops.buffer_insertion.net_eligibility import clock_net_ids
+
     flat_net2pin = _as_int_list(getattr(pydb, "flat_net2pin_map", []))
     flat_net2pin_start = _as_int_list(getattr(pydb, "flat_net2pin_start_map", []))
     net2driver = _as_int_list(getattr(pydb, "net2driver_pin_map", []))
+    clk_ids = clock_net_ids(pydb)
     groups = []
     skipped = Counter()
     for net_id in _iter_requested_net_ids(flat_net2pin_start, net_ids, max_nets):
         if net_id < 0 or net_id + 1 >= len(flat_net2pin_start):
             skipped["invalid_net_id"] += 1
+            continue
+        if int(net_id) in clk_ids:
+            skipped["clock_net"] += 1
             continue
         begin = int(flat_net2pin_start[net_id])
         end = int(flat_net2pin_start[net_id + 1])

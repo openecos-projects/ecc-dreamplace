@@ -129,7 +129,8 @@ int computeSteinerTreeLauncher(
     std::vector<int> &vtx_fa, std::vector<int> &flat_vtx_to,
     std::vector<int> &flat_vtx_from, std::vector<int> &net_flat_topo_idx,
     std::vector<int> &flat_vtx_to_start, int *net_flat_topo_idx_start,
-    bool deterministic_flag, std::vector<NetResult> net_result) {
+    bool deterministic_flag, std::vector<NetResult> net_result,
+    const std::vector<uint8_t> &ignored_net_mask) {
 
   constexpr int scale = 1000;
   int total_steiner = 0;
@@ -205,6 +206,22 @@ int computeSteinerTreeLauncher(
       result.newy.push_back(point.y());
     }
     if (!result.error.empty()) {
+      continue;
+    }
+
+    if (netid < static_cast<int>(ignored_net_mask.size()) &&
+        ignored_net_mask[netid] != 0) {
+      wl[netid] = 0;
+      result.num_steiner = 0;
+      result.vtx_fa.assign(degree, -1);
+      result.vtx_relate_x.resize(degree);
+      result.vtx_relate_y.resize(degree);
+      result.net_flat_topo_idx.resize(degree);
+      for (int local_idx = 0; local_idx < degree; ++local_idx) {
+        result.vtx_relate_x[local_idx] = local_idx;
+        result.vtx_relate_y[local_idx] = local_idx;
+        result.net_flat_topo_idx[local_idx] = local_idx;
+      }
       continue;
     }
 
@@ -655,7 +672,8 @@ std::vector<at::Tensor> build_tree(at::Tensor pos, at::Tensor flat_netpin,
                                    const std::string &post_file,
                                    bool deterministic_flag,
                                    const std::vector<int>& frozen_net_ids,
-                                   const std::vector<at::Tensor>& previous_cache) {
+                                   const std::vector<at::Tensor>& previous_cache,
+                                   const std::vector<int>& ignored_net_ids) {
   checkBuildInputs(pos, flat_netpin, netpin_start);
   TORCH_CHECK(netpin_start.numel() - 1 <= std::numeric_limits<int>::max(),
               "netpin_start has too many nets for the int32 native topology API");
@@ -663,6 +681,12 @@ std::vector<at::Tensor> build_tree(at::Tensor pos, at::Tensor flat_netpin,
 
   const int num_nets = static_cast<int>(netpin_start.numel() - 1);
   const int num_pins = static_cast<int>(pos.numel() / 2);
+  std::vector<uint8_t> ignored_net_mask(num_nets, 0);
+  for (int net_id : ignored_net_ids) {
+    if (net_id >= 0 && net_id < num_nets) {
+      ignored_net_mask[net_id] = 1;
+    }
+  }
   std::vector<int> vtx_relate_x_vec;
   std::vector<int> vtx_relate_y_vec;
   std::vector<int> vtx_fa_vec;
@@ -699,7 +723,7 @@ std::vector<at::Tensor> build_tree(at::Tensor pos, at::Tensor flat_netpin,
         flat_vtx_to_vec, flat_vtx_from_vec, net_flat_topo_idx_vec,
         flat_vtx_to_start_vec,
         DREAMPLACE_TENSOR_DATA_PTR(net_flat_topo_idx_start_tensor, int),
-        deterministic_flag, std::move(retained));
+        deterministic_flag, std::move(retained), ignored_net_mask);
 
     auto newx                     = convertVecToTens(newx_vec, options_float);
     auto newy                     = convertVecToTens(newy_vec, options_float);
@@ -839,5 +863,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         pybind11::arg("post_file"),
         pybind11::arg("deterministic_flag") = false,
         pybind11::arg("frozen_net_ids") = std::vector<int>{},
-        pybind11::arg("previous_cache") = std::vector<at::Tensor>{});
+        pybind11::arg("previous_cache") = std::vector<at::Tensor>{},
+        pybind11::arg("ignored_net_ids") = std::vector<int>{});
 }

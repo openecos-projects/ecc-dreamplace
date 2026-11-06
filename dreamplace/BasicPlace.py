@@ -521,6 +521,20 @@ class PlaceDataCollection(object):
             net_mask = np.logical_and(
                 2 <= net_degrees, net_degrees < params.ignore_net_degree
             ).astype(np.uint8)
+            from dreamplace.ops.buffer_insertion.net_eligibility import clock_net_ids
+
+            clk_ids = [
+                int(net_id)
+                for net_id in clock_net_ids(placedb, self)
+                if 0 <= int(net_id) < len(net_mask)
+            ]
+            if clk_ids:
+                if bool(getattr(params, "zero_clock_net_weight_flag", 0)):
+                    net_mask[clk_ids] = 0
+                else:
+                    for net_id in clk_ids:
+                        if net_degrees[net_id] >= 2:
+                            net_mask[net_id] = 1
             self.net_mask_ignore_large_degrees = torch.from_numpy(net_mask).to(
                 device
             )  # nets with large degrees are ignored
@@ -1952,6 +1966,8 @@ class BasicPlace(nn.Module):
         """
         @brief build the operator for Steiner tree topology construction
         """
+        from dreamplace.ops.buffer_insertion.net_eligibility import clock_net_ids
+
         steiner_topo_for_pin_op = steiner_topo.SteinerTopo(
             flat_net2pin_map=data_collections.flat_net2pin_map.to(
                 device).cpu(),
@@ -1959,6 +1975,7 @@ class BasicPlace(nn.Module):
                 device).cpu(),
             # pin2node_map=data_collections.pin2node_map,
             ignore_net_degree=params.ignore_net_degree,
+            ignored_net_ids=sorted(clock_net_ids(placedb, data_collections)),
             deterministic_flag=getattr(params, "deterministic_flag", False),
             collect_edge_geometry_stats=(
                 bool(getattr(params, "l_shape_profile_flag", False))

@@ -10897,6 +10897,8 @@ class PlaceObj(nn.Module):
         return self.density_weight
 
     def _advance_timing_coeff_growth(self, factor):
+        if not bool(getattr(self, "use_timing_obj", False)):
+            return
         base = getattr(self, "_timing_coeff_growth_base", None)
         if base is None:
             base = (

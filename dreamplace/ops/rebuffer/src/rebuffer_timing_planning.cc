@@ -9,7 +9,8 @@
 
 #include <algorithm>
 #include <cmath>
-#include <unordered_map>
+#include <chrono>
+#include <tuple>
 
 #include "timing_hard_math.h"
 #include "pybind11/stl.h"
@@ -22,15 +23,6 @@ void require(bool valid, const char* message)
   if (!valid) throw py::value_error(message);
 }
 
-std::unordered_map<std::string, int> identityMap(const std::vector<std::string>& names)
-{
-  std::unordered_map<std::string, int> result;
-  result.reserve(names.size());
-  for (std::size_t index = 0; index < names.size(); ++index) {
-    require(result.emplace(names[index], index).second, "native planning has duplicate identities");
-  }
-  return result;
-}
 }  // namespace
 
 py::dict PersistentTimingGraph::initializePlanning(const py::dict& design,
@@ -71,6 +63,19 @@ py::dict PersistentTimingGraph::initializePlanning(const py::dict& design,
   }
   require(base.node_is_fixed.empty() || base.node_is_fixed.size() == base.num_nodes,
           "native planning physical fixed flags do not align");
+  inputs->carrier = overlayCarrierInputs(carrier_);
+  // Import immutable base buffer boundaries once.  Subsequent local
+  // snapshots derive newly inserted boundaries from the native mutation
+  // records instead of scanning every projected pin and instance.
+  {
+    auto links = std::make_shared<std::vector<CurrentDriverBufferLink>>();
+    std::unordered_map<int, CurrentDriverBufferLink> by_input;
+    std::string reason;
+    if (!collectCurrentDriverBufferLinks(inputs->design, *links, by_input, reason)) {
+      throw py::value_error(reason);
+    }
+    inputs->base_links = std::move(links);
+  }
   planning_inputs_ = std::move(inputs);
   py::dict result;
   result["status"] = "ok";
@@ -94,17 +99,32 @@ NativeTimingPlanningSnapshot::NativeTimingPlanningSnapshot(
       liberty_(graph_->queue_liberty_), config_(config.attr("copy")().cast<py::dict>())
 {
   // This validates current propagation/topology before copying any views.
+  auto previous = std::chrono::steady_clock::now();
+  auto finish_phase = [&](const char* name) {
+    const auto now = std::chrono::steady_clock::now();
+    phase_timings_ms_[name] = std::chrono::duration<double, std::milli>(now - previous).count();
+    previous = now;
+  };
   const bool path_context = config_.contains("use_native_timing_path_context")
       && config_["use_native_timing_path_context"].cast<bool>();
-  queue_metadata_ = graph_->timingQueueState(inputs_->steiner.net_ids, path_context);
+  const auto endpoint = config_.contains("native_endpoint_pin")
+      ? std::make_optional(config_["native_endpoint_pin"].cast<int>()) : std::nullopt;
+  queue_metadata_ = graph_->timingQueueState(inputs_->steiner.net_ids, path_context, endpoint);
   graph_->applyQueueGradientScores(queue_metadata_, config_);
+  finish_phase("queue_state");
   std::vector<std::shared_ptr<IncrementalTopologyState>> states;
   for (const auto& [_, state] : graph_->net_states_) states.push_back(state);
-  projection_ = buildOverlayCarrierProjection(graph_->carrier_, inputs_->steiner,
+  projection_ = buildOverlayCarrierProjection(inputs_->carrier, inputs_->steiner,
       states, actions, inputs_->r_unit, inputs_->c_unit);
+  finish_phase("carrier_projection");
+  buildIdentity();
+  finish_phase("identity");
   buildViews();
+  finish_phase("timing_views");
   buildBufferLinks();
+  finish_phase("buffer_links");
   buildQueue();
+  finish_phase("queue_projection");
 }
 
 void NativeTimingPlanningSnapshot::requireCurrent() const
@@ -126,27 +146,6 @@ void NativeTimingPlanningSnapshot::buildViews()
   const auto& m = *graph_->mutation_state_;
   const auto& b = inputs_->design;
   auto& d = projection_.design;
-  const auto graph_pins = identityMap(graph_->timing_index_->pins);
-  const auto graph_nodes = identityMap(m.node_names);
-  const auto physical_nets = identityMap(projection_.net_names);
-  pin_by_graph_.assign(graph_->timing_index_->pins.size(), -1);
-  net_by_graph_.assign(m.net_names.size(), -1);
-  std::vector<int> graph_pin_by_pin;
-  graph_pin_by_pin.reserve(d.num_pins);
-  for (int pin = 0; pin < d.num_pins; ++pin) {
-    const int source = graph_pins.at(d.pin_names[pin]);
-    require(m.pin_active.at(source) != 0, "native planning includes a retired pin");
-    graph_pin_by_pin.push_back(source);
-    pin_by_graph_[source] = pin;
-  }
-  require(d.num_pins == std::count(m.pin_active.begin(), m.pin_active.end(), 1),
-          "native planning is missing active graph pins");
-  for (std::size_t net = 0; net < m.net_names.size(); ++net) {
-    const auto found = physical_nets.find(m.net_names[net]);
-    if (found != physical_nets.end()) net_by_graph_[net] = found->second;
-    else require(net >= m.base_net_pins.size() && m.net_drivers[net] < 0,
-                 "native planning is missing an active graph net");
-  }
   d.pin_cap_limit = b.pin_cap_limit;
   d.pin_cap = b.pin_cap;
   d.pin_slew_limit = b.pin_slew_limit;
@@ -154,7 +153,7 @@ void NativeTimingPlanningSnapshot::buildViews()
   d.main_id_2_cell_id_start = b.main_id_2_cell_id_start;
   d.cell_id_2_libpin_id_start = b.cell_id_2_libpin_id_start;
   for (int node = 0; node < d.num_nodes; ++node) {
-    const int original = graph_nodes.at(projection_.node_names[node]);
+    const int original = graph_node_by_node_.at(node);
     const int cell = m.node_cells.at(original);
     const int main = cell < 0 ? -1 : m.cell_mains.at(cell);
     d.inst_main_id.push_back(main);
@@ -167,7 +166,7 @@ void NativeTimingPlanningSnapshot::buildViews()
     if (cell >= 0) projection_.node_master_names[node] = m.cell_names.at(cell);
   }
   for (int pin = 0; pin < d.num_pins; ++pin) {
-    const int source = graph_pin_by_pin[pin], owner = m.pin_owner[source];
+    const int source = graph_pin_by_pin_[pin], owner = m.pin_owner[source];
     const int cell = m.node_cells[owner], net = m.pin_net[source];
     require((net < 0 ? -1 : net_by_graph_.at(net)) == d.pin2net_map[pin],
             "native planning pin partition differs from timing owner");
@@ -195,7 +194,7 @@ void NativeTimingPlanningSnapshot::buildViews()
     const auto& source = graph_->state_.at(field);
     std::vector<double> result;
     result.reserve(d.num_pins);
-    for (const int pin : graph_pin_by_pin) result.push_back(source.at(pin));
+    for (const int pin : graph_pin_by_pin_) result.push_back(source.at(pin));
     return result;
   };
   timing_.pin_slew_rise = values("pin_rtran");

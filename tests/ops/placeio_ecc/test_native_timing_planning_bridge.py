@@ -62,3 +62,21 @@ def test_native_planning_inputs_reject_a_different_campaign_config():
 
     with pytest.raises(ValueError, match="same campaign configuration"):
         bridge.initialize_planning(another)
+
+
+def test_native_planning_rejects_materialization_before_changing_state(monkeypatch):
+    model, session, bridge = _session()
+    context = RebufferPlanContext(model.pydb, model, config=_config())
+    bridge.initialize_planning(context)
+    checkpoint = bridge.graph.checkpoint()
+    before = bridge.statistics()
+    monkeypatch.setattr(
+        "dreamplace.ops.placeio_ecc.current_timing.evaluate_current_overlay", _forbidden
+    )
+
+    with pytest.raises(RuntimeError, match="cannot materialize a Python timing carrier"):
+        bridge.materialize(session.overlay)
+
+    assert bridge.statistics() == before
+    bridge.graph.restore(checkpoint)
+    assert model._overlay_runtime is None

@@ -22,8 +22,11 @@ def persistent_propagation_payload(owner):
     )
 
     timing = owner.model
-    if int(owner.pydb.timing_schema_version) != 2 or timing._sparse_runtime is not None:
-        raise ValueError("native timing propagation requires schema 2")
+    schema_version = int(owner.pydb.timing_schema_version)
+    # Schema 3 only adds the sparse constraint view on top of the same
+    # per-pin/per-arc/per-endpoint payload exported here.
+    if schema_version not in (2, 3) or timing._sparse_runtime is not None:
+        raise ValueError("native timing propagation requires schema 2 or 3")
     if timing.num_pins != len(owner.pydb.pin_names) or timing.dtype != torch.float64:
         raise ValueError("native timing propagation requires the current float64 carrier")
     fields = {
@@ -55,7 +58,7 @@ def persistent_propagation_payload(owner):
     payload = {name: _array(getattr(timing, source)) for name, source in fields.items()}
     payload.update(
         schema_version=1,
-        timing_schema_version=2,
+        timing_schema_version=schema_version,
         pin_names=[str(name) for name in owner.pydb.pin_names],
         aggregation_mode=timing.timing_aggregation_mode,
         metric_scope=timing.timing_metric_scope,

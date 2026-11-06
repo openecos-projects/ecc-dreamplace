@@ -215,8 +215,7 @@ def test_tree_vgdp_actions_materialize_as_a_valid_native_candidate_tree():
     assert all(
         not node["existing_buffer"]
         for node in candidate_view["nodes"]
-        if node["kind_name"] == "buffer"
-        and node["source_instance_id"] < 0
+        if node["kind_name"] == "buffer" and node["source_instance_id"] < 0
     )
 
     transaction = rebuffer_cpp.create_current_driver_tree_transaction(native_tree)
@@ -246,9 +245,7 @@ def test_joint_tree_vgdp_is_deterministic_and_keeps_pass_through_candidate():
 def test_joint_tree_vgdp_does_not_insert_on_existing_buffer_cell_edges():
     pydb = _serial_buffer_pydb()
     design = build_rebuffer_design_from_pydb(pydb, require_buffer_metadata=True)
-    tree = rebuffer_cpp.import_current_driver_tree(
-        design, _serial_buffer_topology(), root_net_id=0
-    )
+    tree = rebuffer_cpp.import_current_driver_tree(design, _serial_buffer_topology(), root_net_id=0)
     source = rebuffer_cpp.export_current_driver_tree(tree)
     cell_edges = {
         (edge["parent_node_id"], edge["child_node_id"])
@@ -271,6 +268,23 @@ def test_joint_tree_vgdp_does_not_insert_on_existing_buffer_cell_edges():
         (action["parent_node_id"], action["child_node_id"]) not in cell_edges
         for candidate in result["candidates"]
         for action in candidate["actions"]
+    )
+
+
+def test_current_driver_tree_can_stop_at_existing_buffer_boundary():
+    pydb = _serial_buffer_pydb()
+    design = build_rebuffer_design_from_pydb(pydb, require_buffer_metadata=True)
+    full = rebuffer_cpp.import_current_driver_tree(design, _serial_buffer_topology(), root_net_id=0)
+    bounded = rebuffer_cpp.import_current_driver_tree(
+        design, _serial_buffer_topology(), root_net_id=0, stop_at_existing_buffers=True
+    )
+    full_view = rebuffer_cpp.export_current_driver_tree(full)
+    bounded_view = rebuffer_cpp.export_current_driver_tree(bounded)
+    assert full_view["net_ids"] == [0, 1, 2]
+    assert bounded_view["net_ids"] == [0]
+    assert any(
+        node["kind_name"] == "buffer_input" and node["load_pin_ids"]
+        for node in bounded_view["nodes"]
     )
 
 
@@ -305,8 +319,7 @@ def test_joint_tree_vgdp_merges_two_branch_options_exhaustively():
         candidate["buffer_count"] for candidate in result["candidates"]
     ]
     assert all(
-        {action["child_node_id"] for action in candidate["actions"]}
-        <= {1, 2}
+        {action["child_node_id"] for action in candidate["actions"]} <= {1, 2}
         for candidate in result["candidates"]
     )
     assert all(
@@ -314,10 +327,7 @@ def test_joint_tree_vgdp_merges_two_branch_options_exhaustively():
         for candidate in result["candidates"]
         for action in candidate["actions"]
     )
-    assert any(
-        item["reason"] == "dominated" and item["node_id"] == 0
-        for item in result["trace"]
-    )
+    assert any(item["reason"] == "dominated" and item["node_id"] == 0 for item in result["trace"])
 
 
 def test_existing_tree_mutations_keep_remove_and_rewrite_validate():
@@ -326,11 +336,7 @@ def test_existing_tree_mutations_keep_remove_and_rewrite_validate():
     pydb.inst_main_id = [0, 0, 1, 0]
     design = build_rebuffer_design_from_pydb(pydb, require_buffer_metadata=True)
     tree = rebuffer_cpp.import_current_driver_tree(design, _topology(), 0)
-    mutations = list(
-        rebuffer_cpp.enumerate_current_driver_tree_mutations(
-            design, _liberty(), tree
-        )
-    )
+    mutations = list(rebuffer_cpp.enumerate_current_driver_tree_mutations(design, _liberty(), tree))
 
     assert {mutation["kind"] for mutation in mutations} >= {0, 1, 2}
     keep = next(mutation for mutation in mutations if mutation["kind"] == 0)
@@ -355,9 +361,7 @@ def test_existing_tree_mutations_keep_remove_and_rewrite_validate():
     assert rewritten["status"] == "ok"
     assert rewritten["node_count"] == source["node_count"]
     assert rewritten["buffer_count"] == 1
-    buffer_node = next(
-        node for node in rewritten["nodes"] if node["kind_name"] == "buffer"
-    )
+    buffer_node = next(node for node in rewritten["nodes"] if node["kind_name"] == "buffer")
     assert buffer_node["master_id"] == source["nodes"][buffer_node["id"]]["master_id"]
     assert buffer_node["cell_id"] == rewrite["target_cell_index"]
     assert rewrite["target_main_id"] == buffer_node["master_id"]
@@ -370,9 +374,7 @@ def test_tree_area_recovery_enumerates_native_pass_through_removal():
     design = build_rebuffer_design_from_pydb(pydb, require_buffer_metadata=True)
     tree = rebuffer_cpp.import_current_driver_tree(design, _topology(), 0)
 
-    candidates = list(
-        rebuffer_cpp.enumerate_tree_area_recovery(design, _liberty(), tree)
-    )
+    candidates = list(rebuffer_cpp.enumerate_tree_area_recovery(design, _liberty(), tree))
 
     assert len(candidates) == 1
     candidate = candidates[0]
@@ -385,9 +387,7 @@ def test_tree_area_recovery_enumerates_native_pass_through_removal():
     assert removed["buffer_count"] == 0
 
     transaction = rebuffer_cpp.create_current_driver_tree_transaction(tree)
-    transaction_candidates = transaction.area_recovery_candidates(
-        design, _liberty()
-    )
+    transaction_candidates = transaction.area_recovery_candidates(design, _liberty())
     assert transaction_candidates[0]["node_id"] == candidate["node_id"]
     assert transaction_candidates[0]["area_saved"] == candidate["area_saved"]
 
@@ -400,9 +400,7 @@ def test_tree_area_recovery_enumerates_smaller_same_family_rewrite():
     design = build_rebuffer_design_from_pydb(pydb, require_buffer_metadata=True)
     tree = rebuffer_cpp.import_current_driver_tree(design, _topology(), 0)
 
-    candidates = list(
-        rebuffer_cpp.enumerate_tree_area_recovery(design, _liberty(), tree)
-    )
+    candidates = list(rebuffer_cpp.enumerate_tree_area_recovery(design, _liberty(), tree))
     rewrite = next(
         candidate
         for candidate in candidates
@@ -422,9 +420,7 @@ def test_tree_area_recovery_enumerates_smaller_same_family_rewrite():
 def test_native_tree_area_recovery_owns_accept_restore_and_ledger():
     pydb = _serial_buffer_pydb()
     design = build_rebuffer_design_from_pydb(pydb, require_buffer_metadata=True)
-    tree = rebuffer_cpp.import_current_driver_tree(
-        design, _serial_buffer_topology(), 0
-    )
+    tree = rebuffer_cpp.import_current_driver_tree(design, _serial_buffer_topology(), 0)
     transaction = rebuffer_cpp.create_current_driver_tree_transaction(tree)
     source_node_count = transaction.summary()["source_node_count"]
     physical_checkpoints = []
@@ -433,9 +429,7 @@ def test_native_tree_area_recovery_owns_accept_restore_and_ledger():
 
     def physical_checkpoint(label, mutation):
         token = len(physical_checkpoints)
-        physical_checkpoints.append(
-            (label, token, mutation["source_instance_id"])
-        )
+        physical_checkpoints.append((label, token, mutation["source_instance_id"]))
         return {"checkpoint_id": token}
 
     def physical_apply(mutation, tree_result):
@@ -496,9 +490,7 @@ def test_native_tree_area_recovery_owns_accept_restore_and_ledger():
 def test_native_tree_area_recovery_reenumerates_after_accept():
     pydb = _serial_buffer_pydb()
     design = build_rebuffer_design_from_pydb(pydb, require_buffer_metadata=True)
-    tree = rebuffer_cpp.import_current_driver_tree(
-        design, _serial_buffer_topology(), 0
-    )
+    tree = rebuffer_cpp.import_current_driver_tree(design, _serial_buffer_topology(), 0)
     transaction = rebuffer_cpp.create_current_driver_tree_transaction(tree)
     source_node_count = transaction.summary()["source_node_count"]
 
@@ -557,9 +549,7 @@ def test_existing_serial_buffers_and_branch_preserve_tree_identity():
             design, _liberty(), rebuffer_cpp.import_current_driver_tree(design, topology, 0)
         )
     )
-    buffer_nodes = [
-        node for node in tree_view["nodes"] if node["kind_name"] == "buffer"
-    ]
+    buffer_nodes = [node for node in tree_view["nodes"] if node["kind_name"] == "buffer"]
     assert len(buffer_nodes) == 2
     assert {mutation["node_id"] for mutation in mutations if mutation["kind"] == 0} == {
         node["id"] for node in buffer_nodes
@@ -582,9 +572,7 @@ def test_existing_serial_buffers_and_branch_preserve_tree_identity():
             and mutation["target_cell_index"] != node["cell_id"]
         )
         rewritten = rebuffer_cpp.apply_current_driver_tree_mutation(tree, rewrite)
-        rewritten_node = next(
-            item for item in rewritten["nodes"] if item["id"] == node["id"]
-        )
+        rewritten_node = next(item for item in rewritten["nodes"] if item["id"] == node["id"])
         assert rewritten_node["master_id"] == node["master_id"]
         assert rewritten_node["cell_id"] == rewrite["target_cell_index"]
 
@@ -603,11 +591,7 @@ def test_current_tree_transaction_apply_and_restore_is_atomic():
     pydb.inst_main_id = [0, 0, 1, 0]
     design = build_rebuffer_design_from_pydb(pydb, require_buffer_metadata=True)
     tree = rebuffer_cpp.import_current_driver_tree(design, _topology(), 0)
-    mutations = list(
-        rebuffer_cpp.enumerate_current_driver_tree_mutations(
-            design, _liberty(), tree
-        )
-    )
+    mutations = list(rebuffer_cpp.enumerate_current_driver_tree_mutations(design, _liberty(), tree))
     remove = next(mutation for mutation in mutations if mutation["kind"] == 1)
     transaction = rebuffer_cpp.create_current_driver_tree_transaction(tree)
     checkpoint = transaction.checkpoint()
@@ -623,4 +607,3 @@ def test_current_tree_transaction_apply_and_restore_is_atomic():
     assert restored["transaction_state"] == "RESTORED"
     assert restored["candidate_tree_digest"] == source["source_tree_digest"]
     assert transaction.summary()["active_tree_digest"] == source["source_tree_digest"]
-

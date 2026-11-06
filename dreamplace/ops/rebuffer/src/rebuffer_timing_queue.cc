@@ -54,7 +54,8 @@ py::dict PersistentTimingGraph::initializeQueue(const py::dict& values,
 }
 
 py::dict PersistentTimingGraph::timingQueueState(
-    const std::vector<int>& original_net_by_net, bool use_path_context) const
+    const std::vector<int>& original_net_by_net, bool use_path_context,
+    std::optional<int> endpoint_pin) const
 {
   const auto started = std::chrono::steady_clock::now();
   if (!queue_liberty_ || !mutation_state_) {
@@ -67,11 +68,19 @@ py::dict PersistentTimingGraph::timingQueueState(
     throw py::value_error("queue original net identities do not align");
   }
   const auto slacks = endpointSlacks();
+  if (endpoint_pin && std::find(p.metric_pins.begin(), p.metric_pins.end(), *endpoint_pin)
+                          == p.metric_pins.end()) {
+    throw py::value_error("requested queue pin is not a timing endpoint");
+  }
   std::vector<int64_t> active;
   for (std::size_t row = 0; row < p.metric_pins.size(); ++row) {
+    if (endpoint_pin && p.metric_pins[row] != *endpoint_pin) continue;
     if (std::isfinite(slacks[row]) && slacks[row] < 0) active.push_back(p.metric_pins[row]);
   }
-  const auto paths = nativeSetupPaths(active, 0, 0, 1e-3);
+  const auto path_started = std::chrono::steady_clock::now();
+  const auto paths = nativeSetupPaths(active, 0, 0, 1e-3, true);
+  const double path_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - path_started).count();
   std::map<int64_t, const dreamplace::timing::SetupPathTrace*> selected;
   for (std::size_t row = 0; row < paths.batch.states.size(); ++row) {
     selected.emplace(paths.batch.states[row].pin, &paths.batch.traces[row]);
@@ -118,8 +127,10 @@ py::dict PersistentTimingGraph::timingQueueState(
   std::vector<TimingQueueItem> items;
   std::size_t fallback_count = 0;
   std::size_t path_context_count = 0;
+  double ranking_ms = 0.0;
   for (std::size_t row = 0; row < p.metric_pins.size(); ++row) {
     const int endpoint = p.metric_pins[row];
+    if (endpoint_pin && endpoint != *endpoint_pin) continue;
     const double slack = slacks[row];
     if (!std::isfinite(slack) || slack >= 0) continue;
     std::vector<int> path;
@@ -165,8 +176,12 @@ py::dict PersistentTimingGraph::timingQueueState(
     }
     // The opt-in context copies only this path's edge metadata. Pin timing
     // remains borrowed from the graph through PathDriverAccess.
+    std::vector<double> driver_scores;
+    const auto ranking_started = std::chrono::steady_clock::now();
     const auto drivers = rankPathDriverPins(access, *queue_liberty_, path,
-        has_context ? &context : nullptr, has_context);
+        has_context ? &context : nullptr, has_context, &driver_scores);
+    ranking_ms += std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - ranking_started).count();
     std::vector<int> nets;
     auto add_net = [&](int net) {
       if (net >= 0 && net < static_cast<int>(m.net_drivers.size())
@@ -183,6 +198,11 @@ py::dict PersistentTimingGraph::timingQueueState(
       item.endpoint_slack_ps = slack; item.path_pins = path;
       item.net_ids.push_back(net_map[net]);
       item.root_net_id = net; item.driver_pin_id = driver;
+      const auto ranked = std::find(drivers.begin(), drivers.end(), driver);
+      if (ranked != drivers.end()) {
+        item.driver_score_ps = driver_scores[std::distance(drivers.begin(), ranked)];
+        item.has_driver_score = std::isfinite(item.driver_score_ps);
+      }
       item.tree_key = std::to_string(net) + ":" + std::to_string(driver);
       items.push_back(std::move(item));
     }
@@ -201,7 +221,15 @@ py::dict PersistentTimingGraph::timingQueueState(
   statistics["active_endpoint_count"] = active.size();
   statistics["legacy_fallback_count"] = fallback_count;
   if (use_path_context) statistics["path_context_count"] = path_context_count;
-  statistics["setup_path_state_count"] = paths.batch.states.size();
+  statistics["setup_path_state_count"] = paths.batch.failing_state_count;
+  statistics["traced_endpoint_count"] = paths.batch.states.size();
+  statistics["path_extraction_ms"] = path_ms;
+  statistics["driver_ranking_ms"] = ranking_ms;
+  if (endpoint_pin && !paths.batch.states.empty()) {
+    statistics["endpoint_test_id"] = paths.batch.states.front().test_id;
+    statistics["endpoint_transition"] = paths.batch.states.front().transition;
+    statistics["path_valid"] = paths.batch.traces.front().valid != 0;
+  }
   statistics["runtime_ms"] = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - started).count();
   result["graph_queue_statistics"] = std::move(statistics);

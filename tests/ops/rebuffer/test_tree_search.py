@@ -53,13 +53,20 @@ def test_long_wire_chain_materializes_and_obeys_cap_slew_and_action_budget():
     assert exported["buffer_count"] == candidate["buffer_count"]
     assert exported["edge_count"] == exported["node_count"] - 1
     assert _plan(inputs, {"insert_buffers": False})["status"] == "unsupported"
-    assert _plan(inputs, {"max_actions": 1})["status"] == "unsupported"
+    assert _plan(inputs, {"tree_max_buffers": 1})["status"] == "unsupported"
     assert _plan(inputs, {"insert_buffers": False, "tree_enforce_electrical": False})["status"] == "ok"
     rescored = native.plan_current_driver_tree(
         *inputs[:4], {"insert_buffers": False}, tree,
     )
     assert rescored["status"] == "ok"
     assert rescored["candidates"][0]["slack"] == pytest.approx(candidate["slack"])
+
+
+def test_public_tree_digest_keeps_canonical_identity():
+    tree = _long_wire()[-1]
+    exported = native.export_current_driver_tree(tree)
+    assert exported["tree_digest_algorithm"] == "canonical_v2"
+    assert exported["tree_digest"] == "febca7fd39c433b4"
 
 
 def test_chain_materialization_rejects_reversed_source_edge_order():

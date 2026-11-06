@@ -242,7 +242,7 @@ def native_timing_gradient_payload(timing_model, bridge, overlay):
     """
     from dreamplace.ops.rebuffer.timing_model import RebufferTimingModel
 
-    bridge.materialize(overlay)
+    bridge.materialize(overlay, gradient_probe=True)
     source = timing_model.active_pydb
     probe = RebufferTimingModel(
         source,

@@ -38,6 +38,9 @@ def _timing():
         "pin_max_slew": [0.1, 0.0],
         "pin_max_cap": [0.01, 0.0],
         "clock_pins": [],
+        # The production profile plans in reverse topological order and
+        # refuses to guess without the native pin rank.
+        "pin_rank": [0, 0],
     }
 
 
@@ -307,6 +310,20 @@ def test_repair_design_reverse_topological_order_is_native_and_opt_in():
     assert [action["net_id"] for action in reverse_result["actions"]] == [1, 0]
 
 
+def test_placement_profile_enables_openroad_repair_design_order_by_default():
+    """The production placement profile runs the OpenROAD order, not the legacy one."""
+    from dreamplace.ops.rebuffer.repair_design import DEFAULT_CONFIG
+
+    assert DEFAULT_CONFIG["repair_design_reverse_topological"] is True
+    assert DEFAULT_CONFIG["repair_design_local_update"] is True
+    assert DEFAULT_CONFIG["repair_design_load_slew_annotation"] is True
+    assert DEFAULT_CONFIG["repair_design_resize_to_target_slew"] is True
+    # repair_design has no global action budget; the tree DP keeps a
+    # per-net safety bound under a separate name.
+    assert "max_actions" not in DEFAULT_CONFIG
+    assert DEFAULT_CONFIG["tree_max_buffers"] == 1024
+
+
 def test_repair_design_reverse_topological_mode_fails_closed_without_pin_rank():
     result = rebuffer_cpp.plan_repair_design(
         _two_net_design(),
@@ -469,6 +486,36 @@ def test_repair_design_openroad_resize_rule_considers_smallest_legal_equivalent_
         },
     )
     assert openroad_rule["resizes"] == []
+
+
+def test_repair_design_resize_to_target_slew_normalizes_every_driver():
+    """OpenROAD placement repair normalizes drive strength before violations."""
+    liberty = deepcopy(_liberty())
+    # DRV target load is 0.005 pF, BUF target load is 0.05 pF.  The driver
+    # starts as DRV with a 0.05 pF load, so the native selector must swap it
+    # to BUF even though no limit is violated after the swap.
+    liberty["arc_values"] = [0.01] * 48
+    liberty["arc_values"][8:12] = [0.01, 1.0, 0.01, 1.0]
+    liberty["arc_values"][12:16] = [0.01, 1.0, 0.01, 1.0]
+    liberty["arc_values"][24:28] = [0.001, 0.1, 0.001, 0.1]
+    liberty["arc_values"][28:32] = [0.001, 0.1, 0.001, 0.1]
+
+    result = rebuffer_cpp.plan_repair_design(
+        _design(),
+        _timing(),
+        _steiner(),
+        liberty,
+        _characterization(),
+        {
+            "resize_drivers": True,
+            "insert_buffers": False,
+            "repair_design_resize_to_target_slew": True,
+        },
+    )
+
+    assert result["status"] == "ok"
+    assert result["resizes"] == [{"node_id": 0, "target_cell_index": 1}]
+    assert result["actions"] == []
 
 
 def _fanout_design():

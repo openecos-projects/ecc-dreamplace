@@ -64,13 +64,22 @@ SetupPathBatch extractSetupPaths(std::vector<SetupPathState> states,
                                 int64_t num_pins, int64_t global_k,
                                 int64_t max_depth, double residual_tolerance_ps,
                                 const VisitPredecessors& visit_predecessors,
-                                const IsStart& is_start) {
+                                const IsStart& is_start,
+                                bool worst_per_endpoint = false) {
   std::sort(states.begin(), states.end(), [](const auto& lhs, const auto& rhs) {
     return std::tie(lhs.slack, lhs.transition, lhs.pin, lhs.test_id) <
            std::tie(rhs.slack, rhs.transition, rhs.pin, rhs.test_id);
   });
   SetupPathBatch batch;
   batch.failing_state_count = static_cast<int64_t>(states.size());
+  // Queue consumers retain the first sorted state of each endpoint. Select it
+  // before backtracing; full diagnostic consumers still trace every state.
+  if (worst_per_endpoint) {
+    std::unordered_set<int64_t> endpoints;
+    states.erase(std::remove_if(states.begin(), states.end(), [&](const auto& state) {
+      return !endpoints.insert(state.pin).second;
+    }), states.end());
+  }
   if (global_k > 0 && static_cast<int64_t>(states.size()) > global_k) {
     states.resize(static_cast<size_t>(global_k));
   }

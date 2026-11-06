@@ -291,9 +291,11 @@ def test_partial_native_acceptance_is_reverted_and_cannot_be_kept(monkeypatch):
     assert backend.committed == set()
 
 
-def test_sparse_schema_is_rejected_before_native_mutation(monkeypatch):
+def test_unknown_schema_is_rejected_before_native_mutation(monkeypatch):
     backend = FakeBackend({"wns_ps": -100.0, "tns_ps": -1000.0}, {0: (5.0, 50.0)})
-    backend.pydb.timing_schema_version = 3
+    # Schema 2 and 3 share the payload the carrier rebuild consumes; only a
+    # genuinely unknown version must block a native mutation.
+    backend.pydb.timing_schema_version = 4
     _install(monkeypatch, backend)
 
     result = commit_verify.commit_buffer_actions_verified(

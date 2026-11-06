@@ -101,7 +101,7 @@ def _empty_payload(pydb, reason):
     }
 
 
-def build_openroad_steiner_payload(pydb, *, r_unit=0.914, dbu=None, use_pin_offset=True):
+def build_openroad_steiner_payload(pydb, *, r_unit=None, dbu=None, use_pin_offset=True):
     """Return a ``SteinerView``-compatible payload using OpenROAD STT.
 
     Pin nodes keep their global pin ids.  Synthetic Steiner nodes are
@@ -111,6 +111,9 @@ def build_openroad_steiner_payload(pydb, *, r_unit=0.914, dbu=None, use_pin_offs
 
     if pydb is None:
         return _empty_payload(pydb, "pydb_is_none")
+    if r_unit is None:
+        pydb_r = getattr(pydb, "r_unit", None)
+        r_unit = pydb_r if (pydb_r is not None and float(pydb_r) > 0.0 and float(pydb_r) != 1.0) else 0.914
     dbu = int(dbu if dbu is not None else getattr(pydb, "dbu", 0) or 0)
     if dbu <= 0:
         return _empty_payload(pydb, "invalid_dbu")

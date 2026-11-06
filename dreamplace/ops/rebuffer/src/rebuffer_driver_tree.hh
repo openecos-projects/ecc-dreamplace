@@ -13,6 +13,7 @@
 #include "rebuffer_types.hh"
 #include "rebuffer_liberty.hh"
 #include "rebuffer_repair.hh"
+#include "rebuffer_driver_tree_links.hh"
 
 namespace rebuffer {
 
@@ -135,7 +136,12 @@ bool importCurrentDriverTree(const DesignView& design,
                              const TopologyView& topology,
                              int root_net_id,
                              CurrentDriverTree& tree,
-                             std::string& reason);
+                             std::string& reason,
+                             bool stop_at_existing_buffers = false);
+bool importCurrentDriverTree(const DesignView& design, const TopologyView& topology,
+    int root_net_id, const std::vector<CurrentDriverBufferLink>& buffer_links,
+    CurrentDriverTree& tree, std::string& reason,
+    bool stop_at_existing_buffers = false);
 
 bool validateCurrentDriverTree(const CurrentDriverTree& tree,
                                std::string& reason);
@@ -163,7 +169,8 @@ bool applyCurrentDriverTreeBufferActions(
     const LibertyView& liberty,
     const std::vector<BufferAction>& actions,
     CurrentDriverTree& target,
-    std::string& reason);
+    std::string& reason,
+    bool compute_digest = true);
 
 pybind11::dict driverTreeMutationToDict(const DriverTreeMutation& mutation);
 DriverTreeMutation driverTreeMutationFromDict(const pybind11::dict& values);

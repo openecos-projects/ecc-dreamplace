@@ -4,8 +4,9 @@ The stage is deliberately thin.  Native ``repair_design`` and
 ``repair_timing`` planners own every electrical decision; this module only
 sequences the existing ECC commit/refresh primitives and invalidates the
 placement runtime so the caller can rebuild ``NonLinearPlace`` from the new
-database.  Every candidate and committed result is evaluated with the Python
-DreamPlace ``TimingPropagation``.
+database.  The default ``repair_timing`` candidate consumer is the native C++
+timing graph, queue, propagation, and planning path.  Python
+``TimingPropagation`` remains the fresh verification authority after commit.
 """
 
 import json
@@ -22,14 +23,15 @@ TIMING_EVALUATOR = "dreamplace_timing_propagation_after_native_commit"
 # Native ``repair_timing -setup -sequence buffer`` configuration.  These are
 # the values of the verified BM64 runs; explicit caller keys override them.
 REPAIR_TIMING_DEFAULTS = {
-    # Keep the PersistentTimingGraph production bridge opt-in until its
-    # bounded end-to-end QoR and wall-time gate passes.  The timing source
-    # remains Python DreamPlace TimingPropagation in either mode.
+    # The production repair_timing consumer is native C++.  Python
+    # TimingPropagation remains the post-commit fresh verification path;
+    # callers can explicitly disable these flags for compatibility/oracle
+    # runs.
     "use_persistent_graph": False,
-    "use_native_timing_graph": False,
-    "use_native_timing_queue": False,
-    "use_native_timing_evaluation": False,
-    "use_native_timing_planning": False,
+    "use_native_timing_graph": True,
+    "use_native_timing_queue": True,
+    "use_native_timing_evaluation": True,
+    "use_native_timing_planning": True,
     # Queue: current driver trees from a 32-endpoint window, interleaved in
     # quanta of 8 attempts, with branch-focused complete-tree requests.
     "native_tree_queue": True,
@@ -42,9 +44,8 @@ REPAIR_TIMING_DEFAULTS = {
     "native_tree_candidate_variants": 8,
     "native_tree_branch_candidate_variants": 2,
     "native_tree_branch_global_acceptance": True,
-    # Each request evaluates the top two VGDP trees with Python TP.  On BM64
-    # (3000 passes) this improves WNS -1074.7 -> -1043.8 ps and TNS
-    # -350614 -> -341769 ps over top-1, at ~3x the TP evaluations.
+    # Each request evaluates the top two VGDP trees through the selected
+    # native consumer.  The fresh Python TP remains the post-commit oracle.
     "python_timing_candidate_top_k": 2,
     # Candidate model: OpenROAD BufferGenerator eligibility and fast set.
     "buffer_set": "fast",
@@ -73,6 +74,13 @@ def resolve_repair_timing_config(config):
         raise ValueError("repair_timing requires commit_verify_chunk > 0")
     if int(resolved["python_timing_candidate_top_k"]) < 1:
         raise ValueError("python_timing_candidate_top_k must be a positive integer")
+    scheduler = resolved.get("timing_scheduler", "queue")
+    if scheduler not in ("queue", "openroad_legacy"):
+        raise ValueError(f"unknown timing scheduler: {scheduler}")
+    if scheduler == "openroad_legacy":
+        from dreamplace.ops.placeio_ecc.native_legacy_timing import resolve_legacy_timing_config
+
+        resolved = resolve_legacy_timing_config(resolved)
     return resolved
 
 
@@ -131,11 +139,22 @@ def _run_repair_design(placedb, *, config, profile=None):
     timing_kwargs = placement_timing_kwargs(config, use_pin_offset=provider == "openroad_stt")
     with measure_phase(profile, "python_timing_model_build_ms"):
         timing_model = RebufferTimingModel(pydb, **timing_kwargs)
+    summary = {}
+    if profile is not None:
+        from dreamplace.ops.placeio_ecc.electrical_observation import electrical_observation
+
+        with profile.measure("initial_electrical_observation_ms"):
+            summary["timing_before_electrical"] = electrical_observation(
+                timing_model,
+                max_fanout=config.get("max_fanout", 32),
+                cap_margin=config.get("cap_margin", 0.0),
+                slew_margin=config.get("slew_margin", 0.0),
+            )
     with measure_phase(profile, "repair_plan_ms"):
         plan = plan_repair_design_from_pydb(pydb, timing_model, config=config)
     if profile is not None:
         profile.plans["repair_design"] = plan
-    summary = {
+    summary |= {
         "status": plan.get("status"),
         "timing_before": plan.get("baseline"),
         "inserted_count": plan.get("inserted_count"),

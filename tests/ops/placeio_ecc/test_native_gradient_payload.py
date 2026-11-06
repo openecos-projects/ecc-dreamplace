@@ -14,7 +14,9 @@ def test_native_gradient_probe_materializes_current_names_and_epoch(monkeypatch)
     owner = SimpleNamespace(active_pydb=source, r_unit=0.65, c_unit=0.000189)
     overlay = object()
     bridge = SimpleNamespace(graph=SimpleNamespace(epoch=3))
-    bridge.materialize = Mock(side_effect=lambda current: setattr(owner, "active_pydb", updated))
+    bridge.materialize = Mock(
+        side_effect=lambda current, *, gradient_probe: setattr(owner, "active_pydb", updated)
+    )
     constructor = Mock(return_value=SimpleNamespace())
     monkeypatch.setattr("dreamplace.ops.rebuffer.timing_model.RebufferTimingModel", constructor)
     probes = []
@@ -34,7 +36,7 @@ def test_native_gradient_probe_materializes_current_names_and_epoch(monkeypatch)
         "gradient_loss": 2.0,
         "gradient_steiner_provider": "ecc",
     }
-    bridge.materialize.assert_called_once_with(overlay)
+    bridge.materialize.assert_called_once_with(overlay, gradient_probe=True)
     constructor.assert_called_once_with(
         updated,
         use_pin_offset=False,

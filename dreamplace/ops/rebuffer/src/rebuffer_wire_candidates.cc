@@ -27,7 +27,7 @@ void insertAt(std::vector<TreeOption>& output, const TreeOption& downstream,
               const RepairConfig& config, const CurrentDriverTree& tree,
               const DriverTreeEdge& edge, int depth)
 {
-  if (!config.insert_buffers || downstream.buffer_count >= config.max_actions) return;
+  if (!config.insert_buffers || downstream.buffer_count >= config.tree_max_buffers) return;
   const auto& parent = tree.nodes[edge.parent_node_id];
   const auto& child = tree.nodes[edge.child_node_id];
   for (const auto& buffer : characterization.fast_buffers) {

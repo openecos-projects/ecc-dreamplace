@@ -98,6 +98,8 @@ class RepairTimingCampaignSession
                                    int action_id,
                                    const std::string& state);
   std::shared_ptr<RepairTimingCampaignCheckpoint> checkpoint() const;
+  void restoreState(
+      const std::shared_ptr<RepairTimingCampaignCheckpoint>& checkpoint);
   pybind11::dict restore(
       const std::shared_ptr<RepairTimingCampaignCheckpoint>& checkpoint);
   pybind11::dict summary() const;

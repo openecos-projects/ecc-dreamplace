@@ -250,7 +250,8 @@ def test_invalid_propagation_inputs_fail_before_any_state_or_owner_mutation(fail
     elif failure == "mode":
         invalid["aggregation_mode"] = "smooth"
     else:
-        invalid["timing_schema_version"] = 3
+        # Schema 3 is a supported propagation source; only unknown versions fail.
+        invalid["timing_schema_version"] = 4
     graph = rebuffer_cpp.create_persistent_timing_graph(owner.pydb)
     state = persistent_timing_state_payload(owner)
     graph.initialize_timing_state(state)

@@ -2,7 +2,6 @@
 // Owned placement/tree projection shared by Python export and native planning.
 #pragma once
 
-#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -11,10 +10,19 @@
 
 namespace rebuffer {
 
+// Sorted contiguous rows preserve the complete (partition, vertex) domain
+// without allocating one tree-map node per Steiner vertex on every snapshot.
+using PartitionProvenance = std::vector<
+    std::pair<std::pair<int, int>, std::pair<int, int>>>;
+
+void normalizePartitionProvenance(PartitionProvenance& rows);
+PartitionProvenance::const_iterator findPartitionProvenance(
+    const PartitionProvenance& rows, const std::pair<int, int>& key);
+
 struct OverlayActionProjection
 {
   std::vector<int> original_net_by_net, state_node_by_vertex, state_net_by_vertex;
-  std::map<std::pair<int, int>, std::pair<int, int>> state_provenance;
+  PartitionProvenance state_provenance;
   bool has_partition_provenance = true;
 };
 

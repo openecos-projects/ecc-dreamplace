@@ -125,6 +125,51 @@ def test_native_snapshot_compacts_retired_slots_and_keeps_old_views():
     assert old.source_nets([]) == []
 
 
+def test_native_planning_and_projection_reuse_imported_physical_metadata():
+    owner, graph, _, config = _planning()
+    original = graph.planning_snapshot([], config)
+    queue = original.queue_state()
+    requests = [
+        {**row, "net_id": int(row["root_net_id"]), "candidate_variant": 0}
+        for row in rebuffer_cpp.select_timing_queue_items(queue, config)
+    ]
+    expected = [original.plan(request, config) for request in requests]
+    projected = [original.project_actions(result["actions"]) for result in expected]
+    assert any(projected)
+
+    # A campaign owns these inputs after initialization. Neither a new queue
+    # snapshot nor action mapping may re-import the original Python carrier.
+    for field in (
+        "pin_names",
+        "node_names",
+        "node_master_names",
+        "net_names",
+        "pin2node_map",
+        "pin2net_map",
+        "net2driver_pin_map",
+        "pin_offset_x",
+        "pin_offset_y",
+        "pin_direct",
+        "flat_libcell_names",
+        "cell_id_2_arc_id_start",
+        "flat_libarc_info",
+        "node_x",
+        "node_y",
+        "node_size_x",
+        "node_size_y",
+        "flat_libcell_width",
+        "flat_libcell_height",
+        "num_terminals",
+        "num_terminal_NIs",
+    ):
+        delattr(owner.pydb, field)
+
+    current = graph.planning_snapshot([], config)
+    observed = [current.plan(request, config) for request in requests]
+    assert observed == expected
+    assert [current.project_actions(result["actions"]) for result in observed] == projected
+
+
 def test_native_planner_and_action_projection_match_existing_cpp_vgdp():
     owner, graph, _, config = _planning()
     snapshot, reference, exported, rows = _compare(owner, graph, [], config)

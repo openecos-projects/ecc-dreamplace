@@ -38,6 +38,17 @@ bool acceptsTimingCandidate(const py::dict& current, const py::dict& candidate,
       || !std::isfinite(old_wns) || !std::isfinite(old_tns)) return false;
   if (!electricalNonRegressing(current, candidate)) return false;
   constexpr double epsilon = 1.0e-9;
+  if (config.contains("acceptance")
+      && config["acceptance"].cast<std::string>() == "openroad_legacy") {
+    const bool endpoint_phase = request.contains("legacy_phase")
+        && request["legacy_phase"].cast<std::string>() == "endpoint";
+    const double previous = number(request, "previous_endpoint_slack_ps", missing);
+    const double endpoint = number(candidate, "endpoint_slack_ps", missing);
+    return wns > old_wns + epsilon
+        || (endpoint_phase && std::abs(wns - old_wns) <= epsilon
+            && std::isfinite(previous) && std::isfinite(endpoint)
+            && endpoint > previous + epsilon);
+  }
   const double margin = std::max(0.0, number(config, "tns_regression_margin_ps", 0.0));
   // Every accepted epoch protects global WNS and the configured TNS envelope,
   // including endpoint-journal fallback and branch-focused candidates.

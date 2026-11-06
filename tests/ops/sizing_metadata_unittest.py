@@ -141,6 +141,33 @@ class SizingMetadataTest(unittest.TestCase):
                 expected_num_libpins=3,
             )
 
+    def test_rebuild_array_helpers_preserve_shapes_without_row_copy(self):
+        db = MacroPlaceDB.__new__(MacroPlaceDB)
+
+        uniform = db.pad_sequences([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        np.testing.assert_array_equal(
+            uniform,
+            np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+        )
+
+        ragged = db.pad_sequences(
+            [[1.0, 2.0], [3.0]],
+            dtype=np.float32,
+            pad_value=np.inf,
+        )
+        np.testing.assert_array_equal(
+            ragged,
+            np.array([[1.0, 2.0], [3.0, np.inf]], dtype=np.float32),
+        )
+        self.assertEqual(db.pad_sequences([[], []], dtype=np.float32).shape, (2, 0))
+
+        first = np.array([1, 2], dtype=np.int32)
+        second = np.array([3], dtype=np.int32)
+        rows = db._as_object_int32_arrays([first, second])
+        self.assertEqual(rows.shape, (2,))
+        self.assertIs(rows[0], first)
+        self.assertIs(rows[1], second)
+
     def test_build_inst_sizing_metadata(self):
         db = self._build_db()
         (

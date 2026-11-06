@@ -114,7 +114,64 @@ void TimingGraphIndex::build()
     }
   }
   if (visited != pin_count) {
-    throw py::value_error("incremental timing requires a combinational DAG");
+    // Report the pins that never became ready so a cyclic export can be
+    // traced without attaching a debugger to the flow.
+    std::string stuck;
+    int reported = 0;
+    for (int pin = 0; pin < pin_count && reported < 8; ++pin) {
+      if (indegree[pin] <= 0) continue;
+      if (reported != 0) stuck += ", ";
+      stuck += pins[pin] + "(" + std::to_string(indegree[pin]) + ")";
+      ++reported;
+    }
+    // Walk one cycle backwards so the export rule that created it is visible.
+    std::vector<std::vector<std::pair<int, char>>> predecessors(pin_count);
+    for (int id = 0; id < static_cast<int>(cells.size()); ++id) {
+      if (!cell_active.empty() && !cell_active[id]) continue;
+      if (id < clock_end) continue;
+      predecessors[cells[id][1]].emplace_back(source(id), 'C');
+    }
+    for (int id = 0; id < static_cast<int>(nets.size()); ++id) {
+      if (!net_active.empty() && !net_active[id]) continue;
+      predecessors[nets[id][1]].emplace_back(nets[id][0], 'N');
+    }
+    std::vector<int> walk_order;
+    std::vector<char> walk_kind;
+    std::vector<int> position(pin_count, -1);
+    int cursor = -1;
+    for (int pin = 0; pin < pin_count; ++pin) {
+      if (indegree[pin] > 0) { cursor = pin; break; }
+    }
+    while (cursor >= 0 && position[cursor] < 0) {
+      position[cursor] = static_cast<int>(walk_order.size());
+      walk_order.push_back(cursor);
+      int next = -1;
+      char kind = '?';
+      for (const auto& [previous, edge_kind] : predecessors[cursor]) {
+        if (previous >= 0 && previous < pin_count && indegree[previous] > 0) {
+          next = previous;
+          kind = edge_kind;
+          break;
+        }
+      }
+      walk_kind.push_back(kind);
+      cursor = next;
+    }
+    std::string cycle;
+    if (cursor >= 0) {
+      for (int index = position[cursor]; index < static_cast<int>(walk_order.size()); ++index) {
+        if (!cycle.empty()) cycle += " -> ";
+        cycle += pins[walk_order[index]];
+        cycle += " -";
+        cycle += walk_kind[index];
+        cycle += "->";
+      }
+      cycle += " " + pins[cursor];
+    }
+    throw py::value_error(
+        "incremental timing requires a combinational DAG: " + std::to_string(pin_count - visited)
+        + " pins remain in cycles" + (stuck.empty() ? "" : ": " + stuck)
+        + (cycle.empty() ? "" : " | cycle: " + cycle));
   }
 }
 
@@ -197,7 +254,32 @@ std::shared_ptr<TimingGraphIndex> timingGraphIndex(
     throw py::value_error("incremental timing requires a valid clock arc level");
   }
   const auto pins = carrierArray<std::string>(db, "pin_names");
-  const auto nets = db.attr("net_flat_arcs").cast<std::vector<TimingNetArc>>();
+  auto nets = db.attr("net_flat_arcs").cast<std::vector<TimingNetArc>>();
+  // A bidirectional pad and its top-level port share one physical net, and the
+  // export can expose both directions. That is a two-cycle, not a forward
+  // path: keep the arc that enters a cell pin and drop the arc that only
+  // enters the bare port, which stays an endpoint check.
+  {
+    const int pin_count = static_cast<int>(pins.size());
+    std::unordered_set<long long> present;
+    present.reserve(nets.size() * 2);
+    for (const auto& row : nets) {
+      present.insert(static_cast<long long>(row[0]) * pin_count + row[1]);
+    }
+    std::vector<char> has_cell_arc(pin_count, 0);
+    for (int index = offsets[1]; index < static_cast<int>(cells.size()); ++index) {
+      has_cell_arc[cells[index][0]] = 1;
+      has_cell_arc[cells[index][1]] = 1;
+    }
+    std::vector<TimingNetArc> kept;
+    kept.reserve(nets.size());
+    for (const auto& row : nets) {
+      const bool reverse = present.count(static_cast<long long>(row[1]) * pin_count + row[0]) != 0;
+      if (reverse && !has_cell_arc[row[1]]) continue;
+      kept.push_back(row);
+    }
+    if (kept.size() != nets.size()) nets.swap(kept);
+  }
   const auto clocks = carrierArray<int>(db, "clock_pins");
   if (cache_hit != nullptr) *cache_hit = false;
   if (py::hasattr(db, "timing_graph_index")) {

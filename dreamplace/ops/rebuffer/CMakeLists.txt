@@ -23,10 +23,16 @@ add_pytorch_extension(${OP_NAME}_cpp
   src/rebuffer_timing_observation.cc
   src/rebuffer_timing_electrical.cc
   src/rebuffer_timing_planning.cc
+  src/rebuffer_timing_local.cc
+  src/rebuffer_timing_local_geometry.cc
+  src/rebuffer_timing_local_views.cc
+  src/rebuffer_timing_planning_identity.cc
   src/rebuffer_timing_planning_tree.cc
   src/rebuffer_timing_planning_queue.cc
   src/rebuffer_timing_paths.cc
   src/rebuffer_timing_queue.cc
+  src/rebuffer_timing_endpoints.cc
+  src/rebuffer_legacy_queue.cc
   src/rebuffer_timing_queue_projection.cc
   src/rebuffer_timing_event_schedule.cc
   src/rebuffer_timing_events.cc
@@ -59,6 +65,8 @@ add_pytorch_extension(${OP_NAME}_cpp
   src/rebuffer_carrier.cc
   src/rebuffer_carrier_graph.cc
   src/rebuffer_overlay_carrier.cc
+  src/rebuffer_carrier_projection.cc
+  src/rebuffer_overlay_inputs.cc
   src/rebuffer_overlay_actions.cc
   src/rebuffer_liberty.cc
   src/rebuffer_library_metadata.cc

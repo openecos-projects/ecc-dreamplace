@@ -44,8 +44,8 @@ def test_timing_initial_and_verified_reader_share_selected_provider_and_wire_rc(
             {
                 "use_pin_offset": False,
                 "use_persistent_graph": False,
-                "use_native_timing_graph": False,
-                "use_native_timing_evaluation": False,
+                "use_native_timing_graph": True,
+                "use_native_timing_evaluation": True,
                 **config,
             },
         ),

@@ -108,20 +108,31 @@ double bufferDelay(const LibertyCellView& cell,
 {
   double delay = 0.0;
   for (const auto& arc : cell.arcs) {
+    const double fall_in_slew
+        = arc.sense < 0 ? target_slew[0] : target_slew[1];
+    const double rise_in_slew
+        = arc.sense < 0 ? target_slew[1] : target_slew[0];
     delay = std::max(
         delay,
-        gateDelay(arc, false, target_slew[1], load_cap));
+        gateDelay(arc, false, fall_in_slew, load_cap));
     delay = std::max(
         delay,
-        gateDelay(arc, true, target_slew[0], load_cap));
+        gateDelay(arc, true, rise_in_slew, load_cap));
   }
   return delay;
+}
+
+bool isDelayCellName(const std::string& name)
+{
+  return name.rfind("DLY", 0) == 0 || name.rfind("CLKDLY", 0) == 0
+         || name.find("_DLY") != std::string::npos;
 }
 
 double findTargetLoad(const LibertyCellView& cell,
                       const TimingArcView& arc,
                       bool rise,
-                      double target_slew,
+                      double in_slew,
+                      double out_slew,
                       double initial_load_cap)
 {
   const LutTable& transition
@@ -130,7 +141,7 @@ double findTargetLoad(const LibertyCellView& cell,
     return 0.0;
   }
   auto objective = [&](double load_cap) {
-    return lutFindValue(transition, target_slew, load_cap) - target_slew;
+    return lutFindValue(transition, in_slew, load_cap) - out_slew;
   };
   double cap1 = 0.0;
   double cap2 = initial_load_cap;
@@ -140,7 +151,13 @@ double findTargetLoad(const LibertyCellView& cell,
     return 0.0;
   }
   double diff2 = objective(cap2);
-  while (std::abs(cap1 - cap2) > std::max(cap1, cap2) * tolerance) {
+  // Real Liberty transition tables saturate with load and converge quickly.
+  // Keep a hard iteration bound so a degenerate/synthetic table cannot
+  // double the bracket forever.
+  for (int iteration = 0;
+       iteration < 100
+       && std::abs(cap1 - cap2) > std::max(cap1, cap2) * tolerance;
+       ++iteration) {
     if (diff2 < 0.0) {
       cap1 = cap2;
       cap2 *= 2.0;
@@ -210,8 +227,14 @@ double findTargetLoad(const LibertyCellView& cell,
   double sum = 0.0;
   int count = 0;
   for (const auto& arc : cell.arcs) {
-    sum += findTargetLoad(cell, arc, false, target_slew[1], initial_load_cap);
-    sum += findTargetLoad(cell, arc, true, target_slew[0], initial_load_cap);
+    const double fall_in_slew
+        = arc.sense < 0 ? target_slew[0] : target_slew[1];
+    const double rise_in_slew
+        = arc.sense < 0 ? target_slew[1] : target_slew[0];
+    sum += findTargetLoad(
+        cell, arc, false, fall_in_slew, target_slew[1], initial_load_cap);
+    sum += findTargetLoad(
+        cell, arc, true, rise_in_slew, target_slew[0], initial_load_cap);
     count += 2;
   }
   return count == 0 ? 0.0 : sum / count;
@@ -368,8 +391,8 @@ bool characterizeBuffers(const LibertyView& liberty,
        cell_index < static_cast<int>(liberty.cells.size());
        ++cell_index) {
     const auto& cell = liberty.cells[cell_index];
-    if (!cell.is_buffer || cell.arcs.empty() || cell.input_cap <= 0.0
-        || cell.max_cap <= 0.0) {
+    if (!cell.is_buffer || cell.arcs.empty()
+        || cell.input_cap <= 0.0 || cell.max_cap <= 0.0) {
       continue;
     }
     auto buffer = characterizeCell(liberty, cell_index);

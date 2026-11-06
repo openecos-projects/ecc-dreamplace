@@ -19,7 +19,8 @@ namespace rebuffer {
 
 TimingSetupPaths PersistentTimingGraph::nativeSetupPaths(
     const std::optional<std::vector<int64_t>>& endpoint_pins,
-    int64_t global_k, int64_t max_depth, double residual_tolerance_ps) const
+    int64_t global_k, int64_t max_depth, double residual_tolerance_ps,
+    bool worst_per_endpoint) const
 {
   if (global_k < 0) throw py::value_error("global_k must be non-negative");
   if (!std::isfinite(residual_tolerance_ps) || residual_tolerance_ps <= 0) {
@@ -105,7 +106,7 @@ TimingSetupPaths PersistentTimingGraph::nativeSetupPaths(
       index.pins.size(), global_k, max_depth, residual_tolerance_ps, predecessors,
       [&](int64_t pin) {
         return pin < p.pin_count && p.start_row_by_pin[pin] >= 0;
-      });
+      }, worst_per_endpoint);
   return {std::move(extracted), endpoint_records};
 }
 

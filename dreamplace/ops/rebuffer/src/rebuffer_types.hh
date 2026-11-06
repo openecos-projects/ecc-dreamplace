@@ -16,6 +16,11 @@ struct DesignView
   int num_nets = 0;
   int num_pins = 0;
   int num_nodes = 0;
+  // Number of nodes in the original PyPlaceDB before overlay buffers are
+  // appended.  This keeps top-level IO node identity stable in projections.
+  int num_base_nodes = 0;
+  int num_terminals = 0;
+  int num_terminal_nis = 0;
 
   std::vector<int> flat_net2pin_map;
   std::vector<int> flat_net2pin_start_map;

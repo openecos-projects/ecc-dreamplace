@@ -74,13 +74,22 @@ void compileCarrierGraph(const py::object& base, TimingCarrierView& state)
     }
     const int owner = state.old_node_ids[old_owner];
     if (owner < 0) continue;  // Removed physical instances have no cell arcs.
+    // Arcs synthesized by the native graph builder carry no Liberty row, so
+    // there is nothing to re-resolve against the current master.  The sparse
+    // constraint compiler skips the same arcs.
+    if (row[3] < 0) continue;
     row[7] = owner;
     row[1] = carrierIndex(row[1], state.old_pin_ids, "cell sink");
     const bool clock = i < base_levels[1];
     if (!clock) row[0] = carrierIndex(row[0], state.old_pin_ids, "cell source");
     const int cell = state.cell_by_node[owner];
     if (cell < 0 || row[3] < 0 || row[3] >= static_cast<int>(lib_arcs.size())) {
-      throw py::value_error("current master does not contain the timing arc");
+      throw py::value_error(
+          "current master does not contain the timing arc: instance=" + state.node_names[owner]
+          + " cell=" + std::to_string(cell) + " lib_arc=" + std::to_string(row[3])
+          + " lib_arc_count=" + std::to_string(lib_arcs.size())
+          + " source=" + state.pin_names[row[0]] + " sink=" + state.pin_names[row[1]]
+          + " clock=" + (clock ? "1" : "0"));
     }
     const int lut = currentArc(cell, row[3], row[6]);
     const auto& info = libraryArc(lut);
@@ -158,13 +167,55 @@ void compileCarrierGraph(const py::object& base, TimingCarrierView& state)
   }
   std::vector<int> drivers, net_start{0};
   std::vector<std::array<int, 2>> net_arcs;
+  std::vector<int> net_arc_count;
   for (const auto& pins : state.net_pins) {
     const int driver = !pins.empty() && driver_pins.count(pins.front()) ? pins.front() : -1;
     drivers.push_back(driver);
+    int added = 0;
     if (driver >= 0) {
-      for (const int sink : pins) if (sink != driver) net_arcs.push_back({driver, sink});
+      for (const int sink : pins) {
+        if (sink == driver) continue;
+        net_arcs.push_back({driver, sink});
+        ++added;
+      }
     }
+    net_arc_count.push_back(added);
     net_start.push_back(net_arcs.size());
+  }
+  // A bidirectional pad and its top-level port share one physical net and the
+  // export can expose both directions, which is a two-cycle rather than a
+  // forward path.  Both ends are start points, so keep the arc that enters a
+  // cell pin and drop the arc that only enters the bare port; the pad-output
+  // direction stays an endpoint check instead of a forward edge.
+  {
+    std::unordered_set<long long> present;
+    present.reserve(net_arcs.size() * 2);
+    for (const auto& row : net_arcs) {
+      present.insert(static_cast<long long>(row[0]) * pin_count + row[1]);
+    }
+    std::vector<char> has_cell_arc(pin_count, 0);
+    for (int index = 0; index < static_cast<int>(arcs.size()); ++index) {
+      if (is_clock[index]) continue;
+      has_cell_arc[arcs[index][0]] = 1;
+      has_cell_arc[arcs[index][1]] = 1;
+    }
+    std::vector<std::array<int, 2>> kept;
+    std::vector<int> rebuilt_start{0};
+    int offset = 0;
+    for (const int count : net_arc_count) {
+      for (int index = 0; index < count; ++index) {
+        const auto row = net_arcs[offset + index];
+        const bool reverse = present.count(static_cast<long long>(row[1]) * pin_count + row[0]) != 0;
+        if (reverse && !has_cell_arc[row[1]]) continue;
+        kept.push_back(row);
+      }
+      offset += count;
+      rebuilt_start.push_back(kept.size());
+    }
+    if (kept.size() != net_arcs.size()) {
+      net_arcs.swap(kept);
+      net_start.swap(rebuilt_start);
+    }
   }
   std::vector<std::vector<std::pair<int, int>>> successors(pin_count);
   std::vector<int> indegree(pin_count, 0), levels(pin_count, 0);

@@ -316,6 +316,7 @@ int graphNodeFor(const std::map<NodeKey, int>& graph_nodes,
 }
 
 std::string canonicalNodeText(const CurrentDriverTree& tree,
+                              const std::vector<std::vector<int>>& edge_children,
                               const int node_id,
                               std::map<int, std::string>& memo,
                               std::set<int>& active)
@@ -345,14 +346,12 @@ std::string canonicalNodeText(const CurrentDriverTree& tree,
     text << load << ',';
   }
   std::vector<std::string> children;
-  for (const auto& edge : tree.edges) {
-    if (edge.parent_node_id != node_id) {
-      continue;
-    }
+  for (const int edge_index : edge_children.at(node_id)) {
+    const auto& edge = tree.edges.at(edge_index);
     std::ostringstream child;
     child << "E|" << edge.kind << '|' << edge.net_id << '|'
           << edge.partition_id << '|'
-          << canonicalNodeText(tree, edge.child_node_id, memo, active);
+          << canonicalNodeText(tree, edge_children, edge.child_node_id, memo, active);
     children.push_back(child.str());
   }
   std::sort(children.begin(), children.end());
@@ -377,9 +376,23 @@ std::string digestFor(const CurrentDriverTree& tree)
   for (const int net_id : net_ids) {
     hashValue(hash, net_id);
   }
+  // Canonical node text used to scan every edge for every node.  Long
+  // current-driver trees are materialized repeatedly during VGDP candidate
+  // scoring, so that turns an otherwise linear digest into O(V*E).  Preserve
+  // the original edge iteration order and child-string sort, but index the
+  // outgoing edges once per digest.
+  std::vector<std::vector<int>> edge_children(tree.nodes.size());
+  for (int edge_index = 0; edge_index < static_cast<int>(tree.edges.size());
+       ++edge_index) {
+    const auto& edge = tree.edges[edge_index];
+    if (edge.parent_node_id >= 0
+        && edge.parent_node_id < static_cast<int>(edge_children.size())) {
+      edge_children[edge.parent_node_id].push_back(edge_index);
+    }
+  }
   std::map<int, std::string> memo;
   std::set<int> active;
-  hashText(hash, canonicalNodeText(tree, tree.root_node_id, memo, active));
+  hashText(hash, canonicalNodeText(tree, edge_children, tree.root_node_id, memo, active));
   std::ostringstream result;
   result << std::hex << std::setw(16) << std::setfill('0') << hash;
   return result.str();
@@ -435,7 +448,22 @@ bool importCurrentDriverTree(const DesignView& design,
                              const TopologyView& topology,
                              const int root_net_id,
                              CurrentDriverTree& tree,
-                             std::string& reason)
+                             std::string& reason,
+                             const bool stop_at_existing_buffers)
+{
+  tree = CurrentDriverTree{};
+  std::map<int, NetSlice> slices;
+  if (!validateTopologyContract(design, topology, slices, reason)) return false;
+  std::vector<BufferLink> links;
+  std::unordered_map<int, BufferLink> by_input;
+  if (!collectCurrentDriverBufferLinks(design, links, by_input, reason)) return false;
+  return importCurrentDriverTree(design, topology, root_net_id, links, tree, reason,
+                                 stop_at_existing_buffers);
+}
+
+bool importCurrentDriverTree(const DesignView& design, const TopologyView& topology,
+    const int root_net_id, const std::vector<CurrentDriverBufferLink>& buffer_links,
+    CurrentDriverTree& tree, std::string& reason, const bool stop_at_existing_buffers)
 {
   tree = CurrentDriverTree{};
   std::map<int, NetSlice> slices;
@@ -448,11 +476,8 @@ bool importCurrentDriverTree(const DesignView& design,
   }
   const int root_driver = design.net2driver_pin_map[root_net_id];
 
-  std::vector<BufferLink> buffer_links;
   std::unordered_map<int, BufferLink> buffer_by_input;
-  if (!collectCurrentDriverBufferLinks(design, buffer_links, buffer_by_input, reason)) {
-    return false;
-  }
+  for (const auto& link : buffer_links) buffer_by_input.emplace(link.input_pin_id, link);
   std::vector<int> net_order;
   std::set<int> reachable_nets;
   std::queue<int> pending_nets;
@@ -462,6 +487,21 @@ bool importCurrentDriverTree(const DesignView& design,
     const int net_id = pending_nets.front();
     pending_nets.pop();
     net_order.push_back(net_id);
+    if (stop_at_existing_buffers) {
+      // LEGACY rebufferPin operates on the current driver's net.  An existing
+      // buffer input is the terminal load of this tree; its downstream net is
+      // repaired when that buffer's output driver becomes the current target.
+      // Keeping the boundary here prevents every later pass from expanding
+      // the whole historical buffer forest again.
+      bool has_existing_buffer = false;
+      for (const auto& link : buffer_links) {
+        if (link.input_net_id == net_id) {
+          has_existing_buffer = true;
+          break;
+        }
+      }
+      if (has_existing_buffer) continue;
+    }
     for (const auto& link : buffer_links) {
       if (link.input_net_id != net_id) {
         continue;
@@ -518,6 +558,9 @@ bool importCurrentDriverTree(const DesignView& design,
         node.kind = static_cast<int>(DriverTreeNodeKind::steiner);
       } else if (is_buffer_input) {
         node.kind = static_cast<int>(DriverTreeNodeKind::buffer_input);
+        if (stop_at_existing_buffers) {
+          node.load_pin_ids.push_back(source_pin);
+        }
       } else if (is_buffer_output) {
         node.kind = static_cast<int>(DriverTreeNodeKind::buffer_output);
       } else if (source_pin == design.net2driver_pin_map[net_id]) {
@@ -579,6 +622,10 @@ bool importCurrentDriverTree(const DesignView& design,
 
   for (const auto& link : buffer_links) {
     if (reachable_nets.find(link.input_net_id) == reachable_nets.end()) {
+      continue;
+    }
+    if (stop_at_existing_buffers
+        && reachable_nets.find(link.output_net_id) == reachable_nets.end()) {
       continue;
     }
     const int input_graph = graphNodeFor(graph_nodes, link.input_net_id, link.input_pin_id);

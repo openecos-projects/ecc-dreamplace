@@ -19,22 +19,34 @@ ARTIFACT_VERSION = 1
 DEFAULT_CONFIG = {
     "slew_margin": 0.0,
     "cap_margin": 0.0,
-    "r_unit": 0.914,
-    "c_unit": 1.89e-4,
+    "r_unit": 0.653,
+    "c_unit": 0.00018889000086286245,
     "max_fanout": 32,
-    "max_actions": 1000,
+    # Per-net DP safety bound.  repair_design has no global action budget.
+    "tree_max_buffers": 1024,
     "insert_buffers": True,
     "resize_drivers": True,
     "resize_slew_threshold": 0.03,
-    "repair_design_reverse_topological": False,
-    "repair_design_local_update": False,
-    "repair_design_load_slew_annotation": False,
-    "repair_design_openroad_driver_resize": False,
-    "repair_design_fanout_repair": False,
-    "repair_design_target_cell_math": False,
-    "repair_design_target_cell_selection": False,
-    "repair_design_openroad_repeater_resize": False,
-    "repair_design_max_transition_load": False,
+    # OpenROAD repair_design processes nets in reverse topological order and
+    # refreshes the affected timing state before deciding the next driver.
+    # These three form one contract: local update and load-slew annotation are
+    # rejected unless reverse order is on.
+    "repair_net_tree": True,
+    "repair_design_reverse_topological": True,
+    "repair_design_local_update": True,
+    "repair_design_load_slew_annotation": True,
+    "repair_design_openroad_driver_resize": True,
+    "repair_design_fanout_repair": True,
+    # OpenROAD placement-parasitics repair design normalizes every logic
+    # driver to its target load before checking slew/cap violations.
+    "repair_design_resize_to_target_slew": True,
+    "repair_design_target_cell_math": True,
+    "repair_design_target_cell_selection": True,
+    "repair_design_openroad_repeater_resize": True,
+    "sizing_area_limit": 0.0,
+    "sizing_leakage_limit": 0.0,
+    "slew_rc_factor": 1.39,
+    "repair_design_max_transition_load": True,
     "repair_design_max_wire_length_um": 0.0,
     "steiner_provider": "ecc",
 }
@@ -96,7 +108,15 @@ def plan_repair_design_from_pydb(pydb, timing_model=None, *, config=None):
             "actions": [],
             "resizes": [],
         }
-    if bool((config or {}).get("repair_design_target_cell_selection", False)):
+    merged_config = dict(DEFAULT_CONFIG)
+    merged_config.update(config or {})
+    explicit_target_selection = (
+        "repair_design_target_cell_selection" in (config or {})
+    )
+    has_library_source = getattr(pydb, "repair_library_source", None) is not None
+    if not explicit_target_selection and not has_library_source:
+        merged_config["repair_design_target_cell_selection"] = False
+    if bool(merged_config.get("repair_design_target_cell_selection", False)):
         from dreamplace.ops.placeio_ecc.library_metadata import ensure_repair_library_metadata
 
         ensure_repair_library_metadata(pydb)
@@ -112,9 +132,16 @@ def plan_repair_design_from_pydb(pydb, timing_model=None, *, config=None):
             "actions": [],
             "resizes": [],
         }
+    explicit_target_math = bool(
+        (config or {}).get("repair_design_target_cell_math", False)
+    )
     characterization_options = (
         {"canonical_target_load": True}
-        if bool((config or {}).get("repair_design_target_cell_math", False))
+        if explicit_target_math
+        or (
+            bool(merged_config.get("repair_design_target_cell_math", False))
+            and has_library_source
+        )
         else {}
     )
     characterization = characterize_buffers_from_pydb(pydb, **characterization_options)
@@ -131,10 +158,12 @@ def plan_repair_design_from_pydb(pydb, timing_model=None, *, config=None):
             "actions": [],
             "resizes": [],
         }
-
-    merged_config = dict(DEFAULT_CONFIG)
-    merged_config.update(config or {})
     if timing_model is None:
+        for key in ("r_unit", "c_unit"):
+            if key not in (config or {}):
+                pydb_val = getattr(pydb, key, None)
+                if pydb_val is not None and float(pydb_val) > 0.0 and float(pydb_val) != 1.0:
+                    merged_config[key] = float(pydb_val)
         provider_options = (
             {"steiner_provider": merged_config["steiner_provider"]}
             if merged_config["steiner_provider"] != "ecc"
@@ -212,7 +241,10 @@ def plan_repair_design_from_pydb(pydb, timing_model=None, *, config=None):
             "baseline": model.baseline.as_dict(),
         }
     )
-    if merged_config["repair_design_target_cell_selection"]:
+    if (
+        merged_config["repair_design_target_cell_selection"]
+        and getattr(pydb, "repair_library_metadata", None) is not None
+    ):
         result["library_metadata"] = dict(pydb.repair_library_metadata.summary())
     if merged_config["steiner_provider"] == "openroad_stt":
         result["steiner_input_identity"] = dict(steiner_values["input_identity"])

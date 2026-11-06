@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <list>
 #include <limits>
 #include <map>
 #include "pybind11/stl.h"
@@ -65,14 +66,15 @@ bool applyCurrentDriverTreeBufferActions(
     const LibertyView& liberty,
     const std::vector<BufferAction>& actions,
     CurrentDriverTree& target,
-    std::string& reason)
+    std::string& reason,
+    const bool compute_digest)
 {
   if (!validateCurrentDriverTree(source, reason)) {
     return false;
   }
   target = source;
   if (actions.empty()) {
-    target.tree_digest = currentDriverTreeDigest(target);
+    target.tree_digest = compute_digest ? currentDriverTreeDigest(target) : "";
     return true;
   }
   target.topology_epoch = source.topology_epoch + 1;
@@ -80,6 +82,25 @@ bool applyCurrentDriverTreeBufferActions(
   // driver. Splitting again uses the remaining upstream segment, whose child
   // is the buffer introduced by the preceding action on that source edge.
   std::map<std::pair<int, int>, std::pair<int, double>> chain_tips;
+  // Edge ids are stable while materializing a candidate: each action rewrites
+  // one existing edge in place and appends exactly one downstream edge.  The
+  // old implementation erased the edge and rebuilt every node's adjacency
+  // list after every action, making a long candidate tree quadratic in the
+  // number of inserted buffers.
+  std::map<std::pair<int, int>, int> edge_indices;
+  std::list<int> edge_order;
+  std::map<int, std::list<int>::iterator> edge_order_positions;
+  for (int index = 0; index < static_cast<int>(target.edges.size()); ++index) {
+    const auto& edge = target.edges[index];
+    const auto inserted = edge_indices.emplace(
+        std::make_pair(edge.parent_node_id, edge.child_node_id), index);
+    if (!inserted.second) {
+      reason = "current_driver_tree_duplicate_edge";
+      return false;
+    }
+    edge_order.push_back(index);
+    edge_order_positions.emplace(index, std::prev(edge_order.end()));
+  }
   for (const auto& action : actions) {
     if (action.parent_node_id < 0
         || action.parent_node_id >= static_cast<int>(source.nodes.size())
@@ -123,17 +144,14 @@ bool applyCurrentDriverTreeBufferActions(
     }
     const int active_child = previous == chain_tips.end()
                                  ? key.second : previous->second.first;
-    const auto found = std::find_if(target.edges.begin(), target.edges.end(), [&](const DriverTreeEdge& edge) {
-      return edge.parent_node_id == key.first && edge.child_node_id == active_child;
-    });
-    const int edge_index = found == target.edges.end() ? -1
-        : static_cast<int>(found - target.edges.begin());
-    if (edge_index < 0) {
+    const auto edge_key = std::make_pair(key.first, active_child);
+    const auto edge_position = edge_indices.find(edge_key);
+    if (edge_position == edge_indices.end()) {
       reason = "buffer_action_tree_edge_missing";
       return false;
     }
+    const int edge_index = edge_position->second;
     const DriverTreeEdge original = target.edges[edge_index];
-    target.edges.erase(target.edges.begin() + edge_index);
 
     DriverTreeNode buffer;
     buffer.source_node_id = -1;
@@ -152,34 +170,55 @@ bool applyCurrentDriverTreeBufferActions(
     target.nodes.push_back(std::move(buffer));
     chain_tips[key] = {buffer_node, split};
 
-    DriverTreeEdge upstream = original;
-    upstream.id = static_cast<int>(target.edges.size());
-    upstream.child_node_id = buffer_node;
-    upstream.kind = static_cast<int>(DriverTreeEdgeKind::wire);
-    target.edges.push_back(upstream);
+    // Keep the existing edge slot for the upstream half.  This preserves the
+    // tree's canonical topology while avoiding vector erase, edge-id rewrite,
+    // and a full adjacency rebuild for every action.
+    target.edges[edge_index].child_node_id = buffer_node;
+    target.edges[edge_index].kind = static_cast<int>(DriverTreeEdgeKind::wire);
+    edge_indices.erase(edge_position);
+    edge_indices.emplace(std::make_pair(key.first, buffer_node), edge_index);
+
+    const auto order_position = edge_order_positions.at(edge_index);
+    edge_order.erase(order_position);
+    edge_order.push_back(edge_index);
+    edge_order_positions[edge_index] = std::prev(edge_order.end());
+
     DriverTreeEdge downstream = original;
     downstream.id = static_cast<int>(target.edges.size());
     downstream.parent_node_id = buffer_node;
     downstream.kind = static_cast<int>(DriverTreeEdgeKind::wire);
+    const int downstream_index = static_cast<int>(target.edges.size());
     target.edges.push_back(downstream);
+    edge_indices.emplace(std::make_pair(buffer_node, active_child), downstream_index);
+    edge_order.push_back(downstream_index);
+    edge_order_positions.emplace(downstream_index, std::prev(edge_order.end()));
 
-    for (int index = 0; index < static_cast<int>(target.edges.size()); ++index) {
-      target.edges[index].id = index;
+    auto& parent_children = target.nodes[key.first].child_node_ids;
+    const auto child_position = std::find(parent_children.begin(), parent_children.end(), active_child);
+    if (child_position == parent_children.end()) {
+      reason = "buffer_action_parent_child_adjacency_missing";
+      return false;
     }
-    for (auto& node : target.nodes) {
-      node.child_node_ids.clear();
-      node.parent_node_id = -1;
+    parent_children.erase(child_position);
+    parent_children.push_back(buffer_node);
+    target.nodes[buffer_node].parent_node_id = key.first;
+    target.nodes[buffer_node].child_node_ids.push_back(active_child);
+    target.nodes[active_child].parent_node_id = buffer_node;
+  }
+  if (!actions.empty()) {
+    std::vector<DriverTreeEdge> ordered_edges;
+    ordered_edges.reserve(edge_order.size());
+    for (const int stable_id : edge_order) {
+      DriverTreeEdge edge = target.edges[stable_id];
+      edge.id = static_cast<int>(ordered_edges.size());
+      ordered_edges.push_back(std::move(edge));
     }
-    for (const auto& edge : target.edges) {
-      target.nodes[edge.parent_node_id].child_node_ids.push_back(
-          edge.child_node_id);
-      target.nodes[edge.child_node_id].parent_node_id = edge.parent_node_id;
-    }
+    target.edges = std::move(ordered_edges);
   }
   if (!validateCurrentDriverTree(target, reason)) {
     return false;
   }
-  target.tree_digest = currentDriverTreeDigest(target);
+  target.tree_digest = compute_digest ? currentDriverTreeDigest(target) : "";
   return true;
 }
 

@@ -73,7 +73,15 @@ def committed_seed(placedb, old_seed):
         "fixed_positions": fixed_positions(placedb),
     }
     if "fixed_positions" in old_seed and seed["fixed_positions"] != old_seed["fixed_positions"]:
-        raise RuntimeError("native repair changed a fixed position or namespace")
+        old, new = old_seed["fixed_positions"], seed["fixed_positions"]
+        missing = sorted(set(old) - set(new))[:4]
+        added = sorted(set(new) - set(old))[:4]
+        moved = sorted(name for name in set(old) & set(new) if old[name] != new[name])[:4]
+        raise RuntimeError(
+            "native repair changed a fixed position or namespace:"
+            f" count {len(old)}->{len(new)}"
+            f" missing={missing} added={added} moved={moved}"
+        )
     if "overflow_reference_area" in old_seed:
         seed["overflow_reference_area"] = old_seed["overflow_reference_area"]
     return seed
@@ -102,10 +110,18 @@ def validate_position_seed(placer, placedb, seed):
 def fixed_positions(placedb, pos=None):
     x = placedb.node_x if pos is None else pos[: placedb.num_nodes]
     y = placedb.node_y if pos is None else pos[placedb.num_nodes :]
+    # Inserted buffers grow the movable range, so a positional slice would move
+    # the fixed window and report a namespace change.  Identify fixed nodes by
+    # name membership instead.
+    movable = set(names(placedb.node_names[: placedb.num_movable_nodes]))
     return {
         name: [float(x[i]), float(y[i])]
         for i, name in enumerate(names(placedb.node_names))
-        if placedb.num_movable_nodes <= i < placedb.num_physical_nodes
+        if i < placedb.num_physical_nodes
+        and name not in movable
+        # Synthetic blockage obstacles are renumbered when buffers are
+        # inserted; they are not physical cells and cannot move.
+        and not name.startswith("blockage")
     }
 
 
@@ -148,7 +164,9 @@ def runtime_topology(placer, placedb, previous_names):
         raise RuntimeError("committed topology lost per-node buffer metadata")
     records = []
     for node_id, name in enumerate(all_names):
-        if name in previous_names:
+        # Synthetic blockages are renumbered when buffers are inserted; they
+        # are obstacles, never inserted timing cells.
+        if name in previous_names or name.startswith("blockage"):
             continue
         raw_id = native_ids[name]
         if not bool(buffer_mask[raw_id]) or node_id >= placedb.num_movable_nodes:

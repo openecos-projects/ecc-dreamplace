@@ -4,8 +4,17 @@
 #include "rebuffer_incremental_topology.hh"
 #include "rebuffer_repair.hh"
 #include "rebuffer_carrier_projection.hh"
+#include "rebuffer_overlay_inputs.hh"
 
 namespace rebuffer {
+
+OverlayCarrierProjection buildOverlayCarrierProjection(
+    const OverlayCarrierInputs& base,
+    const SteinerView& steiner,
+    const std::vector<std::shared_ptr<IncrementalTopologyState>>& states,
+    const pybind11::list& actions,
+    double r_unit,
+    double c_unit);
 
 OverlayCarrierProjection buildOverlayCarrierProjection(
     const pybind11::object& base,

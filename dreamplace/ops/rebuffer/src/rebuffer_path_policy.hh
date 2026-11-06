@@ -29,7 +29,8 @@ struct PathDriverAccess
 
 std::vector<int> rankPathDriverPins(const PathDriverAccess& access,
     const LibertyView& liberty, const std::vector<int>& path,
-    const TimingView* path_context = nullptr, bool openroad_intrinsic = false);
+    const TimingView* path_context = nullptr, bool openroad_intrinsic = false,
+    std::vector<double>* scores = nullptr);
 
 // Return driver pins on one timing path in descending load-dependent delay.
 // This is the native counterpart of OpenROAD SetupLegacyBase::rankPathDrivers.

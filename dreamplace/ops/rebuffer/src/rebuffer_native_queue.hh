@@ -18,6 +18,7 @@ pybind11::dict runRepairTimingQueueOperator(
     const pybind11::object& apply,
     const pybind11::object& evaluate,
     const pybind11::object& restore,
-    const pybind11::dict& config);
+    const pybind11::dict& config,
+    const pybind11::object& release_checkpoint = pybind11::none());
 
 }  // namespace rebuffer

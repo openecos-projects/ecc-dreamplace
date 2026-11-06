@@ -58,6 +58,21 @@ def test_missing_limits_are_unavailable_and_ideal_clock_net_is_excluded():
     assert native.electrical_snapshot(db, timing, max_fanout=1)["violations_by_pin"] == {}
 
 
+def test_clock_net_driver_is_excluded_by_clock_pin_membership():
+    """A pre-CTS clock buffer carries the whole clock load; it is not a violation."""
+    db, timing = _inputs()
+    # The pydb clock-net name list may not cover every routed clock segment, so
+    # the rule must also key off the clock pins themselves.
+    db.clock_net_names = []
+    db.clock_pins = [1]
+    timing["pin_load_rise"] = [62.5, 0.0, 0.0]
+    timing["pin_load_fall"] = [62.5, 0.0, 0.0]
+    result = native.electrical_snapshot(db, timing, max_fanout=32)
+    assert result["violations_by_pin"] == {}
+    assert result["cap_pf_violation_count"] == 0
+    assert result["fanout_violation_count"] == 0
+
+
 def test_equal_violation_count_cannot_hide_a_new_violating_pin():
     db, timing = _inputs()
     before = {"electrical": native.electrical_snapshot(db, timing)}

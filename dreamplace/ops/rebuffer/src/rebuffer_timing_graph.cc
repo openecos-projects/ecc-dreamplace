@@ -611,6 +611,13 @@ void PersistentTimingGraph::validateCheckpoint(
 py::dict PersistentTimingGraph::restore(
     const std::shared_ptr<PersistentTimingGraphCheckpoint>& checkpoint)
 {
+  restoreState(checkpoint);
+  return summary();
+}
+
+void PersistentTimingGraph::restoreState(
+    const std::shared_ptr<PersistentTimingGraphCheckpoint>& checkpoint)
+{
   validateCheckpoint(checkpoint);
   for (const auto& [net_id, topology_checkpoint]
        : checkpoint->topology_checkpoints) {
@@ -633,7 +640,6 @@ py::dict PersistentTimingGraph::restore(
   }
   restoreTo(checkpoint->journal_size);
   timing_state_initialized_ = checkpoint->timing_state_initialized;
-  return summary();
 }
 
 py::dict PersistentTimingGraph::commit(

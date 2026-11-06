@@ -81,6 +81,26 @@ double pinMaxCap(const DesignView& design, int pin)
   return design.pin_cap_limit[lib_pin];
 }
 
+double cellPinLimit(const std::vector<double>& limits,
+                    const DesignView& design,
+                    int cell_index,
+                    int pin)
+{
+  if (cell_index < 0
+      || cell_index + 1
+             >= static_cast<int>(design.cell_id_2_libpin_id_start.size())
+      || pin < 0 || pin >= static_cast<int>(design.pin_2_libpin_offset.size())
+      || limits.empty()) {
+    return 0.0;
+  }
+  const int lib_pin = design.cell_id_2_libpin_id_start[cell_index]
+                      + design.pin_2_libpin_offset[pin];
+  if (lib_pin < 0 || lib_pin >= static_cast<int>(limits.size())) {
+    return 0.0;
+  }
+  return limits[lib_pin];
+}
+
 double edgeCapacitance(const SteinerView& steiner,
                        const RepairConfig& config,
                        int node)
@@ -157,6 +177,63 @@ double slewLoadCap(const LibertyCellView& cell,
     }
   }
   return 0.5 * (low + high);
+}
+
+// OpenROAD Resizer::findTargetCell over the PyDB sizing family.  The family
+// is the same main-cell group used by the placement sizing operators, so the
+// native planner never invents a cross-function swap.  Buffers keep the
+// delay/target-load 10% acceptance rule; other logic cells compare target
+// load distance only.
+int findTargetSlewCell(const LibertyView& liberty,
+                       const std::vector<std::vector<int>>& cells_by_main_id,
+                       const std::vector<double>& cell_target_loads,
+                       const std::array<double, 2>& target_slew,
+                       int current_cell_index,
+                       double load_cap,
+                       bool allow_upsize_only)
+{
+  if (current_cell_index < 0
+      || current_cell_index >= static_cast<int>(liberty.cells.size())
+      || cell_target_loads.size() != liberty.cells.size()) {
+    return -1;
+  }
+  const auto& current = liberty.cells[current_cell_index];
+  if (current.main_id < 0
+      || current.main_id >= static_cast<int>(cells_by_main_id.size())) {
+    return current_cell_index;
+  }
+  int best = current_cell_index;
+  double best_load = cell_target_loads[current_cell_index];
+  double best_dist = std::abs(load_cap - best_load);
+  const bool delay_aware = current.is_buffer;
+  double best_delay = delay_aware
+                          ? cellTargetSlewDelay(current, target_slew, load_cap)
+                          : 0.0;
+  for (const int candidate : cells_by_main_id[current.main_id]) {
+    if (candidate == current_cell_index) {
+      continue;
+    }
+    const auto& cell = liberty.cells[candidate];
+    const double candidate_load = cell_target_loads[candidate];
+    const double candidate_dist = std::abs(load_cap - candidate_load);
+    const double candidate_delay
+        = delay_aware ? cellTargetSlewDelay(cell, target_slew, load_cap) : 0.0;
+    const bool better
+        = delay_aware
+              ? ((candidate_delay < best_delay
+                  && candidate_dist < best_dist * 1.1)
+                 || (candidate_dist < best_dist
+                     && candidate_delay < best_delay * 1.1))
+              : (candidate_dist < best_dist
+                 && (!allow_upsize_only || candidate_load > best_load));
+    if (better) {
+      best = candidate;
+      best_load = candidate_load;
+      best_dist = candidate_dist;
+      best_delay = candidate_delay;
+    }
+  }
+  return best;
 }
 
 std::string portName(const std::string& pin)
@@ -242,7 +319,8 @@ bool refreshDriverOutputSlew(
     const std::vector<std::vector<int>>& node_pins,
     const std::vector<int>& node_cell_indices,
     int driver,
-    TimingView& timing)
+    TimingView& timing,
+    bool clamp_load_slew = false)
 {
   if (driver < 0 || driver >= design.num_pins
       || driver >= static_cast<int>(design.pin2node_map.size())
@@ -292,8 +370,17 @@ bool refreshDriverOutputSlew(
     if (pin < 0 || pin >= design.num_pins || pin == driver) {
       continue;
     }
-    timing.pin_slew_rise[pin] = output_rise;
-    timing.pin_slew_fall[pin] = output_fall;
+    double sink_rise = output_rise;
+    double sink_fall = output_fall;
+    if (clamp_load_slew && pin < static_cast<int>(timing.pin_max_slew.size())) {
+      const double max_slew = timing.pin_max_slew[pin];
+      if (max_slew > 0.0 && std::isfinite(max_slew)) {
+        sink_rise = std::min(sink_rise, max_slew);
+        sink_fall = std::min(sink_fall, max_slew);
+      }
+    }
+    timing.pin_slew_rise[pin] = sink_rise;
+    timing.pin_slew_fall[pin] = sink_fall;
   }
   return true;
 }
@@ -306,7 +393,8 @@ bool updateResizedCellState(
     int node,
     int old_cell_index,
     int new_cell_index,
-    TimingView& timing)
+    TimingView& timing,
+    bool clamp_load_slew = false)
 {
   if (node < 0 || node >= static_cast<int>(node_pins.size())) {
     return false;
@@ -355,7 +443,8 @@ bool updateResizedCellState(
                                  node_pins,
                                  node_cell_indices,
                                  upstream_driver,
-                                 timing)) {
+                                 timing,
+                                 clamp_load_slew)) {
       return false;
     }
   }
@@ -559,9 +648,16 @@ bool repairFanoutRegions(const DesignView& design,
       }
     }
     const int buffer_cell = rebufferChooseBufferCell(
-        liberty, characterization, input_slew_rise, input_slew_fall, load,
+        liberty,
+        characterization,
+        input_slew_rise,
+        input_slew_fall,
+        load,
         config.repair_design_target_cell_math,
-        config.repair_design_target_cell_selection);
+        config.repair_design_target_cell_selection,
+        -1,
+        config.sizing_area_limit,
+        config.sizing_leakage_limit);
     if (buffer_cell < 0) {
       continue;
     }
@@ -852,9 +948,88 @@ bool planRepairDesign(const DesignView& design,
   for (int node = 0; node < design.num_nodes; ++node) {
     node_cell_indices[node] = cellIndexForNode(design, node);
   }
+  std::vector<double> pin_wire_slew_sq_rise(design.num_pins, 0.0);
+  std::vector<double> pin_wire_slew_sq_fall(design.num_pins, 0.0);
+  for (int net_id = 0; net_id < design.num_nets; ++net_id) {
+    if (net_id + 1 >= static_cast<int>(design.flat_net2pin_start_map.size())) {
+      continue;
+    }
+    const int driver = design.net2driver_pin_map[net_id];
+    if (driver < 0 || driver >= design.num_pins) {
+      continue;
+    }
+    const double drv_r = timing.pin_slew_rise[driver];
+    const double drv_f = timing.pin_slew_fall[driver];
+    const int begin = design.flat_net2pin_start_map[net_id];
+    const int end = design.flat_net2pin_start_map[net_id + 1];
+    for (int index = begin; index < end; ++index) {
+      if (index < 0 || index >= static_cast<int>(design.flat_net2pin_map.size())) {
+        continue;
+      }
+      const int pin = design.flat_net2pin_map[index];
+      if (pin < 0 || pin >= design.num_pins || pin == driver) {
+        continue;
+      }
+      const double pr = timing.pin_slew_rise[pin];
+      const double pf = timing.pin_slew_fall[pin];
+      pin_wire_slew_sq_rise[pin] = std::max(0.0, pr * pr - drv_r * drv_r);
+      pin_wire_slew_sq_fall[pin] = std::max(0.0, pf * pf - drv_f * drv_f);
+    }
+  }
   if (config.repair_design_load_slew_annotation) {
     annotateRepairDesignLoadSlew(design, working_timing);
   }
+
+  // Per-driver target-load normalization follows OpenROAD's placement-RC
+  // Resizer::resizeToTargetSlew pass.  Precompute each cell's target load
+  // once, exactly like OpenROAD's target_load_map_, and keep the sizing
+  // family contiguous for the per-driver scan.
+  std::vector<std::vector<int>> cells_by_main_id;
+  std::vector<double> cell_target_loads;
+  std::vector<int> node_output_pin_count(design.num_nodes, 0);
+  if (config.repair_design_resize_to_target_slew) {
+    int max_main_id = -1;
+    for (const auto& cell : liberty.cells) {
+      max_main_id = std::max(max_main_id, cell.main_id);
+    }
+    cells_by_main_id.resize(max_main_id + 1);
+    for (int cell_id = 0; cell_id < static_cast<int>(liberty.cells.size());
+         ++cell_id) {
+      const int main_id = liberty.cells[cell_id].main_id;
+      if (main_id >= 0) {
+        cells_by_main_id[main_id].push_back(cell_id);
+      }
+    }
+    cell_target_loads.resize(liberty.cells.size(), 0.0);
+    for (int cell_id = 0; cell_id < static_cast<int>(liberty.cells.size());
+         ++cell_id) {
+      cell_target_loads[cell_id] = cellTargetLoad(
+          liberty.cells[cell_id], characterization.target_slew);
+    }
+    for (int net_id = 0; net_id < design.num_nets; ++net_id) {
+      const int driver = design.net2driver_pin_map[net_id];
+      const int node
+          = driver >= 0
+                    && driver < static_cast<int>(design.pin2node_map.size())
+                ? design.pin2node_map[driver]
+                : -1;
+      if (node >= 0 && node < design.num_nodes) {
+        ++node_output_pin_count[node];
+      }
+    }
+  }
+  std::unordered_map<int, int> resize_index_by_node;
+  std::unordered_set<int> visited_multi_output_nodes;
+  const auto recordResize = [&](int node, int cell_index) {
+    const auto found = resize_index_by_node.find(node);
+    if (found == resize_index_by_node.end()) {
+      resize_index_by_node.emplace(node,
+                                   static_cast<int>(result.resizes.size()));
+      result.resizes.push_back(ResizeAction{node, cell_index});
+    } else {
+      result.resizes[found->second].target_cell_index = cell_index;
+    }
+  };
 
   std::unordered_map<int, int> net_index_by_id;
   if (steiner.net_ids.empty()) {
@@ -894,14 +1069,10 @@ bool planRepairDesign(const DesignView& design,
         [&](int lhs, int rhs) { return rankForNet(lhs) > rankForNet(rhs); });
   }
 
-  int action_count = 0;
   const bool use_repair_net_tree
       = config.repair_net_tree
         || config.repair_design_max_wire_length_um > 0.0;
   for (const int net_id : net_order) {
-    if (action_count >= config.max_actions) {
-      break;
-    }
     const int driver = design.net2driver_pin_map[net_id];
     if (driver < 0 || driver >= design.num_pins) {
       continue;
@@ -940,10 +1111,13 @@ bool planRepairDesign(const DesignView& design,
         }
       }
     }
+    if (clock_net && use_repair_net_tree) {
+      continue;
+    }
 
     const double driver_load = working_timing.pin_load[driver];
-    const double driver_max_slew = working_timing.pin_max_slew[driver];
-    const double driver_max_cap = working_timing.pin_max_cap[driver];
+    double driver_max_slew = working_timing.pin_max_slew[driver];
+    double driver_max_cap = working_timing.pin_max_cap[driver];
     double input_slew_rise = working_timing.pin_slew_rise[driver];
     double input_slew_fall = working_timing.pin_slew_fall[driver];
     const int driver_node = design.pin2node_map[driver];
@@ -951,6 +1125,7 @@ bool planRepairDesign(const DesignView& design,
         driver_node >= 0 && driver_node < static_cast<int>(node_cell_indices.size())
             ? node_cell_indices[driver_node]
             : -1;
+    int current_cell_index = initial_cell_index;
     driverInputSlew(design,
                     working_timing,
                     liberty,
@@ -958,9 +1133,71 @@ bool planRepairDesign(const DesignView& design,
                     driver,
                     input_slew_rise,
                     input_slew_fall,
-                    initial_cell_index);
+                    current_cell_index);
+    bool driver_resized = false;
+    if (config.repair_design_resize_to_target_slew
+        && config.resize_drivers
+        && driver_node >= 0
+        && driver_node < static_cast<int>(node_cell_indices.size())
+        && current_cell_index >= 0
+        && current_cell_index < static_cast<int>(liberty.cells.size())
+        && driver_load > 0.0) {
+      const bool revisit
+          = node_output_pin_count[driver_node] > 1
+            && visited_multi_output_nodes.find(driver_node)
+                   != visited_multi_output_nodes.end();
+      if (node_output_pin_count[driver_node] > 1) {
+        visited_multi_output_nodes.insert(driver_node);
+      }
+      const int selected = findTargetSlewCell(liberty,
+                                              cells_by_main_id,
+                                              cell_target_loads,
+                                              characterization.target_slew,
+                                              current_cell_index,
+                                              driver_load,
+                                              revisit);
+      if (selected >= 0 && selected != current_cell_index) {
+        if (config.repair_design_local_update
+            && !updateResizedCellState(design,
+                                       liberty,
+                                       node_pins,
+                                       node_cell_indices,
+                                       driver_node,
+                                       current_cell_index,
+                                       selected,
+                                       working_timing,
+                                       config.repair_design_load_slew_annotation)) {
+          reason = "repair_design_local_resize_update_failed";
+          return false;
+        }
+        recordResize(driver_node, selected);
+        node_cell_indices[driver_node] = selected;
+        current_cell_index = selected;
+        // Limits belong to the driver pin, not to the whole cell.  The
+        // output port often has no max_transition while an input pin does.
+        driver_max_slew = cellPinLimit(
+            design.pin_slew_limit, design, selected, driver);
+        driver_max_cap
+            = cellPinLimit(design.pin_cap_limit, design, selected, driver);
+        if (driver < static_cast<int>(working_timing.pin_max_slew.size())) {
+          working_timing.pin_max_slew[driver] = driver_max_slew;
+        }
+        if (driver < static_cast<int>(working_timing.pin_max_cap.size())) {
+          working_timing.pin_max_cap[driver] = driver_max_cap;
+        }
+        driverInputSlew(design,
+                        working_timing,
+                        liberty,
+                        node_pins,
+                        driver,
+                        input_slew_rise,
+                        input_slew_fall,
+                        current_cell_index);
+        driver_resized = true;
+      }
+    }
     if (config.repair_design_local_update
-        || config.repair_design_load_slew_annotation) {
+        || config.repair_design_load_slew_annotation || driver_resized) {
       refreshDriverOutputSlew(design,
                               liberty,
                               node_pins,
@@ -987,9 +1224,22 @@ bool planRepairDesign(const DesignView& design,
         continue;
       }
       const double max_slew = working_timing.pin_max_slew[pin];
+      const double sink_slew_rise
+          = use_repair_net_tree
+                ? std::max(working_timing.pin_slew_rise[pin],
+                           std::sqrt(working_timing.pin_slew_rise[driver]
+                                         * working_timing.pin_slew_rise[driver]
+                                     + pin_wire_slew_sq_rise[pin]))
+                : working_timing.pin_slew_rise[pin];
+      const double sink_slew_fall
+          = use_repair_net_tree
+                ? std::max(working_timing.pin_slew_fall[pin],
+                           std::sqrt(working_timing.pin_slew_fall[driver]
+                                         * working_timing.pin_slew_fall[driver]
+                                     + pin_wire_slew_sq_fall[pin]))
+                : working_timing.pin_slew_fall[pin];
       if (max_slew > 0.0
-          && std::max(working_timing.pin_slew_rise[pin],
-                      working_timing.pin_slew_fall[pin])
+          && std::max(sink_slew_rise, sink_slew_fall)
                  > max_slew * (1.0 - config.slew_margin)) {
         load_slew_violation = true;
       }
@@ -1034,19 +1284,15 @@ bool planRepairDesign(const DesignView& design,
                               pin_end,
                               fanout_actions)) {
         for (auto& action : fanout_actions) {
-          if (action_count >= config.max_actions) {
-            break;
-          }
           result.actions.push_back(std::move(action));
-          ++action_count;
           repaired = true;
         }
       }
     }
 
-    int current_cell_index = initial_cell_index;
     const bool resize_slew_violation
-        = driver_max_slew > 0.0
+        = !config.repair_design_resize_to_target_slew
+          && driver_max_slew > 0.0
           && driver_slew
                  > driver_max_slew
                        * (config.repair_design_openroad_driver_resize
@@ -1066,8 +1312,14 @@ bool planRepairDesign(const DesignView& design,
           if (config.repair_design_openroad_driver_resize
               && config.repair_design_target_cell_selection
               && current_cell.is_buffer) {
-            selected = findBufferSlewRepairCell(liberty, current_cell_index,
-                input_slew_rise, input_slew_fall, driver_load, config.slew_margin);
+            selected = findBufferSlewRepairCell(liberty,
+                                                current_cell_index,
+                                                input_slew_rise,
+                                                input_slew_fall,
+                                                driver_load,
+                                                config.slew_margin,
+                                                config.sizing_area_limit,
+                                                config.sizing_leakage_limit);
           } else if (config.repair_design_openroad_driver_resize) {
             double best_violation = kInf;
             double best_area = kInf;
@@ -1079,8 +1331,12 @@ bool planRepairDesign(const DesignView& design,
               const auto& cell = liberty.cells[cell_id];
               const double output_slew = cellOutputSlew(
                   cell, input_slew_rise, input_slew_fall, driver_load);
-              const double limit = cell.max_slew > 0.0
-                                       ? cell.max_slew
+              const double raw_slew_limit
+                  = !design.pin_slew_limit.empty()
+                        ? cellPinLimit(design.pin_slew_limit, design, cell_id, driver)
+                        : cell.max_slew;
+              const double limit = raw_slew_limit > 0.0
+                                       ? raw_slew_limit
                                              * (1.0 - config.slew_margin)
                                        : kInf;
               const double violation
@@ -1139,8 +1395,7 @@ bool planRepairDesign(const DesignView& design,
           }
         }
         if (selected >= 0 && selected != current_cell_index) {
-          result.resizes.push_back(
-              ResizeAction{design.pin2node_map[driver], selected});
+          recordResize(design.pin2node_map[driver], selected);
           repaired = true;
           const auto& selected_cell = liberty.cells[selected];
           const double selected_slew_rise = cellOutputSlewRise(
@@ -1155,7 +1410,8 @@ bool planRepairDesign(const DesignView& design,
                                         driver_node,
                                         current_cell_index,
                                         selected,
-                                        working_timing)) {
+                                        working_timing,
+                                        config.repair_design_load_slew_annotation)) {
               reason = "repair_design_local_resize_update_failed";
               return false;
             }
@@ -1164,17 +1420,35 @@ bool planRepairDesign(const DesignView& design,
             working_timing.pin_slew_fall[driver] = selected_slew_fall;
           }
           current_cell_index = selected;
+          if (!design.pin_slew_limit.empty()) {
+            driver_max_slew = cellPinLimit(
+                design.pin_slew_limit, design, selected, driver);
+          } else if (selected_cell.max_slew > 0.0) {
+            driver_max_slew = selected_cell.max_slew;
+          }
+          if (!design.pin_cap_limit.empty()) {
+            driver_max_cap = cellPinLimit(
+                design.pin_cap_limit, design, selected, driver);
+          } else if (selected_cell.max_cap > 0.0) {
+            driver_max_cap = selected_cell.max_cap;
+          }
+          if (driver < static_cast<int>(working_timing.pin_max_slew.size())) {
+            working_timing.pin_max_slew[driver] = driver_max_slew;
+          }
+          if (driver < static_cast<int>(working_timing.pin_max_cap.size())) {
+            working_timing.pin_max_cap[driver] = driver_max_cap;
+          }
           const double selected_slew_check = cellOutputSlew(
               selected_cell, input_slew_rise, input_slew_fall, driver_load);
           driver_slew_violation
-              = selected_cell.max_slew > 0.0
+              = driver_max_slew > 0.0
                 && selected_slew_check
-                       > selected_cell.max_slew
+                       > driver_max_slew
                              * (1.0 - config.slew_margin);
           driver_cap_violation
-              = selected_cell.max_cap > 0.0
+              = driver_max_cap > 0.0
                 && driver_load
-                       > selected_cell.max_cap * (1.0 - config.cap_margin);
+                       > driver_max_cap * (1.0 - config.cap_margin);
         }
       }
     }
@@ -1183,7 +1457,34 @@ bool planRepairDesign(const DesignView& design,
     if (current_cell_index >= 0
         && current_cell_index < static_cast<int>(liberty.cells.size())) {
       const auto& current_cell = liberty.cells[current_cell_index];
-      if (driver_cap_violation) {
+      if (use_repair_net_tree) {
+        if (driver_max_cap > 0.0) {
+          max_cap = std::min(max_cap, driver_max_cap * (1.0 - config.cap_margin));
+        } else if (design.pin_cap_limit.empty() && current_cell.max_cap > 0.0) {
+          max_cap = std::min(
+              max_cap, current_cell.max_cap * (1.0 - config.cap_margin));
+        }
+        const double effective_max_slew
+            = driver_max_slew > 0.0
+                  ? driver_max_slew
+                  : (design.pin_slew_limit.empty() ? current_cell.max_slew : 0.0);
+        if (driver_slew_violation && effective_max_slew > 0.0) {
+          const double slew_cap
+              = slewLoadCap(current_cell,
+                            effective_max_slew * (1.0 - config.slew_margin),
+                            input_slew_rise,
+                            input_slew_fall);
+          double min_buf_cap = 0.0;
+          if (!characterization.filtered_buffers.empty()) {
+            min_buf_cap = characterization
+                              .filtered_buffers[characterization.lowest_drive_index]
+                              .input_cap;
+          }
+          if (slew_cap > min_buf_cap * 2.0) {
+            max_cap = std::min(max_cap, slew_cap);
+          }
+        }
+      } else if (driver_cap_violation) {
         max_cap = current_cell.max_cap * (1.0 - config.cap_margin);
       } else if (driver_slew_violation && current_cell.max_slew > 0.0) {
         max_cap = slewLoadCap(current_cell,
@@ -1223,6 +1524,7 @@ bool planRepairDesign(const DesignView& design,
       if (use_repair_net_tree) {
         std::vector<BufferAction> net_actions;
         std::string tree_reason;
+        double root_cap = driver_load;
         if (repairNetTree(design,
                           working_timing,
                           steiner,
@@ -1235,12 +1537,11 @@ bool planRepairDesign(const DesignView& design,
                           current_cell_index,
                           children,
                           net_actions,
-                          tree_reason)) {
+                          tree_reason,
+                          &root_cap)) {
+          const bool inserted_repeaters = !net_actions.empty();
           for (std::size_t index = 0; index < net_actions.size(); ++index) {
             auto& action = net_actions[index];
-            if (action_count >= config.max_actions) {
-              break;
-            }
             // ``repairNetTree`` walks from the loads toward the driver, so
             // the emitted vector is downstream-first.  The native IDB
             // transaction applies smaller depths first; reverse the local
@@ -1248,8 +1549,53 @@ bool planRepairDesign(const DesignView& design,
             // dependent repeater is applied to the new downstream net.
             action.tree_depth = static_cast<int>(net_actions.size() - index - 1);
             result.actions.push_back(std::move(action));
-            ++action_count;
             repaired = true;
+          }
+          if (inserted_repeaters) {
+            working_timing.pin_load[driver] = root_cap;
+            if (config.repair_design_resize_to_target_slew
+                && config.resize_drivers
+                && driver_node >= 0
+                && driver_node < static_cast<int>(node_cell_indices.size())
+                && current_cell_index >= 0
+                && current_cell_index < static_cast<int>(liberty.cells.size())
+                && root_cap > 0.0) {
+              const bool revisit = node_output_pin_count[driver_node] > 1;
+              const int post_selected = findTargetSlewCell(
+                  liberty,
+                  cells_by_main_id,
+                  cell_target_loads,
+                  characterization.target_slew,
+                  current_cell_index,
+                  root_cap,
+                  revisit);
+              if (post_selected >= 0 && post_selected != current_cell_index) {
+                if (config.repair_design_local_update
+                    && !updateResizedCellState(design,
+                                               liberty,
+                                               node_pins,
+                                               node_cell_indices,
+                                               driver_node,
+                                               current_cell_index,
+                                               post_selected,
+                                               working_timing,
+                                               config.repair_design_load_slew_annotation)) {
+                  reason = "repair_design_local_resize_update_failed";
+                  return false;
+                }
+                recordResize(driver_node, post_selected);
+                node_cell_indices[driver_node] = post_selected;
+                current_cell_index = post_selected;
+              }
+            }
+            if (config.repair_design_local_update) {
+              refreshDriverOutputSlew(design,
+                                      liberty,
+                                      node_pins,
+                                      node_cell_indices,
+                                      driver,
+                                      working_timing);
+            }
           }
         }
       } else {
@@ -1277,7 +1623,10 @@ bool planRepairDesign(const DesignView& design,
           working_timing.pin_slew_fall[driver],
           selected_subtree.load,
           config.repair_design_target_cell_math,
-          config.repair_design_target_cell_selection);
+          config.repair_design_target_cell_selection,
+          -1,
+          config.sizing_area_limit,
+          config.sizing_leakage_limit);
       if (buffer_cell < 0) {
         continue;
       }
@@ -1326,7 +1675,6 @@ bool planRepairDesign(const DesignView& design,
           config.repair_design_target_cell_math);
       action.reason = "load_slew";
       result.actions.push_back(std::move(action));
-      ++action_count;
       repaired = true;
       if (config.repair_design_local_update
           && buffer_cell >= 0
@@ -1349,6 +1697,17 @@ bool planRepairDesign(const DesignView& design,
       ++result.repaired_nets;
     }
   }
+
+  result.resizes.erase(
+      std::remove_if(result.resizes.begin(),
+                     result.resizes.end(),
+                     [&](const ResizeAction& resize) {
+                       return resize.node_id >= 0
+                              && resize.node_id < design.num_nodes
+                              && resize.target_cell_index
+                                     == cellIndexForNode(design, resize.node_id);
+                     }),
+      result.resizes.end());
 
   return true;
 }

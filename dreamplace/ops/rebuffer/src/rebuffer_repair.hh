@@ -75,15 +75,27 @@ struct RepairConfig
   double r_unit = 0.914;
   double c_unit = 1.89e-4;
   int max_fanout = 32;
-  int max_actions = 1000;
+  // Per-net safety bound for the current-driver-tree DP.  repair_design
+  // itself has no global action budget: OpenROAD visits every driver vertex
+  // and never truncates the plan by a total action count.
+  int tree_max_buffers = 1024;
   bool insert_buffers = true;
   bool resize_drivers = true;
   double resize_slew_threshold = 0.03;
+  // Low-level defaults stay off so direct native callers keep their existing
+  // contract.  The production placement profile enables the OpenROAD order,
+  // local state update and load-slew annotation through DEFAULT_CONFIG.
   bool repair_design_reverse_topological = false;
   bool repair_design_local_update = false;
   bool repair_design_load_slew_annotation = false;
   bool repair_design_openroad_driver_resize = false;
   bool repair_design_fanout_repair = false;
+  // OpenROAD placement-parasitics repair design normalizes every logic
+  // driver to its target load before checking slew/cap violations
+  // (Resizer::resizeToTargetSlew / RepairDesign::repairNet).  The low-level
+  // native default stays off so direct callers keep the legacy contract;
+  // the production placement profile enables it.
+  bool repair_design_resize_to_target_slew = false;
   // Isolate the canonical per-arc target load and target-slew delay math.
   // Candidate eligibility, traversal and electrical filters remain legacy.
   bool repair_design_target_cell_math = false;
@@ -92,6 +104,8 @@ struct RepairConfig
   // This is deliberately opt-in until the physical commit path is qualified.
   bool repair_design_target_cell_selection = false;
   bool repair_design_openroad_repeater_resize = false;
+  double sizing_area_limit = 4.0;
+  double sizing_leakage_limit = 4.0;
   // Maximum driver-rooted wire length in microns.  Zero disables the check.
   double repair_design_max_wire_length_um = 0.0;
   bool repair_net_tree = false;
@@ -235,7 +249,9 @@ int rebufferChooseBufferCell(const LibertyView& liberty,
                              double downstream_load,
                              bool target_cell_math = false,
                              bool target_cell_selection = false,
-                             int initial_cell = -1);
+                             int initial_cell = -1,
+                             double sizing_area_limit = 4.0,
+                             double sizing_leakage_limit = 4.0);
 struct RepeaterCellSelection
 {
   int cell_index = -1;
@@ -246,7 +262,8 @@ RepeaterCellSelection rebufferChooseRepeaterCell(const LibertyView& liberty,
                                const CharacterizationResult& characterization,
                                double input_slew_rise, double input_slew_fall,
                                double initial_load, double repeater_load,
-                               const RepairConfig& config);
+                               const RepairConfig& config,
+                               bool resize = true);
 
 bool repairNetTree(const DesignView& design,
                    const TimingView& timing,
@@ -260,7 +277,8 @@ bool repairNetTree(const DesignView& design,
                    int driver_cell_index,
                    const std::vector<std::vector<int>>& children,
                    std::vector<BufferAction>& actions,
-                   std::string& reason);
+                   std::string& reason,
+                   double* root_cap_out = nullptr);
 
 bool planRepairDesign(const DesignView& design,
                       const TimingView& timing,

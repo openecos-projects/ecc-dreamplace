@@ -3,7 +3,10 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from dreamplace.ops.placeio_ecc.timing_carrier import CommittedTimingPyDB
+from dreamplace.ops.placeio_ecc.timing_carrier import (
+    CommittedTimingPyDB,
+    require_carrier_schema,
+)
 from dreamplace.ops.rebuffer import rebuffer_cpp
 from dreamplace.ops.rebuffer.timing_model import RebufferTimingModel
 
@@ -525,3 +528,15 @@ def test_python_timing_and_planner_keep_only_qualified_endpoint_transitions():
         "violating_endpoint_count": 0,
     }
     assert np.isinf(_slack_vector(masked)[3])
+
+
+@pytest.mark.parametrize("version", [2, 3])
+def test_carrier_accepts_schema_two_and_three(version):
+    # Schema 3 only adds the sparse constraint view; the per-pin, per-arc and
+    # per-endpoint rows the carrier rebuild consumes are unchanged.
+    require_carrier_schema(SimpleNamespace(timing_schema_version=version))
+
+
+def test_carrier_rejects_unknown_schema():
+    with pytest.raises(ValueError, match="schema 2 or 3"):
+        require_carrier_schema(SimpleNamespace(timing_schema_version=4))

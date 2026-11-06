@@ -321,6 +321,12 @@ def plan_timing_repair(session, timing_model, *, max_passes, config, context=Non
 
     if session.state != "open":
         raise RuntimeError("session.begin() must be called before planning")
+    if config.get("timing_scheduler") == "openroad_legacy":
+        from .native_legacy_timing import plan_legacy_timing_repair
+
+        return plan_legacy_timing_repair(
+            session, timing_model, max_passes=max_passes, config=config, context=context
+        )
     if context is None:
         from ..rebuffer.rebuffer_timing import RebufferPlanContext
 
@@ -956,15 +962,26 @@ def plan_timing_repair(session, timing_model, *, max_passes, config, context=Non
             for net in planning_snapshot.source_nets(raw["actions"]):
                 state = session.overlay._native_state(str(session.base_pydb.net_names[int(net)]))
                 session.overlay.native_timing_bridge.attach_state(state)
-            return session.apply(list(planning_snapshot.project_actions(raw["actions"])))
+            return session.apply(
+                list(planning_snapshot.project_actions(raw["actions"])),
+                transactional=False,
+            )
         if any("source_parent_node_id" in action for action in raw["actions"]):
-            return session.apply(context.map_native_tree_actions(raw))
-        return session.apply(context.map_native_actions(raw))
+            return session.apply(
+                context.map_native_tree_actions(raw), transactional=False
+            )
+        return session.apply(context.map_native_actions(raw), transactional=False)
 
     def restore_and_resync(checkpoint):
         session.restore(checkpoint)
         return session.evaluate()
 
+    def release_checkpoint(checkpoint):
+        return session.release_checkpoint(checkpoint)
+
+    operator_kwargs = {}
+    if resolved.get("native_checkpoint_release", False):
+        operator_kwargs["release_checkpoint"] = release_checkpoint
     result = dict(
         rebuffer_cpp.run_repair_timing_native_snapshot_operator(
             timing_snapshot,
@@ -973,6 +990,7 @@ def plan_timing_repair(session, timing_model, *, max_passes, config, context=Non
             evaluate,
             restore_and_resync,
             resolved,
+            **operator_kwargs,
         )
     )
     result["accepted_actions"] = session.export_actions()

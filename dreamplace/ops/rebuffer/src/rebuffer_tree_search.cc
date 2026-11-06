@@ -2,6 +2,7 @@
 #include "rebuffer_tree_search.hh"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include "rebuffer_tree_annotation.hh"
 
@@ -72,23 +73,48 @@ bool better(const TreeVgdpCandidate& lhs, const TreeVgdpCandidate& rhs)
 bool optimizeCurrentDriverTree(
     const DesignView& design, const TimingView& timing, const LibertyView& liberty,
     const CharacterizationResult& characterization, const RepairConfig& config,
-    const CurrentDriverTree& source, TreeVgdpResult& result, std::string& reason)
+    const CurrentDriverTree& source, TreeVgdpResult& result, std::string& reason,
+    std::map<std::string, double>* phase_timings)
 {
-  if (!planCurrentDriverTree(design, timing, liberty, characterization, config,
-                             source, result, reason)) return false;
+  auto record = [&](const char* phase, std::chrono::steady_clock::time_point started) {
+    if (phase_timings) (*phase_timings)[phase] += std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+  };
+  auto plan = [&](const CurrentDriverTree& tree, const RepairConfig& settings,
+                  TreeVgdpResult& planned, std::string& rejected) {
+    const auto started = std::chrono::steady_clock::now();
+    const bool ok = planCurrentDriverTree(design, timing, liberty, characterization,
+                                         settings, tree, planned, rejected);
+    // Both paths use the same linear model. Only search enumerates insertions.
+    record(settings.insert_buffers ? "vgdp_dp" : "vgdp_rescore", started);
+    return ok;
+  };
+  auto materialize = [&](const CurrentDriverTree& tree, const std::vector<BufferAction>& actions,
+                         CurrentDriverTree& target, std::string& rejected) {
+    const auto started = std::chrono::steady_clock::now();
+    // Candidate trees are private inputs to the native linear re-score.  Their
+    // identity is not published or used for acceptance; computing the full
+    // canonical digest here repeats a deep subtree-string construction for
+    // every candidate.  Keep validation and topology checks, and defer the
+    // digest to the round identity/output paths that actually consume it.
+    const bool ok = applyCurrentDriverTreeBufferActions(
+        tree, liberty, actions, target, rejected, false);
+    record("vgdp_materialize", started);
+    return ok;
+  };
+  if (!plan(source, config, result, reason)) return false;
   result.timing_round_count = 1;
   result.round_source_tree_digests.push_back(source.tree_digest);
   result.round_source_buffer_counts.push_back(0);
   auto score = [&](const std::vector<BufferAction>& actions, TreeVgdpCandidate& candidate) {
-    if (actions.size() > static_cast<std::size_t>(config.max_actions)) return false;
+    if (actions.size() > static_cast<std::size_t>(config.tree_max_buffers)) return false;
     CurrentDriverTree tree;
     std::string rejected;
-    if (!applyCurrentDriverTreeBufferActions(source, liberty, actions, tree, rejected)) return false;
+    if (!materialize(source, actions, tree, rejected)) return false;
     auto scoring_config = config;
     scoring_config.insert_buffers = false;
     TreeVgdpResult scored;
-    if (!planCurrentDriverTree(design, timing, liberty, characterization, scoring_config,
-                               tree, scored, rejected)) return false;
+    if (!plan(tree, scoring_config, scored, rejected)) return false;
     candidate = scored.candidates.front();
     candidate.actions = actions;
     candidate.buffer_count = static_cast<int>(actions.size());
@@ -110,14 +136,14 @@ bool optimizeCurrentDriverTree(
   auto incumbent = result.candidates.front();
   for (int round = 1; round < config.tree_timing_rounds && config.insert_buffers; ++round) {
     CurrentDriverTree tree;
-    if (!applyCurrentDriverTreeBufferActions(source, liberty, incumbent.actions, tree, reason)) return false;
+    if (!materialize(source, incumbent.actions, tree, reason)) return false;
     TreeVgdpResult next;
     std::string no_improvement;
     ++result.timing_round_count;
+    tree.tree_digest = currentDriverTreeDigest(tree);
     result.round_source_tree_digests.push_back(tree.tree_digest);
     result.round_source_buffer_counts.push_back(incumbent.buffer_count);
-    if (!planCurrentDriverTree(design, timing, liberty, characterization, config,
-                               tree, next, no_improvement)) break;
+    if (!plan(tree, config, next, no_improvement)) break;
     result.generated_option_count += next.generated_option_count;
     result.pruned_option_count += next.pruned_option_count;
     result.long_wire_edge_count += next.long_wire_edge_count;
@@ -127,7 +153,7 @@ bool optimizeCurrentDriverTree(
     for (const auto& addition : next.candidates) {
       if (addition.actions.empty()) continue;
       CurrentDriverTree proposed;
-      if (!applyCurrentDriverTreeBufferActions(tree, liberty, addition.actions, proposed, no_improvement)) continue;
+      if (!materialize(tree, addition.actions, proposed, no_improvement)) continue;
       TreeVgdpCandidate candidate;
       if (!score(flattenTree(source, proposed), candidate)) continue;
       if (better(candidate, best)) best = candidate;

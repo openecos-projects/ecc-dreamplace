@@ -106,7 +106,9 @@ class NetTreeRepair
     driver_slew_fall_ = timing_.pin_slew_fall[driver_];
   }
 
-  bool run(std::vector<BufferAction>& actions, std::string& reason)
+  bool run(std::vector<BufferAction>& actions,
+           std::string& reason,
+           double* root_cap_out = nullptr)
   {
     actions_ = &actions;
     const int root = buildNode(driver_);
@@ -114,6 +116,10 @@ class NetTreeRepair
       return true;
     }
     repairNode(root);
+    if (root_cap_out != nullptr
+        && root < static_cast<int>(nodes_.size())) {
+      *root_cap_out = nodes_[root].cap;
+    }
     return true;
   }
 
@@ -218,19 +224,32 @@ class NetTreeRepair
     double wire_cap = 0.0;
     updateLength(length_dbu, wire_res, wire_cap);
     double load_cap = wire_cap + ref_cap;
-    double load_slew = estimateSlew(wire_res, wire_cap, ref_cap);
     double max_load_slew = child.max_load_slew;
     int wire_length_ref = child.wire_length;
     int fanout = child.fanout;
-    double writeback_max_load_slew
-        = child.max_load_slew
-          - wire_res * (wire_cap / 2.0 + ref_cap) * config_.slew_rc_factor;
+    double load_slew
+        = estimateSlew(wire_length_ref, wire_res, wire_cap, ref_cap);
+    int target_buffer_cell = rebufferChooseBufferCell(
+        liberty_,
+        characterization_,
+        driver_slew_rise_,
+        driver_slew_fall_,
+        load_cap,
+        config_.repair_design_target_cell_math,
+        config_.repair_design_target_cell_selection,
+        -1,
+        config_.sizing_area_limit,
+        config_.sizing_leakage_limit);
 
     // OpenROAD backs up the segment inserting repeaters until the remaining
     // upstream wire meets max_cap / max_load_slew / max_wire_length.  Each
     // repeater becomes the new driver reference for the next iteration.
     int zero_progress_iters = 0;
-    while (length_dbu > 0) {
+    int wire_iters = 0;
+    const int max_wire_iters
+        = config_.tree_max_buffers > 0 ? config_.tree_max_buffers : 1024;
+    while (length_dbu > 0 && wire_iters < max_wire_iters) {
+      ++wire_iters;
       const int total_wire_length = wire_length_ref + length_dbu;
       const double max_load_slew_margined
           = max_load_slew * (1.0 - config_.slew_margin);
@@ -247,6 +266,7 @@ class NetTreeRepair
           && !slew_violation) {
         break;
       }
+      bool resize_repeater = true;
       int split_length_dbu = length_dbu;
       if (negative_limit) {
         split_length_dbu = 0;
@@ -264,18 +284,27 @@ class NetTreeRepair
             static_cast<int>(std::lround(cap_split_um * design_.dbu)));
       }
       if (slew_violation) {
-        const double slew_split_um = solveSlewLength(ref_cap,
-                                                     max_load_slew_margined);
+        const double slew_split_um = solveSlewLength(
+            wire_length_ref, ref_cap, max_load_slew_margined, target_buffer_cell);
         if (slew_split_um >= 0.0) {
           split_length_dbu = std::min(
               split_length_dbu,
               static_cast<int>(std::lround(slew_split_um * design_.dbu)));
+          resize_repeater = false;
         } else {
           split_length_dbu = 0;
+          resize_repeater = true;
         }
       }
       if (split_length_dbu < 0) {
         split_length_dbu = 0;
+      }
+      // Once the downstream load is already isolated by a repeater, if the
+      // upstream driver still cannot drive any meaningful wire length, the
+      // isolating repeater belongs at the upstream driver end rather than
+      // stepping 1 DBU at a time from the load end.
+      if (wire_iters > 1 && split_length_dbu <= std::max(1, design_.dbu)) {
+        split_length_dbu = length_dbu;
       }
       const int buf_dist_dbu
           = split_length_dbu >= length_dbu
@@ -305,7 +334,8 @@ class NetTreeRepair
           driver_slew_fall_,
           load_cap,
           buffer_load_cap,
-          config_);
+          config_,
+          resize_repeater);
       int buffer_cell = selection.cell_index;
       if (buffer_cell < 0) {
         break;
@@ -345,27 +375,23 @@ class NetTreeRepair
       to_y = buf_y;
       updateLength(length_dbu, wire_res, wire_cap);
       load_cap = wire_cap + ref_cap;
-      load_slew = estimateSlew(wire_res, wire_cap, ref_cap);
       // The inserted repeater's input limit becomes the new load-slew budget
       // for the remaining upstream segment.
       max_load_slew = liberty_.cells[buffer_cell].max_slew > 0.0
                           ? liberty_.cells[buffer_cell].max_slew
                           : kInf;
-      writeback_max_load_slew
-          = max_load_slew
-            - wire_res * (wire_cap / 2.0 + ref_cap) * config_.slew_rc_factor;
-      if (config_.repair_design_openroad_repeater_resize) {
-        // OpenROAD calls findTargetCell again after each insertion.  The
-        // next repeater is initially selected for the remaining segment and
-        // then resized against its actual post-split load on insertion.
-        buffer_cell = rebufferChooseBufferCell(liberty_,
-                                               characterization_,
-                                               driver_slew_rise_,
-                                               driver_slew_fall_,
-                                               load_cap,
-                                               config_.repair_design_target_cell_math,
-                                               config_.repair_design_target_cell_selection);
-      }
+      load_slew = estimateSlew(wire_length_ref, wire_res, wire_cap, ref_cap);
+      target_buffer_cell = rebufferChooseBufferCell(
+          liberty_,
+          characterization_,
+          driver_slew_rise_,
+          driver_slew_fall_,
+          load_cap,
+          config_.repair_design_target_cell_math,
+          config_.repair_design_target_cell_selection,
+          -1,
+          config_.sizing_area_limit,
+          config_.sizing_leakage_limit);
       if (buf_dist_dbu <= 0 && ref_cap >= prev_ref_cap) {
         if (++zero_progress_iters >= 2) {
           break;
@@ -377,7 +403,7 @@ class NetTreeRepair
 
     wire.wire_length = wire_length_ref + length_dbu;
     wire.cap = load_cap;
-    wire.max_load_slew = writeback_max_load_slew;
+    wire.max_load_slew = max_load_slew;
     wire.fanout = fanout;
     wire.load_pins = child.load_pins;
   }
@@ -393,11 +419,18 @@ class NetTreeRepair
     const double cap = left.cap + right.cap;
     const double max_load_slew
         = std::min(left.max_load_slew, right.max_load_slew);
+    const long long combined_wire_length
+        = static_cast<long long>(left.wire_length) + right.wire_length;
+    const double combined_wire_res
+        = (static_cast<double>(combined_wire_length)
+           / static_cast<double>(design_.dbu))
+          * config_.r_unit;
 
     // OpenROAD's repairNetJunc combines the two branches with the raw driver
-    // resistance.  Driver slew is handled before this pass by resize /
-    // findSlewLoadCap; it is not re-checked at every junction.
-    const double load_slew = driver_resistance_ * cap * config_.slew_rc_factor;
+    // resistance plus accumulated downstream wire resistance.
+    const double load_slew
+        = (driver_resistance_ + combined_wire_res) * cap
+          * config_.slew_rc_factor;
     const double max_load_slew_margined
         = max_load_slew * (1.0 - config_.slew_margin);
     const bool load_slew_violation
@@ -407,19 +440,28 @@ class NetTreeRepair
         = std::isfinite(max_cap_) && max_cap_ > 0.0 && cap > max_cap_;
     const bool wire_length_violation
         = max_wire_length_dbu_ > 0
-          && static_cast<long long>(left.wire_length) + right.wire_length
-                 > max_wire_length_dbu_;
+          && combined_wire_length > max_wire_length_dbu_;
 
     // OpenROAD evaluates each constraint against the same original branches.
     // Different constraints can isolate both sides; ties select the right.
     std::array<bool, 2> repeat{};
     if (load_slew_violation) {
+      const double left_wire_res
+          = (static_cast<double>(left.wire_length)
+             / static_cast<double>(design_.dbu))
+            * config_.r_unit;
+      const double right_wire_res
+          = (static_cast<double>(right.wire_length)
+             / static_cast<double>(design_.dbu))
+            * config_.r_unit;
       const double left_slack
           = left.max_load_slew * (1.0 - config_.slew_margin)
-            - driver_resistance_ * left.cap * config_.slew_rc_factor;
+            - (driver_resistance_ + left_wire_res) * left.cap
+                  * config_.slew_rc_factor;
       const double right_slack
           = right.max_load_slew * (1.0 - config_.slew_margin)
-            - driver_resistance_ * right.cap * config_.slew_rc_factor;
+            - (driver_resistance_ + right_wire_res) * right.cap
+                  * config_.slew_rc_factor;
       repeat[left_slack < right_slack ? 0 : 1] = true;
     }
     if (cap_violation) {
@@ -477,7 +519,7 @@ class NetTreeRepair
     junction.fanout = left.fanout + right.fanout;
     junction.max_load_slew
         = std::min(left.max_load_slew, right.max_load_slew);
-    junction.wire_length = std::max(left.wire_length, right.wire_length);
+    junction.wire_length = left.wire_length + right.wire_length;
     junction.load_pins = left.load_pins;
     junction.load_pins.insert(junction.load_pins.end(),
                               right.load_pins.begin(), right.load_pins.end());
@@ -491,21 +533,51 @@ class NetTreeRepair
     wire_cap = length_um * config_.c_unit;
   }
 
-  double estimateSlew(double wire_res,
+  double estimateSlew(int wire_length_ref_dbu,
+                      double wire_res,
                       double wire_cap,
                       double ref_cap) const
   {
+    const double wire_res_ref
+        = (static_cast<double>(wire_length_ref_dbu)
+           / static_cast<double>(design_.dbu))
+          * config_.r_unit;
     return (driver_wire_resistance_ * (wire_cap + ref_cap)
-            + wire_res * ref_cap + wire_res * wire_cap / 2.0)
+            + wire_res * (wire_cap / 2.0 + ref_cap)
+            + wire_res_ref * ref_cap)
            * config_.slew_rc_factor;
   }
 
-  double solveSlewLength(double ref_cap, double max_load_slew) const
+  double solveSlewLength(int wire_length_ref_dbu,
+                         double ref_cap,
+                         double max_load_slew,
+                         int buffer_cell) const
   {
-    const double a = config_.r_unit * config_.c_unit / 2.0;
-    const double b = driver_wire_resistance_ * config_.c_unit
-                     + config_.r_unit * ref_cap;
-    const double c = driver_wire_resistance_ * ref_cap
+    double r_buffer = 0.0;
+    if (config_.repair_design_openroad_repeater_resize
+        && buffer_cell >= 0
+        && buffer_cell < static_cast<int>(liberty_.cells.size())) {
+      r_buffer = liberty_.cells[buffer_cell].drive_resistance;
+      if (r_buffer <= 0.0) {
+        r_buffer = cellDriveResistance(liberty_.cells[buffer_cell]);
+      }
+    }
+    if (r_buffer <= 0.0) {
+      r_buffer = driver_wire_resistance_;
+    }
+    const double wire_length_ref_um
+        = config_.repair_design_openroad_repeater_resize
+              ? static_cast<double>(wire_length_ref_dbu)
+                    / static_cast<double>(design_.dbu)
+              : 0.0;
+    const double a = config_.repair_design_openroad_repeater_resize
+                         ? (config_.r_unit * config_.c_unit)
+                         : (config_.r_unit * config_.c_unit / 2.0);
+    const double b = r_buffer * config_.c_unit
+                     + config_.r_unit * ref_cap
+                     + config_.r_unit * config_.c_unit * wire_length_ref_um;
+    const double c = r_buffer * ref_cap
+                     + wire_length_ref_um * config_.r_unit * ref_cap
                      - max_load_slew / config_.slew_rc_factor;
     if (a > 1e-12) {
       const double discriminant = b * b - 4.0 * a * c;
@@ -553,7 +625,8 @@ bool repairNetTree(const DesignView& design,
                    int driver_cell_index,
                    const std::vector<std::vector<int>>& children,
                    std::vector<BufferAction>& actions,
-                   std::string& reason)
+                   std::string& reason,
+                   double* root_cap_out)
 {
   if (driver < 0 || driver >= static_cast<int>(children.size())) {
     reason = "invalid_driver_node";
@@ -570,7 +643,7 @@ bool repairNetTree(const DesignView& design,
                        driver_cell_index,
                        max_cap,
                        children);
-  return repair.run(actions, reason);
+  return repair.run(actions, reason, root_cap_out);
 }
 
 }  // namespace rebuffer

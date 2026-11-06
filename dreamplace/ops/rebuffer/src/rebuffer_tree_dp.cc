@@ -172,7 +172,7 @@ bool planCurrentDriverTree(const DesignView& design,
               combined.actions.insert(combined.actions.end(),
                                       rhs.actions.begin(),
                                       rhs.actions.end());
-              if (combined.buffer_count <= config.max_actions) {
+              if (combined.buffer_count <= config.tree_max_buffers) {
                 merged.push_back(std::move(combined));
               }
             }

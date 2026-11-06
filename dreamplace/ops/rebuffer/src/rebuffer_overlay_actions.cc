@@ -275,39 +275,36 @@ py::list projectOverlayActions(
       const int vertex_id = py::cast<int>(row["vertex_id"]);
       const int state_net_id = py::cast<int>(row["state_net_id"]);
       const int state_node_id = py::cast<int>(row["state_node_id"]);
-      const auto inserted = projection.state_provenance.emplace(
-          std::make_pair(partition_id, vertex_id),
-          std::make_pair(state_net_id, state_node_id));
-      if (!inserted.second && inserted.first->second
-                                != std::make_pair(state_net_id, state_node_id)) {
-        throw py::value_error("duplicate partition vertex provenance");
-      }
+      projection.state_provenance.push_back(
+          {{partition_id, vertex_id}, {state_net_id, state_node_id}});
     }
+    normalizePartitionProvenance(projection.state_provenance);
   }
   return projectOverlayActionsFromProjection(base, projection, states, actions);
 }
 
 py::list projectOverlayActionsFromProjection(
-    const py::object& base, const OverlayActionProjection& projection,
+    const OverlayActionInputs& base, const OverlayActionProjection& projection,
     const std::vector<std::shared_ptr<IncrementalTopologyState>>& states,
     const py::list& actions)
 {
   std::map<int, std::shared_ptr<IncrementalTopologyState>> working_by_net;
+  std::set<int> copied_states;
   for (const auto& state : states) {
     if (state == nullptr) throw py::value_error("null overlay topology state");
-    working_by_net[state->net_id] = std::make_shared<IncrementalTopologyState>(*state);
+    working_by_net[state->net_id] = state;
   }
   const auto& original_net = projection.original_net_by_net;
   const auto& state_node = projection.state_node_by_vertex;
   const auto& state_net = projection.state_net_by_vertex;
   const auto& partition_provenance = projection.state_provenance;
   const bool has_partition_provenance = projection.has_partition_provenance;
-  const auto cells = carrierArray<std::string>(base, "flat_libcell_names");
-  const auto pins = carrierArray<std::string>(base, "pin_names");
-  const auto nets = carrierArray<std::string>(base, "net_names");
-  const auto pin2node = carrierArray<int>(base, "pin2node_map");
-  const auto pin2net = carrierArray<int>(base, "pin2net_map");
-  const auto drivers = carrierArray<int>(base, "net2driver_pin_map");
+  const auto& cells = base.cells;
+  const auto& pins = base.pins;
+  const auto& nets = base.nets;
+  const auto& pin2node = base.pin2node;
+  const auto& pin2net = base.pin2net;
+  const auto& drivers = base.drivers;
   const auto ordered = orderTreeBufferActions(actions);
   py::list output;
   int simulation_action_id = 1000000000;
@@ -367,7 +364,7 @@ py::list projectOverlayActionsFromProjection(
     };
     auto sourceVertex = [&](int partition_id, int vertex, const char* role) {
       if (has_partition_provenance) {
-        const auto found = partition_provenance.find({partition_id, vertex});
+        const auto found = findPartitionProvenance(partition_provenance, {partition_id, vertex});
         if (found != partition_provenance.end()) {
           return found->second;
         }
@@ -437,11 +434,18 @@ py::list projectOverlayActionsFromProjection(
         && source_parent_identity.first == source_child_identity.first
         && (!has_partition_provenance
             || (source_parent_identity.first == planning_net
-                && partition_provenance.count({partition, source_parent}) != 0
-                && partition_provenance.count({partition, source_child}) != 0));
+                && findPartitionProvenance(partition_provenance, {partition, source_parent})
+                    != partition_provenance.end()
+                && findPartitionProvenance(partition_provenance, {partition, source_child})
+                    != partition_provenance.end()));
     const int net = source_identity_valid ? source_parent_identity.first : planning_net;
     const auto state_it = working_by_net.find(net);
     const bool has_active_state = state_it != working_by_net.end();
+    // Only this net's simulated ancestor splits can modify its scratch state.
+    // Other nets remain borrowed read-only for physical provenance lookup.
+    if (has_active_state && copied_states.insert(net).second) {
+      state_it->second = std::make_shared<IncrementalTopologyState>(*state_it->second);
+    }
     unchanged.net_id = net;
     unchanged.driver_pin_id = drivers.at(net);
     auto* state = has_active_state ? state_it->second.get() : &unchanged;
@@ -497,7 +501,7 @@ py::list projectOverlayActionsFromProjection(
                    << "; load_state_net=" << load_identity.first
                    << "; load_state_node=" << load_identity.second
                    << "; boundary_pin=" << selected_pin;
-        const auto provenance = partition_provenance.find({partition, pin});
+        const auto provenance = findPartitionProvenance(partition_provenance, {partition, pin});
         if (provenance != partition_provenance.end()) {
           diagnostic << "; exact_partition_provenance="
                      << provenance->second.first << ':'

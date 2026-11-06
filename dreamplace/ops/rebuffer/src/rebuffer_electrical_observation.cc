@@ -74,11 +74,26 @@ py::dict electricalSnapshot(const py::object& db, const py::dict& timing,
         || starts[net + 1] > static_cast<int>(pins.size())) {
       throw py::value_error("electrical observation driver/CSR out of range");
     }
+    // Match the planner's clock-net rule: a net is a clock net when its driver
+    // is a clock pin or any pin on it is one.  Name-based matching alone missed
+    // the pre-CTS clock buffer, whose driver then reported the whole clock load
+    // as a cap/fanout violation that repair_design never repairs.
+    bool net_is_clock = clock_nets.count(net_names.at(net)) != 0;
+    if (!net_is_clock) {
+      net_is_clock = clock[pin];
+      for (int index = starts[net]; !net_is_clock && index < starts[net + 1]; ++index) {
+        const int sink = pins[index];
+        if (sink != pin && sink >= 0 && sink < count && clock[sink]) {
+          net_is_clock = true;
+        }
+      }
+    }
+    if (net_is_clock) clock[pin] = true;
     driver[pin] = true;
     for (int index = starts[net]; index < starts[net + 1]; ++index) {
       if (pins[index] < 0 || pins[index] >= count) throw py::value_error("electrical net pin out of range");
       if (pins[index] != pin) ++fanout[pin];
-      if (clock_nets.count(net_names.at(net))) clock[pins[index]] = true;
+      if (net_is_clock) clock[pins[index]] = true;
     }
   }
   std::vector<ElectricalPinObservation> observations;
@@ -115,11 +130,11 @@ py::dict observeElectricalPins(const std::vector<ElectricalPinObservation>& pins
     const std::array<double, 3> observed{std::max(pin.slew_rise, pin.slew_fall),
         std::max(pin.load_rise, pin.load_fall), static_cast<double>(pin.fanout)};
     const std::array<double, 3> margin{slew_margin, cap_margin, 0.0};
-    py::dict row;
+    std::array<double, 3> amounts;
     bool violates = false;
     for (int field = 0; field < 3; ++field) {
       const double amount = excess(observed[field], limit[field], margin[field]);
-      row[kFields[field]] = amount;
+      amounts[field] = amount;
       if (limit[field] > 0.0 && std::isfinite(limit[field])) ++checked[field];
       if (amount > kTolerances[field]) {
         ++violation_count[field];
@@ -128,6 +143,8 @@ py::dict observeElectricalPins(const std::vector<ElectricalPinObservation>& pins
       }
     }
     if (violates) {
+      py::dict row;
+      for (int field = 0; field < 3; ++field) row[kFields[field]] = amounts[field];
       std::string name(pin.name);
       std::replace(name.begin(), name.end(), '/', ':');
       if (violations.contains(name.c_str())) throw py::value_error("ambiguous electrical pin name");

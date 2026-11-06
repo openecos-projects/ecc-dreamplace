@@ -11,7 +11,7 @@ def test_default_tree_payload_allows_chain_and_explicit_single_move_limit_is_res
     base.node_x[2] = 1_000_000.0
     model = RebufferTimingModel(base, use_pin_offset=False)
     candidates = []
-    for override in ({}, {"max_actions": 1}):
+    for override in ({}, {"tree_max_buffers": 1}):
         context = RebufferPlanContext(
             base,
             model,

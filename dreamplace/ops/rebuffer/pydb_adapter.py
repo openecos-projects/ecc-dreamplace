@@ -446,6 +446,8 @@ def build_rebuffer_design_from_pydb(
     num_nets = max(0, int(flat_net2pin_start.size) - 1)
     num_pins = int(pin2node.size)
     num_nodes = int(node_x.size)
+    num_terminals = _as_int(getattr(pydb, "num_terminals", 0), 0)
+    num_terminal_nis = _as_int(getattr(pydb, "num_terminal_NIs", 0), 0)
     num_libcells = len(libcell_names)
 
     if flat_net2pin_start.size < 2:
@@ -495,9 +497,7 @@ def build_rebuffer_design_from_pydb(
 
     active_pin_cap = flat_lib_pin_rcap if flat_lib_pin_rcap.size else flat_lib_pin_cap
     pin_cap_source = (
-        "rcap"
-        if flat_lib_pin_rcap.size
-        else ("cap" if flat_lib_pin_cap.size else "none")
+        "rcap" if flat_lib_pin_rcap.size else ("cap" if flat_lib_pin_cap.size else "none")
     )
     num_lib_pins = int(active_pin_cap.size)
     if num_lib_pins == 0:
@@ -533,10 +533,7 @@ def build_rebuffer_design_from_pydb(
 
     if not flat_libcell_info.size and num_libcells:
         reasons.append("missing_flat_libcell_info")
-    elif (
-        flat_libcell_info.size
-        and flat_libcell_info.shape[0] != num_libcells
-    ):
+    elif flat_libcell_info.size and flat_libcell_info.shape[0] != num_libcells:
         reasons.append("flat_libcell_info_shape_mismatch")
 
     node_is_buffer, buffer_metadata_source = _buffer_metadata(pydb, num_nodes)
@@ -593,9 +590,7 @@ def build_rebuffer_design_from_pydb(
     )
     if buffer_main_type_index >= num_libcells:
         reasons.append("buffer_main_type_index_out_of_range")
-    candidate_indices = _as_int_tuple(
-        getattr(pydb, "buffer_main_type_candidate_indices", ())
-    )
+    candidate_indices = _as_int_tuple(getattr(pydb, "buffer_main_type_candidate_indices", ()))
     if any(index < 0 or index >= num_libcells for index in candidate_indices):
         reasons.append("buffer_main_type_candidate_index_out_of_range")
 
@@ -615,6 +610,9 @@ def build_rebuffer_design_from_pydb(
                 "num_nets": num_nets,
                 "num_pins": num_pins,
                 "num_nodes": num_nodes,
+                "num_base_nodes": num_nodes,
+                "num_terminals": num_terminals,
+                "num_terminal_NIs": num_terminal_nis,
                 "num_libcells": num_libcells,
                 "num_lib_pins": num_lib_pins,
             }
@@ -649,14 +647,15 @@ def build_rebuffer_design_from_pydb(
         "num_nets": num_nets,
         "num_pins": num_pins,
         "num_nodes": num_nodes,
+        "num_base_nodes": num_nodes,
+        "num_terminals": num_terminals,
+        "num_terminal_NIs": num_terminal_nis,
         "num_libcells": num_libcells,
         "num_lib_pins": num_lib_pins,
         "has_buffer_metadata": has_buffer_metadata,
         "buffer_metadata_source": buffer_metadata_source,
         "has_fixed_metadata": has_fixed_metadata,
-        "has_pin_limits": bool(
-            flat_lib_pin_cap_limit.size and flat_lib_pin_slew_limit.size
-        ),
+        "has_pin_limits": bool(flat_lib_pin_cap_limit.size and flat_lib_pin_slew_limit.size),
         "has_drive_resistance": bool(flat_lib_pin_drive_resistance.size),
         "has_pin_direction": has_pin_direction,
         "has_libcell_info": bool(flat_libcell_info.size),

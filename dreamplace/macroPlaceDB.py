@@ -3454,49 +3454,98 @@ class MacroPlaceDB(object):
             )
         limit_by_main_id = {int(row[0]): row for row in limits}
 
-        for inst_idx, main_id in enumerate(self.inst_main_id.astype(np.int32)):
-            if main_id < 0:
-                inst_vt_mask[inst_idx, 0] = True
-                inst_vt_init[inst_idx, 0] = 1.0
-                continue
-            if main_id + 1 >= len(self.main_id_2_cell_id_start):
-                raise ValueError(f"inst_main_id[{inst_idx}]={main_id} exceeds main_id_2_cell_id_start")
-            family_is_sizeable = bool(main_id_is_sizeable[main_id])
-            limit_row = limit_by_main_id.get(int(main_id))
+        main_ids = np.asarray(self.inst_main_id, dtype=np.int32)
+        offsets = np.asarray(self.inst_libcell_offset, dtype=np.int32)
+        if len(offsets) != len(main_ids):
+            raise ValueError("inst_libcell_offset length must match inst_main_id")
+        if np.any(main_ids >= num_main_ids):
+            inst_idx = int(np.flatnonzero(main_ids >= num_main_ids)[0])
+            raise ValueError(
+                f"inst_main_id[{inst_idx}]={int(main_ids[inst_idx])} "
+                "exceeds main_id_2_cell_id_start"
+            )
+
+        # Size/VT metadata is family-local.  Compute each used family's
+        # candidate range and limits once, then map the instance arrays with
+        # NumPy.  The old per-instance loop repeated np.arange/np.unique for
+        # every cell and became a large cost on PULP-sized databases.
+        family_start = self.main_id_2_cell_id_start[:-1].astype(np.int64)
+        family_stop = self.main_id_2_cell_id_start[1:].astype(np.int64)
+        family_size_lower = np.ones(num_main_ids, dtype=self.dtype)
+        family_size_upper = np.ones(num_main_ids, dtype=self.dtype)
+        family_vt_mask = np.zeros(
+            (num_main_ids, num_vt_types),
+            dtype=np.bool_,
+        )
+        valid_main = main_ids >= 0
+        used_main_ids = np.unique(main_ids[valid_main])
+        for main_id in used_main_ids:
+            main_id = int(main_id)
+            limit_row = limit_by_main_id.get(main_id)
             if limit_row is None:
                 raise ValueError(f"Missing size/vt limit for main_id {main_id}")
             size_limit = int(limit_row[1])
             vt_limit = int(limit_row[2])
             if size_limit <= 0 or vt_limit <= 0:
-                raise ValueError(f"Invalid size/vt limit for main_id {main_id}: {limit_row.tolist()}")
-            cell_begin = int(self.main_id_2_cell_id_start[main_id])
-            cell_end = int(self.main_id_2_cell_id_start[main_id + 1])
+                raise ValueError(
+                    f"Invalid size/vt limit for main_id {main_id}: "
+                    f"{limit_row.tolist()}"
+                )
+            cell_begin = int(family_start[main_id])
+            cell_end = int(family_stop[main_id])
             if cell_end <= cell_begin:
                 raise ValueError(f"main_id {main_id} has no candidate library cells")
             candidate_cell_ids = np.arange(cell_begin, cell_end, dtype=np.int32)
             candidate_vts = cell_vts[candidate_cell_ids]
             candidate_sizes = cell_sizes[candidate_cell_ids]
-            inst_vt_mask[inst_idx, np.unique(candidate_vts)] = True
-            inst_size_lower[inst_idx] = candidate_sizes.min()
-            inst_size_upper[inst_idx] = candidate_sizes.max()
+            unique_vts = np.unique(candidate_vts)
+            family_vt_mask[main_id, unique_vts] = True
+            family_size_lower[main_id] = candidate_sizes.min()
+            family_size_upper[main_id] = candidate_sizes.max()
             if np.count_nonzero(np.unique(candidate_sizes)) > size_limit:
-                raise ValueError(f"main_id {main_id} has more sizes than declared size limit")
-            if np.count_nonzero(inst_vt_mask[inst_idx]) > vt_limit:
-                raise ValueError(f"main_id {main_id} has more VT types than declared vt limit")
-
-            offset = int(self.inst_libcell_offset[inst_idx])
-            if offset < 0:
-                continue
-            cell_id = cell_begin + offset
-            if cell_id >= cell_end:
                 raise ValueError(
-                    f"inst_libcell_offset[{inst_idx}]={offset} is outside candidate range for main_id {main_id}"
+                    f"main_id {main_id} has more sizes than declared size limit"
                 )
-            inst_cell_id[inst_idx] = cell_id
-            inst_size_init[inst_idx] = cell_sizes[cell_id]
-            inst_leakage_init[inst_idx] = cell_leakages[cell_id]
-            inst_vt_init[inst_idx, cell_vts[cell_id]] = 1.0
-            inst_is_sizeable[inst_idx] = family_is_sizeable
+            if unique_vts.size > vt_limit:
+                raise ValueError(
+                    f"main_id {main_id} has more VT types than declared vt limit"
+                )
+
+        safe_main_ids = np.where(valid_main, main_ids, 0)
+        inst_size_lower[valid_main] = family_size_lower[safe_main_ids[valid_main]]
+        inst_size_upper[valid_main] = family_size_upper[safe_main_ids[valid_main]]
+        inst_vt_mask[valid_main] = family_vt_mask[safe_main_ids[valid_main]]
+        inst_vt_mask[~valid_main, 0] = True
+        inst_vt_init[~valid_main, 0] = 1.0
+
+        valid_cell = valid_main & (offsets >= 0)
+        if np.any(valid_cell):
+            inst_cell_id[valid_cell] = (
+                family_start[safe_main_ids[valid_cell]]
+                + offsets[valid_cell]
+            ).astype(np.int32)
+            invalid_offset = valid_cell & (
+                inst_cell_id >= family_stop[safe_main_ids]
+            )
+            if np.any(invalid_offset):
+                inst_idx = int(np.flatnonzero(invalid_offset)[0])
+                main_id = int(main_ids[inst_idx])
+                raise ValueError(
+                    f"inst_libcell_offset[{inst_idx}]={int(offsets[inst_idx])} "
+                    f"is outside candidate range for main_id {main_id}"
+                )
+        selected_cells = inst_cell_id >= 0
+        if np.any(selected_cells):
+            selected_cell_ids = inst_cell_id[selected_cells]
+            inst_size_init[selected_cells] = cell_sizes[selected_cell_ids]
+            inst_leakage_init[selected_cells] = cell_leakages[selected_cell_ids]
+            inst_vt_init[
+                np.flatnonzero(selected_cells),
+                cell_vts[selected_cell_ids],
+            ] = 1.0
+            inst_is_sizeable[selected_cells] = main_id_is_sizeable[
+                safe_main_ids[selected_cells]
+            ]
 
         return (
             inst_cell_id,
@@ -4433,15 +4482,47 @@ class MacroPlaceDB(object):
         """Pad sequences to the same length"""
         if not sequences:
             return np.array([])
-        max_len = max(len(seq) for seq in sequences)
-        padded = []
-        for seq in sequences:
-            if len(seq) < max_len:
-                padded_seq = list(seq) + [pad_value] * (max_len - len(seq))
-            else:
-                padded_seq = list(seq)
-            padded.append(padded_seq)
-        return np.array(padded, dtype=dtype)
+        # Rebuilding the placement database happens after every committed
+        # repair.  LUT tables contain tens of thousands of rows and are often
+        # already rectangular; avoid materializing Python padding lists and
+        # calling np.array on the whole nested list.
+        lengths = np.fromiter(
+            (len(seq) for seq in sequences),
+            dtype=np.int64,
+            count=len(sequences),
+        )
+        max_len = int(lengths.max())
+        if max_len == 0:
+            return np.empty((len(sequences), 0), dtype=dtype)
+        if bool(np.all(lengths == max_len)):
+            return np.asarray(sequences, dtype=dtype)
+        padded = np.full(
+            (len(sequences), max_len),
+            pad_value,
+            dtype=dtype,
+        )
+        for row, seq, length in zip(padded, sequences, lengths):
+            if length:
+                row[: int(length)] = seq
+        return padded
+
+    @staticmethod
+    def _as_object_int32_arrays(sequences):
+        """Keep native per-node/per-net index arrays without copying rows."""
+
+        if not sequences:
+            return np.empty((0,), dtype=object)
+        dtype = np.dtype(np.int32)
+        if all(
+            isinstance(seq, np.ndarray) and seq.dtype == dtype
+            for seq in sequences
+        ):
+            converted = sequences
+        else:
+            converted = [np.asarray(seq, dtype=dtype) for seq in sequences]
+        result = np.empty(len(converted), dtype=object)
+        result[:] = converted
+        return result
 
     def initialize_from_rawdb(self, pydb, params):
         """
@@ -4609,16 +4690,12 @@ class MacroPlaceDB(object):
                 (self.num_routing_grids_x, self.num_routing_grids_y),
                 dtype=self.dtype)
 
-        # convert node2pin_map to array of array
-        for i in range(len(self.node2pin_map)):
-            self.node2pin_map[i] = np.array(
-                self.node2pin_map[i], dtype=np.int32)
-        self.node2pin_map = np.array(self.node2pin_map, dtype=object)
-
-        # convert net2pin_map to array of array
-        for i in range(len(self.net2pin_map)):
-            self.net2pin_map[i] = np.array(self.net2pin_map[i], dtype=np.int32)
-        self.net2pin_map = np.array(self.net2pin_map, dtype=object)
+        # Preserve the native per-node/per-net int32 arrays.  Rebuilding the
+        # placement database used to convert every row one by one, which is
+        # noticeable on large designs and is unnecessary when the exporter
+        # already returns the required dtype.
+        self.node2pin_map = self._as_object_int32_arrays(self.node2pin_map)
+        self.net2pin_map = self._as_object_int32_arrays(self.net2pin_map)
 
         # convert the max_net_weight from params
         # note that infinity may be included so we need a type cast

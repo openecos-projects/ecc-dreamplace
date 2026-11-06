@@ -48,22 +48,31 @@ OverlayCarrierProjection buildOverlayCarrierProjection(
     const std::vector<std::shared_ptr<IncrementalTopologyState>>& states,
     const py::list& actions, const double r_unit, const double c_unit)
 {
+  return buildOverlayCarrierProjection(overlayCarrierInputs(base), steiner, states,
+                                         actions, r_unit, c_unit);
+}
+
+OverlayCarrierProjection buildOverlayCarrierProjection(
+    const OverlayCarrierInputs& base, const SteinerView& steiner,
+    const std::vector<std::shared_ptr<IncrementalTopologyState>>& states,
+    const py::list& actions, const double r_unit, const double c_unit)
+{
   if (!std::isfinite(r_unit) || r_unit <= 0.0 || !std::isfinite(c_unit)
       || c_unit < 0.0) {
     throw py::value_error("invalid_overlay_wire_rc_units");
   }
-  const auto base_pins = carrierArray<std::string>(base, "pin_names");
-  auto nodes = carrierArray<std::string>(base, "node_names");
-  auto masters = carrierArray<std::string>(base, "node_master_names");
-  auto nets = carrierArray<std::string>(base, "net_names");
-  auto pin_owner = carrierArray<int>(base, "pin2node_map");
+  const auto& base_pins = base.identity.pins;
+  auto nodes = base.nodes;
+  auto masters = base.masters;
+  auto nets = base.identity.nets;
+  auto pin_owner = base.identity.pin2node;
   auto pin_names = base_pins;
-  auto pin_x = carrierArray<double>(base, "pin_offset_x");
-  auto pin_y = carrierArray<double>(base, "pin_offset_y");
-  auto pin_orient = carrierArray<std::string>(base, "pin_direct");
-  const auto cell_names = carrierArray<std::string>(base, "flat_libcell_names");
-  const auto cell_arc_start = carrierArray<int>(base, "cell_id_2_arc_id_start");
-  const auto lib_arcs = base.attr("flat_libarc_info").cast<py::sequence>();
+  auto pin_x = base.pin_x;
+  auto pin_y = base.pin_y;
+  auto pin_orient = base.pin_direct;
+  const auto& cell_names = base.identity.cells;
+  const auto& cell_arc_start = base.cell_arc_start;
+  const auto& lib_arcs = base.library_arcs;
   const int pin_count = base_pins.size(), net_count = nets.size();
   if (steiner.steiner_node_base != pin_count || steiner.node_x.size() != steiner.node_y.size()) {
     throw py::value_error("overlay requires the base Steiner vertex domain");
@@ -93,7 +102,6 @@ OverlayCarrierProjection buildOverlayCarrierProjection(
   if (action_rows.size() != by_action.size()) throw py::value_error("native overlay buffer has no action metadata");
 
   std::vector<BufferRow> buffers;
-  std::set<std::string> node_names(nodes.begin(), nodes.end()), net_names(nets.begin(), nets.end());
   for (const auto& [id, entry] : by_action) {
     const auto& action = action_rows.at(id);
     const auto master = py::cast<std::string>(action["buffer_master_name"]);
@@ -102,16 +110,20 @@ OverlayCarrierProjection buildOverlayCarrierProjection(
     const int cell = found - cell_names.begin();
     const int begin = cell_arc_start.at(cell), end = cell_arc_start.at(cell + 1);
     if (begin == end) throw py::value_error("overlay buffer has no Liberty arc");
-    const auto first = lib_arcs[begin].cast<py::sequence>();
-    const auto source = py::cast<std::string>(first[0]), sink = py::cast<std::string>(first[1]);
+    const auto& first = lib_arcs.at(begin);
+    const auto& source = first.source;
+    const auto& sink = first.sink;
     for (int lut = begin; lut < end; ++lut) {
-      const auto info = lib_arcs[lut].cast<py::sequence>();
-      if (py::cast<std::string>(info[0]) != source || py::cast<std::string>(info[1]) != sink
-          || py::cast<int>(info[4]) != 1) throw py::value_error("overlay requires a noninverting buffer master");
+      const auto& info = lib_arcs.at(lut);
+      if (info.source != source || info.sink != sink || info.sense != 1) {
+        throw py::value_error("overlay requires a noninverting buffer master");
+      }
     }
     const std::string name = "__dreamplace_rebuffer_" + std::to_string(id);
     const std::string net_name = name + "_out";
-    if (!node_names.insert(name).second || !net_names.insert(net_name).second) {
+    // Unique action ids give distinct generated names; base membership is
+    // immutable and indexed once when importing the campaign's physical DB.
+    if (base.node_name_set.count(name) || base.net_name_set.count(net_name)) {
       throw py::value_error("overlay identity collides with the base design");
     }
     const int index = buffers.size();
@@ -122,16 +134,15 @@ OverlayCarrierProjection buildOverlayCarrierProjection(
   const int extra_pins = buffers.size() * 2;
   const int physical_pins = pin_count + extra_pins;
   const int vertex_count = steiner.node_x.size() + extra_pins;
-  const int movable = nodes.size() - py::cast<int>(base.attr("num_terminals"))
-      - py::cast<int>(base.attr("num_terminal_NIs"));
+  const int movable = nodes.size() - base.num_terminals - base.num_terminal_nis;
   if (movable < 0) throw py::value_error("invalid base placement node counts");
   for (int& node : pin_owner) if (node >= movable) node += buffers.size();
-  auto node_x = carrierArray<double>(base, "node_x");
-  auto node_y = carrierArray<double>(base, "node_y");
-  auto width = carrierArray<double>(base, "node_size_x");
-  auto height = carrierArray<double>(base, "node_size_y");
-  const auto lib_width = carrierArray<double>(base, "flat_libcell_width");
-  const auto lib_height = carrierArray<double>(base, "flat_libcell_height");
+  auto node_x = base.node_x;
+  auto node_y = base.node_y;
+  auto width = base.width;
+  auto height = base.height;
+  const auto& lib_width = base.lib_width;
+  const auto& lib_height = base.lib_height;
   std::vector<int> original_net(nets.size());
   std::iota(original_net.begin(), original_net.begin() + net_count, 0);
   std::map<std::pair<int, int>, int> virtual_pins;
@@ -172,13 +183,14 @@ OverlayCarrierProjection buildOverlayCarrierProjection(
   }
   std::vector<std::vector<int>> topo(nets.size()), net_pins(nets.size()), children(vertex_count);
   std::vector<int> parent(vertex_count, -1), state_node(vertex_count, -1), state_net(vertex_count, -1);
-  std::map<std::pair<int, int>, std::pair<int, int>> state_provenance;
+  PartitionProvenance state_provenance;
+  state_provenance.reserve(vertex_count);
   auto addNode = [&](int net, int mapped, int original, int original_net_id) {
     if (mapped < 0 || mapped >= vertex_count) throw py::value_error("overlay RC vertex is out of range");
     topo[net].push_back(mapped);
     state_node[mapped] = original;
     state_net[mapped] = original_net_id;
-    state_provenance[{net, mapped}] = {original_net_id, original};
+    state_provenance.push_back({{net, mapped}, {original_net_id, original}});
     if (mapped < physical_pins) net_pins[net].push_back(mapped);
   };
   for (int net = 0; net < net_count; ++net) {
@@ -279,10 +291,13 @@ OverlayCarrierProjection buildOverlayCarrierProjection(
   }
   OverlayCarrierProjection data;
   auto& design = data.design;
-  design.dbu = py::cast<int>(base.attr("dbu"));
+  design.dbu = base.dbu;
   design.num_nodes = nodes.size();
+  design.num_base_nodes = base.nodes.size();
   design.num_pins = physical_pins;
   design.num_nets = nets.size();
+  design.num_terminals = base.num_terminals;
+  design.num_terminal_nis = base.num_terminal_nis;
   design.pin_names = std::move(pin_names);
   design.pin2node_map = std::move(pin_owner);
   design.pin_offset_x = std::move(pin_x);
@@ -316,6 +331,7 @@ OverlayCarrierProjection buildOverlayCarrierProjection(
   data.actions.original_net_by_net = std::move(original_net);
   data.actions.state_node_by_vertex = std::move(state_node);
   data.actions.state_net_by_vertex = std::move(state_net);
+  normalizePartitionProvenance(state_provenance);
   data.actions.state_provenance = std::move(state_provenance);
   auto& current = data.steiner;
   current.steiner_node_base = physical_pins;

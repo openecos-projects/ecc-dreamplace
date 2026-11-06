@@ -31,7 +31,9 @@ struct TimingStateViewStorage;
 struct TimingSetupPaths;
 struct LibertyView;
 struct TimingPlanningInputs;
+struct TimingEndpointState;
 class NativeTimingPlanningSnapshot;
+class NativeTimingLocalPlanningSnapshot;
 enum class TimingTopologyOperation;
 
 struct TimingPropagationMark
@@ -77,8 +79,9 @@ class PersistentTimingGraph : public std::enable_shared_from_this<PersistentTimi
       int64_t global_k, int64_t max_depth, double residual_tolerance_ps) const;
   pybind11::dict initializeQueue(const pybind11::dict& liberty_values,
       const std::vector<std::uint8_t>& original_node_is_buffer);
+  std::shared_ptr<TimingEndpointState> timingEndpointState() const;
   pybind11::dict timingQueueState(const std::vector<int>& original_net_by_net,
-      bool use_path_context = false) const;
+      bool use_path_context = false, std::optional<int> endpoint_pin = std::nullopt) const;
   void applyQueueGradientScores(pybind11::dict& snapshot, const pybind11::dict& config) const;
   pybind11::dict timingQueueStateForCarrier(
       const std::vector<int>& original_net_by_net,
@@ -88,6 +91,8 @@ class PersistentTimingGraph : public std::enable_shared_from_this<PersistentTimi
       const pybind11::dict& characterization, const pybind11::dict& steiner,
       const pybind11::dict& config, double r_unit, double c_unit);
   std::shared_ptr<NativeTimingPlanningSnapshot> planningSnapshot(
+      const pybind11::list& actions, const pybind11::dict& config);
+  std::shared_ptr<NativeTimingLocalPlanningSnapshot> localPlanningSnapshot(
       const pybind11::list& actions, const pybind11::dict& config);
   pybind11::dict initializeMutations();
   void requireTimingMutationOwner() const;
@@ -144,6 +149,8 @@ class PersistentTimingGraph : public std::enable_shared_from_this<PersistentTimi
       int pin_count);
 
   std::shared_ptr<PersistentTimingGraphCheckpoint> checkpoint() const;
+  void restoreState(
+      const std::shared_ptr<PersistentTimingGraphCheckpoint>& checkpoint);
   pybind11::dict restore(
       const std::shared_ptr<PersistentTimingGraphCheckpoint>& checkpoint);
   pybind11::dict commit(
@@ -156,6 +163,7 @@ class PersistentTimingGraph : public std::enable_shared_from_this<PersistentTimi
 
  private:
   friend class NativeTimingPlanningSnapshot;
+  friend class NativeTimingLocalPlanningSnapshot;
   struct JournalEntry
   {
     std::string name;
@@ -181,7 +189,8 @@ class PersistentTimingGraph : public std::enable_shared_from_this<PersistentTimi
   TimingEventSeeds timingEventSeeds() const;
   TimingSetupPaths nativeSetupPaths(
       const std::optional<std::vector<int64_t>>& endpoint_pins,
-      int64_t global_k, int64_t max_depth, double residual_tolerance_ps) const;
+      int64_t global_k, int64_t max_depth, double residual_tolerance_ps,
+      bool worst_per_endpoint = false) const;
   TimingNetRcValues recomputeTimingNetRc(const IncrementalTopologyState& topology,
       const std::array<std::vector<double>, 5>& pin_values);
   std::shared_ptr<TimingStateUndo> beginStateUpdate();

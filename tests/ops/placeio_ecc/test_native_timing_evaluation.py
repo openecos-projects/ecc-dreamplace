@@ -58,6 +58,58 @@ def test_native_candidate_evaluation_and_restore_do_not_materialize(monkeypatch)
     }
 
 
+def test_native_full_seed_fallback_records_reason_epoch_and_phase_without_materializing():
+    model, session, bridge = _session()
+    before = bridge.statistics()
+    bridge.graph.set_state({"pin_rAAT": bridge.graph.state_view()["pin_rAAT"] + 1.0})
+
+    result = bridge.evaluate(session.overlay)
+
+    assert result["metrics"] == pytest.approx(model.baseline.as_dict(), abs=1e-6, rel=0)
+    assert result["fallback_reason"] == "native_full_seed_baseline_required"
+    stats = bridge.statistics()
+    assert stats["full_fallback_count"] == 1
+    assert stats["python_materialization_count"] == 0
+    fallback = stats["full_fallbacks"][0]
+    assert {key: value for key, value in fallback.items() if key != "elapsed_ms"} == {
+        "reason": result["fallback_reason"],
+        "epoch": result["epoch"],
+        "phase": "native_propagation",
+    }
+    assert fallback["elapsed_ms"] >= 0
+    assert stats["propagation_count"] == before["propagation_count"] + 1
+    fallback["reason"] = "caller mutation"
+    assert bridge.statistics()["full_fallbacks"][0]["reason"] == result["fallback_reason"]
+
+
+def test_native_restore_uses_state_api_and_retains_explicit_campaign_diagnostics(monkeypatch):
+    from tests.ops.rebuffer.test_persistent_timing_resize import _same_state
+
+    model, session, bridge = _session()
+    root = session.checkpoint()["checkpoint_id"]
+    before = bridge.graph.state_view()
+    active_ledger = bridge.campaign.summary()["action_ledger"]
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("native rollback requested serialized campaign restore")
+
+    monkeypatch.setattr(type(bridge.campaign), "restore", forbidden)
+    for variant in range(50):
+        bridge.campaign.record_candidate(0, {"variant_index": variant}, "screened")
+    session.apply([_action(session.overlay)])
+    session.evaluate()
+
+    session.restore(root)
+
+    _same_state(bridge.graph.state_view(), before, bitwise=True)
+    observation = session.evaluate()
+    assert {key: observation[key] for key in model.baseline.as_dict()} == model.baseline.as_dict()
+    summary = bridge.campaign.summary()
+    assert summary["action_ledger"] == active_ledger
+    assert len(summary["ledger_history"]) >= 50
+    assert bridge.statistics()["python_materialization_count"] == 0
+
+
 def test_python_carrier_is_materialized_only_when_explicitly_requested():
     model, session, bridge = _session()
     session.apply([_action(session.overlay)])

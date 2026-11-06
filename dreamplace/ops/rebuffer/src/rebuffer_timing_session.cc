@@ -275,7 +275,7 @@ py::dict RepairTimingCampaignSession::replaceCandidateTree(
     }
   } catch (...) {
     if (timing_graph_) {
-      restore(graph_checkpoint);
+      restoreState(graph_checkpoint);
     } else {
       *found->second = *topology_before;
     }
@@ -324,6 +324,13 @@ RepairTimingCampaignSession::checkpoint() const
 py::dict RepairTimingCampaignSession::restore(
     const std::shared_ptr<RepairTimingCampaignCheckpoint>& checkpoint)
 {
+  restoreState(checkpoint);
+  return summary();
+}
+
+void RepairTimingCampaignSession::restoreState(
+    const std::shared_ptr<RepairTimingCampaignCheckpoint>& checkpoint)
+{
   if (checkpoint == nullptr) {
     throw py::value_error("repair timing campaign checkpoint is required");
   }
@@ -335,10 +342,10 @@ py::dict RepairTimingCampaignSession::restore(
     if (checkpoint->campaign_identity.lock() != checkpoint_identity_) {
       throw py::value_error("campaign checkpoint belongs to another timing campaign");
     }
-    timing_graph_->restore(checkpoint->timing_graph);
+    timing_graph_->restoreState(checkpoint->timing_graph);
     topologies_ = checkpoint->topologies;
     action_ledger_ = checkpoint->action_ledger;
-    return summary();
+    return;
   }
   std::map<int, std::shared_ptr<IncrementalTopologyState>> restored;
   for (const auto& [net_id, topology_checkpoint] : checkpoint->checkpoints) {
@@ -351,7 +358,6 @@ py::dict RepairTimingCampaignSession::restore(
   }
   topologies_ = std::move(restored);
   action_ledger_ = checkpoint->action_ledger;
-  return summary();
 }
 
 py::dict RepairTimingCampaignSession::summary() const

@@ -110,6 +110,70 @@ def test_queue_matches_existing_python_records_and_native_policy(sense, with_clo
     )
 
 
+@pytest.mark.parametrize("sense", [-1, 0, 1])
+@pytest.mark.parametrize("tied_checks", [False, True])
+@pytest.mark.parametrize("use_path_context", [False, True])
+def test_queue_traces_only_the_same_first_state_as_full_path_diagnostics(
+    sense, tied_checks, use_path_context
+):
+    base = _checks_base()
+    base.flat_inst_arcs_by_level[-1][4] = sense
+    if tied_checks:
+        base.endpoints_constraint_arcs = np.repeat(base.endpoints_constraint_arcs[:1], 4, axis=0)
+        base.endpoints_constraint_max_valid = np.ones((4, 2), dtype=bool)
+        base.endpoints_constraint_max_reason = np.zeros((4, 2), dtype=np.int32)
+    owner, graph = _graph(_predecessors(base))
+    graph.propagate()
+    _initialize(owner, graph)
+    full = graph.setup_path_details()
+    assert full["statistics"]["selected_state_count"] > len(full["paths"])
+    if tied_checks:
+        assert full["paths"][3]["endpoint_test_id"] == 0
+
+    selected = graph.timing_queue_state([0, 1], use_path_context=use_path_context)
+    rows = rebuffer_cpp.select_timing_queue_items(selected, {})
+
+    assert rows
+    assert {row["endpoint_pin"]: row["path_pins"] for row in rows} == {
+        pin: record["path"] for pin, record in full["paths"].items()
+    }
+    statistics = selected["graph_queue_statistics"]
+    assert (
+        statistics["setup_path_state_count"],
+        statistics["traced_endpoint_count"],
+        statistics["legacy_fallback_count"],
+    ) == (full["statistics"]["selected_state_count"], len(full["paths"]), 0)
+    if use_path_context:
+        assert statistics["path_context_count"] == sum(
+            record["valid"] for record in full["paths"].values()
+        )
+    else:
+        _assert_queue(graph, owner, base)
+    # Public diagnostics retain all transition/check states and selected paths.
+    after = graph.setup_path_details()
+    assert after["paths"] == full["paths"]
+    assert after["statistics"]["selected_state_count"] == full["statistics"]["selected_state_count"]
+
+
+@pytest.mark.parametrize("use_path_context", [False, True])
+def test_queue_with_no_failing_states_traces_no_paths(use_path_context):
+    base = _base()
+    base.endpoints_rRAT = base.endpoints_fRAT = [1e6]
+    owner, graph = _graph(base)
+    graph.propagate()
+    _initialize(owner, graph)
+
+    selected = graph.timing_queue_state([0, 1], use_path_context=use_path_context)
+
+    assert rebuffer_cpp.select_timing_queue_items(selected, {}) == []
+    statistics = selected["graph_queue_statistics"]
+    assert (
+        statistics["setup_path_state_count"],
+        statistics["traced_endpoint_count"],
+        statistics["legacy_fallback_count"],
+    ) == (0, 0, 0)
+
+
 def test_recovery_only_endpoint_uses_shared_legacy_path_fallback():
     base = _checks_base()
     base.end_points = base.endpoint_pin_ids = [1, 3]

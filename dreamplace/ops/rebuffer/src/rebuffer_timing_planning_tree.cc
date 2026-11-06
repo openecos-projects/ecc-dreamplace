@@ -13,13 +13,12 @@ namespace rebuffer {
 
 void NativeTimingPlanningSnapshot::buildBufferLinks()
 {
-  std::vector<CurrentDriverBufferLink> links;
   std::unordered_map<int, CurrentDriverBufferLink> by_input;
   std::string reason;
-  if (!collectCurrentDriverBufferLinks(projection_.design, links, by_input, reason)) {
+  if (!collectCurrentDriverBufferLinks(projection_.design, buffer_links_, by_input, reason)) {
     throw py::value_error(reason);
   }
-  for (const auto& link : links) {
+  for (const auto& link : buffer_links_) {
     input_net_by_output_.emplace(link.output_net_id, link.input_net_id);
     outputs_by_input_[link.input_net_id].push_back(link.output_net_id);
   }
@@ -81,7 +80,10 @@ std::shared_ptr<CurrentDriverTree> NativeTimingPlanningSnapshot::currentTree(int
   }
   auto tree = std::make_shared<CurrentDriverTree>();
   std::string reason;
-  if (!importCurrentDriverTree(projection_.design, topology, root, *tree, reason)) {
+  const bool stop_at_existing_buffers = config_.contains("native_tree_stop_at_existing_buffers")
+      && config_["native_tree_stop_at_existing_buffers"].cast<bool>();
+  if (!importCurrentDriverTree(projection_.design, topology, root, buffer_links_,
+                               *tree, reason, stop_at_existing_buffers)) {
     throw py::value_error(reason);
   }
   return trees_.emplace(root, std::move(tree)).first->second;
@@ -117,6 +119,7 @@ py::dict NativeTimingPlanningSnapshot::plan(const py::dict& request, const py::d
       projection_.net_names.at(rootNet(request_root)), focus == request_root ? -1 : focus};
   views.candidate_variant = request.contains("candidate_variant")
       ? request["candidate_variant"].cast<int>() : 0;
+  views.phase_timings = &phase_timings_ms_;
   ++planned_requests_;
   return planNativeCurrentTree(request, views, config);
 }

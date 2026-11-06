@@ -715,6 +715,47 @@ def test_native_tree_planner_applies_openroad_timing_fanout_eligibility():
     assert result["passes"][0]["reason"] == "timing_buffer_move_fanout"
 
 
+def test_native_tree_planner_skips_openroad_top_level_output_port_nets():
+    design, timing, liberty, characterization, tree = _branches()
+    # Synthetic PyPlaceDB layout: the final node slot is the top-level output
+    # terminal, and the current net's driver is that terminal pin.
+    design["num_terminal_NIs"] = design["num_nodes"]
+    result = _run_tree_snapshot(
+        lambda: {
+            "items": [
+                {
+                    "endpoint_pin": 1,
+                    "slack_ps": -0.2,
+                    "root_net_id": 0,
+                    "driver_pin_id": 0,
+                    "path_pins": [0, 1],
+                    "net_ids": [0],
+                }
+            ]
+        },
+        lambda _request: {
+            "status": "ok",
+            "current_tree": tree,
+            "design": design,
+            "timing": timing,
+            "liberty": liberty,
+            "characterization": characterization,
+            "config": {"tree_enforce_electrical": False},
+        },
+        lambda _label: 0,
+        lambda _actions: None,
+        lambda: {"status": "ok", "wns_ps": -10.0, "tns_ps": -20.0},
+        lambda _token: None,
+        {
+            "max_passes": 1,
+            "native_tree_queue": True,
+            "native_skip_top_level_output_ports": True,
+        },
+    )
+    assert result["passes"][0]["status"] == "unsupported"
+    assert result["passes"][0]["reason"] == "timing_buffer_move_top_level_output_port"
+
+
 def test_native_tree_branch_planner_falls_back_when_focus_has_no_action():
     design, _tree, native_tree = _unbuffered_tree()
     timing = _timing()

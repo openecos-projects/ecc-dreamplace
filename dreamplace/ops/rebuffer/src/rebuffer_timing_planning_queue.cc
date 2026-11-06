@@ -72,6 +72,16 @@ std::vector<int> NativeTimingPlanningSnapshot::sourceNets(const py::list& action
 py::list NativeTimingPlanningSnapshot::projectActions(const py::list& actions) const
 {
   requireCurrent();
+  std::vector<std::shared_ptr<IncrementalTopologyState>> states;
+  for (const auto& [_, state] : graph_->net_states_) states.push_back(state);
+  return projectPlanningActions(inputs_->carrier.identity, projection_, *liberty_, states, actions);
+}
+
+py::list projectPlanningActions(const OverlayActionInputs& base,
+    const OverlayCarrierProjection& projection, const LibertyView& liberty,
+    const std::vector<std::shared_ptr<IncrementalTopologyState>>& states,
+    const py::list& actions)
+{
   py::list mapped;
   int order = 0;
   for (const auto& value : actions) {
@@ -79,8 +89,8 @@ py::list NativeTimingPlanningSnapshot::projectActions(const py::list& actions) c
     auto row = raw.attr("copy")().cast<py::dict>();
     const int cell = raw["buffer_cell_index"].cast<int>();
     row["action_kind"] = "buffer_insert";
-    row["net_name"] = projection_.net_names.at(raw["net_id"].cast<int>());
-    row["buffer_master_name"] = liberty_->cells.at(cell).name;
+    row["net_name"] = projection.net_names.at(raw["net_id"].cast<int>());
+    row["buffer_master_name"] = liberty.cells.at(cell).name;
     row["candidate_location_x_dbu"] = py::int_(raw["x_dbu"]);
     row["candidate_location_y_dbu"] = py::int_(raw["y_dbu"]);
     row["commit_order"] = order++;
@@ -92,9 +102,7 @@ py::list NativeTimingPlanningSnapshot::projectActions(const py::list& actions) c
     // base PyPlaceDB and terminal closures, so no Python carrier is needed.
     mapped.append(std::move(row));
   }
-  std::vector<std::shared_ptr<IncrementalTopologyState>> states;
-  for (const auto& [_, state] : graph_->net_states_) states.push_back(state);
-  return projectOverlayActionsFromProjection(graph_->carrier_, projection_.actions, states, mapped);
+  return projectOverlayActionsFromProjection(base, projection.actions, states, mapped);
 }
 
 py::dict NativeTimingPlanningSnapshot::summary() const
@@ -108,6 +116,7 @@ py::dict NativeTimingPlanningSnapshot::summary() const
   result["planner_payload_rows"] = payload_rows_;
   result["planned_requests"] = planned_requests_;
   result["imported_tree_count"] = trees_.size();
+  result["phase_timings_ms"] = phase_timings_ms_;
   return result;
 }
 

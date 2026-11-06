@@ -280,7 +280,9 @@ class MidplaceRepairSession:
             if owner is not None:
                 self.record["placement_sizing_sync"] = owner.sync_native_sizing()
             write_back_movable_lpos(placer.pos[0], params, placedb)
-        config = dict(params.repair_buffering_config or {})
+        # The terminal repair path reads this with a default; placement
+        # workspaces that only set the midplace switches leave it absent.
+        config = dict(getattr(params, "repair_buffering_config", None) or {})
         if self.config.mode == "repair_design_then_timing":
             config.update(
                 use_native_timing_graph=True,

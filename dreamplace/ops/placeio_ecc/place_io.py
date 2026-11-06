@@ -62,6 +62,13 @@ class PlaceIOFunction:
             if not callable(prepare_timing):
                 raise RuntimeError(f"ECC-Tools timing export requires {method}")
             timing_summary = dict(prepare_timing(timing_inputs) or {})
+        # The metadata export can only express a single ideal clock without path
+        # exceptions.  When the SDC exceeds that model the preparer falls back
+        # to the full native constraint export, which must not clear the
+        # endpoint arrays and must run the complete snapshot compiler.
+        timing_metadata_only = python_timing and bool(
+            timing_summary.get("placement_metadata_supported", True)
+        )
         dm_inst = module.get_dmInst_ptr()
         pydb = module.pydb(
             dm_inst,
@@ -69,16 +76,19 @@ class PlaceIOFunction:
             route_num_bins_y,
             with_routability,
             with_sta=with_sta,
-            **({"timing_metadata_only": True} if python_timing else {}),
+            **({"timing_metadata_only": True} if timing_metadata_only else {}),
             **asdict(export_options),
         )
+        # Qualify the native export before the carrier rebuild replaces the
+        # runtime arc schedule; the sparse base identities describe the export,
+        # not the committed carrier.
+        sparse_timing_view = validate_timing_schema(pydb) if with_sta else None
         if python_timing:
             from .library_metadata import attach_repair_library_source
             from .timing_carrier import CommittedTimingPyDB
 
             pydb = CommittedTimingPyDB(pydb, pydb, recovery_rat_is_capture_deadline=True)
             attach_repair_library_source(pydb, params, timing_inputs)
-        sparse_timing_view = validate_timing_schema(pydb) if with_sta else None
         raw_db = ECCPlaceIOBackend(
             module=module,
             workspace=workspace,
@@ -100,7 +110,11 @@ class PlaceIOFunction:
             PlaceIOFunction._promote(
                 raw_db,
                 sta_reference_role="dreamplace_timing_propagation",
-                sta_state_status="python_timing_metadata_ready",
+                sta_state_status=(
+                    "python_timing_metadata_ready"
+                    if timing_metadata_only
+                    else "python_timing_native_constraints"
+                ),
             )
         return raw_db
 

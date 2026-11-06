@@ -5,6 +5,7 @@
 #include "rebuffer_timing_local_index.hh"
 
 #include <algorithm>
+#include <exception>
 
 #include "pybind11/stl.h"
 
@@ -28,7 +29,14 @@ py::dict PersistentTimingGraph::mutateTimingTopology(int net_id, const py::dict&
   }
   const auto topology = topologyState(net_id);
   requireSynchronizedTimingTopology(*mutation_state_, *topology);
-  const auto checkpoint_before = checkpoint();
+  // Only this source topology can be changed by one mutation.  The previous
+  // guard called checkpoint(), which copied every attached net topology for
+  // every candidate action.  That made apply grow with campaign history even
+  // though the journal already contains sparse timing undo for the mutation.
+  const auto topology_before = checkpointIncrementalTopology(*topology);
+  const std::size_t journal_size_before = journal_.size();
+  const std::uint64_t epoch_before = epoch_;
+  const auto propagation_mark_before = propagation_mark_;
   try {
     std::string reason;
     py::dict result;
@@ -72,8 +80,15 @@ py::dict PersistentTimingGraph::mutateTimingTopology(int net_id, const py::dict&
     result["state"] = summary();
     return result;
   } catch (...) {
-    restore(checkpoint_before);
-    throw;
+    const auto failure = std::current_exception();
+    std::string restore_reason;
+    restoreTo(journal_size_before);
+    epoch_ = epoch_before;
+    propagation_mark_ = propagation_mark_before;
+    if (!restoreIncrementalTopology(*topology, *topology_before, restore_reason)) {
+      throw py::value_error("native topology mutation rollback failed: " + restore_reason);
+    }
+    std::rethrow_exception(failure);
   }
 }
 

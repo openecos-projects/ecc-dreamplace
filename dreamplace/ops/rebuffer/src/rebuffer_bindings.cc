@@ -20,6 +20,8 @@
 #include "rebuffer_python_views.hh"
 #include "rebuffer_path_policy.hh"
 #include "rebuffer_native_queue.hh"
+#include "rebuffer_legacy_queue.hh"
+#include "rebuffer_timing_local.hh"
 #include "rebuffer_queue_snapshot.hh"
 #include "rebuffer_native_planner.hh"
 #include "rebuffer_verified_commit.hh"
@@ -70,7 +72,9 @@ PYBIND11_MODULE(rebuffer_cpp, module)
       .def("initialize_queue", &rebuffer::PersistentTimingGraph::initializeQueue,
            py::arg("liberty"), py::arg("original_node_is_buffer"))
       .def("timing_queue_state", &rebuffer::PersistentTimingGraph::timingQueueState,
-           py::arg("original_net_by_net"), py::arg("use_path_context") = false)
+           py::arg("original_net_by_net"), py::arg("use_path_context") = false,
+           py::arg("endpoint_pin") = std::nullopt)
+      .def("timing_endpoint_state", &rebuffer::PersistentTimingGraph::timingEndpointState)
       .def("timing_queue_state_for_carrier",
            &rebuffer::PersistentTimingGraph::timingQueueStateForCarrier,
            py::arg("original_net_by_net"), py::arg("carrier"),
@@ -81,6 +85,8 @@ PYBIND11_MODULE(rebuffer_cpp, module)
            py::arg("design"), py::arg("characterization"), py::arg("steiner"),
            py::arg("config"), py::arg("r_unit"), py::arg("c_unit"))
       .def("planning_snapshot", &rebuffer::PersistentTimingGraph::planningSnapshot,
+           py::arg("actions"), py::arg("config"))
+      .def("local_planning_snapshot", &rebuffer::PersistentTimingGraph::localPlanningSnapshot,
            py::arg("actions"), py::arg("config"))
       .def("initialize_mutations", &rebuffer::PersistentTimingGraph::initializeMutations)
       .def("mutation_view", &rebuffer::PersistentTimingGraph::mutationView)
@@ -158,7 +164,8 @@ PYBIND11_MODULE(rebuffer_cpp, module)
              py::arg("apply"),
              py::arg("evaluate"),
              py::arg("restore"),
-             py::arg("config"));
+             py::arg("config"),
+             py::arg("release_checkpoint") = py::none());
   module.def("build_native_timing_queue_snapshot",
              &rebuffer::buildNativeTimingQueueSnapshot,
              py::arg("design"),
@@ -208,7 +215,8 @@ PYBIND11_MODULE(rebuffer_cpp, module)
              py::arg("apply"),
              py::arg("evaluate"),
              py::arg("restore"),
-             py::arg("config"));
+             py::arg("config"), py::arg("endpoint_state") = py::none(),
+             py::arg("release_checkpoint") = py::none());
   module.def(
       "rank_path_driver_pins",
       [](const py::dict& design_values,
@@ -315,6 +323,7 @@ PYBIND11_MODULE(rebuffer_cpp, module)
       .def("record_action_state",
            &rebuffer::RepairTimingCampaignSession::recordActionState)
       .def("checkpoint", &rebuffer::RepairTimingCampaignSession::checkpoint)
+      .def("restore_state", &rebuffer::RepairTimingCampaignSession::restoreState)
       .def("restore", &rebuffer::RepairTimingCampaignSession::restore)
       .def("summary", &rebuffer::RepairTimingCampaignSession::summary)
       .def_property_readonly("timing_graph", &rebuffer::RepairTimingCampaignSession::timingGraph);
@@ -542,20 +551,23 @@ PYBIND11_MODULE(rebuffer_cpp, module)
       "import_current_driver_tree",
       [](const py::dict& design_values,
          const py::dict& topology_values,
-         const int root_net_id) {
+         const int root_net_id,
+         const bool stop_at_existing_buffers) {
         const auto design = designFromDict(design_values);
         const auto topology = topologyFromDict(topology_values);
         auto tree = std::make_shared<rebuffer::CurrentDriverTree>();
         std::string reason;
         if (!rebuffer::importCurrentDriverTree(
-                design, topology, root_net_id, *tree, reason)) {
+                design, topology, root_net_id, *tree, reason,
+                stop_at_existing_buffers)) {
           throw py::value_error(reason);
         }
         return tree;
       },
       py::arg("design"),
       py::arg("topology"),
-      py::arg("root_net_id"));
+      py::arg("root_net_id"),
+      py::arg("stop_at_existing_buffers") = false);
   module.def(
       "export_current_driver_tree",
       [](const std::shared_ptr<rebuffer::CurrentDriverTree>& tree) {
@@ -751,6 +763,8 @@ PYBIND11_MODULE(rebuffer_cpp, module)
              py::arg("tree"));
   rebuffer::registerTreeSearchBindings(module);
   rebuffer::registerTimingPlanningBindings(module);
+  rebuffer::registerTimingLocalBindings(module);
+  rebuffer::registerLegacyQueueBindings(module);
   module.def(
       "plan_repair_design",
       [](const py::dict& design_values,

@@ -28,16 +28,12 @@ void registerTreeSearchBindings(py::module_& module)
           const auto characterization
               = characterizationFromDict(characterization_values);
           const auto config = configFromDict(config_values);
-          const auto planner = optimize ? rebuffer::optimizeCurrentDriverTree
-                                        : rebuffer::planCurrentDriverTree;
-          if (!planner(design,
-                                               timing,
-                                               liberty,
-                                               characterization,
-                                               config,
-                                               *tree,
-                                               result,
-                                               reason)) {
+          const bool planned = optimize
+              ? rebuffer::optimizeCurrentDriverTree(design, timing, liberty,
+                    characterization, config, *tree, result, reason)
+              : rebuffer::planCurrentDriverTree(design, timing, liberty,
+                    characterization, config, *tree, result, reason);
+          if (!planned) {
             py::dict output;
             output["status"] = "unsupported";
             py::list reasons;

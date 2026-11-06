@@ -177,6 +177,15 @@ void restore(const py::object& callback, const py::object& token)
   callback(token);
 }
 
+void releaseCheckpoint(const py::object& callback, const py::object& token)
+{
+  if (callback.is_none()) return;
+  if (!callable(callback)) {
+    throw py::type_error("native queue requires release_checkpoint callback");
+  }
+  callback(token);
+}
+
 std::string candidateKey(const py::dict& candidate, const py::dict& request)
 {
   if (candidate.contains("candidate_key")) {
@@ -212,7 +221,8 @@ py::dict runRepairTimingQueueOperator(const py::object& timing_snapshot,
                                       const py::object& apply,
                                       const py::object& evaluate,
                                       const py::object& restore_callback,
-                                      const py::dict& config)
+                                      const py::dict& config,
+                                      const py::object& release_checkpoint)
 {
   const int max_attempts = configInt(config, "max_passes", 50);
   const int max_tp_evaluations = configInt(config, "max_tp_evaluations", 0);
@@ -592,6 +602,13 @@ py::dict runRepairTimingQueueOperator(const py::object& timing_snapshot,
         row["net_name"] = candidate["net_name"];
       }
       TimingFrontierEvaluation frontier;
+      bool trial_checkpoint_live = true;
+      const auto release_trial = [&]() {
+        if (trial_checkpoint_live) {
+          releaseCheckpoint(release_checkpoint, token);
+          trial_checkpoint_live = false;
+        }
+      };
       try {
         py::dict acceptance_current = current;
         py::dict acceptance_request = request;
@@ -734,6 +751,7 @@ py::dict runRepairTimingQueueOperator(const py::object& timing_snapshot,
         row["status"] = "evaluate_failed";
         row["reason"] = error.what();
       }
+      release_trial();
       // Failed TP calls are part of the same budget and diagnostic ledger.
       evaluation_calls += frontier.evaluation_calls;
       row["selected_frontier_rank"] = frontier.selected_rank;

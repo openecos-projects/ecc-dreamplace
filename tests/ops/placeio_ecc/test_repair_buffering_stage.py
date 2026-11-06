@@ -192,8 +192,8 @@ def test_repair_timing_and_fresh_commit_reader_share_configured_wire_rc(monkeypa
             {
                 "use_pin_offset": False,
                 "use_persistent_graph": False,
-                "use_native_timing_graph": False,
-                "use_native_timing_evaluation": False,
+                "use_native_timing_graph": True,
+                "use_native_timing_evaluation": True,
                 **wire_rc,
             },
         ),
@@ -244,6 +244,25 @@ def test_repair_timing_uses_the_verified_native_defaults(tmp_path, monkeypatch):
     assert stage["buffer_histogram"] == {"BUF": 1}
     assert verified_calls[0][1]["chunk_size"] == 8
     assert placedb.rebuild_calls == [("verified_refreshed", "all")]
+
+
+def test_repair_timing_defaults_select_the_native_cpp_consumer():
+    resolved = repair_buffering.resolve_repair_timing_config({})
+
+    assert {
+        name: resolved[name]
+        for name in (
+            "use_native_timing_graph",
+            "use_native_timing_queue",
+            "use_native_timing_evaluation",
+            "use_native_timing_planning",
+        )
+    } == {
+        "use_native_timing_graph": True,
+        "use_native_timing_queue": True,
+        "use_native_timing_evaluation": True,
+        "use_native_timing_planning": True,
+    }
 
 
 def test_repair_timing_explicit_config_overrides_defaults(monkeypatch):

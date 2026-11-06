@@ -46,8 +46,17 @@ def test_direct_planner_and_timing_model_share_wire_rc(monkeypatch, supplied_mod
         else None
     )
 
+    # This test only covers RC plumbing; the OpenROAD ordering contract needs
+    # pin-cap metadata that this minimal design does not carry.
+    legacy_order = {
+        "repair_design_reverse_topological": False,
+        "repair_design_local_update": False,
+        "repair_design_load_slew_annotation": False,
+    }
     result = repair_design.plan_repair_design_from_pydb(
-        pydb, model, config=None if supplied_model else wire_rc
+        pydb,
+        model,
+        config=legacy_order if supplied_model else {**wire_rc, **legacy_order},
     )
 
     assert result["status"] == "ok", result

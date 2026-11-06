@@ -62,6 +62,12 @@ rebuffer::DesignView designFromDict(const py::dict& values)
   design.num_nets = asInt(values, "num_nets");
   design.num_pins = asInt(values, "num_pins");
   design.num_nodes = asInt(values, "num_nodes");
+  design.num_base_nodes = values.contains("num_base_nodes")
+      ? py::cast<int>(values["num_base_nodes"]) : design.num_nodes;
+  design.num_terminals = values.contains("num_terminals")
+      ? py::cast<int>(values["num_terminals"]) : 0;
+  design.num_terminal_nis = values.contains("num_terminal_NIs")
+      ? py::cast<int>(values["num_terminal_NIs"]) : 0;
   design.flat_net2pin_map
       = asVector<int>(values["flat_net2pin_map"], "flat_net2pin_map");
   design.flat_net2pin_start_map = asVector<int>(
@@ -514,7 +520,7 @@ rebuffer::RepairConfig configFromDict(const py::dict& values)
   config.r_unit = number("r_unit", config.r_unit);
   config.c_unit = number("c_unit", config.c_unit);
   config.max_fanout = integer("max_fanout", config.max_fanout);
-  config.max_actions = integer("max_actions", config.max_actions);
+  config.tree_max_buffers = integer("tree_max_buffers", config.tree_max_buffers);
   config.insert_buffers = boolean("insert_buffers", config.insert_buffers);
   config.resize_drivers = boolean("resize_drivers", config.resize_drivers);
   config.resize_slew_threshold
@@ -532,6 +538,9 @@ rebuffer::RepairConfig configFromDict(const py::dict& values)
       config.repair_design_openroad_driver_resize);
   config.repair_design_fanout_repair = boolean(
       "repair_design_fanout_repair", config.repair_design_fanout_repair);
+  config.repair_design_resize_to_target_slew = boolean(
+      "repair_design_resize_to_target_slew",
+      config.repair_design_resize_to_target_slew);
   config.repair_design_target_cell_math = boolean(
       "repair_design_target_cell_math", config.repair_design_target_cell_math);
   config.repair_design_target_cell_selection = boolean(
@@ -539,6 +548,9 @@ rebuffer::RepairConfig configFromDict(const py::dict& values)
   config.repair_design_openroad_repeater_resize = boolean(
       "repair_design_openroad_repeater_resize",
       config.repair_design_openroad_repeater_resize);
+  config.sizing_area_limit = number("sizing_area_limit", config.sizing_area_limit);
+  config.sizing_leakage_limit
+      = number("sizing_leakage_limit", config.sizing_leakage_limit);
   config.repair_design_max_wire_length_um = values.contains(
       "repair_design_max_wire_length_um")
       ? number("repair_design_max_wire_length_um",

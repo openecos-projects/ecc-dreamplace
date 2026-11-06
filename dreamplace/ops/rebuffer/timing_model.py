@@ -28,8 +28,8 @@ class RebufferTimingModel:
         self,
         pydb,
         *,
-        r_unit=0.914,
-        c_unit=1.89e-4,
+        r_unit=None,
+        c_unit=None,
         scale_factor=1.0,
         dbu=None,
         use_pin_offset=True,
@@ -48,6 +48,12 @@ class RebufferTimingModel:
         self.dbu = float(dbu if dbu is not None else getattr(pydb, "dbu", 0) or 0)
         if self.dbu <= 0:
             raise ValueError("timing model requires a positive dbu")
+        if r_unit is None:
+            pydb_r = getattr(pydb, "r_unit", None)
+            r_unit = pydb_r if (pydb_r is not None and float(pydb_r) > 0.0 and float(pydb_r) != 1.0) else 0.914
+        if c_unit is None:
+            pydb_c = getattr(pydb, "c_unit", None)
+            c_unit = pydb_c if (pydb_c is not None and float(pydb_c) >= 0.0 and float(pydb_c) != 1.0) else 1.89e-4
         self.r_unit = float(r_unit)
         self.c_unit = float(c_unit)
         self.scale_factor = float(scale_factor)

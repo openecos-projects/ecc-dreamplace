@@ -74,6 +74,9 @@ def test_builds_native_ready_design_view_from_pydb():
         "num_nets": 2,
         "num_pins": 5,
         "num_nodes": 5,
+        "num_base_nodes": 5,
+        "num_terminals": 0,
+        "num_terminal_NIs": 0,
         "num_libcells": 2,
         "num_lib_pins": 4,
         "has_buffer_metadata": True,
@@ -130,12 +133,8 @@ def test_buffer_metadata_can_be_derived_from_candidate_families():
     design = build_rebuffer_design_from_pydb(pydb)
 
     assert design["status"] == "ok"
-    assert design["summary"]["buffer_metadata_source"] == (
-        "buffer_main_type_candidate_indices"
-    )
-    np.testing.assert_array_equal(
-        design["node_is_buffer"], [True, False, False, True, False]
-    )
+    assert design["summary"]["buffer_metadata_source"] == ("buffer_main_type_candidate_indices")
+    np.testing.assert_array_equal(design["node_is_buffer"], [True, False, False, True, False])
 
 
 def test_invalid_csr_span_is_rejected_before_native_planning():
@@ -145,9 +144,7 @@ def test_invalid_csr_span_is_rejected_before_native_planning():
     design = build_rebuffer_design_from_pydb(pydb)
 
     assert design["status"] == "unsupported"
-    assert "flat_net2pin_start_map_does_not_cover_elements" in design[
-        "unsupported_reasons"
-    ]
+    assert "flat_net2pin_start_map_does_not_cover_elements" in design["unsupported_reasons"]
     assert design["summary"]["status"] == "unsupported"
 
 

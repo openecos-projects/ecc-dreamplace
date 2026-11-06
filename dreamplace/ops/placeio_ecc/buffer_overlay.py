@@ -12,6 +12,14 @@ import json
 import os
 from collections.abc import Mapping
 
+from .overlay_metadata import (
+    FrozenRecord,
+    FrozenValues,
+    NativeOverlayMetadata,
+    freeze_record,
+    frozen_mutation_arguments,
+)
+
 ARTIFACT = "placeio_ecc_buffer_session"
 ARTIFACT_VERSION = 1
 
@@ -41,10 +49,14 @@ class _ActionList(list):
     invalidation event.
     """
 
-    __slots__ = ("_digest",)
+    __slots__ = ("_digest", "_freeze")
 
-    def __init__(self, values=()):
-        super().__init__(values)
+    def __init__(self, values=(), *, freeze=False):
+        self._freeze = freeze
+        if freeze:
+            super().__init__(freeze_record(value) for value in values)
+        else:
+            super().__init__(values)
         self._digest = None
 
     def digest(self):
@@ -53,7 +65,9 @@ class _ActionList(list):
         elif _CHECK_CACHED_DIGEST:
             fresh = action_digest(self)
             if fresh != self._digest:
-                raise AssertionError("cached overlay digest is stale: an action was edited in place")
+                raise AssertionError(
+                    "cached overlay digest is stale: an action was edited in place"
+                )
         return self._digest
 
 
@@ -62,6 +76,8 @@ def _invalidating(name):
 
     def wrapper(self, *args, **kwargs):
         self._digest = None
+        if self._freeze:
+            args = frozen_mutation_arguments(name, args)
         return method(self, *args, **kwargs)
 
     wrapper.__name__ = name
@@ -85,7 +101,7 @@ def _names(value):
     return tuple(str(item) for item in list(value))
 
 
-class BufferOverlay:
+class BufferOverlay(NativeOverlayMetadata):
     """Copy-on-write representation of buffer insertion actions.
 
     The overlay groups actions by net and assigns a session-local buffer id to
@@ -93,6 +109,7 @@ class BufferOverlay:
     """
 
     def __init__(self, base_pydb, *, timing_model=None):
+        super().__init__()
         if base_pydb is None:
             raise ValueError("buffer overlay requires a base pydb")
         self.base_pydb = base_pydb
@@ -120,7 +137,7 @@ class BufferOverlay:
 
     @actions.setter
     def actions(self, values):
-        self._actions = _ActionList(values)
+        self._actions = _ActionList(values, freeze=self._metadata_journal_enabled)
 
     def actions_digest(self):
         """Canonical digest of the current action list (cached until mutation)."""
@@ -557,7 +574,9 @@ class BufferOverlay:
             ),
         }
         if projection_error is not None:
-            self.projection_audit["persistent_graph_fallback"] = projection_error
+            self.projection_audit = {
+                **self.projection_audit, "persistent_graph_fallback": projection_error
+            }
         return projected
 
     def _remove_native_insert(self, action):
@@ -682,10 +701,10 @@ class BufferOverlay:
         }
 
     def _rebuild_patches(self):
-        self.net_patches = {}
+        patches = {}
         for action in self.actions:
             net_name = action["net_name"]
-            patch = self.net_patches.setdefault(
+            patch = patches.setdefault(
                 net_name,
                 {
                     "inserted_buffer_ids": [],
@@ -698,20 +717,62 @@ class BufferOverlay:
                 str(value) for value in action.get("downstream_pin_names", ()) or ()
             )
             patch["action_count"] += 1
+        self.net_patches = patches
 
-    def apply(self, actions):
+    def _append_patch_record(self, action):
+        """Publish one immutable patch update without freezing all actions.
+
+        LEGACY enables the metadata journal so checkpoints can retain immutable
+        roots.  Rebuilding the complete ``net_patches`` mapping after every
+        accepted candidate turned that guarantee into an O(history) JSON
+        serialization.  An insertion changes only one net, so copy the outer
+        root and the affected patch while sharing every other frozen record.
+        """
+
+        if not self._metadata_journal_enabled:
+            return False
+        net_name = action["net_name"]
+        current = self._net_patches
+        old = current.get(net_name)
+        inserted = list(old.get("inserted_buffer_ids", ())) if old is not None else []
+        loads = list(old.get("load_pin_names", ())) if old is not None else []
+        inserted.append(action["session_buffer_id"])
+        loads.extend(str(value) for value in action.get("downstream_pin_names", ()) or ())
+        patch = FrozenRecord(
+            (
+                ("inserted_buffer_ids", FrozenValues(inserted)),
+                ("load_pin_names", FrozenValues(loads)),
+                ("action_count", (int(old["action_count"]) if old is not None else 0) + 1),
+            )
+        )
+        rows = []
+        replaced = False
+        for key, value in current.items():
+            if key == net_name:
+                rows.append((key, patch))
+                replaced = True
+            else:
+                rows.append((key, value))
+        if not replaced:
+            rows.append((net_name, patch))
+        self._net_patches = FrozenRecord(rows)
+        return True
+
+    def apply(self, actions, *, transactional=True):
         if not isinstance(actions, (list, tuple)):
             raise TypeError("actions must be a list or tuple")
-        snapshot = self._snapshot()
+        snapshot = self._snapshot() if transactional else None
         try:
             return self._apply_actions(actions)
         except Exception:
-            self._restore_snapshot(snapshot)
+            if snapshot is not None:
+                self._restore_snapshot(snapshot)
             raise
 
     def _apply_actions(self, actions):
         added = []
         removed = []
+        rebuild_patches = False
         for action in actions:
             normalized = self._normalize_action(action)
             if normalized.get("action_kind") == "buffer_remove":
@@ -733,6 +794,7 @@ class BufferOverlay:
                 self.actions.pop(index)
                 self.removed_buffer_ids.add(target)
                 removed.append(target)
+                rebuild_patches = True
                 continue
             try:
                 self._apply_native_insert(normalized)
@@ -764,7 +826,10 @@ class BufferOverlay:
             self.actions.append(normalized)
             added.append(normalized)
             self._next_buffer_id += 1
-        self._rebuild_patches()
+            if not self._append_patch_record(normalized):
+                rebuild_patches = True
+        if rebuild_patches:
+            self._rebuild_patches()
         if added or removed:
             self.epoch += 1
         return {
@@ -852,15 +917,18 @@ class BufferOverlay:
     def _snapshot(self):
         module = self._native_module()
         bridge = getattr(self.timing_model, "_persistent_graph_bridge", None)
-        return {
+        metadata = self.metadata_checkpoint() if self._metadata_journal_enabled else {
             "actions": _json_safe(self.actions),
-            "next_buffer_id": self._next_buffer_id,
-            "removed_buffer_ids": set(self.removed_buffer_ids),
             "base_removals": _json_safe(self.base_removals),
-            "epoch": self.epoch,
-            "native_topologies": dict(self.native_topologies),
             "native_topology_events": _json_safe(self.native_topology_events),
             "projection_audit": _json_safe(self.projection_audit),
+        }
+        return {
+            **metadata,
+            "next_buffer_id": self._next_buffer_id,
+            "removed_buffer_ids": set(self.removed_buffer_ids),
+            "epoch": self.epoch,
+            "native_topologies": dict(self.native_topologies),
             "native_checkpoints": (
                 {
                     net_name: module.checkpoint_incremental_topology(state)
@@ -901,16 +969,29 @@ class BufferOverlay:
             "action_count": len(self.actions),
         }
 
+    def release_checkpoint(self, checkpoint_id):
+        """Drop a native scheduler checkpoint after its restore window closes."""
+
+        checkpoint_id = int(checkpoint_id)
+        existed = checkpoint_id in self._checkpoints
+        self._checkpoints.pop(checkpoint_id, None)
+        return {
+            "status": "released" if existed else "already_released",
+            "checkpoint_id": checkpoint_id,
+        }
+
     def _restore_snapshot(self, checkpoint):
+        shared_metadata = checkpoint.get("metadata_journal", False)
+        clone = (lambda value: value) if shared_metadata else _json_safe
         native_timing_checkpoint = checkpoint.get("native_timing_checkpoint")
         if native_timing_checkpoint is not None:
             if self.native_timing_bridge is None:
                 raise ValueError("native timing checkpoint has no campaign owner")
             self.native_timing_bridge.restore(native_timing_checkpoint)
-        self.actions = _json_safe(checkpoint["actions"])
+        self.actions = clone(checkpoint["actions"])
         self._next_buffer_id = checkpoint["next_buffer_id"]
         self.removed_buffer_ids = set(checkpoint["removed_buffer_ids"])
-        self.base_removals = _json_safe(checkpoint["base_removals"])
+        self.base_removals = clone(checkpoint["base_removals"])
         self.native_topologies = dict(checkpoint["native_topologies"])
         self.native_repair_sessions = {
             name: session
@@ -945,11 +1026,14 @@ class BufferOverlay:
             self.native_campaign_session.restore(campaign_checkpoint)
         elif campaign_checkpoint is None and self.native_timing_bridge is None:
             self.native_campaign_session = None
-        self.native_topology_events = _json_safe(checkpoint["native_topology_events"])
-        self.projection_audit = _json_safe(
+        self.native_topology_events = clone(checkpoint["native_topology_events"])
+        self.projection_audit = clone(
             checkpoint.get("projection_audit", {})
         )
-        self._rebuild_patches()
+        if shared_metadata:
+            self.net_patches = checkpoint["net_patches"]
+        else:
+            self._rebuild_patches()
         self.epoch = checkpoint["epoch"]
 
     def restore(self, checkpoint_id):

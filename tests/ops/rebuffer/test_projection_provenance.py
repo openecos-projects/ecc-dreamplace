@@ -7,7 +7,10 @@ from dreamplace.ops.rebuffer import rebuffer_cpp
 
 
 @pytest.mark.parametrize("foreign_source_ids", [False, True])
-def test_descendant_load_uses_carrier_identity_before_an_aliasing_mutable_node(foreign_source_ids):
+@pytest.mark.parametrize("layout", ["canonical", "reversed", "duplicate", "conflicting"])
+def test_descendant_load_uses_carrier_identity_before_an_aliasing_mutable_node(
+    foreign_source_ids, layout
+):
     base = SimpleNamespace(
         pin_names=["drv:Y", "buf:A", "buf:Y", "load:A", "branch:A"],
         net_names=["n0", "n1"],
@@ -90,9 +93,26 @@ def test_descendant_load_uses_carrier_identity_before_an_aliasing_mutable_node(f
             source_parent_node_id=8,
             source_child_node_id=9,
         )
-    result = rebuffer_cpp.project_overlay_actions(base, payload, [upstream, downstream], [action])[
-        0
-    ]
+    expected_projection = rebuffer_cpp.project_overlay_actions(
+        base, payload, [upstream, downstream], [action]
+    )
+    if layout == "reversed":
+        payload["state_provenance"].reverse()
+    elif layout in ("duplicate", "conflicting"):
+        extra = dict(payload["state_provenance"][0])
+        if layout == "conflicting":
+            extra["state_node_id"] += 999
+        payload["state_provenance"].append(extra)
+    if layout == "conflicting":
+        with pytest.raises(ValueError, match="duplicate partition vertex provenance"):
+            rebuffer_cpp.project_overlay_actions(base, payload, [upstream, downstream], [action])
+        return
+
+    # Repeated projection also proves the simulation leaves borrowed live
+    # topology states untouched, including nets outside the candidate bundle.
+    observed = rebuffer_cpp.project_overlay_actions(base, payload, [upstream, downstream], [action])
+    assert observed == expected_projection
+    result = observed[0]
     expected = {
         "net_id": 0,
         "downstream_pins": [1],

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #pragma once
 
+#include <map>
+
 #include "rebuffer_tree_dp.hh"
 
 namespace rebuffer {
@@ -10,6 +12,7 @@ namespace rebuffer {
 bool optimizeCurrentDriverTree(
     const DesignView& design, const TimingView& timing, const LibertyView& liberty,
     const CharacterizationResult& characterization, const RepairConfig& config,
-    const CurrentDriverTree& source, TreeVgdpResult& result, std::string& reason);
+    const CurrentDriverTree& source, TreeVgdpResult& result, std::string& reason,
+    std::map<std::string, double>* phase_timings = nullptr);
 
 }  // namespace rebuffer

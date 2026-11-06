@@ -12,6 +12,9 @@
 #include "pybind11/stl.h"
 #include "rebuffer_driver_tree.hh"
 #include "rebuffer_native_queue.hh"
+#include "rebuffer_legacy_queue.hh"
+#include "rebuffer_timing_local.hh"
+#include <chrono>
 #include "rebuffer_python_views.hh"
 #include "rebuffer_tree_search.hh"
 
@@ -79,6 +82,39 @@ bool timingBufferMoveEligible(const DesignView& design, int net_id,
          && (config.timing_max_fanout <= 0 || fanout < config.timing_max_fanout);
 }
 
+bool hasTopLevelOutputPort(const DesignView& design, int net_id)
+{
+  if (design.num_terminal_nis <= 0
+      || net_id < 0
+      || net_id + 1 >= static_cast<int>(design.flat_net2pin_start_map.size())
+      || net_id >= static_cast<int>(design.net2driver_pin_map.size())) {
+    return false;
+  }
+  const int base_nodes = design.num_base_nodes > 0 ? design.num_base_nodes : design.num_nodes;
+  const int io_begin = base_nodes - design.num_terminal_nis;
+  if (io_begin < 0 || io_begin > base_nodes) return false;
+  const int driver = design.net2driver_pin_map[net_id];
+  const int begin = design.flat_net2pin_start_map[net_id];
+  const int end = design.flat_net2pin_start_map[net_id + 1];
+  if (begin < 0 || end < begin || end > static_cast<int>(design.flat_net2pin_map.size())) {
+    return false;
+  }
+  // PyPlaceDB puts I/O nodes in the final num_terminal_NIs node slots and
+  // puts IdbNet::get_driving_pin() first in every flat net.  For ordinary
+  // input/output ports, an I/O pin that is not the net driver is a top-level
+  // output port.  This is the placement-RC equivalent of OpenROAD's scan of
+  // every connected pin for isTopLevelPort && direction->isOutput(); an input
+  // port is the driver and is therefore retained as a legal source.
+  for (int index = begin; index < end; ++index) {
+    const int pin = design.flat_net2pin_map[index];
+    if (pin != driver && pin >= 0 && pin < static_cast<int>(design.pin2node_map.size())
+        && design.pin2node_map[pin] >= io_begin) {
+      return true;
+    }
+  }
+  return false;
+}
+
 std::string actionKey(const py::dict& action)
 {
   std::ostringstream key;
@@ -121,21 +157,32 @@ py::dict planNativeCurrentTree(const py::dict& request,
       const auto& liberty = input.liberty;
       const auto& characterization = input.characterization;
       const auto config = rebuffer_python::configFromDict(planner_config);
+      if (planner_config.contains("native_skip_top_level_output_ports")
+          && planner_config["native_skip_top_level_output_ports"].cast<bool>()
+          && hasTopLevelOutputPort(design, tree->root_net_id)) {
+        return unsupported("timing_buffer_move_top_level_output_port");
+      }
       if (!timingBufferMoveEligible(design, tree->root_net_id, config)) {
         return unsupported("timing_buffer_move_fanout");
       }
       TreeVgdpResult result;
       std::string reason;
-      if (!optimizeCurrentDriverTree(design,
+      const auto vgdp_started = std::chrono::steady_clock::now();
+      const bool optimized = optimizeCurrentDriverTree(design,
                                  timing,
                                  liberty,
                                  characterization,
                                  config,
                                  *tree,
                                  result,
-                                 reason)) {
+                                 reason,
+                                 input.phase_timings);
+      if (input.phase_timings) (*input.phase_timings)["vgdp"] +=
+          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - vgdp_started).count();
+      if (!optimized) {
         return unsupported(reason.c_str());
       }
+      const auto pack_started = std::chrono::steady_clock::now();
       const int requested_variant = input.candidate_variant;
       focus_net_id = input.focus_net_id;
       std::vector<const TreeVgdpCandidate*> focused;
@@ -176,6 +223,8 @@ py::dict planNativeCurrentTree(const py::dict& request,
       tree_search["recovery_attempt_count"] = result.recovery_attempt_count;
       tree_search["recovered_buffer_count"] = result.recovered_buffer_count;
       net_name = input.net_name;
+      if (input.phase_timings) (*input.phase_timings)["candidate_pack"] +=
+          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - pack_started).count();
     } catch (const std::exception& error) {
       return unsupported(error.what());
     }
@@ -279,7 +328,9 @@ py::dict runRepairTimingNativeSnapshotOperator(
     const py::object& apply,
     const py::object& evaluate,
     const py::object& restore,
-    const py::dict& config)
+    const py::dict& config,
+    const py::object& endpoint_state,
+    const py::object& release_checkpoint)
 {
   const bool snapshot_probe_only
       = config.contains("native_snapshot_probe_only")
@@ -335,6 +386,10 @@ py::dict runRepairTimingNativeSnapshotOperator(
         if (latest_snapshot->contains("_native_planning_state")) {
           ++(*payload_hits);
           try {
+            const auto state = (*latest_snapshot)["_native_planning_state"];
+            if (py::isinstance<NativeTimingLocalPlanningSnapshot>(state)) {
+              return state.cast<std::shared_ptr<NativeTimingLocalPlanningSnapshot>>()->plan(request, config);
+            }
             return (*latest_snapshot)["_native_planning_state"]
                 .cast<std::shared_ptr<NativeTimingPlanningSnapshot>>()->plan(request, config);
           } catch (const std::exception& error) {
@@ -380,13 +435,20 @@ py::dict runRepairTimingNativeSnapshotOperator(
         ++(*payload_misses);
         return unsupported("native_snapshot_planner_payload_not_found");
       });
-  py::dict result = runRepairTimingQueueOperator(snapshot_adapter,
+  const bool legacy = config.contains("timing_scheduler")
+      && config["timing_scheduler"].cast<std::string>() == "openroad_legacy";
+  py::dict result = legacy
+      ? runRepairTimingLegacyQueueOperator(endpoint_state, snapshot_adapter,
+          native_provider, checkpoint, apply, evaluate, restore, config,
+          release_checkpoint)
+      : runRepairTimingQueueOperator(snapshot_adapter,
                                                   native_provider,
                                                   checkpoint,
                                                   apply,
                                                   evaluate,
                                                   restore,
-                                                  config);
+                                                  config,
+                                                  release_checkpoint);
   result["operator"] = "rebuffer_native_repair_timing_native_snapshot";
   result["native_candidate_planner"] = true;
   result["native_payload_snapshot"] = true;

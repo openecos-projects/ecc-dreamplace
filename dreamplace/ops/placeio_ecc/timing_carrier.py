@@ -65,8 +65,15 @@ PHYSICAL_FIELDS = frozenset(
 
 def require_carrier_schema(pydb):
     """Reject unsupported sparse state semantics before a native mutation."""
-    if int(pydb.timing_schema_version) != 2:
-        raise ValueError("committed timing carrier currently requires schema 2")
+    # Schema 3 adds the sparse constraint view on top of the same per-pin,
+    # per-arc and per-endpoint rows the carrier rebuild consumes, so both
+    # versions are valid rebuild bases.  Richer SDCs (multi-clock, path
+    # exceptions, clock groups) only exist in schema 3.
+    version = int(pydb.timing_schema_version)
+    if version not in (2, 3):
+        raise ValueError(
+            f"committed timing carrier requires schema 2 or 3, got {version}"
+        )
 
 
 class CommittedTimingPyDB:
@@ -108,8 +115,15 @@ class CommittedTimingPyDB:
                 rebuild_base, previous_pydb, physical_pydb
             )
         self.__dict__.update(payload)
+        # The rebuilt carrier owns a compact schedule, not the export's sparse
+        # constraint view, so it declares the legacy per-pin schema.  The
+        # original sparse view stays qualified on the metadata owner.
+        self.timing_schema_version = 2
         if validate_schema:
-            validate_timing_schema(self)
+            # The sparse view describes the immutable export, while the payload
+            # carries the rebuilt schedule.  Qualify the owner they both come
+            # from instead of the mixed carrier view.
+            validate_timing_schema(rebuild_base)
 
     def __getattr__(self, name):
         if name.startswith("backend_endpoint_"):

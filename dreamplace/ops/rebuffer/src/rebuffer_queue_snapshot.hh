@@ -24,6 +24,8 @@ struct TimingQueueItem
   double endpoint_slack_ps = 0.0;
   int root_net_id = -1;
   int driver_pin_id = -1;
+  double driver_score_ps = 0.0;
+  bool has_driver_score = false;
   double gradient_score = 0.0;
   bool has_gradient_score = false;
   std::string tree_key;

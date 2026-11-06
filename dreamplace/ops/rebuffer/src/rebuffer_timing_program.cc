@@ -185,9 +185,12 @@ std::shared_ptr<const TimingPropagationProgram> timingProgramFromPython(
     if (key == "recovery_rat_is_capture_deadline") continue;
     require(values.contains(py::str(key)), "missing propagation input field: " + key);
   }
+  // Schema 3 adds the sparse constraint view; the propagation payload keys
+  // consumed below are identical, so both versions are valid sources.
+  const int timing_schema_version = values["timing_schema_version"].cast<int>();
   require(values["schema_version"].cast<int>() == 1
-              && values["timing_schema_version"].cast<int>() == 2,
-          "native propagation requires schema 2 timing inputs");
+              && (timing_schema_version == 2 || timing_schema_version == 3),
+          "native propagation requires schema 2 or 3 timing inputs");
   require(values["aggregation_mode"].cast<std::string>() == "hard",
           "native propagation requires hard aggregation");
   const auto scope = values["metric_scope"].cast<std::string>();

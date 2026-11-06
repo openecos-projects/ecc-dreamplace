@@ -59,7 +59,9 @@ int rebufferChooseBufferCell(const LibertyView& liberty,
                              double downstream_load,
                              bool target_cell_math,
                              bool target_cell_selection,
-                             int initial_cell)
+                             int initial_cell,
+                             double sizing_area_limit,
+                             double sizing_leakage_limit)
 {
   if (target_cell_selection) {
     if (!target_cell_math) throw std::invalid_argument("target-cell selection requires canonical target-cell math");
@@ -70,7 +72,12 @@ int rebufferChooseBufferCell(const LibertyView& liberty,
       }
       initial_cell = characterization.filtered_buffers[lowest].cell_index;
     }
-    return findBufferTargetCell(liberty, characterization, initial_cell, downstream_load);
+    return findBufferTargetCell(liberty,
+                                characterization,
+                                initial_cell,
+                                downstream_load,
+                                sizing_area_limit,
+                                sizing_leakage_limit);
   }
   const auto& candidates = characterization.filtered_buffers.empty()
                                ? characterization.fast_buffers
@@ -163,23 +170,43 @@ RepeaterCellSelection rebufferChooseRepeaterCell(const LibertyView& liberty,
                                const CharacterizationResult& characterization,
                                double input_slew_rise, double input_slew_fall,
                                double initial_load, double repeater_load,
-                               const RepairConfig& config)
+                               const RepairConfig& config,
+                               bool resize)
 {
+  const bool do_resize
+      = resize && config.repair_design_openroad_repeater_resize;
   if (!config.repair_design_target_cell_selection) {
     return {rebufferChooseBufferCell(liberty, characterization,
         input_slew_rise, input_slew_fall,
-        config.repair_design_openroad_repeater_resize ? repeater_load : initial_load,
+        do_resize ? repeater_load : initial_load,
         config.repair_design_target_cell_math), -1};
   }
   // findTargetCell first starts from the lowest-drive buffer. The insertion
   // resize then starts from that selected cell, whose eligibility may differ.
-  const int initial = rebufferChooseBufferCell(liberty, characterization,
-      input_slew_rise, input_slew_fall, initial_load, true, true);
-  if (initial < 0 || !config.repair_design_openroad_repeater_resize) {
+  const int initial = rebufferChooseBufferCell(liberty,
+                                               characterization,
+                                               input_slew_rise,
+                                               input_slew_fall,
+                                               initial_load,
+                                               true,
+                                               true,
+                                               -1,
+                                               config.sizing_area_limit,
+                                               config.sizing_leakage_limit);
+  if (initial < 0 || !do_resize) {
     return {initial, initial};
   }
-  return {rebufferChooseBufferCell(liberty, characterization,
-      input_slew_rise, input_slew_fall, repeater_load, true, true, initial), initial};
+  return {rebufferChooseBufferCell(liberty,
+                                   characterization,
+                                   input_slew_rise,
+                                   input_slew_fall,
+                                   repeater_load,
+                                   true,
+                                   true,
+                                   initial,
+                                   config.sizing_area_limit,
+                                   config.sizing_leakage_limit),
+          initial};
 }
 
 }  // namespace rebuffer

@@ -37,7 +37,10 @@ void initializeBufferCellSelection(LibertyView& liberty)
   }
 }
 
-std::vector<int> swappableBufferCells(const LibertyView& liberty, int source)
+std::vector<int> swappableBufferCells(const LibertyView& liberty,
+                                      int source,
+                                      double sizing_area_limit,
+                                      double sizing_leakage_limit)
 {
   if (!liberty.cell_metadata) throw std::invalid_argument("repair cell selection requires source Library/LEF metadata");
   const auto& metadata = liberty.cell_metadata->cells;
@@ -56,8 +59,14 @@ std::vector<int> swappableBufferCells(const LibertyView& liberty, int source)
   for (int candidate : equivalent) {
     const auto& target = metadata[candidate];
     if (!target.has_master) continue;
-    if (source_area != 0 && liberty.cells[candidate].area / source_area > 4.0) continue;
-    if (current.has_leakage && target.has_leakage && target.leakage / current.leakage > 4.0) continue;
+    if (sizing_area_limit > 0.0 && source_area != 0
+        && liberty.cells[candidate].area / source_area > sizing_area_limit) {
+      continue;
+    }
+    if (sizing_leakage_limit > 0.0 && current.has_leakage && target.has_leakage
+        && target.leakage / current.leakage > sizing_leakage_limit) {
+      continue;
+    }
     if (!current.function_class.empty() && current.function_class != target.function_class) continue;
     result.push_back(candidate);
   }
@@ -66,14 +75,18 @@ std::vector<int> swappableBufferCells(const LibertyView& liberty, int source)
 
 int findBufferTargetCell(const LibertyView& liberty,
                          const CharacterizationResult& characterization,
-                         int source, double load)
+                         int source,
+                         double load,
+                         double sizing_area_limit,
+                         double sizing_leakage_limit)
 {
   if (!std::isfinite(load) || load < 0) throw std::invalid_argument("invalid target-cell load");
   const auto& cells = liberty.cells;
   int best = source;
   double distance = std::abs(load - cellTargetLoad(cells.at(source), characterization.target_slew));
   double delay = cellTargetSlewDelay(cells[source], characterization.target_slew, load);
-  for (int candidate : swappableBufferCells(liberty, source)) {
+  for (int candidate : swappableBufferCells(
+           liberty, source, sizing_area_limit, sizing_leakage_limit)) {
     const double candidate_distance = std::abs(load - cellTargetLoad(cells[candidate], characterization.target_slew));
     const double candidate_delay = cellTargetSlewDelay(cells[candidate], characterization.target_slew, load);
     if ((candidate_delay < delay && candidate_distance < distance * 1.1)
@@ -91,10 +104,13 @@ int findBufferSlewRepairCell(const LibertyView& liberty,
                              double input_slew_rise,
                              double input_slew_fall,
                              double load,
-                             double slew_margin)
+                             double slew_margin,
+                             double sizing_area_limit,
+                             double sizing_leakage_limit)
 {
   std::vector<std::pair<double, int>> sizes;
-  for (int candidate : swappableBufferCells(liberty, source)) {
+  for (int candidate : swappableBufferCells(
+           liberty, source, sizing_area_limit, sizing_leakage_limit)) {
     const auto& cell = liberty.cells[candidate];
     const double slew = rebufferCellOutputSlew(
         cell, input_slew_rise, input_slew_fall, load);
@@ -128,7 +144,7 @@ void registerCellSelectionBindings(py::module_& module)
           || targets[i] < 0 || targets[i] >= static_cast<int>(liberty.cells.size())) {
         throw std::invalid_argument("buffer resize cell index is outside Liberty");
       }
-      const auto candidates = swappableBufferCells(liberty, sources[i]);
+      const auto candidates = swappableBufferCells(liberty, sources[i], 0.0, 0.0);
       if (std::find(candidates.begin(), candidates.end(), targets[i]) == candidates.end()) {
         throw std::invalid_argument("target is not a swappable buffer: "
             + liberty.cells[sources[i]].name + " -> " + liberty.cells[targets[i]].name);

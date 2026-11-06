@@ -51,9 +51,9 @@ class PlaceIOBufferSession:
             "refresh_generation": int(getattr(self.raw_db, "refresh_generation", 0) or 0),
         }
 
-    def apply(self, actions):
+    def apply(self, actions, *, transactional=True):
         self._require_open()
-        return self.overlay.apply(actions)
+        return self.overlay.apply(actions, transactional=transactional)
 
     def record_candidate(self, net_id, observation, state):
         self._require_open()
@@ -102,6 +102,10 @@ class PlaceIOBufferSession:
     def checkpoint(self, label=""):
         self._require_open()
         return self.overlay.checkpoint(label)
+
+    def release_checkpoint(self, checkpoint_id):
+        self._require_open()
+        return self.overlay.release_checkpoint(checkpoint_id)
 
     def restore(self, checkpoint_id):
         self._require_open()

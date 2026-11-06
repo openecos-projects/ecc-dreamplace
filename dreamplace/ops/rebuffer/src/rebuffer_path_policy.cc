@@ -90,7 +90,7 @@ int cellIndexForNode(const DesignView& design, int node)
 
 std::vector<int> rankPathDriverPins(const PathDriverAccess& access,
     const LibertyView& liberty, const std::vector<int>& path,
-    const TimingView* path_context, bool openroad_intrinsic)
+    const TimingView* path_context, bool openroad_intrinsic, std::vector<double>* scores)
 {
   std::vector<RankedDriver> ranked;
   ranked.reserve(path.size());
@@ -147,8 +147,10 @@ std::vector<int> rankPathDriverPins(const PathDriverAccess& access,
 
   std::vector<int> result;
   result.reserve(ranked.size());
+  if (scores) scores->clear();
   for (const auto& item : ranked) {
     result.push_back(item.pin);
+    if (scores) scores->push_back(item.delay);
   }
   return result;
 }

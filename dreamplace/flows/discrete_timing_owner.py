@@ -1116,7 +1116,9 @@ class DiscreteTimingOwner:
         rounds, best_round = [], 0
         best_round_committed = False
         native_action_backward_used = False
-        for round_id in range(1, int(self.params.timing_opt_sizing_rounds) + 1):
+        total_rounds = int(self.params.timing_opt_sizing_rounds)
+        for round_id in range(1, total_rounds + 1):
+            has_next_round = round_id < total_rounds
             self.round_index += 1
             if self.action_mode == "lut_action" and action_context is None:
                 started_at = time.perf_counter()
@@ -1379,6 +1381,8 @@ class DiscreteTimingOwner:
                 rounds.append(round_record)
                 # Consume the no-op attempt while rebuilding the graph for the
                 # next fixed-budget sizing round.
+                if not has_next_round:
+                    continue
                 if self.action_mode == "lut_action":
                     started_at = time.perf_counter()
                     loss, action_context = self._action_loss(model, pos)
@@ -1457,7 +1461,7 @@ class DiscreteTimingOwner:
             # pays for one timing evaluation instead of a value-only pass plus
             # a second action pass.
             started_at = time.perf_counter()
-            if self.action_mode == "lut_action":
+            if self.action_mode == "lut_action" and has_next_round:
                 loss, action_context = self._action_loss(model, pos)
                 action_build_ms.append(
                     float(action_context.mapping_summary.get("build_ms", 0.0) or 0.0)
@@ -1497,11 +1501,16 @@ class DiscreteTimingOwner:
                         ),
                     }
                 )
-            else:
+            elif has_next_round:
                 loss = self._loss(model, pos)
                 action_context = None
+            else:
+                with torch.no_grad():
+                    loss = self._loss(model, pos)
+                if self.action_mode != "lut_action":
+                    action_context = None
             forward_ms.append((time.perf_counter() - started_at) * 1000.0)
-            if self.action_mode != "lut_action":
+            if self.action_mode != "lut_action" or not has_next_round:
                 timing_forward_ms.append(forward_ms[-1])
             actual = float(loss.detach())
             fits_started_at = time.perf_counter()

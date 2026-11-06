@@ -14,13 +14,16 @@ from .net_aat_native import _NetAat
 class SparseNetProvider:
     def __init__(self, timing, schedule):
         self.timing = timing
-        self.levels = {
-            id(level): (
+        self.levels = {}
+        for index, level in enumerate(schedule.levels):
+            row_net_ids = timing.pin_net[level.pins[level.net[:, 1]]]
+            net_ids = torch.unique(row_net_ids)
+            self.levels[id(level)] = (
                 index,
-                timing.pin_net[level.pins[level.net[:, 1]]],
+                row_net_ids,
+                net_ids,
+                frozenset(int(net_id) for net_id in net_ids.detach().cpu().tolist()),
             )
-            for index, level in enumerate(schedule.levels)
-        }
         self.provider = None
 
     def bind(self, provider):
@@ -42,8 +45,12 @@ class SparseNetProvider:
         provider = self.provider
         if provider is None:
             return output
-        index, row_net_ids = self.levels[id(level)]
-        net_ids = torch.unique(row_net_ids)
+        affected = getattr(provider, "affected_net_ids", None)
+        if affected is not None and not affected:
+            return output
+        index, row_net_ids, net_ids, net_id_set = self.levels[id(level)]
+        if affected is not None and not (net_id_set & affected):
+            return output
         epoch = self.timing.critical_path_topology_epoch
         if not provider.has_dynamic_nets(
             net_ids, level_id=index, level_view_epoch=epoch

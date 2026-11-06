@@ -227,12 +227,20 @@ def prepare_candidate_owner(
     if state is None:
         raise RuntimeError(f"S5B1 state construction failed: {lane.summarize()}")
     owner._transfer_counts(state, counts)
+    if hasattr(state, "activation_param"):
+        state.timing_active_only = bool(active_only)
+        lane._candidate_state_contains_full_domain = True
+        if active_only:
+            state.activation_param.requires_grad_(requires_grad=False)
+            owner.ops.steiner_topo_op.frozen_nets.candidate_state = state
     if hasattr(state, "z_param"):
         state.z_param.requires_grad_(requires_grad=False)
         state.bsu_index_param.requires_grad_(requires_grad=False)
     lane.attach_state(owner.data)
     owner.lane = lane
     model._virtual_cell_density_view = None
+    if clear_timing_geometry_cache:
+        model._timing_geometry_cache = None
     owner._pending_dirty_instance_ids = set()
     owner._pending_dirty_net_ids = set()
     finish("lane_created")

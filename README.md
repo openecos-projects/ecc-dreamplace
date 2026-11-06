@@ -136,11 +136,13 @@ restart clears the initialized balance state and recomputes the outer weight.
 Set `place.timing_grad_balance_reset_on_restart = 0` to preserve the current
 weight and cached balance state across restarts.
 
-`timing_aggregation_mode` selects AAT/RAT propagation aggregation: `smooth`
-(default) uses LSE, while `hard` uses max/min. LSE uses the positive temperature
+`timing_aggregation_mode` selects aggregation for AAT/RAT propagation and
+endpoint rise/fall and timing-check candidates: `smooth` (default) uses LSE,
+while `hard` uses max/min. LSE uses the positive temperature
 `timing_aggregation_tau_ps` (default 2.0 ps). Smaller temperatures approach
-hard max/min. ECC exposes both through `place.*` parameters. Endpoint WNS
-still uses hard min, and TNS still sums negative slacks.
+hard max/min. ECC exposes both through `place.*` parameters. With `smooth`,
+endpoint WNS/TNS use the aggregated soft slack and TNS clamps each endpoint
+slack at zero before summing; `hard` preserves hard min/max semantics.
 
 `overflow_reference_mode` selects the area used to normalize overflow. The
 default `initial` freezes the GP-entry movable area. `ordinary` preserves the

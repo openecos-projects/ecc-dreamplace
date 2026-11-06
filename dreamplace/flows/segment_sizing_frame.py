@@ -69,7 +69,7 @@ def freeze_segment_milestone_sizing_frame(
         "frame": "pre_nesterov_x_t",
         "objective_mode": "normal_joint_objective",
         "timing_objective_lane": str(
-            getattr(params, "timing_objective_lane", "timing_only")
+            getattr(params, "timing_objective_lane", "timing_slew_cap")
         ),
         "timing_wns_coeff": float(getattr(params, "timing_wns_coeff", 0.0)),
         "timing_tns_coeff": float(getattr(params, "timing_tns_coeff", 0.0)),

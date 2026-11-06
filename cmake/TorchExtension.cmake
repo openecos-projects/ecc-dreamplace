@@ -2,13 +2,15 @@
 # @author Zizheng Guo
 # @brief Use CMake to compile PyTorch extensions
 
-# Activate new FindPython mode, specified in pybind11Config.cmake.in...
-# This one is recommended from CMake 3.12+.
-# It should try to find the Python associated with the environment variable.
-# find_package(Python COMPONENTS Interpreter Development)
-if(DEFINED Python_EXECUTABLE AND NOT DEFINED PYTHON_EXECUTABLE)
-  set(PYTHON_EXECUTABLE "${Python_EXECUTABLE}")
+# Resolve headers and the extension ABI from the same interpreter used by
+# scikit-build and Torch. Legacy FindPythonLibs can mix a venv interpreter
+# with a different Python library from the build shell.
+if(DEFINED PYTHON_EXECUTABLE AND NOT DEFINED Python_EXECUTABLE)
+  set(Python_EXECUTABLE "${PYTHON_EXECUTABLE}")
 endif()
+set(PYBIND11_FINDPYTHON ON)
+find_package(Python 3.11 REQUIRED COMPONENTS Interpreter Development.Module)
+set(PYTHON_EXECUTABLE "${Python_EXECUTABLE}")
 add_subdirectory(thirdparty/pybind11)
 
 if (DEFINED TORCH_INSTALL_PREFIX AND DEFINED TORCH_ENABLE_CUDA AND DEFINED TORCH_VERSION)

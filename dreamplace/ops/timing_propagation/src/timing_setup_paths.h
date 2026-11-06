@@ -43,6 +43,7 @@ struct SetupPathPredecessor {
   // and stable slot; this preserves flat-arc tie order after relevelization.
   // Net arcs precede cell arcs in a tie and use (-1, -1).
   std::pair<int64_t, int64_t> order;
+  int64_t mask = 15;
 };
 
 inline void appendSetupPathStates(std::vector<SetupPathState>& states,
@@ -132,19 +133,20 @@ SetupPathBatch extractSetupPaths(std::vector<SetupPathState> states,
         }
       };
       visit_predecessors(current_pin, [&](const SetupPathPredecessor& edge) {
-        const auto pred = edge.pin, arc = edge.arc_id;
+        const auto pred = edge.pin, arc = edge.arc_id, mask = edge.mask;
         if (arc == -1) {
+          if (!(mask & (1 << (3 * current_transition)))) return;
           const double pred_aat = current_transition == 0
               ? timing.rise_aat[pred] : timing.fall_aat[pred];
           const double delay = current_transition == 0
               ? timing.net_delay_rise[current_pin] : timing.net_delay_fall[current_pin];
           consider(edge, current_transition, pred_aat + delay);
         } else if (current_transition == 0) {
-          if (edge.sense >= 0) consider(edge, 0, timing.rise_aat[pred] + timing.delay_rr[arc]);
-          if (edge.sense <= 0) consider(edge, 1, timing.fall_aat[pred] + timing.delay_fr[arc]);
+          if (edge.sense >= 0 && (mask & 1)) consider(edge, 0, timing.rise_aat[pred] + timing.delay_rr[arc]);
+          if (edge.sense <= 0 && (mask & 4)) consider(edge, 1, timing.fall_aat[pred] + timing.delay_fr[arc]);
         } else {
-          if (edge.sense >= 0) consider(edge, 1, timing.fall_aat[pred] + timing.delay_ff[arc]);
-          if (edge.sense <= 0) consider(edge, 0, timing.rise_aat[pred] + timing.delay_rf[arc]);
+          if (edge.sense >= 0 && (mask & 8)) consider(edge, 1, timing.fall_aat[pred] + timing.delay_ff[arc]);
+          if (edge.sense <= 0 && (mask & 2)) consider(edge, 0, timing.rise_aat[pred] + timing.delay_rf[arc]);
         }
       });
       // A sequential output can have an in-graph async launch predecessor.

@@ -81,7 +81,8 @@ def continuous_size_dynamics_config(params):
         getattr(params, "precise_improvement_parallel_workers", 1) or 1
     )
     timing_objective_lane = str(
-        getattr(params, "timing_objective_lane", "timing_only") or "timing_only"
+        getattr(params, "timing_objective_lane", "timing_slew_cap")
+        or "timing_slew_cap"
     )
     timing_slew_weight = float(getattr(params, "timing_slew_weight", 1.0))
     timing_cap_weight = float(getattr(params, "timing_cap_weight", 1.0))

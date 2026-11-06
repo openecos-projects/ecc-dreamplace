@@ -3,6 +3,8 @@
 import copy
 import math
 
+from .diff_opt_spec import HOLD_COEFFICIENT_NAMES
+
 TIMING_OPT_COEFFICIENT_FIELDS = {
     "wns": "timing_wns_coeff",
     "tns": "timing_tns_coeff",
@@ -45,14 +47,15 @@ def normalize_timing_opt_coefficients(policy):
     mode = policy.get("mode")
     if mode not in ("inherit", "fixed"):
         raise ValueError("timing_opt_coefficients.mode must be inherit or fixed")
-    fields = {"mode", *TIMING_OPT_COEFFICIENT_FIELDS}
-    if set(policy) - fields or (mode == "fixed" and set(policy) != fields):
+    required = {"mode", *TIMING_OPT_COEFFICIENT_FIELDS}
+    fields = required | set(HOLD_COEFFICIENT_NAMES)
+    if set(policy) - fields or (mode == "fixed" and not required <= set(policy)):
         raise ValueError(
-            "timing_opt_coefficients allows mode, wns, tns, slew and cap; "
-            "fixed mode requires all five fields"
+            "timing_opt_coefficients allows mode, wns, tns, slew, cap, hold_wns and hold_tns; "
+            "fixed mode requires mode, wns, tns, slew and cap"
         )
     normalized = {"mode": mode}
-    for name in TIMING_OPT_COEFFICIENT_FIELDS:
+    for name in (*TIMING_OPT_COEFFICIENT_FIELDS, *HOLD_COEFFICIENT_NAMES):
         if name not in policy:
             continue
         value = policy[name]

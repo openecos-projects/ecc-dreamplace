@@ -2198,6 +2198,7 @@ PyPlaceDB buildPyDB(OpenRoadPlaceIOBridgeImpl& raw_db)
         }
         const std::string port_name = liberty_port->name();
         cell_pin_offset[cell_name][port_name] = pin_offset++;
+        pydb.flat_lib_pin_names.append(port_name);
         bool has_bbox = false;
         const odb::Rect pin_bbox = libPortBBox(network, master, liberty_port, &has_bbox);
         pydb.flat_lib_pin_offset_x.append(has_bbox ? (pin_bbox.xMin() + pin_bbox.xMax()) / 2 : 0);

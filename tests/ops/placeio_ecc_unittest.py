@@ -12,6 +12,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from dreamplace.macroPlaceDB import MacroPlaceDB  # noqa: E402
 from dreamplace.ops.placeio_ecc.place_io import PlaceIOFunction  # noqa: E402
+from dreamplace.ops.placeio_ecc.timing_generation import timing_generation_lease  # noqa: E402
 
 
 class FakeEccModule:
@@ -24,10 +25,11 @@ class FakeEccModule:
         return "dm-inst"
 
     def pydb(self, dm_inst, bins_x, bins_y, routability, with_sta,
-             include_m2_pg_rail_blockage=False, include_m2_pg_rail_density=True):
+             include_m2_pg_rail_blockage=False, include_m2_pg_rail_density=True,
+             timing_model_only=False):
         self.export_options = (include_m2_pg_rail_blockage, include_m2_pg_rail_density)
         self.calls.append(
-            ("pydb", dm_inst, bins_x, bins_y, routability, with_sta)
+            ("pydb", dm_inst, bins_x, bins_y, routability, with_sta, timing_model_only)
         )
         return types.SimpleNamespace(
             num_nodes=2,
@@ -88,7 +90,7 @@ class EccPlaceIOTest(unittest.TestCase):
         self.assertEqual("dm-inst", raw_db.dm_inst)
         self.assertEqual(2, raw_db.pydb.num_nodes)
         self.assertEqual(
-            ("pydb", "dm-inst", 64, 32, True, False),
+            ("pydb", "dm-inst", 64, 32, True, False, False),
             module.calls[1],
         )
         self.assertEqual("ecc", PlaceIOFunction.backend_caps(raw_db)["backend"])
@@ -120,7 +122,7 @@ class EccPlaceIOTest(unittest.TestCase):
             module.calls[0],
         )
         self.assertEqual(
-            ("pydb", "dm-inst", 512, 512, False, True),
+            ("pydb", "dm-inst", 512, 512, False, True, False),
             module.calls[2],
         )
 
@@ -178,6 +180,80 @@ class EccPlaceIOTest(unittest.TestCase):
             "native_rebuilt_without_fresh_rc",
             summary["backend_capabilities"]["sta_state_status"],
         )
+
+    def test_failed_refresh_invalidates_old_timing_model(self):
+        module = FakeEccModule()
+        raw_db = PlaceIOFunction.read(
+            types.SimpleNamespace(with_sta=1, design_inputs={"lib": ["cells.lib"]}),
+            module,
+        )
+        old_pydb = raw_db.pydb
+        lease = timing_generation_lease(types.SimpleNamespace(rawdb=raw_db, pydb=old_pydb))
+        module.refresh_place_timing = lambda _inputs: (_ for _ in ()).throw(
+            RuntimeError("native rebuild failed")
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "native rebuild failed"):
+            PlaceIOFunction.refresh(raw_db)
+
+        self.assertIsNone(raw_db.pydb)
+        self.assertIsNot(raw_db.pydb, old_pydb)
+        self.assertFalse(raw_db.timing_enabled)
+        self.assertIn("native rebuild failed", raw_db.refresh_invalidated_reason)
+        self.assertFalse(PlaceIOFunction.backend_caps(raw_db)["supports_sta_pydb"])
+        self.assertFalse(PlaceIOFunction.backend_caps(raw_db)["supports_committed_refresh"])
+        self.assertEqual(
+            "invalidated_refresh_failure",
+            PlaceIOFunction.backend_caps(raw_db)["sta_state_status"],
+        )
+        self.assertEqual(0, raw_db.refresh_generation)
+        with self.assertRaisesRegex(RuntimeError, "invalid or replaced native generation"):
+            lease.require_current()
+        with self.assertRaisesRegex(RuntimeError, "does not support sizing writeback"):
+            PlaceIOFunction.apply_sizing(raw_db, [1, 0], ["BUFX1", "BUFX2"])
+
+    def test_two_refreshes_invalidate_each_prior_tensor_generation(self):
+        module = FakeEccModule()
+        raw_db = PlaceIOFunction.read(types.SimpleNamespace(with_sta=1), module)
+        leases = []
+        original_refresh = module.refresh_place_timing
+
+        def refresh(inputs):
+            self.assertFalse(raw_db.timing_enabled)
+            with self.assertRaisesRegex(RuntimeError, "invalid or replaced native generation"):
+                leases[-1].require_current()
+            return original_refresh(inputs)
+
+        module.refresh_place_timing = refresh
+        for generation in range(3):
+            self.assertEqual(generation, raw_db.refresh_generation)
+            current = timing_generation_lease(
+                types.SimpleNamespace(rawdb=raw_db, pydb=raw_db.pydb)
+            )
+            current.require_current()
+            for previous in leases:
+                with self.assertRaisesRegex(RuntimeError, "invalid or replaced native generation"):
+                    previous.require_current()
+            leases.append(current)
+            if generation < 2:
+                PlaceIOFunction.refresh(raw_db)
+        self.assertTrue(raw_db.timing_enabled)
+
+    def test_operator_rejects_stale_tensor_generation_before_timing_work(self):
+        import torch
+        from dreamplace.ops.timing_propagation.timing_propagation import TimingPropagation
+
+        module = FakeEccModule()
+        raw_db = PlaceIOFunction.read(types.SimpleNamespace(with_sta=1), module)
+        placedb = types.SimpleNamespace(rawdb=raw_db, pydb=raw_db.pydb)
+        timing = TimingPropagation.__new__(TimingPropagation)
+        torch.nn.Module.__init__(timing)
+        timing.timing_model_lease = timing_generation_lease(placedb)
+        PlaceIOFunction.refresh(raw_db)
+        with self.assertRaisesRegex(RuntimeError, "invalid or replaced native generation"):
+            timing({}, {}, {})
+        with self.assertRaisesRegex(RuntimeError, "invalid or replaced native generation"):
+            timing_generation_lease(placedb)
 
     def test_mutation_capabilities_promote_after_native_round_trips(self):
         module = FakeEccModule()

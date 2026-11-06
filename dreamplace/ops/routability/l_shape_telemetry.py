@@ -13,6 +13,7 @@ def reset_l_shape_gradient_telemetry(model):
         "l_shape_last_cost", "l_shape_last_weighted_cost", "l_shape_last_weight",
         "l_shape_last_target_weight", "l_shape_last_weight_candidate",
         "l_shape_last_cap_active", "l_shape_last_base_grad_norm",
+        "l_shape_last_wirelength_grad_norm",
         "l_shape_last_grad_raw_norm", "l_shape_last_grad_norm", "l_shape_last_grad_ratio",
     ):
         setattr(model, field, None)
@@ -46,6 +47,7 @@ def collect_l_shape_telemetry(model, metric):
         "l_shape_weight_candidate": "l_shape_last_weight_candidate",
         "l_shape_cap_active": "l_shape_last_cap_active",
         "l_shape_base_grad_norm": "l_shape_last_base_grad_norm",
+        "l_shape_wirelength_grad_norm": "l_shape_last_wirelength_grad_norm",
         "l_shape_grad_raw_norm": "l_shape_last_grad_raw_norm",
         "l_shape_grad_norm": "l_shape_last_grad_norm",
         "l_shape_grad_ratio": "l_shape_last_grad_ratio",
@@ -163,6 +165,7 @@ def append_processed_metric_series(processed_metrics, metrics):
         "l_shape_target_weight",
         "l_shape_weight_candidate",
         "l_shape_base_grad_norm",
+        "l_shape_wirelength_grad_norm",
         "l_shape_grad_raw_norm",
         "l_shape_grad_norm",
         "l_shape_grad_ratio",

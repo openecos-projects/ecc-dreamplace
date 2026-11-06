@@ -33,6 +33,39 @@ def test_domains_share_rc_but_keep_arrivals_and_count_endpoint_once(
     )
 
 
+def test_endpoint_lse_is_used_by_sparse_tns_reduction(native_device):
+    hard = schedule(native_device)
+    smooth = schedule(native_device)
+    smooth.aggregation_mode = "smooth"
+    smooth.aggregation_tau_ps = 2.0
+    values = inputs(native_device)
+
+    hard_lanes = hard.propagate((), values[:2], values[2:4], values[4:])
+    smooth_lanes = smooth.propagate((), values[:2], values[2:4], values[4:])
+    hard_result = hard.reduce_endpoints(
+        hard_lanes,
+        torch.zeros(4, device=native_device, dtype=torch.float64),
+    )
+    smooth_result = smooth.reduce_endpoints(
+        smooth_lanes,
+        torch.zeros(4, device=native_device, dtype=torch.float64),
+    )
+
+    torch.testing.assert_close(
+        hard_result.endpoint_slack,
+        torch.tensor([-3.0], device=native_device, dtype=torch.float64),
+    )
+    expected = -2.0 * torch.logsumexp(
+        -hard_result.check_slack / 2.0,
+        dim=0,
+    )
+    torch.testing.assert_close(
+        smooth_result.endpoint_slack,
+        expected.reshape_as(smooth_result.endpoint_slack),
+    )
+    assert float(smooth_result.tns.detach()) < float(hard_result.tns.detach())
+
+
 def test_false_path_excludes_timing_gradient_but_preserves_electrical_slew(
     native_device,
 ):
@@ -160,7 +193,11 @@ def test_compact_invalid_transition_keeps_shared_electrical_slew(native_device, 
     lanes = model.propagate((), values[:2], values[2:4], values[4:], smooth=smooth)
     torch.testing.assert_close(lanes[0][3], lanes[0].new_tensor(-2e8))
     torch.testing.assert_close(
-        lanes[2][2:], torch.sqrt(lanes[2].new_tensor([0.08, 0.08]))
+        lanes[2][2:], torch.sqrt(lanes[2].new_tensor([0.13, 0.13]))
     )
-    gradient = torch.autograd.grad(lanes[0][3], values[2])[0]
+    gradient = torch.autograd.grad(lanes[0][3], values[2], retain_graph=True)[0]
     torch.testing.assert_close(gradient, torch.zeros_like(gradient))
+    slew_gradient = torch.autograd.grad(lanes[2][3], values[4])[0]
+    expected = torch.zeros_like(slew_gradient)
+    expected[2] = 0.5 / (0.13 ** 0.5)
+    torch.testing.assert_close(slew_gradient, expected)

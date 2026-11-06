@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from dreamplace.ops.timing_propagation.endpoint_qualification import (
+    aggregate_endpoint_slack,
     endpoint_metrics,
     qualify_pin_slacks,
 )
@@ -23,6 +24,21 @@ def test_invalid_edges_and_endpoints_do_not_affect_metrics_or_gradients():
     (wns + tns).backward()
     torch.testing.assert_close(rise.grad, torch.tensor([2.0, 0.0], dtype=rise.dtype))
     torch.testing.assert_close(fall.grad, torch.zeros_like(fall))
+
+
+def test_smooth_endpoint_slack_uses_configured_tau_and_hard_mode_is_unchanged():
+    rise = torch.tensor([-2.0, -5.0], dtype=torch.float64)
+    fall = torch.tensor([-4.0, -5.0], dtype=torch.float64)
+
+    hard = aggregate_endpoint_slack(rise, fall, mode="hard", tau_ps=2.0)
+    smooth = aggregate_endpoint_slack(rise, fall, mode="smooth", tau_ps=2.0)
+
+    torch.testing.assert_close(hard, torch.tensor([-4.0, -5.0], dtype=rise.dtype))
+    expected = -2.0 * torch.logsumexp(
+        torch.stack((-rise / 2.0, -fall / 2.0), dim=0), dim=0
+    )
+    torch.testing.assert_close(smooth, expected)
+    assert bool(torch.all(smooth <= hard))
 
 
 @pytest.mark.parametrize("count", [0, 2])

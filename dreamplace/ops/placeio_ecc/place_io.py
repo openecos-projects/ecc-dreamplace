@@ -18,6 +18,7 @@ class ECCPlaceIOBackend:
     pydb: object
     backend_caps: object = DEFAULT_BACKEND_CAPS
     timing_enabled: bool = False
+    hold_enabled: bool = False
     timing_inputs: dict = field(default_factory=dict)
     route_num_bins_x: int = 512
     route_num_bins_y: int = 512
@@ -25,6 +26,7 @@ class ECCPlaceIOBackend:
     refresh_generation: int = 0
     export_options: PyDbExportOptions = PyDbExportOptions()
     sparse_timing_view: SparseTimingView | None = None
+    refresh_invalidated_reason: str | None = None
 
 
 def _module_from_data_manager(data_manager):
@@ -42,6 +44,36 @@ class PlaceIOFunction:
         raw_db.backend_caps = replace(raw_db.backend_caps, **changes)
 
     @staticmethod
+    def _invalidate_timing(raw_db, reason):
+        """Make a failed native refresh unusable to timing consumers.
+
+        The native refresh destroys the old STA session before rebuilding it.
+        Keeping the old PyPlaceDB after that point would let a caller run a
+        forward/backward against a model whose native owner no longer exists.
+        Geometry ownership remains available, but timing must be rebuilt from
+        scratch before it can be enabled again.
+        """
+        destroy = getattr(raw_db.module, "destroy_place_timing", None)
+        if callable(destroy):
+            try:
+                destroy()
+            except Exception:
+                pass
+        raw_db.timing_enabled = False
+        raw_db.pydb = None
+        raw_db.sparse_timing_view = None
+        raw_db.refresh_invalidated_reason = str(reason)
+        PlaceIOFunction._promote(
+            raw_db,
+            has_sta=False,
+            supports_sta_pydb=False,
+            supports_apply_sizing=False,
+            supports_buffer_commit=False,
+            supports_committed_refresh=False,
+            sta_state_status="invalidated_refresh_failure",
+        )
+
+    @staticmethod
     def read(params, data_manager):
         module = _module_from_data_manager(data_manager)
         workspace = str(getattr(data_manager, "dir_workspace", ""))
@@ -57,38 +89,59 @@ class PlaceIOFunction:
             or resolve_flag(params, "repair_buffering_midplace_enable")
         )
         if with_sta:
-            method = "prepare_placement_metadata" if python_timing else "prepare_place_timing"
+            method = (
+                "prepare_placement_metadata"
+                if python_timing and hasattr(module, "prepare_placement_metadata")
+                else "prepare_place_timing"
+            )
             prepare_timing = getattr(module, method, None)
             if not callable(prepare_timing):
                 raise RuntimeError(f"ECC-Tools timing export requires {method}")
             timing_summary = dict(prepare_timing(timing_inputs) or {})
+        timing_model_only = timing_summary.get("mode") == "model_only"
         # The metadata export can only express a single ideal clock without path
         # exceptions.  When the SDC exceeds that model the preparer falls back
         # to the full native constraint export, which must not clear the
         # endpoint arrays and must run the complete snapshot compiler.
-        timing_metadata_only = python_timing and bool(
-            timing_summary.get("placement_metadata_supported", True)
+        timing_metadata_only = (
+            python_timing
+            and not timing_model_only
+            and bool(timing_summary.get("placement_metadata_supported", True))
         )
         dm_inst = module.get_dmInst_ptr()
+        pydb_kwargs = dict(asdict(export_options))
+        if timing_metadata_only:
+            pydb_kwargs["timing_metadata_only"] = True
+        else:
+            pydb_kwargs["timing_model_only"] = timing_model_only
         pydb = module.pydb(
             dm_inst,
             route_num_bins_x,
             route_num_bins_y,
             with_routability,
             with_sta=with_sta,
-            **({"timing_metadata_only": True} if timing_metadata_only else {}),
-            **asdict(export_options),
+            **pydb_kwargs,
         )
         # Qualify the native export before the carrier rebuild replaces the
         # runtime arc schedule; the sparse base identities describe the export,
         # not the committed carrier.
         sparse_timing_view = validate_timing_schema(pydb) if with_sta else None
+        if bool(getattr(params, "timing_hold_enabled", False)):
+            from .hold_schema import read_hold_timing_schema
+
+            # Validate the independent min payload before any placement model
+            # is constructed. A setup-only PyPlaceDB must never be accepted as
+            # a hold-capable runtime by accident.
+            hold_data = read_hold_timing_schema(pydb)
+            timing_summary["hold_schema_version"] = 2
+            timing_summary["hold_context_count"] = len(hold_data.contexts)
         if python_timing:
             from .library_metadata import attach_repair_library_source
             from .timing_carrier import CommittedTimingPyDB
 
             pydb = CommittedTimingPyDB(pydb, pydb, recovery_rat_is_capture_deadline=True)
             attach_repair_library_source(pydb, params, timing_inputs)
+            sparse_timing_view = None
         raw_db = ECCPlaceIOBackend(
             module=module,
             workspace=workspace,
@@ -99,6 +152,7 @@ class PlaceIOFunction:
                 parasitics_initialization=timing_summary.get("parasitics_initialization"),
             ),
             timing_enabled=with_sta,
+            hold_enabled=bool(getattr(params, "timing_hold_enabled", False)),
             timing_inputs=timing_inputs,
             route_num_bins_x=route_num_bins_x,
             route_num_bins_y=route_num_bins_y,

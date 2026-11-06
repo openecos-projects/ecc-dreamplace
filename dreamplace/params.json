@@ -13,7 +13,7 @@
     },
     "timing_objective_lane": {
         "description": "timing objective terms, timing_only | timing_slew_cap",
-        "default": "timing_only"
+        "default": "timing_slew_cap"
     },
     "timing_aggregation_mode": {
         "description": "AAT/RAT aggregation: hard max/min or smooth LSE; endpoint WNS/TNS retain hard reductions",
@@ -129,7 +129,7 @@
     },
     "l_shape_grad_target_ratio_max": {
         "description": "maximum adaptive routability gradient target ratio",
-        "default": 0.1
+        "default": 0.2
     },
     "buffering_continuous_steps": {
         "description": "number of steps in the standalone buffering optimizer",
@@ -218,6 +218,70 @@
     "timing_surrogate_mode": {
         "description": "cell timing evaluation mode, auto | mixed | lut_only | surrogate_only",
         "default": "auto"
+    },
+    "timing_action_gradient_mode": {
+        "description": "discrete sizing gradient mode; default lut_action, off is the legacy path",
+        "default": "lut_action"
+    },
+    "timing_sizing_action": {
+        "description": "action family for placement sizing windows and diff_opt sizing: up | down | quad; explicit diff_sizing phase masks take precedence",
+        "default": "up"
+    },
+    "timing_action_score_objective": {
+        "description": "objective differentiated for the local LUT action score; loss uses diff_sizing_coefficients, tns/wns select a single timing metric",
+        "default": "loss"
+    },
+    "timing_action_load_delta": {
+        "description": "legacy diagnostic option; must be 0 because index derivatives query target LUTs at the base-point load",
+        "default": 0
+    },
+    "timing_action_pin_cap_gradient": {
+        "description": "carry the target cell input pin cap into the beta probe so the upstream driver load follows the action; 0 removes the load-feedback term for A/B debugging",
+        "default": 1
+    },
+    "timing_action_drive_load_feedback": {
+        "description": "add paper Eq. (7): the sized cell input pin cap delta raises the fanin driver LUT load, carried by the cell load Jacobian in the same backward",
+        "default": 1
+    },
+    "timing_action_tns_margin_ps": {
+        "description": "slack margin in ps for the tns action score; endpoints within the margin keep a unit TNS slope so near-critical regressions are visible",
+        "default": 0.0
+    },
+    "timing_action_trial_candidates": {
+        "description": "debug only: number of local top candidates measured by an actual one-action TNS trial; 0 means twice the shared budget",
+        "default": 0
+    },
+    "timing_action_trial_probe": {
+        "description": "debug only: number of trial candidates that record no-op/restore metrics and explicit beta forwards at 0, 0.001, 0.01, 0.1, 1 for finite-difference validation",
+        "default": 0
+    },
+    "timing_action_trial_reachability": {
+        "description": "debug only: count endpoints reachable from each trial cell's output pin",
+        "default": 0
+    },
+    "timing_action_trial_stratified": {
+        "description": "take the trial shortlist evenly across the four actions instead of the global top-k",
+        "default": 0
+    },
+    "timing_action_trial_record_only": {
+        "description": "debug only: record exact one-action TNS/WNS trials for a shortlist; selection always uses the local scores",
+        "default": 0
+    },
+    "timing_action_trial_sample": {
+        "description": "debug only: draw this many valid instances per action uniformly in addition to the top-k shortlist",
+        "default": 0
+    },
+    "timing_action_trial_top_per_action": {
+        "description": "debug only: take this many lowest local-score valid instances per action before the uniform sample",
+        "default": 0
+    },
+    "timing_action_trial_seed": {
+        "description": "deterministic seed for timing_action_trial_sample",
+        "default": 0
+    },
+    "timing_zero_buffer_static_net_fast_path": {
+        "description": "skip the dynamic candidate-buffer net AAT lane when every candidate buffer activation is exactly zero; the static RC lane is used instead",
+        "default": 0
     },
     "diff_timing_driven_placement": {
         "description": "enable differentiable timing in the placement flow",
@@ -517,7 +581,13 @@
     },
     "timing_opt_coefficients": {
         "description": "GP sizing-window coefficient policy: mode=inherit uses live placement values; mode=fixed requires wns, tns, slew and cap during S rounds only, with outer timing weight 1; placement weights are restored on exit",
-        "default": {"mode": "fixed", "wns": 500.0, "tns": 5.0, "cap": 1.0, "slew": 1.0}
+        "default": {
+            "mode": "fixed",
+            "wns": 500.0,
+            "tns": 5.0,
+            "cap": 1.0,
+            "slew": 1.0
+        }
     },
     "repair_buffering_enable": {
         "description": "run native repair_design/repair_timing buffering after global placement and before legalization",
@@ -593,7 +663,7 @@
     },
     "max_num_area_adjust": {
         "description": "maximum times to adjust node area",
-        "default": 3
+        "default": 5
     },
     "adjust_nctugr_area_flag": {
         "description": "legacy compatibility key; when enabled use the ECC/iRT EGR congestion map for area adjustment (NCTUgr is not invoked)",
@@ -775,6 +845,25 @@
         "description": "enable integrated STA initialization and differentiable timing updates during placement",
         "default": 1
     },
+    "timing_hold_enabled": {
+        "description": "enable the independent ideal-clock early/min timing lane",
+        "default": false
+    },
+    "timing_hold_margin_ns": {
+        "description": "hold slack margin used only when forming the optional hold objective",
+        "default": 0.0
+    },
+    "timing_hold_coefficients": {
+        "description": "named hold objective coefficients; zero values retain report-only behavior",
+        "default": {
+            "wns": 0.0,
+            "tns": 0.0
+        }
+    },
+    "timing_hold_lib_paths": {
+        "description": "optional Liberty paths for an independent early corner",
+        "default": []
+    },
     "export_pin_violation_csv": {
         "description": "export detailed per-pin slew/cap violation CSV files; disabled by default because it is expensive on large designs",
         "default": 0
@@ -864,11 +953,11 @@
         "default": 0.1
     },
     "inflation_density_weight_scale": {
-        "description": "positive scale for the Xplace-style density-weight restart ratio ||grad wirelength||_1 / ||grad density||_1 after each inflation geometry epoch; the default 0.001 keeps the restarted density force small, 1.0 uses the normalized ratio directly, and 0.1 reproduces the historical DreamPlace post-restart scale",
+        "description": "positive scale for the Xplace-style density-weight restart ratio after inflation; the default 0.001 keeps the restarted density force small, 1.0 uses the normalized gradient ratio directly, and 0.1 reproduces the historical DreamPlace post-restart scale",
         "default": 0.001
     },
     "inflation_filler_consumption_mode": {
-        "description": "filler area consumed by routability inflation: filler_first subtracts the inflation area from filler before raising target density, proportional shrinks filler and non-filler whitespace together, capacity_only preserves the legacy behavior of shrinking filler only at the placement-area limit",
+        "description": "how routability inflation consumes filler: filler_first subtracts the inflation area from filler before raising target density, proportional shrinks filler and non-filler whitespace together, capacity_only preserves the legacy limit-only shrink",
         "default": "filler_first"
     },
     "legalize_before_each_inflation_flag": {
@@ -902,6 +991,14 @@
     "timing_rc_mode": {
         "default": "placement",
         "description": "timing parasitics, placement | gr; gr requires native ECC CPU sizing or STA"
+    },
+    "diff_sizing_timing_rc_mode": {
+        "default": "gr",
+        "description": "standalone diff_sizing timing RC source; placement uses the placement parasitics and gr uses the frozen GR snapshot"
+    },
+    "diff_sizing_optimization_flows": {
+        "default": null,
+        "description": "ordered standalone diff_sizing phases: [action, rounds, [wns, tns, slew, cap], selection_percent]; action is quad, up, or down and percent is in (0, 100]; null selects an up phase; ECC defaults to 50 rounds with diff_sizing_coefficients and a shared 1% budget per round"
     },
     "cell_model_schema": {
         "default": "main_id_arc_offset_piecewise_linear",
@@ -1088,7 +1185,7 @@
         "default": 0
     },
     "l_shape_grad_target_ratio": {
-        "description": "target ratio between weighted preconditioned L-shape gradient norm and preconditioned base wirelength+density gradient norm",
+        "description": "target ratio between raw L-shape gradient norm and raw wirelength gradient norm before the shared preconditioner; the printed L-shape ratio uses this same definition",
         "default": 0.2
     },
     "l_shape_overflow_threshold": {

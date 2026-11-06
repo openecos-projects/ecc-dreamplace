@@ -1025,7 +1025,10 @@ class NonLinearPlace(BasicPlace.BasicPlace):
     def _write_timing_objective_terms_artifact(self, params, model):
         payload = dict(getattr(model, "last_timing_objective_terms", {}) or {})
         model_params = getattr(model, "params", params)
-        payload.setdefault("lane", getattr(model_params, "timing_objective_lane", "timing_only"))
+        payload.setdefault(
+            "lane",
+            getattr(model_params, "timing_objective_lane", "timing_slew_cap"),
+        )
         payload.setdefault("enabled_terms", ["timing"])
         payload.setdefault(
             "units",
@@ -2550,7 +2553,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         return sizing_dynamics.evaluate_continuous_size_dynamics_candidate_metric(self._sizing_dynamics_context(), model, pos, metric)
 
     def _combined_timing_loss(self, wns, tns):
-        return combined_timing_loss(wns, tns)
+        return combined_timing_loss(
+            wns, tns, getattr(self, "last_global_place_model", None)
+        )
 
     def _finite_timing_scalar(self, value):
         return finite_timing_scalar(value)

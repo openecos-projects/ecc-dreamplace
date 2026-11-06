@@ -11,7 +11,45 @@ class _CellDelay(torch.nn.Module):
         return 2.0 * vt + 8.0 * cap + 0.5 * slew
 
 
-def test_fast_loop_vt_input_gradients_match_forward_only_when_chains_enabled(monkeypatch):
+def test_sizing_pin_caps_keep_float64_values_and_vt_derivatives():
+    obj = PlaceObj.__new__(PlaceObj)
+    obj.params = SimpleNamespace(production_fast_loop=True)
+    logits = torch.zeros((1, 2), dtype=torch.float64, requires_grad=True)
+    caps = torch.tensor([0.01, 0.03], dtype=torch.float64)
+    data = SimpleNamespace(
+        pin2node_map=torch.tensor([0]),
+        inst_main_id=torch.tensor([0]),
+        inst_is_sizeable=torch.tensor([True]),
+        pin_2_libpin_offset=torch.tensor([0]),
+        main_id_2_cell_id_start=torch.tensor([0, 2]),
+        flat_libcell_info=torch.tensor([[0.0, 0.0, 1.0, 0.0], [1.0, 0.0, 1.0, 1.0]]),
+        cell_id_2_libpin_id_start=torch.tensor([0, 1]),
+        flat_lib_pin_cap=caps,
+        flat_lib_pin_rcap=caps,
+        flat_lib_pin_fcap=caps,
+        get_size_var=lambda: torch.ones(1, dtype=torch.float64),
+        get_vt_var=lambda: torch.softmax(logits, dim=1),
+    )
+    result = obj._apply_sizing_driven_pin_caps(
+        *(torch.zeros(1, dtype=torch.float64) for _ in range(3)), data
+    )
+    torch.testing.assert_close(
+        result,
+        (torch.tensor([0.02], dtype=torch.float64),) * 3,
+        atol=1e-12,
+        rtol=0,
+    )
+    gradient = torch.autograd.grad(sum(value.sum() for value in result), logits)[0]
+    torch.testing.assert_close(
+        gradient,
+        torch.tensor([[-0.015, 0.015]], dtype=torch.float64),
+        atol=1e-12,
+        rtol=0,
+    )
+
+
+@pytest.mark.parametrize("variable_slew", [False, True])
+def test_fast_loop_vt_gradient_includes_cell_load_slew_and_rc(variable_slew):
     obj = PlaceObj.__new__(PlaceObj)
     obj.params = SimpleNamespace(production_fast_loop=True)
     data = SimpleNamespace(
@@ -20,7 +58,7 @@ def test_fast_loop_vt_input_gradients_match_forward_only_when_chains_enabled(mon
         inst_is_sizeable=torch.tensor([True]),
         pin_2_libpin_offset=torch.tensor([0]),
         main_id_2_cell_id_start=torch.tensor([0, 2]),
-        flat_libcell_info=torch.tensor([[0., 0., 1., 0.], [1., 0., 1., 1.]]),
+        flat_libcell_info=torch.tensor([[0.0, 0.0, 1.0, 0.0], [1.0, 0.0, 1.0, 1.0]]),
         cell_id_2_libpin_id_start=torch.tensor([0, 1]),
         flat_lib_pin_cap=torch.tensor([0.01, 0.03]),
         flat_lib_pin_rcap=torch.tensor([0.01, 0.03]),
@@ -55,43 +93,24 @@ def test_fast_loop_vt_input_gradients_match_forward_only_when_chains_enabled(mon
         if variable_slew:
             slew = slew + 0.04 * data.get_vt_var()[:, 1]
         delay = tp.r_delay_entry(
-            torch.tensor([0]), slew, cap,
-            torch.tensor([0]), torch.tensor([0]),
+            torch.tensor([0]),
+            slew,
+            cap,
+            torch.tensor([0]),
+            torch.tensor([0]),
         )
         return (delay + 0.25 * obj._timing_rc_cap_input_tensor(cap)).sum()
 
-    monkeypatch.delenv("AIMP_DETACH_TIMING_RC_CAP_INPUTS", raising=False)
-    monkeypatch.delenv("AIMP_DISABLE_DETACH_SURROGATE_SLEW_INPUTS", raising=False)
-    monkeypatch.delenv("AIMP_DISABLE_DETACH_SURROGATE_CAP_INPUTS", raising=False)
     logits = torch.tensor([[0.0, 0.0]], requires_grad=True)
-    default_grad = torch.autograd.grad(evaluate(logits), logits)[0][0, 1].item()
-    assert default_grad > 0.0  # Direct VT delay and the RC-cap input proxy survive.
-
-    monkeypatch.setenv("AIMP_DISABLE_DETACH_SURROGATE_CAP_INPUTS", "1")
-    full_grad = torch.autograd.grad(evaluate(logits), logits)[0][0, 1].item()
+    gradient = torch.autograd.grad(evaluate(logits, variable_slew=variable_slew), logits)[0]
+    # p=softmax(logits)[1], dp/dlogit_1=1/4 at zero. Cell delay,
+    # input-cap-driven load, wire RC, and optional slew all depend on p.
+    expected = (2.0 + 8.0 * 0.02 + 0.25 * 0.02 + 0.5 * 0.04 * variable_slew) / 4
+    torch.testing.assert_close(gradient, torch.tensor([[-expected, expected]]))
     epsilon = 1.0e-3
     plus = torch.tensor([[0.0, epsilon]])
     minus = torch.tensor([[0.0, -epsilon]])
-    finite_diff = (evaluate(plus) - evaluate(minus)).item() / (2 * epsilon)
-
-    assert full_grad - default_grad == pytest.approx(8.0 * 0.02 / 4, abs=1e-5)
-    assert full_grad == pytest.approx(finite_diff, abs=1e-4)
-
-    monkeypatch.delenv("AIMP_DISABLE_DETACH_SURROGATE_CAP_INPUTS")
-    default_slew_grad = torch.autograd.grad(
-        evaluate(logits, variable_slew=True), logits
-    )[0][0, 1].item()
-    monkeypatch.setenv("AIMP_DISABLE_DETACH_SURROGATE_SLEW_INPUTS", "1")
-    full_slew_grad = torch.autograd.grad(
-        evaluate(logits, variable_slew=True), logits
-    )[0][0, 1].item()
-    monkeypatch.setenv("AIMP_DISABLE_DETACH_SURROGATE_CAP_INPUTS", "1")
-    complete_grad = torch.autograd.grad(
-        evaluate(logits, variable_slew=True), logits
-    )[0][0, 1].item()
-    complete_finite_diff = (
-        evaluate(plus, variable_slew=True) - evaluate(minus, variable_slew=True)
+    finite_diff = (
+        evaluate(plus, variable_slew=variable_slew) - evaluate(minus, variable_slew=variable_slew)
     ).item() / (2 * epsilon)
-
-    assert full_slew_grad - default_slew_grad == pytest.approx(0.5 * 0.04 / 4, abs=1e-5)
-    assert complete_grad == pytest.approx(complete_finite_diff, abs=1e-4)
+    assert gradient[0, 1].item() == pytest.approx(finite_diff, abs=1e-4)

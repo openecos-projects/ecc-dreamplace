@@ -117,7 +117,8 @@ SetupCriticalPathExtractor::SetupCriticalPathExtractor(
     const at::Tensor& pin_pred_pin,
     const at::Tensor& pin_pred_arc_id,
     const at::Tensor& start_points,
-    int64_t topology_epoch)
+    int64_t topology_epoch,
+    const at::Tensor& pin_pred_transition_mask)
     : topology_epoch_(topology_epoch) {
   TORCH_CHECK(flat_inst_arcs_by_level.defined(),
               "flat_inst_arcs_by_level must be defined");
@@ -143,6 +144,11 @@ SetupCriticalPathExtractor::SetupCriticalPathExtractor(
   predecessor_offsets_ = tensor_to_i64_vector(pin_pred_start, "pin_pred_start");
   predecessor_pins_ = tensor_to_i64_vector(pin_pred_pin, "pin_pred_pin");
   predecessor_arc_ids_ = tensor_to_i64_vector(pin_pred_arc_id, "pin_pred_arc_id");
+  predecessor_transition_masks_ = pin_pred_transition_mask.defined() && pin_pred_transition_mask.numel()
+      ? tensor_to_i64_vector(pin_pred_transition_mask, "pin_pred_transition_mask")
+      : std::vector<int64_t>(predecessor_pins_.size(), 15);
+  TORCH_CHECK(predecessor_transition_masks_.size() == predecessor_pins_.size(),
+              "pin_pred_transition_mask length must match pin_pred_pin");
   TORCH_CHECK(!predecessor_offsets_.empty(),
               "pin_pred_start must contain at least one offset");
   TORCH_CHECK(predecessor_offsets_.front() == 0,
@@ -160,6 +166,8 @@ SetupCriticalPathExtractor::SetupCriticalPathExtractor(
   for (size_t edge_idx = 0; edge_idx < predecessor_pins_.size(); ++edge_idx) {
     const int64_t pred = predecessor_pins_[edge_idx];
     const int64_t arc_id = predecessor_arc_ids_[edge_idx];
+    TORCH_CHECK(predecessor_transition_masks_[edge_idx] >= 0 && predecessor_transition_masks_[edge_idx] <= 15,
+                "pin_pred_transition_mask must use only the four legal branch bits");
     TORCH_CHECK(pred >= 0 && pred < num_pins_,
                 "pin_pred_pin contains out-of-range pin id");
     TORCH_CHECK(arc_id == -1 || (arc_id >= 0 && arc_id < num_cell_arcs_),
@@ -260,7 +268,8 @@ CriticalPathBatch SetupCriticalPathExtractor::extract(
           predecessor_pins_[static_cast<size_t>(edge)], arc,
           arc < 0 ? 0 : arc_senses_[static_cast<size_t>(arc)],
           arc < 0 ? std::pair<int64_t, int64_t>{-1, -1}
-                  : std::pair<int64_t, int64_t>{0, arc}});
+                  : std::pair<int64_t, int64_t>{0, arc},
+          predecessor_transition_masks_[static_cast<size_t>(edge)]});
     }
   };
   const auto extracted = timing::extractSetupPaths(

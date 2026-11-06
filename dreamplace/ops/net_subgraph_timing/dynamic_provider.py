@@ -113,6 +113,7 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
         coordinate_source=None,
         forward_backend="native_explicit_autograd",
         buffer_device_lut=None,
+        allow_zero_buffer_static_net=False,
     ):
         self.static_payload = dict(static_payload)
         self.buffer_state = buffer_state
@@ -147,6 +148,7 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
         )
         self.forward_backend = str(forward_backend or "python")
         self.buffer_device_lut = buffer_device_lut
+        self.allow_zero_buffer_static_net = bool(allow_zero_buffer_static_net)
         self._forward_kwargs_cache = {}
         self._active_forward_kwargs_cache = {}
         self._active_view_cache = {}
@@ -166,6 +168,14 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
             self._fixed_bsu_fused_supported,
             self._fixed_bsu_fused_fallback_reason,
         ) = self._fixed_bsu_fused_support()
+        with torch.no_grad():
+            candidate_activation = buffer_state.candidate_bu()
+            activation_nonzero = int(
+                (candidate_activation != 0).sum().detach().cpu().item()
+            )
+            activation_sum = float(
+                candidate_activation.detach().double().sum().cpu().item()
+            )
         self.metadata = {
             "net_subgraph_invocation_timing": "during_timing_propagation_net_aat",
             "uses_current_propagated_driver_slew": True,
@@ -186,6 +196,9 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
             ),
             "affected_net_count": int(len(self.affected_net_ids)),
             "candidate_net_count": int(len(self._candidate_net_ids)),
+            "candidate_activation_nonzero_count": activation_nonzero,
+            "candidate_activation_sum": activation_sum,
+            "zero_buffer_static_net_fast_path_count": 0,
             "buffer_device_lut_status": (
                 "ok" if self.buffer_device_lut is not None else "unavailable"
             ),
@@ -262,6 +275,7 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
             "native_active_view_selector_ms",
             "fixed_bsu_fused_forward_count",
             "driver_cap_overlay_count",
+            "zero_buffer_static_net_fast_path_count",
         ):
             self.metadata[key] = 0
         return self
@@ -857,7 +871,7 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
             )
         return result
 
-    def _run_cap_only(self, active_net_ids, *, sense="base"):
+    def _run_cap_only(self, active_net_ids, *, dtype, sense="base"):
         active_view = self._active_view(active_net_ids)
         active_net_count = len(active_view["cache_key"])
         candidate_bu = self.buffer_state.candidate_bu()
@@ -868,7 +882,9 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
         )
         zeros = torch.zeros(
             active_net_count,
-            dtype=candidate_bu.dtype,
+            # This sets the RC query precision in _run_lane. Buffer logits
+            # may remain float32 while live sizing caps and timing are double.
+            dtype=dtype,
             device=forward_device,
         )
         result = self._run_lane(
@@ -926,9 +942,13 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
     ):
         if not self.affected_net_ids:
             return pin_net_cap_rise, pin_net_cap_fall
-        cap_result = self._run_cap_only(self.affected_net_ids, sense="rise")
+        cap_result = self._run_cap_only(
+            self.affected_net_ids, dtype=pin_net_cap_rise.dtype, sense="rise"
+        )
         fall_cap_result = (
-            self._run_cap_only(self.affected_net_ids, sense="fall")
+            self._run_cap_only(
+                self.affected_net_ids, dtype=pin_net_cap_fall.dtype, sense="fall"
+            )
             if self._live_geometry is not None else cap_result
         )
         pin_net_cap_rise = self._scatter_driver_cap(pin_net_cap_rise, cap_result)
@@ -1055,6 +1075,27 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
             base_pin_net_impulse_rise,
             base_pin_net_impulse_fall,
         )
+        if self.allow_zero_buffer_static_net:
+            activation = self.buffer_state.candidate_bu()
+            if not bool((activation != 0).any().detach().cpu().item()):
+                self.metadata["zero_buffer_static_net_fast_path_count"] += 1
+                self.metadata["provider_dispatch_ms"] += (
+                    time.perf_counter() - provider_started_at
+                ) * 1000.0
+                return pin_rAAT, pin_fAAT, pin_rtran, pin_ftran
+        zero_activation_probe = not bool(
+            getattr(self, "_zero_activation_probe_done", False)
+        )
+        if zero_activation_probe:
+            activation = self.buffer_state.candidate_bu()
+            zero_activation = not bool(
+                (activation != 0).any().detach().cpu().item()
+            )
+            if zero_activation:
+                static_rAAT = pin_rAAT.detach().clone()
+                static_fAAT = pin_fAAT.detach().clone()
+                static_rtran = pin_rtran.detach().clone()
+                static_ftran = pin_ftran.detach().clone()
         gather_started_at = time.perf_counter()
         active_view = self._active_view(active_net_ids)
         if int(active_view["net_indices_cpu"].numel()) == 0:
@@ -1107,6 +1148,23 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
             active_net_ids,
             active_view=active_view,
         )
+        if zero_activation_probe:
+            self._zero_activation_probe_done = True
+            if zero_activation:
+                self.metadata["zero_activation_static_max_diff"] = {
+                    "rise_arrival": float(
+                        (pin_rAAT - static_rAAT).abs().max().detach().cpu().item()
+                    ),
+                    "fall_arrival": float(
+                        (pin_fAAT - static_fAAT).abs().max().detach().cpu().item()
+                    ),
+                    "rise_slew": float(
+                        (pin_rtran - static_rtran).abs().max().detach().cpu().item()
+                    ),
+                    "fall_slew": float(
+                        (pin_ftran - static_ftran).abs().max().detach().cpu().item()
+                    ),
+                }
         self.metadata["sink_scatter_ms"] += (
             time.perf_counter() - scatter_started_at
         ) * 1000.0

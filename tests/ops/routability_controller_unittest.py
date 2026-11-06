@@ -12,6 +12,7 @@ from dreamplace.NonLinearPlace import NonLinearPlace
 from dreamplace.PlaceObj import PlaceObj
 from dreamplace.ops.routability.gpugr_context import sync_route_grid_to_autodmp
 from dreamplace.ops.routability.l_shape_policy import LShapePolicy
+from dreamplace.ops.routability.l_shape_telemetry import append_processed_metric_series
 from dreamplace.ops.routability.routability_controller import RoutabilityController
 
 
@@ -182,6 +183,7 @@ class RoutabilityControllerTest(unittest.TestCase):
         model.l_shape_last_weight_candidate = 0.6
         model.l_shape_last_cap_active = True
         model.l_shape_last_base_grad_norm = 3.0
+        model.l_shape_last_wirelength_grad_norm = 4.0
         model.l_shape_last_grad_raw_norm = 2.5
         model.l_shape_last_grad_ratio = 0.8
         model.l_shape_fast_mode = False
@@ -198,8 +200,23 @@ class RoutabilityControllerTest(unittest.TestCase):
 
         self.assertEqual(metric.l_shape_cost, 1.5)
         self.assertEqual(metric.l_shape_grad_ratio, 0.8)
+        self.assertEqual(metric.l_shape_wirelength_grad_norm, 4.0)
         self.assertEqual(metric.l_shape_capacity_al_g_h_max, 3.0)
         self.assertEqual(metric.soft_l_tau, 0.25)
+
+    def test_processed_metric_series_keeps_raw_wirelength_reference(self):
+        processed = {}
+        metrics = [
+            SimpleNamespace(
+                l_shape_fast_mode=False,
+                l_shape_energy_valid=True,
+                l_shape_wirelength_grad_norm=4.0,
+            )
+        ]
+
+        append_processed_metric_series(processed, metrics)
+
+        self.assertEqual(processed["l_shape_wirelength_grad_norm"], [4.0])
 
     def test_non_linear_place_keeps_backend_implementations_out_of_flow_module(self):
         source = (

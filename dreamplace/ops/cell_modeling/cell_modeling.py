@@ -1365,7 +1365,10 @@ class CellModeling(nn.Module):
                     mt_sub * vt_available.shape[1]
                     + ao_sub
                 )
-                available = state["_vt_available_flat"].index_select(
+                flat_vt_available = state["_vt_available_flat"].to(
+                    device=mt.device
+                )
+                available = flat_vt_available.index_select(
                     0, base_indices
                 ).reshape(-1, vt_available.shape[2])
                 support[arc_mask] = available.any(dim=1) & valid_indices
@@ -1482,10 +1485,10 @@ class CellModeling(nn.Module):
                     dataset_name,
                     libcell_main_id.long(),
                     arc_offset.long(),
-                    vt.float(),
-                    size.float(),
-                    input_slew.float(),
-                    out_cap.float(),
+                    vt,
+                    size,
+                    input_slew,
+                    out_cap,
                 )
             )
             return self._apply_piecewise_gradient_mode(
@@ -1493,10 +1496,10 @@ class CellModeling(nn.Module):
                 dataset_name,
                 libcell_main_id,
                 arc_offset,
-                vt.float(),
-                size.float(),
-                input_slew.float(),
-                out_cap.float(),
+                vt,
+                size,
+                input_slew,
+                out_cap,
             )
 
         coeff_tensor = {
@@ -1870,11 +1873,12 @@ class CellModeling(nn.Module):
         return low_idx.clamp(min=0), high_idx.clamp(min=0, max=max(0, num_slots - 1))
 
     def _piecewise_size_interp(self, dataset_name, state, mt, ao, vt_slot, size, input_slew, out_cap):
+        size = size.to(input_slew)
         device = size.device
         if "_size_table_flat" not in state:
             self._finalize_piecewise_state(state)
         flat_indices = self._piecewise_base_indices(state, mt, ao) + vt_slot.long()
-        size_table = state["_size_table_flat"].to(device).index_select(
+        size_table = state["_size_table_flat"].to(size).index_select(
             0, flat_indices
         )
         arc_index_table = state["_arc_index_table_flat"].to(device).index_select(
@@ -2010,9 +2014,9 @@ class CellModeling(nn.Module):
         device = input_slew.device
         mt = libcell_main_id.to(device).clamp(max=state["size_table"].shape[0] - 1)
         ao = arc_offset.to(device).clamp(max=state["size_table"].shape[1] - 1)
-        vt = vt.to(device)
-        size = size.to(device)
-        out_cap = out_cap.to(device)
+        vt = vt.to(input_slew)
+        size = size.to(input_slew)
+        out_cap = out_cap.to(input_slew)
         vt_available = self._piecewise_vt_availability(state, mt, ao, device)
         has_vt_candidates = vt_available.any(dim=1)
         vt_low, vt_high = self._piecewise_vt_slots(
@@ -2084,9 +2088,10 @@ class CellModeling(nn.Module):
         return torch.where(has_vt_candidates, torch.nan_to_num(interpolated), torch.zeros_like(interpolated))
 
     def _dataset_spec(self, dataset_name):
-        if dataset_name not in DATASET_SPECS:
+        specs = getattr(self, "dataset_specs", DATASET_SPECS)
+        if dataset_name not in specs:
             raise ValueError(f"unknown cell-model dataset: {dataset_name}")
-        return DATASET_SPECS[dataset_name]
+        return specs[dataset_name]
 
     def _flatten_lut_points(self, dataset_name):
         spec = self._dataset_spec(dataset_name)

@@ -9,15 +9,13 @@ import hashlib
 import importlib.util
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
-
 from dreamplace.ops.placeio_ecc.sparse_timing_schema import read_sparse_timing_view
-
 
 BASE_FIELDS = (
     "pin_names",
@@ -50,6 +48,18 @@ def padded_rows(rows, fill):
     return values
 
 
+def load_native(native_module, ecc_root):
+    sys.path.insert(0, str(ecc_root.resolve()))
+    import ecc_tools_bin
+
+    spec = importlib.util.spec_from_file_location("ecc_tools_bin.ecc_py", native_module)
+    native = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(native)
+    sys.modules[spec.name] = native
+    ecc_tools_bin.ecc_py = native
+    return native
+
+
 def save_export(pydb, output):
     native = pydb.timing_sparse
     np.savez_compressed(output / "sparse_arrays.npz", **native["arrays"])
@@ -69,10 +79,11 @@ def save_export(pydb, output):
     return read_sparse_timing_view(pydb)
 
 
-def run(args):
+def run(args, *, export=None):
     inputs = json.loads(args.manifest.read_text())
     paths = [inputs[name] for name in ("tech_lef", "def", "sdc")]
     paths += inputs["lefs"] + inputs["libs"] + list(inputs["sources"].values())
+    paths += [inputs[name] for name in ("sta_config", "hierarchy_verilog") if inputs.get(name)]
     provenance = {
         "inputs": {str(Path(path).resolve()): file_digest(path) for path in paths},
         "native_module": str(args.native_module.resolve()),
@@ -83,28 +94,31 @@ def run(args):
             text=True,
         ).strip(),
         "thread_number": args.threads,
+        "requested_timing_mode": args.timing_mode,
         "timing_relative_tolerance": 0.03,
         "timing_absolute_floor_ps": 2.0,
         "status": "running",
+        "phase_seconds": {},
     }
     args.output.mkdir(parents=True, exist_ok=False)
     report = args.output / "manifest.json"
     report.write_text(json.dumps(provenance, indent=2))
+
+    def measured(name, operation, *values, **options):
+        provenance["stage"] = name
+        report.write_text(json.dumps(provenance, indent=2))
+        started = time.perf_counter()
+        try:
+            return operation(*values, **options)
+        finally:
+            provenance["phase_seconds"][name] = time.perf_counter() - started
+
     for relative, source in inputs["sources"].items():
         target = args.output / relative
         target.resolve().relative_to(args.output.resolve())
         target.parent.mkdir(parents=True, exist_ok=True)
         target.symlink_to(Path(source).resolve())
-    sys.path.insert(0, str(args.ecc_root.resolve()))
-    import ecc_tools_bin
-
-    spec = importlib.util.spec_from_file_location(
-        "ecc_tools_bin.ecc_py", args.native_module
-    )
-    native = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(native)
-    sys.modules[spec.name] = native
-    ecc_tools_bin.ecc_py = native
+    native = load_native(args.native_module, args.ecc_root)
     from chipcompiler.tools.ecc.module import ECCToolsModule
 
     print("NATIVE_MODULE", native.__file__, flush=True)
@@ -114,12 +128,16 @@ def run(args):
     try:
         for name in ("output", "feature"):
             (args.output / name).mkdir()
-        module.init_config("", args.output / "output", args.output / "feature")
-        module.init_techlef(inputs["tech_lef"])
-        module.init_lefs(inputs["lefs"])
-        if not module.read_def(inputs["def"]):
+        measured(
+            "init_config", module.init_config, "", args.output / "output", args.output / "feature"
+        )
+        measured("read_techlef", module.init_techlef, inputs["tech_lef"])
+        measured("read_lefs", module.init_lefs, inputs["lefs"])
+        if not measured("read_def", module.read_def, inputs["def"]):
             raise RuntimeError("native DEF read failed")
-        summary = module.prepare_place_timing(
+        summary = measured(
+            "prepare_timing",
+            module.prepare_place_timing,
             {
                 "lib_paths": inputs["libs"],
                 "sdc": inputs["sdc"],
@@ -127,15 +145,29 @@ def run(args):
                 "work_dir": args.output / "sta",
                 "thread_number": args.threads,
                 "max_paths": 20,
-            }
+                "timing_mode": args.timing_mode,
+                "config": inputs.get("sta_config", ""),
+            },
         )
-        pydb = module.pydb(module.get_dmInst_ptr(), 512, 512, False, True)
+        pydb = measured(
+            "materialize",
+            module.pydb,
+            module.get_dmInst_ptr(),
+            512,
+            512,
+            routability_opt_flag=False,
+            with_sta=True,
+            timing_model_only=args.timing_mode == "model_only",
+        )
         provenance["timing_summary"] = summary
+        provenance["native_preparation"] = pydb.timing_preparation
         provenance["schema_version"] = pydb.timing_schema_version
         provenance["pin_count"] = len(pydb.pin_names)
         provenance["endpoint_count"] = len(pydb.end_points)
         provenance["clock_pin_count"] = len(pydb.clock_pins)
-        view = save_export(pydb, args.output)
+        view = measured(
+            "inspect_export", save_export if export is None else export, pydb, args.output
+        )
         provenance["sparse"] = view.statistics()
         provenance["status"] = "unsupported" if view.unsupported else "export_validated"
         print(json.dumps(provenance, indent=2), flush=True)
@@ -156,6 +188,7 @@ def main():
     parser.add_argument("--ecc-root", type=Path, required=True)
     parser.add_argument("--native-module", type=Path, required=True)
     parser.add_argument("--threads", type=int, default=8)
+    parser.add_argument("--timing-mode", choices=("complete", "model_only"), default="complete")
     args = parser.parse_args()
     args.output = args.output.resolve()
     run(args)

@@ -355,6 +355,10 @@ def query_cell_aat_updates(
 
         aat_rr = pin_rAAT[arc_in_pins[mask]] + delay_rr_non
         aat_fr = pin_fAAT[arc_in_pins[mask]] + delay_fr_non
+        if level_inst_arcs.shape[1] > 8:
+            transitions = level_inst_arcs[mask, 8]
+            aat_rr = torch.where(transitions & 1 != 0, aat_rr, -2e8)
+            aat_fr = torch.where(transitions & 4 != 0, aat_fr, -2e8)
         r_aat_updates[mask] = smooth_max(aat_rr, aat_fr, alpha=SMOOTH_MAX_ALPHA)
 
         # Fall output calculation (worst of f->f and r->f)
@@ -371,7 +375,14 @@ def query_cell_aat_updates(
 
         aat_ff = pin_fAAT[arc_in_pins[mask]] + delay_ff_non
         aat_rf = pin_rAAT[arc_in_pins[mask]] + delay_rf_non
+        if level_inst_arcs.shape[1] > 8:
+            aat_ff = torch.where(transitions & 8 != 0, aat_ff, -2e8)
+            aat_rf = torch.where(transitions & 2 != 0, aat_rf, -2e8)
         f_aat_updates[mask] = smooth_max(aat_ff, aat_rf, alpha=SMOOTH_MAX_ALPHA)
+
+    if level_inst_arcs.shape[1] > 8:
+        r_aat_updates = torch.where(level_inst_arcs[:, 8] & 5 != 0, r_aat_updates, -2e8)
+        f_aat_updates = torch.where(level_inst_arcs[:, 8] & 10 != 0, f_aat_updates, -2e8)
 
     return CellAatUpdates(
         (r_aat_updates, f_aat_updates, r_trans, f_trans),

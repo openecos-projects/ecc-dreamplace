@@ -13,6 +13,7 @@ DIFF_OPT_SCHEMA_VERSION = 1
 DIFF_OPT_MODES = frozenset(("sizing", "buffering", "joint"))
 DIFF_OPT_ACTIONS = frozenset(("sz", "bf"))
 DIFF_OPT_COEFFICIENT_NAMES = ("wns", "tns", "slew", "cap")
+HOLD_COEFFICIENT_NAMES = ("hold_wns", "hold_tns")
 DIFF_OPT_DEFAULT_COEFFICIENTS = {
     "wns": 500.0,
     "tns": 5.0,
@@ -27,6 +28,8 @@ class TimingCoefficients:
     tns: float
     slew: float
     cap: float
+    hold_wns: float = 0.0
+    hold_tns: float = 0.0
 
     @classmethod
     def from_value(cls, value, *, field="coefficients"):
@@ -36,12 +39,12 @@ class TimingCoefficients:
             value = dict(zip(DIFF_OPT_COEFFICIENT_NAMES, value, strict=True))
         if not isinstance(value, dict):
             raise ValueError(f"{field} must be a mapping or [wns, tns, slew, cap] list")
-        unknown = set(value) - set(DIFF_OPT_COEFFICIENT_NAMES)
+        unknown = set(value) - {*DIFF_OPT_COEFFICIENT_NAMES, *HOLD_COEFFICIENT_NAMES}
         if unknown:
             raise ValueError(f"{field} contains unknown keys: {sorted(unknown)}")
         result = {}
-        for name in DIFF_OPT_COEFFICIENT_NAMES:
-            raw = value.get(name, DIFF_OPT_DEFAULT_COEFFICIENTS[name])
+        for name in (*DIFF_OPT_COEFFICIENT_NAMES, *HOLD_COEFFICIENT_NAMES):
+            raw = value.get(name, DIFF_OPT_DEFAULT_COEFFICIENTS.get(name, 0.0))
             if isinstance(raw, bool):
                 raise ValueError(f"{field}.{name} must be a finite non-negative number")
             try:
@@ -56,7 +59,17 @@ class TimingCoefficients:
         return cls(**result)
 
     def to_dict(self):
-        return {name: float(getattr(self, name)) for name in DIFF_OPT_COEFFICIENT_NAMES}
+        values = {
+            name: float(getattr(self, name)) for name in DIFF_OPT_COEFFICIENT_NAMES
+        }
+        values.update(
+            {
+                name: float(getattr(self, name))
+                for name in HOLD_COEFFICIENT_NAMES
+                if getattr(self, name)
+            }
+        )
+        return values
 
 
 @dataclass(frozen=True)
@@ -143,6 +156,7 @@ __all__ = [
     "DIFF_OPT_DEFAULT_COEFFICIENTS",
     "DIFF_OPT_MODES",
     "DIFF_OPT_SCHEMA_VERSION",
+    "HOLD_COEFFICIENT_NAMES",
     "DiffFlowSpec",
     "TimingCoefficients",
     "canonical_diff_opt_flows",

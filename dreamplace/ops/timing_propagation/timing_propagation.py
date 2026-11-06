@@ -30,7 +30,10 @@ from dreamplace.ops.timing_propagation.critical_endpoint_pruning import (
     DynamicCriticalEndpointSelector,
 )
 from dreamplace.ops.timing_propagation.endpoint_qualification import (
-    endpoint_metrics, qualify_check_candidates, qualify_pin_slacks,
+    aggregate_endpoint_slack,
+    endpoint_metrics,
+    qualify_check_candidates,
+    qualify_pin_slacks,
 )
 from dreamplace.ops.timing_propagation.recovery_checks import (
     TIMING_CHECK_CLASS_RECOVERY,
@@ -184,6 +187,83 @@ def smooth_max(a: torch.Tensor, b: torch.Tensor, alpha: float = SMOOTH_MAX_ALPHA
     # stack on a new dim and reduce
     return torch.logsumexp(torch.stack([alpha * a, alpha * b], dim=0), dim=0) / alpha
 
+
+class _AveScatterMax(torch.autograd.Function):
+    """Hard-max forward with an AveSmooth gradient over near-max entries.
+
+    The forward value is the ordinary scatter max, so TNS/WNS stay on the
+    hard-max timing semantics.  The backward distributes each output adjoint
+    equally among the contributions within ``epsilon`` of the group maximum.
+    This is the timing branch of the DAC 2026 quad-gradient paper: a
+    near-critical fanin gets a share of the gradient without the log-sum-exp
+    tail spreading it to every non-critical path.
+    """
+
+    @staticmethod
+    def forward(ctx, dest, index, src, include_self, epsilon):
+        idx = index.long()
+        if include_self:
+            idx_all = torch.cat(
+                [idx, torch.arange(dest.numel(), device=dest.device)],
+                dim=0,
+            )
+            values = torch.cat([src, dest], dim=0)
+        else:
+            idx_all = idx
+            values = src
+        max_per_index = torch.full(
+            (dest.numel(),),
+            -torch.inf,
+            device=dest.device,
+            dtype=dest.dtype,
+        )
+        if idx_all.numel():
+            max_per_index = torch.scatter_reduce(
+                max_per_index,
+                0,
+                idx_all,
+                values,
+                reduce="amax",
+                include_self=False,
+            )
+        near = values >= (max_per_index[idx_all] - float(epsilon))
+        count = torch.zeros(
+            dest.numel(),
+            device=dest.device,
+            dtype=dest.dtype,
+        )
+        if idx_all.numel():
+            count.scatter_add_(0, idx_all, near.to(dest.dtype))
+        touched = count > 0
+        output = torch.where(touched, max_per_index, dest)
+        ctx.save_for_backward(idx_all, near, count)
+        ctx.include_self = bool(include_self)
+        ctx.src_numel = int(src.numel())
+        ctx.dest_numel = int(dest.numel())
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        idx_all, near, count = ctx.saved_tensors
+        safe_count = count.clamp(min=1.0)
+        share = torch.where(
+            count[idx_all] > 0,
+            grad_output[idx_all] / safe_count[idx_all],
+            torch.zeros_like(grad_output[idx_all]),
+        )
+        grad_values = share * near.to(grad_output.dtype)
+        grad_src = grad_values[: ctx.src_numel]
+        if ctx.include_self:
+            grad_dest = grad_values[ctx.src_numel :]
+        else:
+            touched = count > 0
+            grad_dest = torch.where(
+                touched,
+                torch.zeros_like(grad_output),
+                grad_output,
+            )
+        return grad_dest, None, grad_src, None, None
+
 def smooth_max_reduce(x: torch.Tensor, dim: int = None, alpha: float = SMOOTH_MAX_ALPHA, keepdim: bool = False) -> torch.Tensor:
     """
     Generalized smooth max over a dimension (log-sum-exp reduction).
@@ -328,6 +408,14 @@ def scatter_timing_max(
             include_self=include_self,
             tau=tau_ps,
         )
+    if str(mode) == "avesmooth":
+        return _AveScatterMax.apply(
+            dest,
+            index,
+            src,
+            include_self,
+            float(tau_ps),
+        )
     return torch.scatter_reduce(
         dest,
         0,
@@ -353,6 +441,14 @@ def scatter_timing_min(
             src,
             include_self=include_self,
             tau=tau_ps,
+        )
+    if str(mode) == "avesmooth":
+        return -_AveScatterMax.apply(
+            -dest,
+            index,
+            -src,
+            include_self,
+            float(tau_ps),
         )
     return torch.scatter_reduce(
         dest,
@@ -659,6 +755,8 @@ class TimingPropagation(nn.Module):
                  backend_endpoint_rSlew=None,
                  backend_endpoint_fSlew=None,
                  sparse_timing_view=None,
+                 timing_model_lease=None,
+                 hold_timing_data=None,
                  recovery_rat_is_capture_deadline=False,
                  ):
         super(TimingPropagation, self).__init__()
@@ -672,7 +770,20 @@ class TimingPropagation(nn.Module):
 
         self.num_pins = pin_net.shape[0]
         self.sparse_timing_view = sparse_timing_view
+        self.timing_model_lease = timing_model_lease
         self._sparse_runtime = None
+        from .early_propagation import EarlyPropagation
+
+        self.early_propagation = (
+            EarlyPropagation(hold_timing_data, use_native=False)
+            if hold_timing_data is not None
+            else None
+        )
+        self.hold_rc = None
+        self.early_timing_view = None
+        self.hold_liberty_paths = ()
+        self.last_evaluation = None
+        self.evaluation_generation = 0
         # TimingPropagation keeps the Python timing state on the same exported
         # basis as PyPlaceDB:
         #   - delay / AAT / RAT / slew / slack are in ps
@@ -764,8 +875,10 @@ class TimingPropagation(nn.Module):
         self.timing_propagation_parity_atol_ps = float(timing_propagation_parity_atol_ps)
         self.timing_propagation_parity_rtol = float(timing_propagation_parity_rtol)
         self.timing_aggregation_mode = str(timing_aggregation_mode or "smooth")
-        if self.timing_aggregation_mode not in ("hard", "smooth"):
-            raise ValueError("timing_aggregation_mode must be one of: hard, smooth")
+        if self.timing_aggregation_mode not in ("hard", "smooth", "avesmooth"):
+            raise ValueError(
+                "timing_aggregation_mode must be one of: hard, smooth, avesmooth"
+            )
         self.timing_aggregation_tau_ps = float(timing_aggregation_tau_ps)
         if self.timing_aggregation_tau_ps <= 0.0:
             raise ValueError("timing_aggregation_tau_ps must be positive")
@@ -884,6 +997,68 @@ class TimingPropagation(nn.Module):
         self._setup_critical_path_extractor_epoch = None
         self.critical_path_topology_epoch = 0
         self.last_critical_path_extraction_stats = None
+
+    def _run_early_evaluation(
+        self,
+        early_rc_inputs,
+        *,
+        cell_use_surrogate,
+        clk2q_use_surrogate,
+        dynamic_net_provider,
+    ):
+        if self.early_propagation is None:
+            return None
+        if early_rc_inputs is None:
+            raise RuntimeError("hold propagation requires min RC from the current forward")
+        if dynamic_net_provider is not None:
+            early_analysis = getattr(dynamic_net_provider, "early_analysis", None)
+            if not callable(early_analysis):
+                raise RuntimeError("hold propagation requires a dynamic provider with early_analysis")
+            early_context = early_analysis(early_rc_inputs.pin_caps)
+        else:
+            from contextlib import nullcontext
+
+            early_context = nullcontext(None)
+
+        def sides(values):
+            return tuple(
+                self._forward_input_tensor(values[edge]) for edge in ("rise", "fall")
+            )
+
+        with torch.set_grad_enabled(
+            torch.is_grad_enabled() and early_rc_inputs.gradients_enabled
+        ), early_context as early_provider:
+            early_timing = self.early_timing_view
+            if early_timing is None:
+                early_timing = self
+            else:
+                early_timing.timing_aggregation_mode = self.timing_aggregation_mode
+                early_timing.timing_aggregation_tau_ps = self.timing_aggregation_tau_ps
+                early_timing._dynamic_net_level_view_epoch = self._dynamic_net_level_view_epoch
+            return self.early_propagation.forward(
+                early_timing,
+                sides(early_rc_inputs.delays),
+                sides(early_rc_inputs.impulses),
+                sides(early_rc_inputs.caps),
+                surrogate=cell_use_surrogate,
+                clock_surrogate=clk2q_use_surrogate,
+                dynamic_provider=early_provider,
+            )
+
+    def _publish_timing_evaluation(self, outputs, hold_result):
+        from .timing_evaluation import TimingEvaluation
+
+        self.evaluation_generation += 1
+        self.last_evaluation = TimingEvaluation(
+            self.evaluation_generation,
+            outputs[0],
+            outputs[1],
+            outputs[2],
+            outputs[3],
+            self.timing_aggregation_mode,
+            hold_result,
+            self.hold_liberty_paths,
+        )
 
     def _skip_full_rat_propagation_in_fast_loop(self):
         return bool(getattr(self, "production_fast_loop", False))
@@ -1189,6 +1364,26 @@ class TimingPropagation(nn.Module):
         include_recovery,
         endpoint_pins=None,
     ):
+        action_context = getattr(self, "_active_discrete_action_context", None)
+        if action_context is not None:
+            if getattr(self, "sparse_timing_view", None) is None:
+                raise RuntimeError(
+                    "lut_action requires the sparse timing runtime; the scalar "
+                    "fallback cannot preserve the all-arcs action mask"
+                )
+            from .cell_aat_native import _tables
+
+            if _tables(self) is None:
+                raise RuntimeError(
+                    "lut_action requires raw 2D LUT tables; cached coefficient "
+                    "tables are not supported by the action path"
+                )
+        if getattr(self, "sparse_timing_view", None) is not None:
+            return self._sparse_runtime.extract_paths(
+                snapshot, global_k=global_k, max_depth=max_depth,
+                residual_tolerance_ps=residual_tolerance_ps,
+                include_recovery=include_recovery,
+            )
         if endpoint_pins is not None:
             requested = torch.as_tensor(
                 list(endpoint_pins), dtype=torch.long, device=self.end_points.device
@@ -1225,12 +1420,6 @@ class TimingPropagation(nn.Module):
                 ):
                     if name in snapshot:
                         snapshot[name] = snapshot[name][:0]
-        if getattr(self, "sparse_timing_view", None) is not None:
-            return self._sparse_runtime.extract_paths(
-                snapshot, global_k=global_k, max_depth=max_depth,
-                residual_tolerance_ps=residual_tolerance_ps,
-                include_recovery=include_recovery,
-            )
         if snapshot["aggregation_mode"] != "hard":
             raise RuntimeError("critical path snapshot does not use hard aggregation")
         if snapshot["topology_epoch"] != int(self.critical_path_topology_epoch):
@@ -1361,30 +1550,6 @@ class TimingPropagation(nn.Module):
             getattr(self, "production_fast_loop", False)
             and tensor.dtype in (torch.float32, torch.float64)
         )
-
-    def _surrogate_slew_input_tensor(self, pin_slew):
-        if not getattr(self, "production_fast_loop", False):
-            return pin_slew
-        if (
-            os.environ.get("AIMP_DISABLE_DETACH_SURROGATE_SLEW_INPUTS", "")
-            .strip()
-            .lower()
-            in ("1", "true", "yes", "on")
-        ):
-            return pin_slew
-        return pin_slew.detach()
-
-    def _surrogate_cap_input_tensor(self, pin_net_caps):
-        if not getattr(self, "production_fast_loop", False):
-            return pin_net_caps
-        if (
-            os.environ.get("AIMP_DISABLE_DETACH_SURROGATE_CAP_INPUTS", "")
-            .strip()
-            .lower()
-            in ("1", "true", "yes", "on")
-        ):
-            return pin_net_caps
-        return pin_net_caps.detach()
 
     def _build_cell_aat_surrogate_support_cache(
         self,
@@ -3296,8 +3461,8 @@ class TimingPropagation(nn.Module):
             )
             profile_timer = profile_now
 
-        active_slew = self._surrogate_slew_input_tensor(pin_slew)
-        active_cap = self._surrogate_cap_input_tensor(pin_net_caps)
+        active_slew = pin_slew
+        active_cap = pin_net_caps
         if valid_indices is not None:
             active_slew = active_slew.index_select(0, valid_indices)
             active_cap = active_cap.index_select(0, valid_indices)
@@ -3987,15 +4152,19 @@ class TimingPropagation(nn.Module):
         )
 
     def r_setup_entry(self, lib_cell_idxs, clk_pin_rtrans, data_pin_trans, lib_arc_idxs):
+        from .action_check_lut import action_setup_values
+
         luts = self.arcs_info.r_delay_luts
-        return self.lut_entry_vectorized(
-            lib_cell_idxs, clk_pin_rtrans, data_pin_trans, lib_arc_idxs, luts
+        return action_setup_values(
+            self, lib_cell_idxs, clk_pin_rtrans, data_pin_trans, lib_arc_idxs, luts
         )
 
     def f_setup_entry(self, lib_cell_idxs, clk_pin_rtrans, data_pin_trans, lib_arc_idxs):
+        from .action_check_lut import action_setup_values
+
         luts = self.arcs_info.f_delay_luts
-        return self.lut_entry_vectorized(
-            lib_cell_idxs, clk_pin_rtrans, data_pin_trans, lib_arc_idxs, luts
+        return action_setup_values(
+            self, lib_cell_idxs, clk_pin_rtrans, data_pin_trans, lib_arc_idxs, luts
         )
 
     def _entry_with_optional_surrogate(
@@ -4370,7 +4539,8 @@ class TimingPropagation(nn.Module):
                                 pin_rtran, pin_ftran,
                                 pin_net_cap_rise, pin_net_cap_fall
                                 , use_surrogate=None, profile_level=None,
-                                need_delay_updates=True):
+                                need_delay_updates=True,
+                                global_arc_rows=None):
         """
         Optimized version of the AAT calculation function.
         It groups arcs by their 'unate' property (timing sense) to avoid
@@ -4383,16 +4553,23 @@ class TimingPropagation(nn.Module):
 
         if use_surrogate is None:
             use_surrogate = self._cell_modeling_enabled()
+        action_context = getattr(self, "_active_discrete_action_context", None)
         if lut_entry_2d_op is not None:
             from .cell_aat_native import try_cell_aat_native
 
             native_result = try_cell_aat_native(
                 self, inst_arcs, (pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
                                  pin_net_cap_rise, pin_net_cap_fall),
-                use_surrogate=use_surrogate, need_delay_updates=need_delay_updates,
+                use_surrogate=use_surrogate,
+                need_delay_updates=need_delay_updates,
+                global_arc_rows=global_arc_rows,
             )
             if native_result is not None:
                 return native_result
+        elif action_context is not None:
+            raise RuntimeError(
+                "lut_action requires lut_entry_2d_op for the scalar cell LUT path"
+            )
         from .cell_aat_queries import query_cell_aat_updates
 
         updates = query_cell_aat_updates(
@@ -4822,8 +4999,14 @@ class TimingPropagation(nn.Module):
         dynamic_net_arc_inputs=None,
         dynamic_net_subgraph_inputs=None,
         dynamic_net_provider=None,
+        early_rc_inputs=None,
     ):
+        if self.timing_model_lease is not None:
+            self.timing_model_lease.require_current()
         start_time = time.time()
+        self.last_evaluation = None
+        if self.early_propagation is not None and early_rc_inputs is None:
+            raise RuntimeError("hold propagation requires min RC from the current forward")
 
         def profile_clock():
             if self.timing_propagation_profile:
@@ -4904,6 +5087,11 @@ class TimingPropagation(nn.Module):
         pin_net_impulse_fall = self._forward_input_tensor(pin_net_impulses['fall'])
         pin_net_cap_rise = self._forward_input_tensor(pin_net_caps['rise'])
         pin_net_cap_fall = self._forward_input_tensor(pin_net_caps['fall'])
+        action_context = getattr(self, "_active_discrete_action_context", None)
+        if action_context is not None:
+            pin_net_cap_rise, pin_net_cap_fall = action_context.maybe_apply_drive_load(
+                pin_net_cap_rise, pin_net_cap_fall
+            )
         if dynamic_net_provider is not None and hasattr(dynamic_net_provider, "apply_dynamic_net_cap_overlay"):
             pin_net_cap_rise, pin_net_cap_fall = dynamic_net_provider.apply_dynamic_net_cap_overlay(
                 pin_net_cap_rise=pin_net_cap_rise,
@@ -4925,6 +5113,13 @@ class TimingPropagation(nn.Module):
                 dynamic_net_provider=dynamic_net_provider,
                 surrogate_mode=surrogate_mode,
             )
+            hold_result = self._run_early_evaluation(
+                early_rc_inputs,
+                cell_use_surrogate=cell_use_surrogate,
+                clk2q_use_surrogate=clk2q_use_surrogate,
+                dynamic_net_provider=dynamic_net_provider,
+            )
+            self._publish_timing_evaluation(outputs, hold_result)
             self.last_parity_payload = self._try_run_cpu_cuda_parity(
                 pin_net_delays, pin_net_impulses, pin_net_caps, surrogate_mode,
                 outputs[0], outputs[1], self.last_endpoint_slack_tensor,
@@ -5099,6 +5294,7 @@ class TimingPropagation(nn.Module):
                 use_surrogate=cell_use_surrogate,
                 profile_level=level,
                 need_delay_updates=need_cell_arc_delay_cache,
+                global_arc_rows=abs_arc_indices,
             )
 
             profile_timer = self._sync_profile_clock(device)
@@ -5232,7 +5428,12 @@ class TimingPropagation(nn.Module):
         endpoint_rslack, endpoint_fslack = qualify_pin_slacks(
             self, metric_endpoint_ids, endpoint_rslack, endpoint_fslack
         )
-        endpoints_slack = torch.min(endpoint_rslack, endpoint_fslack)
+        endpoints_slack = aggregate_endpoint_slack(
+            endpoint_rslack,
+            endpoint_fslack,
+            mode=self.timing_aggregation_mode,
+            tau_ps=self.timing_aggregation_tau_ps,
+        )
         RAT_THRESHOLD = 8e7 
         # valid_mask = (pin_rRAT < RAT_THRESHOLD) & (pin_fRAT < RAT_THRESHOLD)
         # all_valid_slacks = slack[valid_mask]
@@ -5251,6 +5452,12 @@ class TimingPropagation(nn.Module):
         if critical_path_snapshot_requested and dynamic_net_provider is not None:
             critical_path_pin_net_delay_rise = pin_net_delay_rise
             critical_path_pin_net_delay_fall = pin_net_delay_fall
+        hold_result = self._run_early_evaluation(
+            early_rc_inputs,
+            cell_use_surrogate=cell_use_surrogate,
+            clk2q_use_surrogate=clk2q_use_surrogate,
+            dynamic_net_provider=dynamic_net_provider,
+        )
         self._store_forward_state(
             pin_rAAT=pin_rAAT,
             pin_fAAT=pin_fAAT,
@@ -5274,6 +5481,7 @@ class TimingPropagation(nn.Module):
             critical_path_pin_net_delay_rise=critical_path_pin_net_delay_rise,
             critical_path_pin_net_delay_fall=critical_path_pin_net_delay_fall,
         )
+        self._publish_timing_evaluation((wns, tns, ws, ts), hold_result)
         total_runtime_ms = (profile_clock() - profile_started_at) * 1000.0
         post_timing_boundary = {
             "core_device": str(self.device),
@@ -5450,7 +5658,7 @@ class TimingPropagation(nn.Module):
     def _prepare_violation_inputs(self, values, pin_mask, limits, metric_name: str):
         values = values.reshape(-1)
         mask = pin_mask.bool().to(values.device).reshape(-1)
-        limits = limits.to(values.device).float().reshape(-1)
+        limits = limits.to(values).reshape(-1)
         # mask/limits are always design-pin tensors. values may come from the
         # larger RC graph and therefore include a trailing Steiner-only suffix.
 
@@ -5511,8 +5719,8 @@ class TimingPropagation(nn.Module):
         if not torch.any(valid_mask):
             return rise_values.new_zeros(()) if virtual_drv is None else virtual_drv[0]
 
-        rise_violation = torch.clamp(rise_values[valid_mask].float() - limits[valid_mask], min=0.0)
-        fall_violation = torch.clamp(fall_values[valid_mask].float() - limits[valid_mask], min=0.0)
+        rise_violation = torch.clamp(rise_values[valid_mask] - limits[valid_mask], min=0.0)
+        fall_violation = torch.clamp(fall_values[valid_mask] - limits[valid_mask], min=0.0)
         total_violation_per_pin = torch.maximum(rise_violation, fall_violation)
 
         # Debug: log top 20 slew violations
@@ -5575,11 +5783,11 @@ class TimingPropagation(nn.Module):
             return rise_values.new_zeros(()) if virtual_drv is None else virtual_drv[1]
 
         rise_violation = torch.clamp(
-            rise_values[valid_mask].float() - limits[valid_mask],
+            rise_values[valid_mask] - limits[valid_mask],
             min=0.0,
         )
         fall_violation = torch.clamp(
-            fall_values[valid_mask].float() - limits[valid_mask],
+            fall_values[valid_mask] - limits[valid_mask],
             min=0.0,
         )
         total_violation_per_pin = torch.maximum(rise_violation, fall_violation)

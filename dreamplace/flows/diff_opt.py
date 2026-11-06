@@ -52,14 +52,29 @@ class DiffOptController:
             for name, field in TIMING_OPT_COEFFICIENT_FIELDS.items()
         }
         original_weight = model.timing_grad_balance_weight
+        hold = getattr(model, "hold_objective", None)
         try:
             for name, field in TIMING_OPT_COEFFICIENT_FIELDS.items():
                 setattr(model, field, float(getattr(coefficients, name)))
+            if hold is None and (
+                coefficients.hold_wns or coefficients.hold_tns
+            ):
+                raise ValueError(
+                    "nonzero diff_opt hold weights require timing_hold_enabled"
+                )
+            if hold is not None:
+                model.hold_objective = replace(
+                    hold,
+                    wns=float(coefficients.hold_wns),
+                    tns=float(coefficients.hold_tns),
+                )
             model.timing_grad_balance_weight = 1.0
             yield
         finally:
             for name, field in TIMING_OPT_COEFFICIENT_FIELDS.items():
                 setattr(model, field, original[name])
+            if hold is not None:
+                model.hold_objective = hold
             model.timing_grad_balance_weight = original_weight
 
     @contextmanager

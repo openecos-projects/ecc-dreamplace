@@ -136,6 +136,7 @@ struct PyPlaceDB
   py::list inst_size;
   py::list cell_id_2_libpin_id_start;
   py::list pin_2_libpin_offset;
+  py::list flat_lib_pin_names;
   py::list flat_lib_pin_offset_x;
   py::list flat_lib_pin_offset_y;
   py::list flat_lib_pin_cap;

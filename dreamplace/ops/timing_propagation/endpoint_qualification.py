@@ -18,6 +18,20 @@ def qualify_pin_slacks(timing, pins, rise, fall):
     return qualify_check_candidates(rise, fall, valid)
 
 
+def aggregate_endpoint_slack(rise, fall, *, mode="hard", tau_ps=2.0):
+    """Combine rise/fall endpoint slack using the timing aggregation mode."""
+
+    if mode == "smooth":
+        tau = float(tau_ps)
+        if tau <= 0.0:
+            raise ValueError("endpoint aggregation tau must be positive")
+        return -tau * torch.logsumexp(
+            torch.stack((-rise / tau, -fall / tau), dim=0),
+            dim=0,
+        )
+    return torch.minimum(rise, fall)
+
+
 def endpoint_metrics(slack, zero):
     if slack.numel() == 0:
         return zero, zero, zero

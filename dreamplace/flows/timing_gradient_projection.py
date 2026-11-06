@@ -171,6 +171,16 @@ def project_timing_gradient_to_net_weights(context):
             dtype=data_collections.net_weights.dtype,
             device=data_collections.net_weights.device,
         )
+        if bool(getattr(params, "zero_clock_net_weight_flag", 0)):
+            from dreamplace.ops.buffer_insertion.net_eligibility import clock_net_ids
+
+            clk_ids = [
+                int(net_id)
+                for net_id in clock_net_ids(placedb, data_collections)
+                if 0 <= int(net_id) < target_weights.numel()
+            ]
+            if clk_ids:
+                target_weights[clk_ids] = 0.0
         data_collections.net_weights[: target_weights.numel()].copy_(target_weights)
         placedb.net_weights[: target_weights.numel()] = target_weights.detach().cpu().numpy().astype(
             placedb.net_weights.dtype, copy=False

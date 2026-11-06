@@ -1444,6 +1444,14 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             net_weights.fill_(1.0)
         if hasattr(placedb, "net_weights"):
             placedb.net_weights[:] = 1.0
+            if hasattr(placedb, "apply_clock_net_weight_policy"):
+                placedb.apply_clock_net_weight_policy(params)
+            if net_weights is not None:
+                net_weights[: len(placedb.net_weights)].copy_(
+                    torch.from_numpy(placedb.net_weights).to(
+                        dtype=net_weights.dtype, device=net_weights.device
+                    )
+                )
         self._diff_tdp_net_weights_are_projected = False
         summary = getattr(self, "_diff_tdp_gate_summary", None)
         if isinstance(summary, dict):

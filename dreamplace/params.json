@@ -439,6 +439,10 @@
         "description": "ignore net degree larger than some value",
         "default": 100
     },
+    "zero_clock_net_weight_flag": {
+        "description": "whether to zero out clock net weights in placement",
+        "default": 0
+    },
     "gp_noise_ratio": {
         "description": "noise to initial positions for global placement",
         "default": 0.025

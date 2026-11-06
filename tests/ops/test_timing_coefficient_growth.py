@@ -34,6 +34,7 @@ def density_update_model():
     model.timing_slew_weight = 3.0
     model.timing_cap_weight = 4.0
     model.timing_grad_balance_weight = 7.0
+    model.use_timing_obj = True
     return model
 
 
@@ -93,6 +94,33 @@ def test_timing_coefficient_growth_is_capped(algo, density_update_model):
 
     update(metric, previous, 696)
     assert (model.timing_wns_coeff, model.timing_tns_coeff) == pytest.approx(capped)
+
+
+@pytest.mark.parametrize("algo", ["hpwl", "overflow"])
+def test_timing_coefficient_growth_waits_for_use_timing_obj(algo, density_update_model):
+    model = density_update_model
+    model.params.placement_sizing_mode = "place_only"
+    model.params.timing_coeff_growth_factor = 1.01
+    model.use_timing_obj = False
+    update = model.build_update_density_weight(model.params, model.placedb, algo=algo)
+    metric = SimpleNamespace(
+        hpwl=torch.tensor(101.0),
+        density=torch.tensor([0.5]),
+        overflow=torch.tensor([0.2]),
+    )
+    previous = SimpleNamespace(hpwl=torch.tensor(100.0))
+
+    for iteration in range(1, 5):
+        update(metric, previous, iteration)
+    assert (model.timing_wns_coeff, model.timing_tns_coeff) == pytest.approx(
+        (0.02, 0.0002)
+    )
+
+    model.use_timing_obj = True
+    update(metric, previous, 5)
+    assert (model.timing_wns_coeff, model.timing_tns_coeff) == pytest.approx(
+        (0.02 * 1.01, 0.0002 * 1.01)
+    )
 
 
 @pytest.mark.parametrize("factor", [0.0, -1.0, float("nan"), float("inf")])

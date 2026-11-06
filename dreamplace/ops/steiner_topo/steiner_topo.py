@@ -102,6 +102,7 @@ class SteinerTopo(nn.Module):
                  flat_net2pin_map,
                  flat_net2pin_start_map,
                  ignore_net_degree=None,
+                 ignored_net_ids=None,
                  algorithm="FLUTE",
                  deterministic_flag=False,
                  collect_edge_geometry_stats=False):
@@ -113,6 +114,11 @@ class SteinerTopo(nn.Module):
 
         # Set ignore degree threshold
         self.ignore_net_degree = ignore_net_degree if ignore_net_degree is not None else flat_net2pin_map.numel()
+        self.ignored_net_ids = (
+            sorted({int(net_id) for net_id in ignored_net_ids if int(net_id) >= 0})
+            if ignored_net_ids is not None
+            else []
+        )
 
         self.newx = None
         self.newy = None
@@ -569,6 +575,7 @@ class SteinerTopo(nn.Module):
             str(_FLUTE_POWV_FILE),
             str(_FLUTE_POST_FILE),
             deterministic_flag=self.deterministic_flag,
+            ignored_net_ids=self.ignored_net_ids,
             **self.frozen_nets.build_options(self),
         )
 

@@ -109,6 +109,21 @@ def prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
         topology_flat_net2pin_map, topology_flat_net2pin_start_map = (
             build_topology_flat_net2pin_inputs(placedb)
         )
+    from dreamplace.ops.buffer_insertion.net_eligibility import clock_net_ids, decode_name
+
+    net_names = getattr(placedb, "net_names", None)
+    if net_names is None:
+        net_names = ()
+    clock_net_names = getattr(placedb, "clock_net_names", None)
+    if clock_net_names is None:
+        clock_net_names = ()
+    ignored_clock_net_names = {
+        decode_name(name) for name in clock_net_names
+    }
+    for net_id in clock_net_ids(placedb):
+        if 0 <= int(net_id) < len(net_names):
+            ignored_clock_net_names.add(decode_name(net_names[int(net_id)]))
+
     with profile_scope(
         params,
         "gpugr_prepare.run_gpugr",
@@ -135,7 +150,7 @@ def prepare_l_shape_inputs_from_gpugr(params, placedb, pos, model=None):
             topology_flat_net2pin_start_map=topology_flat_net2pin_start_map,
             topology_num_pins=len(getattr(placedb, "pin_names", [])),
             topology_num_nets=int(getattr(placedb, "num_nets", 0)),
-            topology_ignored_net_names=getattr(placedb, "clock_net_names", ()),
+            topology_ignored_net_names=sorted(ignored_clock_net_names),
             topology_max_gap=1,
             topology_xl=topology_xl,
             topology_yl=topology_yl,

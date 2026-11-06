@@ -146,6 +146,8 @@ def _net_arcs(timing, nets):
 
 
 def _apply_nets(timing, arcs, arrivals, slews, delays, impulses):
+    if arcs.numel() == 0:
+        return arrivals, slews
     from .timing_propagation import SLEW_SQRT_EPS
 
     source, sink = arcs[:, 0].long(), arcs[:, 1].long()
@@ -267,6 +269,8 @@ class EarlyPropagation:
         def nets_forward(nets, level):
             nonlocal slews
             arcs = _net_arcs(timing, nets)
+            if arcs.numel() == 0 and dynamic_provider is None:
+                return
             old_slews = slews
             for key, arrival in domains.items():
                 native = None

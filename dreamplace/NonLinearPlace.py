@@ -4050,6 +4050,18 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 density_weight = 0.0
                 model = construct_model()
                 self.last_global_place_model = model
+                if bool(getattr(params, "build_model_only", False)):
+                    params.stop_overflow = original_stop_overflow
+                    return (
+                        float("nan"),
+                        float("nan"),
+                        {
+                            "objective": [-1],
+                            "hpwl": [-1],
+                            "overflow": [-1],
+                            "density": [-1],
+                        },
+                    )
                 warm_schedule_state = getattr(
                     placedb,
                     "pending_warm_schedule_state",
@@ -7121,25 +7133,26 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 flat_pin_to = self.data_collections.flat_pin_to
                 flat_pin_from = self.data_collections.flat_pin_from
 
-                length = (torch.abs(new_x[flat_pin_from] - new_x[flat_pin_to])
-                        + torch.abs(new_y[flat_pin_from] - new_y[flat_pin_to])) / params.scale_factor  / placedb.dbu
-                flute_length_path = "%s/%s_flute_length.txt" % (
-                    params.result_dir, params.design_name())
-                with open(flute_length_path, "w") as f:
-                    f.write("net_name, flute_length (um), cap (pF)\n")
-                    for net_id in range(placedb.num_nets):
-                        start = self.data_collections.net_flat_topo_sort_start[net_id]
-                        end = self.data_collections.net_flat_topo_sort_start[net_id + 1]
-                        net_name = placedb.net_names[net_id]
-                        net_flat_pins_nodes = self.data_collections.net_flat_topo_sort[start:end]
-                        net_flat_pin_start = self.data_collections.flat_pin_to_start[net_flat_pins_nodes]
-                        net_flat_pin_end = self.data_collections.flat_pin_to_start[net_flat_pins_nodes + 1]
-                        net_length = 0
-                        for i in range(len(net_flat_pins_nodes)):
-                            pin_start = net_flat_pin_start[i]
-                            pin_end = net_flat_pin_end[i]
-                            net_length += length[pin_start:pin_end].sum().item()
-                        f.write(f"{net_name}, {net_length}, {placedb.c_unit * net_length}\n")
+                if bool(getattr(params, "dump_flute_length_flag", False)):
+                    length = (torch.abs(new_x[flat_pin_from] - new_x[flat_pin_to])
+                            + torch.abs(new_y[flat_pin_from] - new_y[flat_pin_to])) / params.scale_factor  / placedb.dbu
+                    flute_length_path = "%s/%s_flute_length.txt" % (
+                        params.result_dir, params.design_name())
+                    with open(flute_length_path, "w") as f:
+                        f.write("net_name, flute_length (um), cap (pF)\n")
+                        for net_id in range(placedb.num_nets):
+                            start = self.data_collections.net_flat_topo_sort_start[net_id]
+                            end = self.data_collections.net_flat_topo_sort_start[net_id + 1]
+                            net_name = placedb.net_names[net_id]
+                            net_flat_pins_nodes = self.data_collections.net_flat_topo_sort[start:end]
+                            net_flat_pin_start = self.data_collections.flat_pin_to_start[net_flat_pins_nodes]
+                            net_flat_pin_end = self.data_collections.flat_pin_to_start[net_flat_pins_nodes + 1]
+                            net_length = 0
+                            for i in range(len(net_flat_pins_nodes)):
+                                pin_start = net_flat_pin_start[i]
+                                pin_end = net_flat_pin_end[i]
+                                net_length += length[pin_start:pin_end].sum().item()
+                            f.write(f"{net_name}, {net_length}, {placedb.c_unit * net_length}\n")
 
                 wns, tns, ws, ts = model.timing_obj(self.pos[0])
                 if (

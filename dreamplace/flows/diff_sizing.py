@@ -97,6 +97,7 @@ def _build_timing_model(engine):
         "legalize_flag": params.legalize_flag,
         "detailed_place_flag": params.detailed_place_flag,
         "global_place_stages": copy.deepcopy(params.global_place_stages),
+        "build_model_only": getattr(params, "build_model_only", False),
     }
     stages = copy.deepcopy(params.global_place_stages)
     for stage in stages:
@@ -106,6 +107,7 @@ def _build_timing_model(engine):
     params.global_place_flag = 1
     params.legalize_flag = 0
     params.detailed_place_flag = 0
+    params.build_model_only = True
     try:
         engine.place()
     finally:
@@ -124,6 +126,7 @@ def _legalize_and_measure(engine, params):
 
     terminal_params = copy.deepcopy(params)
     terminal_params.flow_kind = "placement"
+    terminal_params.placement_sizing_mode = "place_only"
     terminal_params.global_place_flag = 0
     terminal_params.legalize_flag = 1
     terminal_params.detailed_place_flag = 0

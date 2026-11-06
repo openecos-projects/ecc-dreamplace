@@ -127,6 +127,7 @@ def _legalize_and_measure(engine, params):
     terminal_params = copy.deepcopy(params)
     terminal_params.flow_kind = "placement"
     terminal_params.placement_sizing_mode = "place_only"
+    terminal_params.sizing_parameterization = "logits"
     terminal_params.global_place_flag = 0
     terminal_params.legalize_flag = 1
     terminal_params.detailed_place_flag = 0

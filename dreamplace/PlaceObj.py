@@ -890,7 +890,7 @@ class PlaceObj(nn.Module):
     It includes various ops related to global placement as well.
     """
 
-    TIMING_COEFF_GROWTH_MAX_MULTIPLIER = 1000.0
+    TIMING_COEFF_GROWTH_MAX_MULTIPLIER = 10.0
 
     def __init__(
         self,

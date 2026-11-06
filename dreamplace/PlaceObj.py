@@ -11116,7 +11116,7 @@ class PlaceObj(nn.Module):
         return PreconditionOp(
             placedb, data_collections, op_collections,
             precond_pin_count_flag=pin_count_flag,
-            use_net_weights=not bool(params.routability_opt_flag) and not pin_count_flag,
+            use_net_weights=not pin_count_flag,
         )
 
     def build_route_utilization_map(self, params, placedb, data_collections):

@@ -605,6 +605,41 @@ def test_repair_design_fanout_region_repair_is_opt_in_and_partitions_loads():
     ) == [1, 2, 3, 4, 5]
 
 
+def test_repair_design_fanout_repair_skips_stale_tree_repair_on_same_net():
+    design = _fanout_design()
+    timing = _fanout_timing()
+    timing["pin_slew_rise"] = [0.2] * 6
+    timing["pin_slew_fall"] = [0.2] * 6
+    timing["pin_load"] = [0.05, 0.01, 0.01, 0.01, 0.01, 0.01]
+    timing["pin_cap"] = [0.01] * 6
+    timing["pin_max_slew"] = [0.05, 0.05, 0.05, 0.05, 0.05, 0.05]
+    timing["pin_max_cap"] = [0.01, 0.0, 0.0, 0.0, 0.0, 0.0]
+    steiner = _fanout_steiner()
+
+    result = rebuffer_cpp.plan_repair_design(
+        design,
+        timing,
+        steiner,
+        _liberty(),
+        _characterization(),
+        {
+            "resize_drivers": False,
+            "insert_buffers": True,
+            "max_fanout": 2,
+            "repair_design_fanout_repair": True,
+            "repair_net_tree": True,
+        },
+    )
+    assert result["status"] == "ok"
+    assert result["actions"]
+    assert all(action["reason"] == "fanout" for action in result["actions"])
+    assert sorted(
+        pin
+        for action in result["actions"]
+        for pin in action["downstream_pins"]
+    ) == [1, 2, 3, 4, 5]
+
+
 def test_plan_repair_design_resizes_driver_before_inserting_buffer():
     result = rebuffer_cpp.plan_repair_design(
         _design(),

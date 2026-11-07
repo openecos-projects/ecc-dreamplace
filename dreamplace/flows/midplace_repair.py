@@ -29,6 +29,7 @@ from dreamplace.flows.midplace_schedule import MidplaceSchedule
 from dreamplace.flows.midplace_state import (
     MidplaceBoundedStop,
     MidplaceConfig,
+    MidplaceRequest,
     MidplaceRestart,
     OverflowObservation,
     OverflowTracker,
@@ -214,6 +215,9 @@ class MidplaceRepairSession:
                 self.write()
                 raise MidplaceBoundedStop()
             return
+        if self.defers_to_first_inflation_window(placer):
+            self.tracker.previous_overflow = overflow
+            return
         observation = OverflowObservation(
             overflow,
             int(getattr(placedb, "topology_generation", 0)),
@@ -223,12 +227,56 @@ class MidplaceRepairSession:
         )
         request = self.tracker.observe(observation, pending_transaction=pending_transaction)
         if request is not None:
-            self._execute(placer, model, request)
+            self._execute(placer, model, request, metric=metric)
         elif self.tracker.pending is not None:
             self.record.update(
                 status="repair_handoff_pending", pending_crossing=asdict(self.tracker.pending[1])
             )
             self.write()
+
+    def defers_to_first_inflation_window(self, placer):
+        if self.active:
+            return False
+        params = self.engine.params
+        if not bool(getattr(params, "routability_opt_flag", False)):
+            return False
+        owner = getattr(placer, "inflation_s5b1", None)
+        schedule = getattr(owner, "schedule", None)
+        return schedule is not None and schedule.mode == "inflation"
+
+    def before_first_inflation(self, placer, model, metric, eval_ops, cursor):
+        if self.active or self.tracker.consumed:
+            return False
+        placedb = self.engine.placedb
+        overflow = float(metric.overflow.detach().max().cpu())
+        threshold = float(
+            getattr(self.engine.params, "node_area_adjust_overflow", self.config.overflow)
+        )
+        observation = OverflowObservation(
+            overflow,
+            int(getattr(placedb, "topology_generation", 0)),
+            cursor,
+            self.completed_steps,
+            self.total_steps,
+        )
+        previous = self.tracker.previous_overflow
+        self.tracker.previous_overflow = overflow
+        self.tracker.consumed = True
+        request = MidplaceRequest(
+            "midplace-1",
+            threshold,
+            previous,
+            observation,
+            observation,
+        )
+        self._execute(
+            placer,
+            model,
+            request,
+            consume_inflation_window=True,
+            metric=metric,
+        )
+        return True
 
     def observe_initial(self, metric, cursor):
         """Capture the first metric before an S5B1 window can replace it."""
@@ -245,7 +293,15 @@ class MidplaceRepairSession:
         self.tracker.observe_initial(observation)
         self.record["initial_observation"] = asdict(observation)
 
-    def _execute(self, placer, model, request):
+    def _execute(
+        self,
+        placer,
+        model,
+        request,
+        *,
+        consume_inflation_window=False,
+        metric=None,
+    ):
         placedb, params = self.engine.placedb, self.engine.params
         self.record.update(
             status="repair_executing",
@@ -267,7 +323,13 @@ class MidplaceRepairSession:
             pre_pydb_identity=id(placedb.rawdb.pydb),
         )
         self.previous_names = set(names(placedb.node_names))
-        self.schedule.capture(placer, model, request.execution.cursor.stage)
+        self.schedule.capture(
+            placer,
+            model,
+            request.execution.cursor.stage,
+            cursor=request.execution.cursor,
+            metric=metric,
+        )
         old_seed = capture_fillers(placedb, placer.pos[0])
         warm = (
             capture_warm_schedule_state(model)
@@ -290,6 +352,10 @@ class MidplaceRepairSession:
                 use_native_timing_evaluation=True,
                 use_native_timing_planning=True,
             )
+        can_inplace_size = _can_sync_size_only_inplace(placer, placedb)
+        stage_kwargs = (
+            {"skip_size_only_rebuild": True} if can_inplace_size else {}
+        )
         stage = run_repair_buffering_stage(
             placedb,
             mode=self.config.mode,
@@ -298,6 +364,7 @@ class MidplaceRepairSession:
             artifact_dir=self.path.parent / "midplace-repair",
             topology_generation=request.execution.topology_generation,
             profile=self.profile,
+            **stage_kwargs,
         )
         self.record["repair"] = stage
         if stage["status"] != "ok":
@@ -337,11 +404,53 @@ class MidplaceRepairSession:
         self.active = True
         params._midplace_objectives_pending = False
         self.record["objectives_ready_after_repair"] = True
+        if consume_inflation_window:
+            self.schedule.record_inflation_window(
+                stage=request.execution.cursor.stage,
+                iteration=request.execution.cursor.raw_iteration + 1,
+                window_summary={
+                    "stage": int(request.execution.cursor.stage),
+                    "iteration": int(request.execution.cursor.raw_iteration + 1),
+                    "mode": self.config.mode,
+                    "mutation_kind": mutation,
+                    "inserted_count": inserted,
+                    "resized_count": resized,
+                },
+            )
         if mutation == "noop":
+            if consume_inflation_window:
+                self.record["s5b1_inflation_state"] = self.schedule.restore(
+                    getattr(placer, "inflation_s5b1", None),
+                    placer._routability_controller,
+                )
             self.record.update(status="placement_continuing", runtime_reused=True)
             self.write()
             if not self.config.continue_placement:
                 self.record.update(status="handoff_completed", gate_status="passed")
+                self.write()
+                raise MidplaceBoundedStop()
+            return
+        if mutation == "resize-only" and can_inplace_size:
+            with self.profile.measure("inplace_runtime_sizing_sync_ms"):
+                runtime_sync = _sync_size_only_runtime(
+                    placer, model, params, placedb, design
+                )
+            if consume_inflation_window:
+                self.record["s5b1_inflation_state"] = self.schedule.restore(
+                    getattr(placer, "inflation_s5b1", None),
+                    placer._routability_controller,
+                )
+            self.record.update(
+                status="placement_continuing",
+                runtime_reused=True,
+                runtime_sizing_sync=runtime_sync,
+                post_counts=topology_counts(placedb),
+            )
+            self.write()
+            if not self.config.continue_placement:
+                self.record.update(
+                    status="handoff_completed_without_continuation", gate_status="pending"
+                )
                 self.write()
                 raise MidplaceBoundedStop()
             return
@@ -362,7 +471,14 @@ class MidplaceRepairSession:
                 sub_count=model.Lsub_iteration,
             )
             if self.resume_cursor.stage == request.execution.cursor.stage:
-                self.resume_sub_iteration = int(model.Lsub_iteration)
+                self.resume_sub_iteration = int(
+                    getattr(model, "routability_Lsub_iteration", model.Lsub_iteration)
+                    if (
+                        consume_inflation_window
+                        or bool(getattr(params, "routability_opt_flag", False))
+                    )
+                    else model.Lsub_iteration
+                )
         self.record.update(
             resume_cursor=asdict(self.resume_cursor),
             remaining_effective_steps=remaining_steps(
@@ -456,3 +572,90 @@ class MidplaceRepairSession:
         )
         self.write()
         return result
+
+
+def _can_sync_size_only_inplace(placer, placedb):
+    dc = getattr(placer, "data_collections", None)
+    if dc is None or placedb is None:
+        return False
+    return all(
+        getattr(dc, attr, None) is not None
+        for attr in (
+            "inst_cell_id",
+            "node_size_x",
+            "node_size_y",
+            "node_areas",
+            "flat_libcell_width",
+            "flat_libcell_height",
+        )
+    )
+
+
+def _sync_size_only_runtime(placer, model, params, placedb, design):
+    import torch
+    from dreamplace.ops.discrete_gradient_topk.runtime_cells import sync_runtime_cells
+    from dreamplace.ops.routability.cooptimization_area import (
+        SizingWindowGeometry,
+        capture_area,
+        coordinate_area,
+    )
+
+    resizes = list((design.get("plan") or {}).get("resizes", ()) or ())
+    inst_ids = [int(item["node_id"]) for item in resizes]
+    cell_ids = [
+        int(
+            item["target_cell_index"]
+            if "target_cell_index" in item
+            else item["new_cell_id"]
+        )
+        for item in resizes
+    ]
+    dc = placer.data_collections
+    owner = getattr(placer, "inflation_s5b1", None)
+    virtual_area = owner.virtual_area(model) if owner is not None else 0.0
+    capacity = getattr(owner, "capacity", None)
+    before = capture_area(dc, placedb, virtual_area, capacity=capacity)
+    geometry = SizingWindowGeometry(dc, placedb, placer.pos[0])
+    pin_inflate_x = (
+        (dc.pin_offset_x - dc.original_pin_offset_x).detach().clone()
+        if getattr(dc, "original_pin_offset_x", None) is not None
+        else None
+    )
+    pin_inflate_y = (
+        (dc.pin_offset_y - dc.original_pin_offset_y).detach().clone()
+        if getattr(dc, "original_pin_offset_y", None) is not None
+        else None
+    )
+    op_collections = getattr(placer, "op_collections", None)
+    timing_op = getattr(op_collections, "timing_op", None)
+    result = sync_runtime_cells(
+        params,
+        {
+            "applied_instance_ids": inst_ids,
+            "applied_cell_ids": cell_ids,
+        },
+        data_collections=dc,
+        placedb=placedb,
+        timing_op=timing_op,
+        model=model,
+        direct_joint=False,
+        geometry_window=geometry,
+        pin_offset_mode="delta",
+    )
+    with torch.no_grad():
+        if pin_inflate_x is not None:
+            dc.original_pin_offset_x.copy_(dc.pin_offset_x - pin_inflate_x)
+        if pin_inflate_y is not None:
+            dc.original_pin_offset_y.copy_(dc.pin_offset_y - pin_inflate_y)
+        if owner is not None and getattr(owner, "native_cell_ids", None) is not None:
+            owner.native_cell_ids.copy_(dc.inst_cell_id.detach().cpu())
+    after = coordinate_area(before, dc, placedb, placer.pos[0], virtual_area)
+    inflation_state = getattr(model, "inflation_state", None)
+    if inflation_state is not None and inflation_state.target_area is not None:
+        inflation_state.target_area = after.movable + after.filler
+    if hasattr(model, "refresh_routability_operators"):
+        model.refresh_routability_operators()
+    if hasattr(model, "refresh_after_geometry_change"):
+        model.refresh_after_geometry_change()
+    result["area"] = {"before": before.__dict__, "after": after.__dict__}
+    return result

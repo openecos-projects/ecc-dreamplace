@@ -540,3 +540,89 @@ def test_carrier_accepts_schema_two_and_three(version):
 def test_carrier_rejects_unknown_schema():
     with pytest.raises(ValueError, match="schema 2 or 3"):
         require_carrier_schema(SimpleNamespace(timing_schema_version=4))
+
+
+def test_inplace_carrier_sizing_matches_full_rebuild_without_reexport():
+    from dreamplace.ops.placeio_ecc.place_io import ECCPlaceIOBackend
+    from dreamplace.ops.placeio_ecc.timing_carrier import apply_inplace_carrier_sizing
+
+    base = _base()
+    base.flat_lib_pin_offset_x = [10.0, 20.0, 30.0, 40.0]
+    base.flat_lib_pin_offset_y = [5.0, 15.0, 25.0, 35.0]
+    physical = deepcopy(base)
+    physical.native_state_dirty = True
+    carrier = CommittedTimingPyDB(base, physical)
+
+    def forbidden_export(*args, **kwargs):
+        pytest.fail("size-only in-place carrier sizing must not call C++ pydb export")
+
+    raw = ECCPlaceIOBackend(
+        SimpleNamespace(ecc=SimpleNamespace(pydb=forbidden_export)),
+        ".",
+        object(),
+        carrier,
+        timing_enabled=True,
+    )
+
+    updated, summary = apply_inplace_carrier_sizing(
+        raw,
+        [{"node_id": 0, "target_cell_index": 1, "target_master_name": "BUF2"}],
+    )
+
+    assert updated is carrier
+    assert summary["refresh_path"] == "inplace_carrier_sizing"
+    assert summary["pydb_replaced"] is False
+    assert raw.refresh_generation == 1
+    assert carrier.native_state_dirty is False
+    assert carrier.node_master_names[0] == "BUF2"
+    assert carrier.inst_libcell_offset[0] == 1
+    assert carrier.node_size_x[0] == pytest.approx(2000.0)
+    assert carrier.node_size_y[0] == pytest.approx(1000.0)
+    assert list(carrier.pin_offset_x[1:3]) == [30.0, 40.0]
+    assert list(carrier.pin_offset_y[1:3]) == [25.0, 35.0]
+    assert carrier.flat_inst_arcs_by_level == [[1, 2, 1, 1, 1, 0, 0, 0]]
+    assert list(carrier.arc_libcell_id) == [1, -1, -1]
+    assert list(carrier.arc_libarc_id) == [1, -1, -1]
+
+    resized_physical = deepcopy(base)
+    resized_physical.node_master_names[0] = "BUF2"
+    resized_physical.node_size_x[0] = 2000.0
+    resized_physical.pin_offset_x[1:3] = [30.0, 40.0]
+    resized_physical.pin_offset_y[1:3] = [25.0, 35.0]
+    full_rebuilt = CommittedTimingPyDB(base, resized_physical)
+
+    assert _timing(carrier).baseline.as_dict() == pytest.approx(
+        _timing(full_rebuilt).baseline.as_dict(), abs=1e-8, rel=0
+    )
+
+
+def test_refresh_skips_routability_export_when_metadata_owns_static_routability():
+    from dreamplace.ops.placeio_ecc.place_io import ECCPlaceIOBackend
+    from dreamplace.ops.placeio_ecc.timing_carrier import refresh_python_timing_carrier
+
+    base = _base()
+    base.num_routing_grids_x = 4
+    base.num_routing_grids_y = 4
+    base.unit_horizontal_capacities = [1.0]
+    base.unit_vertical_capacities = [1.0]
+    base.initial_horizontal_demand_map = [0.0] * 16
+    base.initial_vertical_demand_map = [0.0] * 16
+
+    seen_routability_flags = []
+
+    def export(dm, x, y, routability, **options):
+        seen_routability_flags.append(bool(routability))
+        return _physical_after()
+
+    raw = ECCPlaceIOBackend(
+        SimpleNamespace(ecc=SimpleNamespace(pydb=export)),
+        ".",
+        object(),
+        base,
+        timing_enabled=True,
+    )
+    carrier, _ = refresh_python_timing_carrier(raw)
+    assert seen_routability_flags == [False]
+    assert carrier.num_routing_grids_x == 4
+    assert carrier.unit_horizontal_capacities == [1.0]
+

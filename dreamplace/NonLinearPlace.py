@@ -4058,12 +4058,6 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 
                 density_weight = 0.0
                 model = construct_model()
-                if (
-                    midplace is not None and midplace.restarted
-                    and cur_stage == resume_cursor.stage
-                    and midplace.resume_sub_iteration is not None
-                ):
-                    model.Lsub_iteration = midplace.resume_sub_iteration
                 self.last_global_place_model = model
                 warm_schedule_state = getattr(
                     placedb,
@@ -4503,13 +4497,15 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         use_live_timing_loss=use_live_timing_loss,
                     )
 
+                is_midplace_restart_stage = bool(
+                    midplace is not None
+                    and midplace.restarted
+                    and resume_cursor is not None
+                    and cur_stage == resume_cursor.stage
+                )
                 if (
                     iteration == 0 or (params.macro_place_flag and cur_stage == 1)
-                    or (
-                        midplace is not None and midplace.restarted
-                        and cur_stage == resume_cursor.stage
-                    )
-                ):
+                ) and not is_midplace_restart_stage:
                     write_crash_stage_marker(
                         "nonlinearplace_learning_rate_initialization",
                         "start",
@@ -4781,7 +4777,16 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     # handle multiple density weights for multi-electric field
                     _profile_t = profile_now()
                     if torch.eq(model.density_weight.mean(), 0.0):
-                        model.initialize_density_weight(params, placedb)
+                        if (
+                            midplace is not None
+                            and midplace.restarted
+                            and resume_cursor is not None
+                            and cur_stage == resume_cursor.stage
+                            and getattr(midplace.schedule, "use_restart_density_weight", False)
+                        ):
+                            model.initialize_restart_density_weight(params, placedb)
+                        else:
+                            model.initialize_density_weight(params, placedb)
                         if model.density_weight.size(0) == 1:
                             logging.info("density_weight = %.6E" %
                                          (model.density_weight.data))
@@ -5424,6 +5429,134 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 model.enable_l_shape_routability = False
                 l_shape_policy.reset_auto_disable_state(model)
                 l_shape_policy.reset_reenable_state(model)
+                if is_midplace_restart_stage:
+                    pos = model.data_collections.pos[0]
+                    restart_metric = EvalMetrics.EvalMetrics(iteration)
+                    restart_metric.evaluate(
+                        placedb,
+                        eval_ops,
+                        pos,
+                        model.data_collections,
+                    )
+                    model.overflow = restart_metric.overflow.data.clone()
+                    midplace.schedule.restore_model_state(self, model, params)
+                    if (
+                        midplace.schedule.use_l_shape_routability
+                        and params.routability_opt_flag
+                        and getattr(params, "l_shape_routability_flag", 0)
+                    ):
+                        model.enable_l_shape_routability = True
+                        model.use_l_shape_routability = False
+                        route_updated = l_shape_iteration.update_iteration(
+                            l_shape_iteration.LShapeIterationContext(
+                                self.data_collections,
+                                self.op_collections,
+                            ),
+                            params,
+                            placedb,
+                            model,
+                            pos,
+                            iteration,
+                            restart_metric,
+                            l_shape_policy,
+                        )
+                        if route_updated:
+                            topo = self.op_collections.steiner_topo_op
+                            self._publish_live_timing_topology(
+                                topo.newx,
+                                topo.newy,
+                                update_kind="routing_feedback",
+                            )
+                        midplace.schedule.restore_l_shape_state(model, params)
+                    model.refresh_after_geometry_change()
+                    if (
+                        torch.eq(model.density_weight.mean(), 0.0)
+                        and getattr(midplace.schedule, "use_restart_density_weight", False)
+                    ):
+                        model.initialize_restart_density_weight(params, placedb)
+                        if model.density_weight.numel() == 1:
+                            density_weight_repr = "%.6E" % (
+                                model.density_weight.detach().cpu().item()
+                            )
+                        else:
+                            density_weight_repr = "[%s]" % ", ".join(
+                                "%.6E" % value
+                                for value in model.density_weight.detach()
+                                .cpu()
+                                .tolist()
+                            )
+                        restart_scale = getattr(
+                            model,
+                            "_inflation_density_weight_restart_scale",
+                            float("nan"),
+                        )
+                        logging.info(
+                            "density restart mode=xplace_normalized "
+                            "scale=%.6E norm_ratio=%.6E w_restart=%s",
+                            restart_scale,
+                            getattr(
+                                model,
+                                "_density_weight_grad_norm_ratio",
+                                float("nan"),
+                            ),
+                            density_weight_repr,
+                        )
+                    self._reset_timing_grad_balance_for_restart(
+                        model,
+                        params,
+                        iteration=iteration,
+                    )
+                    model.reset_l_shape_weight_state()
+                    optimizer.load_state_dict(initial_state)
+                    initialize_learning_rate(pos)
+                    frozen_generation = self._activate_size_only_frozen_topology(
+                        params,
+                        pos,
+                    )
+                    if frozen_generation is not None:
+                        logging.info(
+                            "froze size-only timing topology generation=%d",
+                            frozen_generation,
+                        )
+                    initial_state = copy.deepcopy(optimizer.state_dict())
+                    if midplace.resume_sub_iteration is not None:
+                        model.Lsub_iteration = midplace.resume_sub_iteration
+                    routability_controller.after_geometry_change(
+                        model=model,
+                        position=pos,
+                    )
+                    keep_during_inflation = getattr(params, "l_shape_keep_during_inflation", False)
+                    if getattr(model, "use_l_shape_routability", False) and not keep_during_inflation:
+                        l_shape_policy.disable_for_recovery(
+                            model,
+                            iteration,
+                            reason="inflation",
+                            update_threshold=True,
+                            inflation_round=num_area_adjust if params.routability_opt_flag else 1,
+                        )
+                    trigger_lgamma = midplace.schedule.trigger_lgamma_step
+                    trigger_ov = midplace.schedule.trigger_overflow
+                    trigger_gov = midplace.schedule.trigger_goverflow
+                    if trigger_lgamma is not None and trigger_ov is not None:
+                        if len(placedb.regions) > 0 and trigger_gov is not None:
+                            model.op_collections.update_gamma_op(
+                                trigger_lgamma,
+                                trigger_gov,
+                            )
+                        elif len(placedb.regions) == 0:
+                            model.op_collections.update_gamma_op(
+                                trigger_lgamma,
+                                trigger_ov,
+                            )
+                        else:
+                            model.op_collections.precondition_op.set_overflow(
+                                trigger_ov,
+                            )
+                    if optimizer_name.lower() in ["sgd", "adam", "sgd_momentum", "sgd_nesterov", "cg"]:
+                        if "learning_rate_decay" in global_place_params:
+                            for param_group in optimizer.param_groups:
+                                param_group["lr"] *= global_place_params["learning_rate_decay"]
+                    Llambda_flat_iteration = int(midplace.schedule.llambda_flat_iteration)
 
                 # preparation for self-adaptive divergence check
                 overflow_list = [1]
@@ -5503,6 +5636,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     iteration,
                                     Lsub_metrics,
                                 )
+                                self._last_eval_metric = cur_metric
+                                self._llambda_flat_iteration = Llambda_flat_iteration
                             except AssertionError as exc:
                                 if not self._is_gradient_nan_assertion(exc):
                                     raise
@@ -5676,16 +5811,27 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 stop_placement_reason,
                             )
                         Llambda_flat_iteration += 1
+                        self._llambda_flat_iteration = Llambda_flat_iteration
 
                         # update density weight
                         if Llambda_flat_iteration > 1:
-                            model.op_collections.update_density_weight_op(
-                                Llambda_metrics[-1][-1],
+                            prev_llambda_metric = (
                                 Llambda_metrics[-2][-1]
                                 if len(Llambda_metrics) > 1
-                                else Lgamma_metrics[-2][-1][-1],
-                                Llambda_flat_iteration,
+                                else (
+                                    Lgamma_metrics[-2][-1][-1]
+                                    if len(Lgamma_metrics) > 1
+                                    else getattr(midplace.schedule, "last_llambda_metric", None)
+                                    if midplace is not None
+                                    else None
+                                )
                             )
+                            if prev_llambda_metric is not None:
+                                model.op_collections.update_density_weight_op(
+                                    Llambda_metrics[-1][-1],
+                                    prev_llambda_metric,
+                                    Llambda_flat_iteration,
+                                )
                         # logging.debug("update density weight %.3f ms" % ((time.time()-t2)*1000))
                         llambda_should_stop = Llambda_stop_criterion(
                             Lgamma_step,
@@ -5722,6 +5868,57 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 Llambda_metrics[-1][-1].overflow,
                             )
                             if trigger_enhanced_inflation or trigger_legacy_inflation:
+                                if (
+                                    midplace is not None
+                                    and not midplace.active
+                                    and int(num_area_adjust) == 0
+                                    and midplace.defers_to_first_inflation_window(self)
+                                ):
+                                    midplace.before_first_inflation(
+                                        self,
+                                        model,
+                                        Llambda_metrics[-1][-1],
+                                        eval_ops,
+                                        PlacementCursor(
+                                            cur_stage,
+                                            Lgamma_step,
+                                            model.Llambda_density_weight_iteration - 1,
+                                            model.Lsub_iteration - 1,
+                                            iteration - 1,
+                                        ),
+                                    )
+                                    routability_controller.record_inflation()
+                                    inflation_applied_this_gamma = True
+                                    num_area_adjust += 1
+                                    if getattr(model, "inflation_state", None) is not None:
+                                        model.inflation_state.num_area_adjust = num_area_adjust
+                                    model.refresh_after_geometry_change()
+                                    model.initialize_restart_density_weight(params, placedb)
+                                    self._reset_timing_grad_balance_for_restart(
+                                        model,
+                                        params,
+                                        iteration=iteration,
+                                    )
+                                    model.reset_l_shape_weight_state()
+                                    optimizer.load_state_dict(initial_state)
+                                    initialize_learning_rate(model.data_collections.pos[0])
+                                    model.Lsub_iteration = model.routability_Lsub_iteration
+                                    routability_controller.after_geometry_change(
+                                        model=model,
+                                        position=model.data_collections.pos[0],
+                                    )
+                                    best_metric[0] = None
+                                    best_pos[0] = None
+                                    keep_during_inflation = getattr(params, "l_shape_keep_during_inflation", False)
+                                    if getattr(model, "use_l_shape_routability", False) and not keep_during_inflation:
+                                        l_shape_policy.disable_for_recovery(
+                                            model,
+                                            iteration,
+                                            reason="inflation",
+                                            update_threshold=True,
+                                            inflation_round=num_area_adjust,
+                                        )
+                                    break
                                 if cooptimization is not None:
                                     cooptimization.before_inflation(
                                         model, model.data_collections.pos[0],

@@ -118,9 +118,14 @@ def _rebuild_placement(placedb, raw_db):
     return dict(rebuild)
 
 
-def _run_repair_design(placedb, *, config, profile=None):
+def _run_repair_design(
+    placedb, *, config, profile=None, defer_rebuild=False, skip_size_only_rebuild=False
+):
     from dreamplace.ops.placeio_ecc.place_io import PlaceIOFunction
-    from dreamplace.ops.placeio_ecc.timing_carrier import refresh_python_timing_carrier
+    from dreamplace.ops.placeio_ecc.timing_carrier import (
+        apply_inplace_carrier_sizing,
+        refresh_python_timing_carrier,
+    )
     from dreamplace.ops.rebuffer.repair_design import plan_repair_design_from_pydb
     from dreamplace.ops.rebuffer.timing_model import RebufferTimingModel
     from dreamplace.ops.rebuffer.timing_profile import placement_timing_kwargs
@@ -130,9 +135,16 @@ def _run_repair_design(placedb, *, config, profile=None):
     # coordinates use the original ECC dbu database.
     pydb = raw_db.pydb
     profile_kwargs = {"profile": profile} if profile is not None else {}
-    if getattr(raw_db, "module", None) is not None:
+    if getattr(raw_db, "module", None) is not None and (
+        bool(getattr(pydb, "native_state_dirty", False))
+        or not bool(getattr(raw_db, "_carrier_positions_synced", False))
+    ):
         with measure_phase(profile, "input_carrier_refresh_ms"):
             pydb, _ = refresh_python_timing_carrier(raw_db)
+            try:
+                raw_db._carrier_positions_synced = True
+            except AttributeError:
+                pass
     provider = str(config.get("steiner_provider", "ecc"))
     # The selected PD profile retains the physical-pin geometry of its
     # previous planner input; the legacy profile uses instance origins.
@@ -179,10 +191,26 @@ def _run_repair_design(placedb, *, config, profile=None):
         summary["status"] = "commit_failed"
         return summary
 
-    refreshed, refresh = refresh_python_timing_carrier(raw_db, **profile_kwargs)
+    inplace = (
+        apply_inplace_carrier_sizing(raw_db, plan.get("resizes"), **profile_kwargs)
+        if not plan.get("actions") and plan.get("resizes")
+        else None
+    )
+    if inplace is not None:
+        refreshed, refresh = inplace
+    else:
+        refreshed, refresh = refresh_python_timing_carrier(raw_db, **profile_kwargs)
     summary["refresh"] = dict(refresh)
-    with measure_phase(profile, "placedb_rebuild_ms"):
-        summary["rebuild"] = _rebuild_placement(placedb, raw_db)
+    size_only_inplace = bool(
+        skip_size_only_rebuild and not plan.get("actions") and plan.get("resizes")
+    )
+    if size_only_inplace:
+        placedb.pydb = raw_db.pydb
+        placedb.backend_caps = PlaceIOFunction.backend_caps(raw_db)
+        summary["rebuild"] = {"status": "skipped_inplace_sizing"}
+    elif not defer_rebuild:
+        with measure_phase(profile, "placedb_rebuild_ms"):
+            summary["rebuild"] = _rebuild_placement(placedb, raw_db)
     with measure_phase(profile, "python_timing_model_build_ms"):
         after = RebufferTimingModel(refreshed, **timing_kwargs)
     summary["timing_after"] = after.baseline.as_dict()
@@ -293,6 +321,7 @@ def run_repair_buffering_stage(
     placement_snapshot_digest=None,
     topology_generation=None,
     profile=None,
+    skip_size_only_rebuild=False,
 ):
     """Run one repair-buffering stage on ``placedb``.
 
@@ -322,15 +351,27 @@ def run_repair_buffering_stage(
         "external_sta_run": False,
         "stages": {},
     }
+    design_rebuild_deferred = False
     if mode in {"repair_design", "repair_design_then_timing"}:
         before = dict(profile.timings_ms) if profile is not None else {}
-        stage = _run_repair_design(placedb, config=config, profile=profile)
+        stage = _run_repair_design(
+            placedb,
+            config=config,
+            profile=profile,
+            defer_rebuild=(mode == "repair_design_then_timing"),
+            skip_size_only_rebuild=skip_size_only_rebuild,
+        )
         if profile is not None:
             stage["phase_timings_ms"] = {
                 key: value - before.get(key, 0.0) for key, value in profile.timings_ms.items()
                 if value != before.get(key, 0.0)
             }
         summary["stages"]["repair_design"] = stage
+        design_rebuild_deferred = (
+            mode == "repair_design_then_timing"
+            and stage.get("status") == "ok"
+            and "rebuild" not in stage
+        )
         if stage.get("status") not in {"ok", "noop"}:
             summary["status"] = "failed"
         elif (
@@ -346,6 +387,11 @@ def run_repair_buffering_stage(
         try:
             timing_config = resolve_repair_timing_config(config)
         except ValueError as error:
+            if design_rebuild_deferred:
+                with measure_phase(profile, "placedb_rebuild_ms"):
+                    summary["stages"]["repair_design"]["rebuild"] = _rebuild_placement(
+                        placedb, _rawdb(placedb)
+                    )
             summary.update(status="invalid_config", failure_reason=str(error))
             _write_stage_artifact(summary, artifact_dir)
             return summary
@@ -354,6 +400,11 @@ def run_repair_buffering_stage(
         stage = _run_repair_timing(
             placedb, max_passes=max_passes, config=timing_config, profile=profile
         )
+        if design_rebuild_deferred and stage.get("status") != "ok":
+            with measure_phase(profile, "placedb_rebuild_ms"):
+                summary["stages"]["repair_design"]["rebuild"] = _rebuild_placement(
+                    placedb, _rawdb(placedb)
+                )
         if profile is not None:
             stage["phase_timings_ms"] = {
                 key: value - before.get(key, 0.0) for key, value in profile.timings_ms.items()

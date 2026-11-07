@@ -188,7 +188,10 @@ class PlaceIOFunction:
 
     @staticmethod
     def apply(raw_db, node_x, node_y):
+        from .timing_carrier import sync_carrier_positions
+
         raw_db.module.write_placement_back(raw_db.dm_inst, node_x, node_y)
+        sync_carrier_positions(raw_db, node_x, node_y)
 
     @staticmethod
     def write_def(raw_db, filename):
@@ -255,6 +258,62 @@ class PlaceIOFunction:
         return summary
 
     @staticmethod
+    def apply_sparse_sizing(raw_db, resizes, cell_master_names=None):
+        if not raw_db.timing_enabled:
+            raise RuntimeError("ECC backend does not support sizing writeback")
+        if not resizes:
+            return {"ok": True, "accepted_count": 0, "requested_count": 0, "rejected_count": 0}
+        pydb = raw_db.pydb
+        if cell_master_names is None:
+            cell_master_names = pydb.flat_libcell_names
+        num_masters = len(cell_master_names)
+        num_nodes = len(pydb.inst_main_id)
+        node_ids = []
+        target_names = []
+        cross_family_sources = []
+        cross_family_targets = []
+        for item in resizes:
+            node_id = int(item["node_id"])
+            target_id = int(
+                item["target_cell_index"]
+                if "target_cell_index" in item
+                else item["new_cell_id"]
+            )
+            if node_id < 0 or node_id >= num_nodes:
+                raise ValueError(f"node {node_id} is outside ECC PyPlaceDB nodes")
+            main_id = int(pydb.inst_main_id[node_id])
+            if main_id < 0:
+                raise ValueError(f"node {node_id} has no Liberty family")
+            start = int(pydb.main_id_2_cell_id_start[main_id])
+            end = int(pydb.main_id_2_cell_id_start[main_id + 1])
+            source_id = start + int(pydb.inst_libcell_offset[node_id])
+            if target_id == source_id:
+                continue
+            if target_id < 0 or target_id >= num_masters:
+                raise ValueError(f"node {node_id} sizing target is outside its Liberty family")
+            if not start <= target_id < end:
+                cross_family_sources.append(source_id)
+                cross_family_targets.append(target_id)
+            node_ids.append(node_id)
+            target_names.append(str(cell_master_names[target_id]))
+        if not node_ids:
+            return {"ok": True, "accepted_count": 0, "requested_count": 0, "rejected_count": 0}
+        if cross_family_sources:
+            from .library_metadata import validate_buffer_resize_pairs
+
+            validate_buffer_resize_pairs(
+                pydb, cross_family_sources, cross_family_targets, cell_master_names
+            )
+        try:
+            summary = dict(pydb.apply_sizing(node_ids, target_names) or {})
+        except AttributeError as exc:
+            raise RuntimeError("ECC native PyPlaceDB has no sizing transaction") from exc
+        summary["requested_count"] = len(node_ids)
+        if bool(summary.get("ok")) and int(summary.get("accepted_count", 0) or 0) == len(node_ids):
+            PlaceIOFunction._promote(raw_db, supports_apply_sizing=True)
+        return summary
+
+    @staticmethod
     def apply_buffer_actions(raw_db, actions, action_digest):
         if not raw_db.timing_enabled:
             raise RuntimeError("ECC backend does not support buffer commit")
@@ -292,24 +351,31 @@ class PlaceIOFunction:
         actions = list(plan.get("actions", ()) or ())
         sizing_summary = {"ok": True, "accepted_count": 0, "requested_count": 0}
         if resizes:
-            cell_ids = []
-            for node_id, main_id in enumerate(pydb.inst_main_id):
-                main_id = int(main_id)
-                if main_id < 0:
-                    cell_ids.append(-1)
-                    continue
-                cell_ids.append(
-                    int(pydb.main_id_2_cell_id_start[main_id])
-                    + int(pydb.inst_libcell_offset[node_id])
-                )
-            for resize in resizes:
-                cell_ids[int(resize["node_id"])] = int(resize["target_cell_index"])
             with measure_phase(profile, "native_sizing_commit_ms"):
-                sizing_summary = PlaceIOFunction.apply_sizing(
-                    raw_db,
-                    cell_ids,
-                    list(pydb.flat_libcell_names),
-                )
+                if PlaceIOFunction.apply_sizing is _DEFAULT_APPLY_SIZING:
+                    sizing_summary = PlaceIOFunction.apply_sparse_sizing(
+                        raw_db,
+                        resizes,
+                        pydb.flat_libcell_names,
+                    )
+                else:
+                    cell_ids = []
+                    for node_id, main_id in enumerate(pydb.inst_main_id):
+                        main_id = int(main_id)
+                        if main_id < 0:
+                            cell_ids.append(-1)
+                            continue
+                        cell_ids.append(
+                            int(pydb.main_id_2_cell_id_start[main_id])
+                            + int(pydb.inst_libcell_offset[node_id])
+                        )
+                    for resize in resizes:
+                        cell_ids[int(resize["node_id"])] = int(resize["target_cell_index"])
+                    sizing_summary = PlaceIOFunction.apply_sizing(
+                        raw_db,
+                        cell_ids,
+                        list(pydb.flat_libcell_names),
+                    )
             if profile is not None:
                 profile.commits["sizing"] = dict(sizing_summary)
             if not bool(sizing_summary.get("ok")) or int(
@@ -347,9 +413,20 @@ class PlaceIOFunction:
 
         refresh_summary = {"status": "skipped"}
         if refresh:
-            from .timing_carrier import refresh_python_timing_carrier
+            from .timing_carrier import (
+                apply_inplace_carrier_sizing,
+                refresh_python_timing_carrier,
+            )
 
-            new_pydb, refresh_summary = refresh_python_timing_carrier(raw_db)
+            inplace = (
+                apply_inplace_carrier_sizing(raw_db, resizes, profile=profile)
+                if not actions and resizes
+                else None
+            )
+            if inplace is not None:
+                new_pydb, refresh_summary = inplace
+            else:
+                new_pydb, refresh_summary = refresh_python_timing_carrier(raw_db)
             raw_db.pydb = new_pydb
         return {
             "status": "committed",
@@ -375,3 +452,6 @@ class PlaceIOFunction:
             refresh_mode=refresh_mode,
             rebuild_mode=rebuild_mode,
         )
+
+
+_DEFAULT_APPLY_SIZING = PlaceIOFunction.apply_sizing

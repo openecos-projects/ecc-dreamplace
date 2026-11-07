@@ -615,7 +615,7 @@
     },
     "repair_buffering_midplace_overflow": {
         "description": "post-step placement overflow threshold for the session's single repair request",
-        "default": 0.6
+        "default": 0.4
     },
     "repair_buffering_midplace_mode": {
         "description": "mid-placement repair_design or repair_design_then_timing",

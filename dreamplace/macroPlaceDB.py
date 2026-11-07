@@ -520,6 +520,9 @@ class MacroPlaceDB(object):
         self.r_check_flat_luts_cap_table = None
         self.r_check_flat_luts_dim = None
         self._topology_refresh_param_baseline = None
+        self._static_rawdb_initialized = False
+        self._static_geometry_scaled = False
+        self._static_diff_optimizer_initialized = False
         self.handoff_session = None
         self.pending_continuation_seed = None
         self.topology_generation = 0
@@ -534,7 +537,7 @@ class MacroPlaceDB(object):
         self.node_x *= scale_factor
         self.node_y *= scale_factor
 
-    def scale(self, shift_factor, scale_factor):
+    def scale(self, shift_factor, scale_factor, *, skip_static_arrays=False):
         """
         @brief shift and scale coordinates
         @param shift_factor shift factor to make the origin of the layout to (0, 0)
@@ -561,14 +564,15 @@ class MacroPlaceDB(object):
         # pin offsets
         self.pin_offset_x *= scale_factor
         self.pin_offset_y *= scale_factor
-        if self.flat_libcell_width is not None:
-            self.flat_libcell_width *= scale_factor
-        if self.flat_libcell_height is not None:
-            self.flat_libcell_height *= scale_factor
-        if self.flat_lib_pin_offset_x is not None:
-            self.flat_lib_pin_offset_x *= scale_factor
-        if self.flat_lib_pin_offset_y is not None:
-            self.flat_lib_pin_offset_y *= scale_factor
+        if not skip_static_arrays:
+            if self.flat_libcell_width is not None:
+                self.flat_libcell_width *= scale_factor
+            if self.flat_libcell_height is not None:
+                self.flat_libcell_height *= scale_factor
+            if self.flat_lib_pin_offset_x is not None:
+                self.flat_lib_pin_offset_x *= scale_factor
+            if self.flat_lib_pin_offset_y is not None:
+                self.flat_lib_pin_offset_y *= scale_factor
 
         # floorplan
         self.xl -= shift_factor[0]
@@ -583,10 +587,11 @@ class MacroPlaceDB(object):
         self.site_width *= scale_factor
         if getattr(self, "total_fixed_node_area", None) is not None:
             self.total_fixed_node_area *= scale_factor * scale_factor
-        if self.min_wire_widths is not None:
-            self.min_wire_widths *= scale_factor
-        if self.min_wire_spacings is not None:
-            self.min_wire_spacings *= scale_factor
+        if not skip_static_arrays:
+            if self.min_wire_widths is not None:
+                self.min_wire_widths *= scale_factor
+            if self.min_wire_spacings is not None:
+                self.min_wire_spacings *= scale_factor
 
         # # bin
         # self.bin_size_x *= scale_factor
@@ -606,41 +611,43 @@ class MacroPlaceDB(object):
         self.macro_util_V *= scale_factor
         self.macro_util_H *= scale_factor
 
-        # shift factor for rectangle
-        if self.rows.size > 0:
-            box_shift_factor = np.array(
-                [shift_factor, shift_factor], dtype=self.rows.dtype
-            ).reshape(1, -1)
-            # placement rows
-            self.rows -= box_shift_factor
-            self.rows *= scale_factor
-        else:
-            box_shift_factor = np.zeros((1, 4), dtype=self.dtype)
         self.total_space_area *= scale_factor * scale_factor
+        if not skip_static_arrays:
+            # shift factor for rectangle
+            if self.rows.size > 0:
+                box_shift_factor = np.array(
+                    [shift_factor, shift_factor], dtype=self.rows.dtype
+                ).reshape(1, -1)
+                # placement rows
+                self.rows -= box_shift_factor
+                self.rows *= scale_factor
+            else:
+                box_shift_factor = np.zeros((1, 4), dtype=self.dtype)
 
-        # regions
-        if len(self.flat_region_boxes) > 0:
-            self.flat_region_boxes -= box_shift_factor
-            self.flat_region_boxes *= scale_factor
-        for i in range(len(self.regions)):
-            # may have performance issue
-            self.regions[i] -= box_shift_factor
-            self.regions[i] *= scale_factor
-        for rail_box_field in (
-            "m2_pg_rail_boxes",
-            "m2_pg_rail_density_boxes",
-        ):
-            rail_boxes = getattr(self, rail_box_field, None)
-            if rail_boxes is None or not rail_boxes.size:
-                continue
-            rail_xl = rail_boxes[:, 0].copy()
-            rail_yl = rail_boxes[:, 1].copy()
-            rail_w = (rail_boxes[:, 2] - rail_boxes[:, 0]).copy()
-            rail_h = (rail_boxes[:, 3] - rail_boxes[:, 1]).copy()
-            rail_boxes[:, 0] = (rail_xl - shift_factor[0]) * scale_factor
-            rail_boxes[:, 1] = (rail_yl - shift_factor[1]) * scale_factor
-            rail_boxes[:, 2] = rail_boxes[:, 0] + rail_w * scale_factor
-            rail_boxes[:, 3] = rail_boxes[:, 1] + rail_h * scale_factor
+            # regions
+            if len(self.flat_region_boxes) > 0:
+                self.flat_region_boxes -= box_shift_factor
+                self.flat_region_boxes *= scale_factor
+            for i in range(len(self.regions)):
+                # may have performance issue
+                self.regions[i] -= box_shift_factor
+                self.regions[i] *= scale_factor
+            for rail_box_field in (
+                "m2_pg_rail_boxes",
+                "m2_pg_rail_density_boxes",
+            ):
+                rail_boxes = getattr(self, rail_box_field, None)
+                if rail_boxes is None or not rail_boxes.size:
+                    continue
+                rail_xl = rail_boxes[:, 0].copy()
+                rail_yl = rail_boxes[:, 1].copy()
+                rail_w = (rail_boxes[:, 2] - rail_boxes[:, 0]).copy()
+                rail_h = (rail_boxes[:, 3] - rail_boxes[:, 1]).copy()
+                rail_boxes[:, 0] = (rail_xl - shift_factor[0]) * scale_factor
+                rail_boxes[:, 1] = (rail_yl - shift_factor[1]) * scale_factor
+                rail_boxes[:, 2] = rail_boxes[:, 0] + rail_w * scale_factor
+                rail_boxes[:, 3] = rail_boxes[:, 1] + rail_h * scale_factor
+        self._static_geometry_scaled = True
 
     def _validate_place_blockage_bookkeeping(self):
         blockage_count = int(getattr(self, "num_place_blockages", 0))
@@ -847,6 +854,24 @@ class MacroPlaceDB(object):
             ),
         }
 
+    def can_incremental_rebuild(self, pydb, params):
+        if (
+            "initialize_from_rawdb" in self.__dict__
+            or "initialize" in self.__dict__
+            or not bool(getattr(self, "_static_rawdb_initialized", False))
+            or not bool(getattr(self, "_static_geometry_scaled", False))
+            or getattr(self, "rows", None) is None
+        ):
+            return False
+        if bool(getattr(params, "with_sta", False)) and self._supports_diff_optimizer_metadata():
+            if not bool(getattr(self, "_static_diff_optimizer_initialized", False)):
+                return False
+        return (
+            int(getattr(pydb, "num_terminals", -1)) == int(getattr(self, "num_terminals", -2))
+            and int(getattr(pydb, "num_terminal_NIs", -1)) == int(getattr(self, "num_terminal_NIs", -2))
+            and int(getattr(pydb, "num_place_blockages", 0)) == int(getattr(self, "num_place_blockages", -1))
+        )
+
     def rebuild_from_pydb(self, pydb, rebuild_mode="topo"):
         from dreamplace.ops.routability.gpugr_context import invalidate_route_state
 
@@ -857,13 +882,19 @@ class MacroPlaceDB(object):
         invalidate_route_state(self)
         self.pydb = pydb
         self._restore_topology_refresh_params(self.params)
-        self.initialize_from_rawdb(pydb, self.params)
-        self.initialize(self.params)
+        incremental = self.can_incremental_rebuild(pydb, self.params)
+        if incremental:
+            self.initialize_from_rawdb(pydb, self.params, incremental_topology=True)
+            self.initialize(self.params, incremental_topology=True)
+        else:
+            self.initialize_from_rawdb(pydb, self.params)
+            self.initialize(self.params)
         self.topology_generation = int(getattr(self, "topology_generation", 0) or 0) + 1
         summary = {
             "status": "ok",
             "requested_rebuild_mode": mode,
             "effective_rebuild_mode": mode,
+            "incremental_static_reuse": bool(incremental),
             "source": "macroPlaceDB.initialize_from_rawdb+initialize",
             "topology_generation": self.topology_generation,
             "pre_counts": pre_counts,
@@ -4585,7 +4616,7 @@ class MacroPlaceDB(object):
         result[:] = converted
         return result
 
-    def initialize_from_rawdb(self, pydb, params):
+    def initialize_from_rawdb(self, pydb, params, *, incremental_topology=False):
         """
         @brief initialize data members from raw database 
         @param params parameters 
@@ -4607,39 +4638,40 @@ class MacroPlaceDB(object):
         self.num_terminal_NIs = pydb.num_terminal_NIs
         self.num_place_blockages = int(getattr(pydb, "num_place_blockages", 0))
         self._validate_place_blockage_bookkeeping()
-        export_options = getattr(getattr(self, "rawdb", None), "export_options", None)
-        if export_options is None:
-            export_options = PyDbExportOptions.from_params(params)
-        include_m2_pg_rail_blockage = export_options.include_m2_pg_rail_blockage
-        self.m2_pg_rail_legalization_blockage_flag = (
-            resolve_flag(params, "m2_pg_rail_legalization_blockage_flag")
-        )
-        self.m2_pa_refine_flag = resolve_flag(params, "m2_pa_refine_flag")
-        include_m2_pg_rail_density = (
-            (
-                resolve_m2_density_weight(params) > 0
-                or self.m2_pg_rail_legalization_blockage_flag
+        if not incremental_topology:
+            export_options = getattr(getattr(self, "rawdb", None), "export_options", None)
+            if export_options is None:
+                export_options = PyDbExportOptions.from_params(params)
+            include_m2_pg_rail_blockage = export_options.include_m2_pg_rail_blockage
+            self.m2_pg_rail_legalization_blockage_flag = (
+                resolve_flag(params, "m2_pg_rail_legalization_blockage_flag")
             )
-            and not include_m2_pg_rail_blockage
-        )
-        if getattr(params, "place_io_engine", "ieda") == "openroad" and not hasattr(
-            pydb, "m2_pg_rail_density_boxes"
-        ):
-            if include_m2_pg_rail_blockage or self.m2_pg_rail_legalization_blockage_flag or self.m2_pa_refine_flag:
-                raise RuntimeError("OpenROAD PyDB does not support native M2 PG rail geometry export")
-            if include_m2_pg_rail_density:
-                logging.warning(
-                    "OpenROAD PyDB has no M2 PG rail geometry export; soft rail density is unavailable"
+            self.m2_pa_refine_flag = resolve_flag(params, "m2_pa_refine_flag")
+            include_m2_pg_rail_density = (
+                (
+                    resolve_m2_density_weight(params) > 0
+                    or self.m2_pg_rail_legalization_blockage_flag
                 )
-            include_m2_pg_rail_density = False
-        self.m2_pg_rail_density_boxes = self._import_m2_pg_rail_density_boxes(
-            pydb,
-            include_m2_pg_rail_density=include_m2_pg_rail_density,
-        )
-        self.m2_pg_rail_boxes = self._import_m2_pg_rail_boxes(
-            pydb,
-            include_m2_pg_rail_geometry=self.m2_pa_refine_flag,
-        )
+                and not include_m2_pg_rail_blockage
+            )
+            if getattr(params, "place_io_engine", "ieda") == "openroad" and not hasattr(
+                pydb, "m2_pg_rail_density_boxes"
+            ):
+                if include_m2_pg_rail_blockage or self.m2_pg_rail_legalization_blockage_flag or self.m2_pa_refine_flag:
+                    raise RuntimeError("OpenROAD PyDB does not support native M2 PG rail geometry export")
+                if include_m2_pg_rail_density:
+                    logging.warning(
+                        "OpenROAD PyDB has no M2 PG rail geometry export; soft rail density is unavailable"
+                    )
+                include_m2_pg_rail_density = False
+            self.m2_pg_rail_density_boxes = self._import_m2_pg_rail_density_boxes(
+                pydb,
+                include_m2_pg_rail_density=include_m2_pg_rail_density,
+            )
+            self.m2_pg_rail_boxes = self._import_m2_pg_rail_boxes(
+                pydb,
+                include_m2_pg_rail_geometry=self.m2_pa_refine_flag,
+            )
         self.node_name2id_map = {
             self._decode_name(name): node_id
             for name, node_id in pydb.node_name2id_map.items()
@@ -4699,14 +4731,15 @@ class MacroPlaceDB(object):
             pydb.flat_node2pin_start_map, dtype=np.int32)
         self.pin2node_map = np.array(pydb.pin2node_map, dtype=np.int32)
         self.pin2net_map = np.array(pydb.pin2net_map, dtype=np.int32)
-        self.rows = np.array(pydb.rows, dtype=self.dtype)
-        self.regions = pydb.regions
-        for i in range(len(self.regions)):
-            self.regions[i] = np.array(self.regions[i], dtype=self.dtype)
-        self.flat_region_boxes = np.array(
-            pydb.flat_region_boxes, dtype=self.dtype)
-        self.flat_region_boxes_start = np.array(
-            pydb.flat_region_boxes_start, dtype=np.int32)
+        if not incremental_topology:
+            self.rows = np.array(pydb.rows, dtype=self.dtype)
+            self.regions = pydb.regions
+            for i in range(len(self.regions)):
+                self.regions[i] = np.array(self.regions[i], dtype=self.dtype)
+            self.flat_region_boxes = np.array(
+                pydb.flat_region_boxes, dtype=self.dtype)
+            self.flat_region_boxes_start = np.array(
+                pydb.flat_region_boxes_start, dtype=np.int32)
         self.node2fence_region_map = np.array(
             pydb.node2fence_region_map, dtype=np.int32)
         self.xl = float(pydb.xl)
@@ -4725,42 +4758,44 @@ class MacroPlaceDB(object):
         self.routing_grid_yl = float(pydb.routing_grid_yl)
         self.routing_grid_xh = float(pydb.routing_grid_xh)
         self.routing_grid_yh = float(pydb.routing_grid_yh)
-        if pydb.num_routing_grids_x:
-            self.num_routing_grids_x = pydb.num_routing_grids_x
-            self.num_routing_grids_y = pydb.num_routing_grids_y
-            self.num_routing_layers = len(pydb.unit_horizontal_capacities)
-            self.unit_horizontal_capacity = np.array(
-                pydb.unit_horizontal_capacities, dtype=self.dtype).sum()
-            self.unit_vertical_capacity = np.array(
-                pydb.unit_vertical_capacities, dtype=self.dtype).sum()
-            self.unit_horizontal_capacities = np.array(
-                pydb.unit_horizontal_capacities, dtype=self.dtype)
-            self.unit_vertical_capacities = np.array(
-                pydb.unit_vertical_capacities, dtype=self.dtype)
-            if hasattr(pydb, "min_wire_widths") and len(pydb.min_wire_widths):
-                self.min_wire_widths = np.array(pydb.min_wire_widths, dtype=self.dtype)
-            if hasattr(pydb, "min_wire_spacings") and len(pydb.min_wire_spacings):
-                self.min_wire_spacings = np.array(pydb.min_wire_spacings, dtype=self.dtype)
-            self.initial_horizontal_demand_map = np.array(pydb.initial_horizontal_demand_map, dtype=self.dtype).reshape(
-                (-1, self.num_routing_grids_x, self.num_routing_grids_y)).sum(axis=0)
-            self.initial_vertical_demand_map = np.array(pydb.initial_vertical_demand_map, dtype=self.dtype).reshape(
-                (-1, self.num_routing_grids_x, self.num_routing_grids_y)).sum(axis=0)
-        else:
-            self.num_routing_grids_x = params.route_num_bins_x
-            self.num_routing_grids_y = params.route_num_bins_y
-            self.num_routing_layers = 1
-            self.unit_horizontal_capacity = params.unit_horizontal_capacity
-            self.unit_vertical_capacity = params.unit_vertical_capacity
-            self.unit_horizontal_capacities = np.array(
-                [self.unit_horizontal_capacity], dtype=self.dtype)
-            self.unit_vertical_capacities = np.array(
-                [self.unit_vertical_capacity], dtype=self.dtype)
-            self.initial_horizontal_demand_map = np.zeros(
-                (self.num_routing_grids_x, self.num_routing_grids_y),
-                dtype=self.dtype)
-            self.initial_vertical_demand_map = np.zeros(
-                (self.num_routing_grids_x, self.num_routing_grids_y),
-                dtype=self.dtype)
+        if not incremental_topology:
+            if pydb.num_routing_grids_x:
+                self.num_routing_grids_x = pydb.num_routing_grids_x
+                self.num_routing_grids_y = pydb.num_routing_grids_y
+                self.num_routing_layers = len(pydb.unit_horizontal_capacities)
+                self.unit_horizontal_capacity = np.array(
+                    pydb.unit_horizontal_capacities, dtype=self.dtype).sum()
+                self.unit_vertical_capacity = np.array(
+                    pydb.unit_vertical_capacities, dtype=self.dtype).sum()
+                self.unit_horizontal_capacities = np.array(
+                    pydb.unit_horizontal_capacities, dtype=self.dtype)
+                self.unit_vertical_capacities = np.array(
+                    pydb.unit_vertical_capacities, dtype=self.dtype)
+                if hasattr(pydb, "min_wire_widths") and len(pydb.min_wire_widths):
+                    self.min_wire_widths = np.array(pydb.min_wire_widths, dtype=self.dtype)
+                if hasattr(pydb, "min_wire_spacings") and len(pydb.min_wire_spacings):
+                    self.min_wire_spacings = np.array(pydb.min_wire_spacings, dtype=self.dtype)
+                self.initial_horizontal_demand_map = np.array(pydb.initial_horizontal_demand_map, dtype=self.dtype).reshape(
+                    (-1, self.num_routing_grids_x, self.num_routing_grids_y)).sum(axis=0)
+                self.initial_vertical_demand_map = np.array(pydb.initial_vertical_demand_map, dtype=self.dtype).reshape(
+                    (-1, self.num_routing_grids_x, self.num_routing_grids_y)).sum(axis=0)
+            else:
+                self.num_routing_grids_x = params.route_num_bins_x
+                self.num_routing_grids_y = params.route_num_bins_y
+                self.num_routing_layers = 1
+                self.unit_horizontal_capacity = params.unit_horizontal_capacity
+                self.unit_vertical_capacity = params.unit_vertical_capacity
+                self.unit_horizontal_capacities = np.array(
+                    [self.unit_horizontal_capacity], dtype=self.dtype)
+                self.unit_vertical_capacities = np.array(
+                    [self.unit_vertical_capacity], dtype=self.dtype)
+                self.initial_horizontal_demand_map = np.zeros(
+                    (self.num_routing_grids_x, self.num_routing_grids_y),
+                    dtype=self.dtype)
+                self.initial_vertical_demand_map = np.zeros(
+                    (self.num_routing_grids_x, self.num_routing_grids_y),
+                    dtype=self.dtype)
+            self._static_rawdb_initialized = True
 
         # Preserve the native per-node/per-net int32 arrays.  Rebuilding the
         # placement database used to convert every row one by one, which is
@@ -4913,7 +4948,9 @@ class MacroPlaceDB(object):
                 getattr(pydb, "endpoints_timing_check_arcs", []), dtype=np.int32)
 
             if self._supports_diff_optimizer_metadata():
-                self._initialize_diff_optimizer_metadata_from_pydb(pydb, params)
+                self._initialize_diff_optimizer_metadata_from_pydb(
+                    pydb, params, incremental_topology=incremental_topology
+                )
             else:
                 logging.info(
                     "Skipping diff optimizer metadata initialization for backend=%s; backend_caps.has_diff_sizing_metadata=False",
@@ -4925,104 +4962,108 @@ class MacroPlaceDB(object):
         caps = dict(getattr(self, "backend_caps", {}) or {})
         return bool(caps.get("has_diff_sizing_metadata", caps.get("has_diff_optimizer_metadata", True)))
 
-    def _initialize_diff_optimizer_metadata_from_pydb(self, pydb, params):
-        self.main_id_2_cell_id_start = np.array(
-            pydb.main_id_2_cell_id_start, dtype=np.int32)
-        self.cell_id_2_arc_id_start = np.array(
-            pydb.cell_id_2_arc_id_start, dtype=np.int32)
-        self.buffer_main_type_index = int(getattr(pydb, "buffer_main_type_index", -1))
-        self.buffer_main_type_status = str(getattr(pydb, "buffer_main_type_status", "unsupported"))
-        self.buffer_main_type_candidate_indices = np.array(
-            getattr(pydb, "buffer_main_type_candidate_indices", []), dtype=np.int32
-        )
-
+    def _initialize_diff_optimizer_metadata_from_pydb(
+        self, pydb, params, *, incremental_topology=False
+    ):
         self.inst_main_id = np.array(pydb.inst_main_id, dtype=np.int32)
         self.inst_libcell_offset = np.array(pydb.inst_libcell_offset, dtype=np.int32)
 
-        self.flat_libarc_names, self.flat_libarc_info = self._normalize_flat_libarc_info(
-            pydb.flat_libarc_info
-        )
-        self.flat_libcell_names, self.flat_libcell_info = self._normalize_flat_libcell_info(
-            pydb.flat_libcell_info
-        )
-        if hasattr(pydb, "flat_libcell_width") and hasattr(pydb, "flat_libcell_height"):
-            self.flat_libcell_width = self._normalize_flat_libcell_geometry(
-                pydb.flat_libcell_width,
-                "flat_libcell_width",
+        if not incremental_topology:
+            self.main_id_2_cell_id_start = np.array(
+                pydb.main_id_2_cell_id_start, dtype=np.int32)
+            self.cell_id_2_arc_id_start = np.array(
+                pydb.cell_id_2_arc_id_start, dtype=np.int32)
+            self.buffer_main_type_index = int(getattr(pydb, "buffer_main_type_index", -1))
+            self.buffer_main_type_status = str(getattr(pydb, "buffer_main_type_status", "unsupported"))
+            self.buffer_main_type_candidate_indices = np.array(
+                getattr(pydb, "buffer_main_type_candidate_indices", []), dtype=np.int32
+            )
+
+            self.flat_libarc_names, self.flat_libarc_info = self._normalize_flat_libarc_info(
+                pydb.flat_libarc_info
+            )
+            self.flat_libcell_names, self.flat_libcell_info = self._normalize_flat_libcell_info(
+                pydb.flat_libcell_info
+            )
+            if hasattr(pydb, "flat_libcell_width") and hasattr(pydb, "flat_libcell_height"):
+                self.flat_libcell_width = self._normalize_flat_libcell_geometry(
+                    pydb.flat_libcell_width,
+                    "flat_libcell_width",
+                    expected_num_cells=len(self.flat_libcell_info),
+                )
+                self.flat_libcell_height = self._normalize_flat_libcell_geometry(
+                    pydb.flat_libcell_height,
+                    "flat_libcell_height",
+                    expected_num_cells=len(self.flat_libcell_info),
+                )
+            else:
+                self.flat_libcell_width = None
+                self.flat_libcell_height = None
+                logging.warning(
+                    "pydb.flat_libcell_width/height are unavailable; projected runtime geometry refresh will be disabled"
+                )
+            if self._openroad_aimp_debug_artifacts_enabled(params):
+                logging.info(
+                    "libcell_id export trigger: result_dir=%s design=%s num_cells=%d",
+                    params.result_dir,
+                    params.design_name(),
+                    len(self.flat_libcell_info),
+                )
+                _write_libcell_id_artifact(
+                    os.path.join(params.result_dir, f"{params.design_name()}_libcell_id.csv"),
+                    self.flat_libcell_names,
+                    self.flat_libcell_info,
+                )
+            if not hasattr(pydb, "flat_libcell_leakage"):
+                raise ValueError("pydb.flat_libcell_leakage is required for gate sizing metadata")
+            self.flat_libcell_leakage = self._normalize_flat_libcell_leakage(
+                pydb.flat_libcell_leakage,
                 expected_num_cells=len(self.flat_libcell_info),
             )
-            self.flat_libcell_height = self._normalize_flat_libcell_geometry(
-                pydb.flat_libcell_height,
-                "flat_libcell_height",
-                expected_num_cells=len(self.flat_libcell_info),
+            (
+                self.flat_libcell_main_type_names,
+                self.flat_libcell_main_id2size_vt_limit,
+            ) = self._normalize_flat_libcell_limit_info(
+                pydb.flat_libcell_main_id2size_vt_limit
             )
-        else:
-            self.flat_libcell_width = None
-            self.flat_libcell_height = None
-            logging.warning(
-                "pydb.flat_libcell_width/height are unavailable; projected runtime geometry refresh will be disabled"
-            )
-        if self._openroad_aimp_debug_artifacts_enabled(params):
-            logging.info(
-                "libcell_id export trigger: result_dir=%s design=%s num_cells=%d",
-                params.result_dir,
-                params.design_name(),
-                len(self.flat_libcell_info),
-            )
-            _write_libcell_id_artifact(
-                os.path.join(params.result_dir, f"{params.design_name()}_libcell_id.csv"),
+            if hasattr(pydb, "main_id_is_sizeable") and len(pydb.main_id_is_sizeable) > 0:
+                self.main_id_is_sizeable = np.array(pydb.main_id_is_sizeable, dtype=np.bool_)
+            else:
+                self.main_id_is_sizeable = np.ones(
+                    len(self.main_id_2_cell_id_start) - 1, dtype=np.bool_
+                )
+            if self._openroad_aimp_debug_artifacts_enabled(params):
+                self._write_libcell_semantic_drift_artifacts(
+                    os.path.join(
+                        params.result_dir,
+                        f"{params.design_name()}_libcell_semantic_drift_report.csv",
+                    ),
+                    os.path.join(
+                        params.result_dir,
+                        f"{params.design_name()}_libcell_semantic_drift_summary.json",
+                    ),
+                )
+            (
+                self.main_id_is_sizeable,
+                self.runtime_sizing_arc_schema_gate,
+            ) = _gate_sizeable_families_by_runtime_arc_schema(
+                self.main_id_2_cell_id_start,
+                self.cell_id_2_arc_id_start,
+                self.flat_libarc_info,
+                self.main_id_is_sizeable,
                 self.flat_libcell_names,
-                self.flat_libcell_info,
             )
-        if not hasattr(pydb, "flat_libcell_leakage"):
-            raise ValueError("pydb.flat_libcell_leakage is required for gate sizing metadata")
-        self.flat_libcell_leakage = self._normalize_flat_libcell_leakage(
-            pydb.flat_libcell_leakage,
-            expected_num_cells=len(self.flat_libcell_info),
-        )
-        (
-            self.flat_libcell_main_type_names,
-            self.flat_libcell_main_id2size_vt_limit,
-        ) = self._normalize_flat_libcell_limit_info(
-            pydb.flat_libcell_main_id2size_vt_limit
-        )
-        if hasattr(pydb, "main_id_is_sizeable") and len(pydb.main_id_is_sizeable) > 0:
-            self.main_id_is_sizeable = np.array(pydb.main_id_is_sizeable, dtype=np.bool_)
-        else:
-            self.main_id_is_sizeable = np.ones(
-                len(self.main_id_2_cell_id_start) - 1, dtype=np.bool_
-            )
-        if self._openroad_aimp_debug_artifacts_enabled(params):
-            self._write_libcell_semantic_drift_artifacts(
-                os.path.join(
-                    params.result_dir,
-                    f"{params.design_name()}_libcell_semantic_drift_report.csv",
-                ),
-                os.path.join(
-                    params.result_dir,
-                    f"{params.design_name()}_libcell_semantic_drift_summary.json",
-                ),
-            )
-        (
-            self.main_id_is_sizeable,
-            self.runtime_sizing_arc_schema_gate,
-        ) = _gate_sizeable_families_by_runtime_arc_schema(
-            self.main_id_2_cell_id_start,
-            self.cell_id_2_arc_id_start,
-            self.flat_libarc_info,
-            self.main_id_is_sizeable,
-            self.flat_libcell_names,
-        )
-        if self.runtime_sizing_arc_schema_gate["disabled_family_count"]:
-            logging.warning(
-                "disabled %d frozen-topology sizing families with incompatible "
-                "Liberty arc schemas: %s",
-                self.runtime_sizing_arc_schema_gate["disabled_family_count"],
-                ", ".join(
-                    str(row["main_id"])
-                    for row in self.runtime_sizing_arc_schema_gate["disabled_families"]
-                ),
-            )
+            if self.runtime_sizing_arc_schema_gate["disabled_family_count"]:
+                logging.warning(
+                    "disabled %d frozen-topology sizing families with incompatible "
+                    "Liberty arc schemas: %s",
+                    self.runtime_sizing_arc_schema_gate["disabled_family_count"],
+                    ", ".join(
+                        str(row["main_id"])
+                        for row in self.runtime_sizing_arc_schema_gate["disabled_families"]
+                    ),
+                )
+
         (
             self.inst_cell_id,
             self.inst_size_init,
@@ -5034,99 +5075,101 @@ class MacroPlaceDB(object):
             self.inst_is_sizeable,
         ) = self._build_inst_sizing_metadata()
         self._log_leakage_debug_summary()
-
-        # LUTs table
-        self.f_delay_flat_luts_values = self.pad_sequences(
-            pydb.f_delay_flat_luts_values, dtype=self.dtype)
-        self.f_delay_flat_luts_trans_table = self.pad_sequences(
-            pydb.f_delay_flat_luts_trans_table, dtype=self.dtype, pad_value=np.inf)
-        self.f_delay_flat_luts_cap_table = self.pad_sequences(
-            pydb.f_delay_flat_luts_cap_table, dtype=self.dtype, pad_value=np.inf)
-        self.f_delay_flat_luts_dim = np.array(
-            pydb.f_delay_flat_luts_dim, dtype=np.int32)
-
-        self.r_delay_flat_luts_values = self.pad_sequences(
-            pydb.r_delay_flat_luts_values, dtype=self.dtype)
-        self.r_delay_flat_luts_trans_table = self.pad_sequences(
-            pydb.r_delay_flat_luts_trans_table, dtype=self.dtype, pad_value=np.inf)
-        self.r_delay_flat_luts_cap_table = self.pad_sequences(
-            pydb.r_delay_flat_luts_cap_table, dtype=self.dtype, pad_value=np.inf)
-        self.r_delay_flat_luts_dim = np.array(
-            pydb.r_delay_flat_luts_dim, dtype=np.int32)
-
-        self.f_trans_flat_luts_values = self.pad_sequences(
-            pydb.f_trans_flat_luts_values, dtype=self.dtype)
-        self.f_trans_flat_luts_trans_table = self.pad_sequences(
-            pydb.f_trans_flat_luts_trans_table, dtype=self.dtype, pad_value=np.inf)
-        self.f_trans_flat_luts_cap_table = self.pad_sequences(
-            pydb.f_trans_flat_luts_cap_table, dtype=self.dtype, pad_value=np.inf)
-        self.f_trans_flat_luts_dim = np.array(
-            pydb.f_trans_flat_luts_dim, dtype=np.int32)
-
-        self.r_trans_flat_luts_values = self.pad_sequences(
-            pydb.r_trans_flat_luts_values, dtype=self.dtype)
-        self.r_trans_flat_luts_trans_table = self.pad_sequences(
-            pydb.r_trans_flat_luts_trans_table, dtype=self.dtype, pad_value=np.inf)
-        self.r_trans_flat_luts_cap_table = self.pad_sequences(
-            pydb.r_trans_flat_luts_cap_table, dtype=self.dtype, pad_value=np.inf)
-        self.r_trans_flat_luts_dim = np.array(
-            pydb.r_trans_flat_luts_dim, dtype=np.int32)
-
-        self.f_check_flat_luts_values = self.pad_sequences(
-            pydb.f_check_flat_luts_values, dtype=self.dtype)
-        self.f_check_flat_luts_trans_table = self.pad_sequences(
-            pydb.f_check_flat_luts_trans_table, dtype=self.dtype, pad_value=np.inf)
-        self.f_check_flat_luts_cap_table = self.pad_sequences(
-            pydb.f_check_flat_luts_cap_table, dtype=self.dtype, pad_value=np.inf)
-        self.f_check_flat_luts_dim = np.array(
-            pydb.f_check_flat_luts_dim, dtype=np.int32)
-
-        self.r_check_flat_luts_values = self.pad_sequences(
-            pydb.r_check_flat_luts_values, dtype=self.dtype)
-        self.r_check_flat_luts_trans_table = self.pad_sequences(
-            pydb.r_check_flat_luts_trans_table, dtype=self.dtype, pad_value=np.inf)
-        self.r_check_flat_luts_cap_table = self.pad_sequences(
-            pydb.r_check_flat_luts_cap_table, dtype=self.dtype, pad_value=np.inf)
-        self.r_check_flat_luts_dim = np.array(
-            pydb.r_check_flat_luts_dim, dtype=np.int32)
-
-        self.cell_id_2_libpin_id_start = np.array(
-            pydb.cell_id_2_libpin_id_start, dtype=np.int32)
-        self.flat_lib_pin_names = self._pydb_names_as_str_list(
-            pydb,
-            "flat_lib_pin_names",
-        )
         self.pin_2_libpin_offset = np.array(
             pydb.pin_2_libpin_offset, dtype=np.int32)
-        if not hasattr(pydb, "flat_lib_pin_offset_x") or not hasattr(pydb, "flat_lib_pin_offset_y"):
-            raise ValueError("pydb.flat_lib_pin_offset_x/y are required for size-aware lib pin offsets")
-        expected_num_libpins = len(self.cell_id_2_libpin_id_start) and int(self.cell_id_2_libpin_id_start[-1])
-        self.flat_lib_pin_offset_x = self._normalize_flat_libpin_offsets(
-            pydb.flat_lib_pin_offset_x,
-            "flat_lib_pin_offset_x",
-            expected_num_libpins=expected_num_libpins,
-        )
-        self.flat_lib_pin_offset_y = self._normalize_flat_libpin_offsets(
-            pydb.flat_lib_pin_offset_y,
-            "flat_lib_pin_offset_y",
-            expected_num_libpins=expected_num_libpins,
-        )
-        self.flat_lib_pin_cap = np.array(
-            pydb.flat_lib_pin_cap, dtype=self.dtype)
-        self.flat_lib_pin_rcap = np.array(
-            pydb.flat_lib_pin_rcap, dtype=self.dtype)
-        self.flat_lib_pin_fcap = np.array(
-            pydb.flat_lib_pin_fcap, dtype=self.dtype)
-        self.flat_lib_pin_cap_limit = np.array(
-            pydb.flat_lib_pin_cap_limit, dtype=self.dtype)
-        self.flat_lib_pin_slew_limit = np.array(
-            pydb.flat_lib_pin_slew_limit, dtype=self.dtype)
 
-        # RC
-        self.r_unit = float(pydb.r_unit)
-        self.c_unit = float(pydb.c_unit)
-        if getattr(params, "place_io_engine", "ieda") == "openroad":
-            self._write_openroad_aimp_db_summary(params)
+        if not incremental_topology:
+            # LUTs table
+            self.f_delay_flat_luts_values = self.pad_sequences(
+                pydb.f_delay_flat_luts_values, dtype=self.dtype)
+            self.f_delay_flat_luts_trans_table = self.pad_sequences(
+                pydb.f_delay_flat_luts_trans_table, dtype=self.dtype, pad_value=np.inf)
+            self.f_delay_flat_luts_cap_table = self.pad_sequences(
+                pydb.f_delay_flat_luts_cap_table, dtype=self.dtype, pad_value=np.inf)
+            self.f_delay_flat_luts_dim = np.array(
+                pydb.f_delay_flat_luts_dim, dtype=np.int32)
+
+            self.r_delay_flat_luts_values = self.pad_sequences(
+                pydb.r_delay_flat_luts_values, dtype=self.dtype)
+            self.r_delay_flat_luts_trans_table = self.pad_sequences(
+                pydb.r_delay_flat_luts_trans_table, dtype=self.dtype, pad_value=np.inf)
+            self.r_delay_flat_luts_cap_table = self.pad_sequences(
+                pydb.r_delay_flat_luts_cap_table, dtype=self.dtype, pad_value=np.inf)
+            self.r_delay_flat_luts_dim = np.array(
+                pydb.r_delay_flat_luts_dim, dtype=np.int32)
+
+            self.f_trans_flat_luts_values = self.pad_sequences(
+                pydb.f_trans_flat_luts_values, dtype=self.dtype)
+            self.f_trans_flat_luts_trans_table = self.pad_sequences(
+                pydb.f_trans_flat_luts_trans_table, dtype=self.dtype, pad_value=np.inf)
+            self.f_trans_flat_luts_cap_table = self.pad_sequences(
+                pydb.f_trans_flat_luts_cap_table, dtype=self.dtype, pad_value=np.inf)
+            self.f_trans_flat_luts_dim = np.array(
+                pydb.f_trans_flat_luts_dim, dtype=np.int32)
+
+            self.r_trans_flat_luts_values = self.pad_sequences(
+                pydb.r_trans_flat_luts_values, dtype=self.dtype)
+            self.r_trans_flat_luts_trans_table = self.pad_sequences(
+                pydb.r_trans_flat_luts_trans_table, dtype=self.dtype, pad_value=np.inf)
+            self.r_trans_flat_luts_cap_table = self.pad_sequences(
+                pydb.r_trans_flat_luts_cap_table, dtype=self.dtype, pad_value=np.inf)
+            self.r_trans_flat_luts_dim = np.array(
+                pydb.r_trans_flat_luts_dim, dtype=np.int32)
+
+            self.f_check_flat_luts_values = self.pad_sequences(
+                pydb.f_check_flat_luts_values, dtype=self.dtype)
+            self.f_check_flat_luts_trans_table = self.pad_sequences(
+                pydb.f_check_flat_luts_trans_table, dtype=self.dtype, pad_value=np.inf)
+            self.f_check_flat_luts_cap_table = self.pad_sequences(
+                pydb.f_check_flat_luts_cap_table, dtype=self.dtype, pad_value=np.inf)
+            self.f_check_flat_luts_dim = np.array(
+                pydb.f_check_flat_luts_dim, dtype=np.int32)
+
+            self.r_check_flat_luts_values = self.pad_sequences(
+                pydb.r_check_flat_luts_values, dtype=self.dtype)
+            self.r_check_flat_luts_trans_table = self.pad_sequences(
+                pydb.r_check_flat_luts_trans_table, dtype=self.dtype, pad_value=np.inf)
+            self.r_check_flat_luts_cap_table = self.pad_sequences(
+                pydb.r_check_flat_luts_cap_table, dtype=self.dtype, pad_value=np.inf)
+            self.r_check_flat_luts_dim = np.array(
+                pydb.r_check_flat_luts_dim, dtype=np.int32)
+
+            self.cell_id_2_libpin_id_start = np.array(
+                pydb.cell_id_2_libpin_id_start, dtype=np.int32)
+            self.flat_lib_pin_names = self._pydb_names_as_str_list(
+                pydb,
+                "flat_lib_pin_names",
+            )
+            if not hasattr(pydb, "flat_lib_pin_offset_x") or not hasattr(pydb, "flat_lib_pin_offset_y"):
+                raise ValueError("pydb.flat_lib_pin_offset_x/y are required for size-aware lib pin offsets")
+            expected_num_libpins = len(self.cell_id_2_libpin_id_start) and int(self.cell_id_2_libpin_id_start[-1])
+            self.flat_lib_pin_offset_x = self._normalize_flat_libpin_offsets(
+                pydb.flat_lib_pin_offset_x,
+                "flat_lib_pin_offset_x",
+                expected_num_libpins=expected_num_libpins,
+            )
+            self.flat_lib_pin_offset_y = self._normalize_flat_libpin_offsets(
+                pydb.flat_lib_pin_offset_y,
+                "flat_lib_pin_offset_y",
+                expected_num_libpins=expected_num_libpins,
+            )
+            self.flat_lib_pin_cap = np.array(
+                pydb.flat_lib_pin_cap, dtype=self.dtype)
+            self.flat_lib_pin_rcap = np.array(
+                pydb.flat_lib_pin_rcap, dtype=self.dtype)
+            self.flat_lib_pin_fcap = np.array(
+                pydb.flat_lib_pin_fcap, dtype=self.dtype)
+            self.flat_lib_pin_cap_limit = np.array(
+                pydb.flat_lib_pin_cap_limit, dtype=self.dtype)
+            self.flat_lib_pin_slew_limit = np.array(
+                pydb.flat_lib_pin_slew_limit, dtype=self.dtype)
+
+            # RC
+            self.r_unit = float(pydb.r_unit)
+            self.c_unit = float(pydb.c_unit)
+            if getattr(params, "place_io_engine", "ieda") == "openroad":
+                self._write_openroad_aimp_db_summary(params)
+            self._static_diff_optimizer_initialized = True
 
     def __call__(self, params):
         """
@@ -5238,7 +5281,7 @@ class MacroPlaceDB(object):
             np.sum(fence_region_mask.astype(np.float32)),
         )
 
-    def initialize(self, params):
+    def initialize(self, params, *, incremental_topology=False):
         """
         @brief initialize data members after reading 
         @param params parameters 
@@ -5300,7 +5343,11 @@ class MacroPlaceDB(object):
             "set scale_factor = %g, as site_width = %g"
             % (params.scale_factor, self.site_width)
         )
-        self.scale(params.shift_factor, params.scale_factor)
+        self.scale(
+            params.shift_factor,
+            params.scale_factor,
+            skip_static_arrays=incremental_topology,
+        )
 
         params.macro_halo_x *= params.scale_factor
         params.macro_halo_y *= params.scale_factor
@@ -5466,7 +5513,10 @@ row height = %g, site width = %g
             )
 
         # calculate fence region virtual macro
-        if len(self.regions) > 0:
+        if len(self.regions) > 0 and (
+            not incremental_topology
+            or getattr(self, "virtual_macro_fence_region", None) is None
+        ):
             virtual_macro_for_fence_region = [
                 fence_region.slice_non_fence_region(
                     region,

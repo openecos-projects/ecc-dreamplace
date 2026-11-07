@@ -1270,6 +1270,7 @@ bool planRepairDesign(const DesignView& design,
     }
 
     bool repaired = false;
+    bool fanout_repaired = false;
     if (fanout_violation && !clock_net && config.insert_buffers) {
       std::vector<BufferAction> fanout_actions;
       if (repairFanoutRegions(design,
@@ -1286,6 +1287,7 @@ bool planRepairDesign(const DesignView& design,
         for (auto& action : fanout_actions) {
           result.actions.push_back(std::move(action));
           repaired = true;
+          fanout_repaired = true;
         }
       }
     }
@@ -1495,10 +1497,11 @@ bool planRepairDesign(const DesignView& design,
       }
     }
     const bool needs_buffer
-        = driver_cap_violation || load_slew_violation || load_cap_violation
-          || (driver_slew_violation && std::isfinite(max_cap)
-              && max_cap > 0.0)
-          || config.repair_design_max_wire_length_um > 0.0;
+        = !fanout_repaired
+          && (driver_cap_violation || load_slew_violation || load_cap_violation
+              || (driver_slew_violation && std::isfinite(max_cap)
+                  && max_cap > 0.0)
+              || config.repair_design_max_wire_length_um > 0.0);
     if (needs_buffer && config.insert_buffers) {
       const auto net_it = net_index_by_id.find(net_id);
       if (net_it == net_index_by_id.end()) {

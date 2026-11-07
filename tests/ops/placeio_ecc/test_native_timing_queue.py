@@ -171,7 +171,12 @@ def test_repair_queue_consumes_native_state_without_python_path_records(monkeypa
         model,
         max_passes=1,
         config=resolve_repair_timing_config(
-            {"use_native_timing_graph": True, "use_native_timing_queue": True}
+            {
+                "use_native_timing_graph": True,
+                "use_native_timing_queue": True,
+                "use_native_timing_evaluation": False,
+                "use_native_timing_planning": False,
+            }
         ),
     )
 

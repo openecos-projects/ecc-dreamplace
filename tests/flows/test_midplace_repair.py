@@ -83,7 +83,7 @@ def placer_for(db):
                 "node_size_y",
             )
         },
-        node_areas=torch.ones(db.num_nodes),
+        node_areas=torch.ones(db.num_nodes, dtype=torch.float64),
     )
     db.pending_continuation_seed = None
     return SimpleNamespace(
@@ -131,7 +131,7 @@ def setup(tmp_path, monkeypatch):
     )
     sync = Mock()
     monkeypatch.setattr(repair, "write_back_movable_lpos", sync)
-    monkeypatch.setattr(repair, "post_step_overflow", lambda *args: 0.5)
+    monkeypatch.setattr(repair, "post_step_overflow", lambda *args: 0.35)
     return engine, session, old, model, metric, sync
 
 
@@ -366,7 +366,7 @@ def test_native_queue_endpoint_sets_are_stable_in_handoff_artifacts(setup):
 
 def test_initial_metric_survives_an_s5b1_window_before_the_first_stable_step(setup, monkeypatch):
     _, session, old, model, metric, _ = setup
-    metric.overflow = torch.tensor(0.5)
+    metric.overflow = torch.tensor(0.35)
     session.observe_initial(metric, PlacementCursor())
     metric.overflow.fill_(0.8)
     monkeypatch.setattr(repair, "post_step_overflow", lambda *args: 0.9)
@@ -386,7 +386,7 @@ def test_initial_metric_survives_an_s5b1_window_before_the_first_stable_step(set
     monkeypatch.setattr(repair, "run_repair_buffering_stage", stage)
     assert not session.tracker.consumed
     session.after_step(old, model, metric, {}, PlacementCursor(), 1.0)
-    assert session.record["request"]["crossing"]["overflow"] == pytest.approx(0.5)
+    assert session.record["request"]["crossing"]["overflow"] == pytest.approx(0.35)
     assert session.record["request"]["execution"]["overflow"] == pytest.approx(0.9)
     stage.assert_called_once()
 
@@ -501,3 +501,433 @@ def test_disabling_midplace_clears_suspension_from_a_previous_failed_session(set
     engine.params.repair_buffering_midplace_enable = False
     assert repair.create_session(engine) is None
     assert not engine.params._midplace_objectives_pending
+
+
+def test_size_only_repair_syncs_runtime_inplace_without_restart(setup, monkeypatch):
+    engine, session, old, model, metric, sync = setup
+    db = engine.placedb
+    db.scale_factor = 1.0
+    db.cell_padding_x = 0.0
+    db.area = 100.0
+    db.total_fixed_node_area = 0.0
+    db.total_space_area = 100.0
+    db.total_movable_node_area = 2.0
+    db.total_movable_macro_area = 0.0
+    db.total_movable_cell_area = 2.0
+    db.total_filler_node_area = 0.0
+    db.movable_slice = slice(0, 2)
+    db.movable_macro_mask = np.zeros(2, dtype=bool)
+    db.inst_main_id = np.array([0, 0], dtype=np.int32)
+    db.main_id_2_cell_id_start = np.array([0, 2], dtype=np.int32)
+    db.inst_libcell_offset = np.array([0, 0], dtype=np.int32)
+    db.inst_cell_id = np.array([0, 0], dtype=np.int32)
+    db.flat_libcell_names = ["BUF1", "BUF2"]
+    db.flat_libcell_info = np.array([[0, 0, 1], [0, 0, 2]], dtype=np.int32)
+    db.flat_libcell_width = np.array([1.0, 2.0], dtype=np.float64)
+    db.flat_libcell_height = np.array([1.0, 1.0], dtype=np.float64)
+    db.flat_libcell_leakage = np.array([0.1, 0.2], dtype=np.float64)
+    db.cell_id_2_libpin_id_start = np.array([0, 2, 4], dtype=np.int32)
+    db.pin_2_libpin_offset = np.array([0, 1, 0, 1], dtype=np.int32)
+    db.flat_lib_pin_offset_x = np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float64)
+    db.flat_lib_pin_offset_y = np.array([0.5, 0.6, 0.7, 0.8], dtype=np.float64)
+    db.flat_lib_pin_cap = np.array([0.01, 0.0, 0.02, 0.0], dtype=np.float64)
+    db.flat_lib_pin_rcap = np.array([0.01, 0.0, 0.02, 0.0], dtype=np.float64)
+    db.flat_lib_pin_fcap = np.array([0.01, 0.0, 0.02, 0.0], dtype=np.float64)
+    db.flat_lib_pin_cap_limit = np.array([0.0, 1.0, 0.0, 1.0], dtype=np.float64)
+    db.flat_lib_pin_slew_limit = np.array([10.0] * 4, dtype=np.float64)
+    db.cell_id_2_arc_id_start = np.array([0, 1, 2], dtype=np.int32)
+    db.flat_libarc_info = np.array([[0, 1, 0, 0, 1, 0], [0, 1, 1, 0, 1, 0]], dtype=np.int32)
+    db.flat_inst_arcs_by_level = np.array([[0, 1, 0, 0, 1, 0, 0, 0]], dtype=np.int32)
+    db.pin_offset_x = np.array([0.1, 0.2, 0.1, 0.2], dtype=np.float64)
+    db.pin_offset_y = np.array([0.5, 0.6, 0.5, 0.6], dtype=np.float64)
+    db.rawdb.pydb.inst_libcell_offset = [0, 0]
+
+    for key in (
+        "inst_main_id",
+        "main_id_2_cell_id_start",
+        "inst_libcell_offset",
+        "inst_cell_id",
+        "flat_libcell_info",
+        "flat_libcell_width",
+        "flat_libcell_height",
+        "flat_libcell_leakage",
+        "cell_id_2_libpin_id_start",
+        "pin_2_libpin_offset",
+        "flat_lib_pin_offset_x",
+        "flat_lib_pin_offset_y",
+        "flat_lib_pin_cap",
+        "flat_lib_pin_rcap",
+        "flat_lib_pin_fcap",
+        "flat_lib_pin_cap_limit",
+        "flat_lib_pin_slew_limit",
+        "cell_id_2_arc_id_start",
+        "flat_libarc_info",
+        "flat_inst_arcs_by_level",
+        "pin_offset_x",
+        "pin_offset_y",
+    ):
+        setattr(old.data_collections, key, torch.as_tensor(getattr(db, key)).clone())
+    old.data_collections.inst_size_cur = torch.tensor([1, 1], dtype=torch.int32)
+    old.data_collections.inst_vt_cur = torch.tensor([0, 0], dtype=torch.int32)
+    old.data_collections.inst_leakage_cur = torch.tensor([0.1, 0.1], dtype=torch.float64)
+    old.data_collections.target_density = torch.tensor([0.5], dtype=torch.float64)
+    old.data_collections.sorted_node_map = torch.arange(2, dtype=torch.int32)
+
+    def stage(placedb_arg, **kwargs):
+        assert kwargs.get("skip_size_only_rebuild") is True
+        placedb_arg.rawdb.pydb.inst_libcell_offset = [1, 0]
+        return {
+            "status": "ok",
+            "stages": {
+                "repair_design": {
+                    "status": "ok",
+                    "inserted_count": 0,
+                    "resized_count": 1,
+                    "plan": {
+                        "actions": [],
+                        "resizes": [{"node_id": 0, "target_cell_index": 1}],
+                    },
+                }
+            },
+        }
+
+    monkeypatch.setattr(repair, "run_repair_buffering_stage", Mock(side_effect=stage))
+    # Must NOT raise MidplaceRestart when size-only syncs in-place!
+    session.after_step(old, model, metric, {}, PlacementCursor(), 2.0)
+
+    assert not session.restarted
+    assert session.active is True
+    assert session.record["mutation_kind"] == "resize-only"
+    assert session.record["runtime_reused"] is True
+    assert session.record["runtime_sizing_sync"]["runtime_cell_state_synced"] is True
+    assert int(db.inst_libcell_offset[0]) == 1
+    assert float(db.node_size_x[0]) == pytest.approx(2.0)
+    assert float(db.total_movable_node_area) == pytest.approx(3.0)
+    assert float(old.data_collections.node_size_x[0]) == pytest.approx(2.0)
+    assert float(old.data_collections.original_node_size_x[0]) == pytest.approx(2.0)
+    assert float(old.data_collections.pin_offset_x[0]) == pytest.approx(0.3)
+    assert int(old.data_collections.flat_inst_arcs_by_level[0, 2]) == 1
+
+
+def test_macroplacedb_incremental_rebuild_reuses_static_arrays_with_exact_parity(tmp_path):
+    from copy import deepcopy
+    from dreamplace.macroPlaceDB import MacroPlaceDB
+
+    def make_pydb(num_movable=2):
+        total_nodes = num_movable + 1
+        num_pins = total_nodes * 2
+        node_names = [f"u{i}" for i in range(num_movable)] + ["OUT"]
+        pin_names = [f"p{i}" for i in range(num_pins)]
+        pydb = SimpleNamespace(
+            timing_schema_version=2,
+            dbu=1000,
+            num_nodes=total_nodes,
+            num_terminals=0,
+            num_terminal_NIs=1,
+            num_place_blockages=0,
+            num_movable_pins=num_movable * 2,
+            node_name2id_map={name: idx for idx, name in enumerate(node_names)},
+            node_names=node_names,
+            node_x=[100.0 * i for i in range(total_nodes)],
+            node_y=[200.0 * i for i in range(total_nodes)],
+            node_orient=["N"] * total_nodes,
+            node_size_x=[100.0] * num_movable + [0.0],
+            node_size_y=[200.0] * num_movable + [0.0],
+            node_is_hard_macro=[False] * total_nodes,
+            macro_writeback_candidate=[False] * total_nodes,
+            node2orig_node_map=list(range(total_nodes)),
+            pin_direct=["I", "O"] * total_nodes,
+            pin_offset_x=[10.0] * num_pins,
+            pin_offset_y=[20.0] * num_pins,
+            pin_names=pin_names,
+            net_name2id_map={f"n{i}": i for i in range(total_nodes)},
+            pin_name2id_map={name: idx for idx, name in enumerate(pin_names)},
+            net_names=[f"n{i}" for i in range(total_nodes)],
+            clock_net_names=[],
+            net2pin_map=[np.array([2 * i, 2 * i + 1], dtype=np.int32) for i in range(total_nodes)],
+            flat_net2pin_map=list(range(num_pins)),
+            flat_net2pin_start_map=[2 * i for i in range(total_nodes + 1)],
+            net_weights=[1.0] * total_nodes,
+            node2pin_map=[np.array([2 * i, 2 * i + 1], dtype=np.int32) for i in range(total_nodes)],
+            flat_node2pin_map=list(range(num_pins)),
+            flat_node2pin_start_map=[2 * i for i in range(total_nodes + 1)],
+            pin2node_map=[i // 2 for i in range(num_pins)],
+            pin2net_map=[i // 2 for i in range(num_pins)],
+            rows=[[0.0, 0.0, 1000.0, 200.0]],
+            regions=[],
+            flat_region_boxes=[],
+            flat_region_boxes_start=[0],
+            node2fence_region_map=[np.iinfo(np.int32).max] * total_nodes,
+            xl=0.0,
+            yl=0.0,
+            xh=1000.0,
+            yh=1000.0,
+            row_height=200.0,
+            site_width=10.0,
+            total_fixed_node_area=0.0,
+            total_space_area=1000000.0,
+            routing_grid_xl=0.0,
+            routing_grid_yl=0.0,
+            routing_grid_xh=1000.0,
+            routing_grid_yh=1000.0,
+            num_routing_grids_x=4,
+            num_routing_grids_y=4,
+            unit_horizontal_capacities=[1.0, 2.0],
+            unit_vertical_capacities=[1.5, 2.5],
+            min_wire_widths=[10.0, 10.0],
+            min_wire_spacings=[10.0, 10.0],
+            initial_horizontal_demand_map=[0.5] * 32,
+            initial_vertical_demand_map=[0.25] * 32,
+            m2_pg_rail_density_boxes=[[0.0, 0.0, 100.0, 10.0]],
+            m2_pg_rail_boxes=[[0.0, 0.0, 100.0, 10.0]],
+            start_points=[0],
+            end_points=[num_pins - 1],
+            endpoints_max_valid=np.ones((1, 2), dtype=bool),
+            endpoints_max_reason=np.zeros((1, 2), dtype=np.int32),
+            endpoints_constraint_max_valid=np.empty((0, 2), dtype=bool),
+            endpoints_constraint_max_reason=np.empty((0, 2), dtype=np.int32),
+            endpoints_timing_check_max_valid=np.empty((0, 2), dtype=bool),
+            endpoints_timing_check_max_reason=np.empty((0, 2), dtype=np.int32),
+            clock_pins=[],
+            FF_ids=[],
+            clk_pin_r_aat=[],
+            clk_pin_f_aat=[],
+            clk_pin_rtran=[],
+            clk_pin_ftran=[],
+            clk_pin_names=[],
+            flat_inst_arcs_by_level=[[0, 1, 0, 0, 1, 0, 0, 0]],
+            flat_inst_arcs_by_level_start=[0, 1],
+            flat_pin_to_graph=[],
+            flat_pin_to_graph_start=[0] * (num_pins + 1),
+            flat_pin_to_graph_reverse=[],
+            flat_pin_to_graph_start_reverse=[0] * (num_pins + 1),
+            pin_pair_arc_keys=[],
+            flat_pin_pair_arc_start=[0],
+            flat_pin_pair_arc_indices=[],
+            arc_level_start=[0, 1],
+            arc_src_pin=[0],
+            arc_dst_pin=[1],
+            arc_inst_id=[0],
+            arc_libcell_id=[0],
+            arc_libarc_id=[0],
+            arc_sense=[1],
+            arc_type=[0],
+            arc_offset=[0],
+            pin_pred_start=[0] * (num_pins + 1),
+            pin_pred_pin=[],
+            pin_pred_arc_id=[],
+            pin_succ_start=[0] * (num_pins + 1),
+            pin_succ_pin=[],
+            pin_succ_arc_id=[],
+            endpoint_pin_ids=[num_pins - 1],
+            start_pin_ids=[0],
+            pin_to_inst_id=[i // 2 for i in range(num_pins)],
+            pin_to_node_id=[i // 2 for i in range(num_pins)],
+            inst_topo_start=[0, num_movable],
+            inst_topo_ids=list(range(num_movable)),
+            flat_cells_by_level=list(range(num_movable)),
+            flat_cells_by_reverse_level=list(range(num_movable)),
+            flat_cells_by_level_start=[0, num_movable],
+            flat_cells_by_reverse_level_start=[0, num_movable],
+            net2driver_pin_map=[2 * i for i in range(total_nodes)],
+            inrdelays=[0.0],
+            infdelays=[0.0],
+            inrtrans=[10.0],
+            inftrans=[10.0],
+            outcaps=[0.0],
+            endpoints_rRAT=[100.0],
+            endpoints_fRAT=[100.0],
+            net_flat_arcs_start=list(range(total_nodes + 1)),
+            net_flat_arcs=[[2 * i, 2 * i + 1] for i in range(total_nodes)],
+            inst_flat_arcs_start=[0] + [1] * total_nodes,
+            inst_flat_arcs=[0],
+            endpoints_constraint_arcs=[],
+            endpoints_timing_check_arcs=[],
+            main_id_2_cell_id_start=[0, 2],
+            cell_id_2_arc_id_start=[0, 1, 2],
+            buffer_main_type_index=0,
+            buffer_main_type_status="ready",
+            buffer_main_type_candidate_indices=[0],
+            inst_main_id=[0] * num_movable + [-1],
+            inst_libcell_offset=[0] * total_nodes,
+            flat_libarc_info=[["A", "Y", 0, 0, 1, 0], ["A", "Y", 1, 0, 1, 0]],
+            flat_libcell_info=[["BUF1", 0, 1, 0], ["BUF2", 0, 2, 0]],
+            flat_libcell_width=[100.0, 200.0],
+            flat_libcell_height=[200.0, 200.0],
+            flat_libcell_leakage=[1.0, 2.0],
+            flat_libcell_main_id2size_vt_limit=[["BUF", 2, 1]],
+            main_id_is_sizeable=[True],
+            cell_id_2_libpin_id_start=[0, 2, 4],
+            flat_lib_pin_names=["A", "Y", "A", "Y"],
+            pin_2_libpin_offset=[0, 1] * num_movable + [-1, -1],
+            flat_lib_pin_offset_x=[10.0, 20.0, 30.0, 40.0],
+            flat_lib_pin_offset_y=[15.0, 25.0, 35.0, 45.0],
+            flat_lib_pin_cap=[0.01, 0.0, 0.02, 0.0],
+            flat_lib_pin_rcap=[0.01, 0.0, 0.02, 0.0],
+            flat_lib_pin_fcap=[0.01, 0.0, 0.02, 0.0],
+            flat_lib_pin_cap_limit=[0.0, 1.0, 0.0, 1.0],
+            flat_lib_pin_slew_limit=[100.0] * 4,
+            r_unit=0.001,
+            c_unit=0.001,
+        )
+        for prefix in ("r_delay", "f_delay", "r_trans", "f_trans", "r_check", "f_check"):
+            setattr(pydb, f"{prefix}_flat_luts_values", [[1.0, 2.0, 3.0, 4.0]] * 2)
+            setattr(pydb, f"{prefix}_flat_luts_trans_table", [[0.0, 10.0]] * 2)
+            setattr(pydb, f"{prefix}_flat_luts_cap_table", [[0.0, 1.0]] * 2)
+            setattr(pydb, f"{prefix}_flat_luts_dim", [[2, 2]] * 2)
+        return pydb
+
+    def make_params():
+        p = _load_params_json(None)
+        p.fromJson(
+            {
+                "with_sta": 1,
+                "place_io_engine": "ecc",
+                "result_dir": str(tmp_path),
+                "base_design_name": "synthetic",
+                "target_density": 0.8,
+                "num_bins_x": 16,
+                "num_bins_y": 16,
+                "random_center_init_flag": 0,
+            }
+        )
+        return p
+
+    pydb0 = make_pydb(2)
+    params_inc = make_params()
+    db_inc = MacroPlaceDB(SimpleNamespace())
+    db_inc.pydb = pydb0
+    db_inc.rawdb = SimpleNamespace(pydb=pydb0, export_options=None)
+    db_inc.init_db(params_inc)
+
+    rows_obj = db_inc.rows
+    luts_obj = db_inc.f_delay_flat_luts_values
+    hcap_obj = db_inc.unit_horizontal_capacities
+    hdem_obj = db_inc.initial_horizontal_demand_map
+
+    pydb1 = make_pydb(3)
+    summary = db_inc.rebuild_from_pydb(deepcopy(pydb1), rebuild_mode="topo")
+    assert summary["incremental_static_reuse"] is True
+    assert db_inc.rows is rows_obj
+    assert db_inc.f_delay_flat_luts_values is luts_obj
+    assert db_inc.unit_horizontal_capacities is hcap_obj
+    assert db_inc.initial_horizontal_demand_map is hdem_obj
+
+    params_full = make_params()
+    db_full = MacroPlaceDB(SimpleNamespace())
+    db_full.pydb = deepcopy(pydb1)
+    db_full.rawdb = SimpleNamespace(pydb=db_full.pydb, export_options=None)
+    db_full.init_db(params_full)
+
+    for attr in (
+        "node_x",
+        "node_y",
+        "node_size_x",
+        "node_size_y",
+        "pin_offset_x",
+        "pin_offset_y",
+        "rows",
+        "unit_horizontal_capacities",
+        "initial_horizontal_demand_map",
+        "f_delay_flat_luts_values",
+        "flat_lib_pin_offset_x",
+        "inst_cell_id",
+        "pin_2_libpin_offset",
+    ):
+        np.testing.assert_allclose(getattr(db_inc, attr), getattr(db_full, attr))
+
+
+def test_first_inflation_window_replaced_by_repair_design_leaves_four_s5b1_windows(
+    setup, monkeypatch
+):
+    engine, session, old, model, metric, _ = setup
+    engine.params.routability_opt_flag = 1
+    engine.params.node_area_adjust_overflow = 0.15
+    engine.params.timing_grad_balance_reset_on_restart = 0
+    schedule = TimingOptWindowSchedule([], 5)
+    old.inflation_s5b1 = SimpleNamespace(
+        schedule=schedule,
+        round_index=0,
+        summaries=[],
+        sync_native_sizing=lambda: {"ok": True, "accepted_count": 0, "requested_count": 0},
+    )
+    old._diff_tdp_step_status = {"timing_objective_active": True, "enabled": True}
+    old._timing_grad_balance_state = {"initialized": True, "weight_applied": 0.25}
+    model.inflation_state = SimpleNamespace(num_area_adjust=0)
+    model.routability_Lsub_iteration = 5
+    model._timing_coeff_growth_base = (500.0, 5.0)
+    model._timing_coeff_growth_multiplier = 1.5
+    model.timing_wns_coeff = 750.0
+    model.timing_tns_coeff = 7.5
+
+    def stage(db, **kwargs):
+        updated = database(3)
+        db.__dict__.update(updated.__dict__)
+        db.topology_generation = 1
+        return {
+            "status": "ok",
+            "stages": {
+                "repair_design": {
+                    "status": "ok",
+                    "inserted_count": 1,
+                    "resized_count": 1,
+                    "plan": {"actions": [{}], "resizes": [{}]},
+                }
+            },
+        }
+
+    run = Mock(side_effect=stage)
+    monkeypatch.setattr(repair, "run_repair_buffering_stage", run)
+
+    # Ordinary after_step before first inflation must defer when S5B1 inflation mode is active
+    assert session.defers_to_first_inflation_window(old)
+    session.after_step(old, model, metric, {}, PlacementCursor(raw_iteration=10), 1.0)
+    assert run.call_count == 0
+    assert not session.active
+
+    # Triggering at the 1st inflation window consumes Window 1 and Round 0
+    metric.overflow = torch.tensor(0.145)
+    with pytest.raises(repair.MidplaceRestart):
+        session.before_first_inflation(
+            old,
+            model,
+            metric,
+            {},
+            PlacementCursor(stage=0, gamma=10, density=0, sub=0, raw_iteration=10),
+        )
+    assert run.call_count == 1
+    assert session.resume_sub_iteration == 5
+    assert session.schedule.use_restart_density_weight is True
+
+    fresh = session.build_placer(lambda: placer_for(engine.placedb))
+    fresh_owner = SimpleNamespace(lane=None)
+    session.runtime_ready(fresh, fresh_owner, fresh._routability_controller)
+    assert fresh_owner.window_count == 1
+    assert fresh_owner.schedule.window_count == 1
+    assert fresh_owner.summaries[0]["window"] == 1
+    assert fresh_owner.summaries[0]["mode"] == "repair_design"
+    assert session.schedule.inflation_rounds == {0: 1}
+    assert fresh._routability_controller._last_inflation_step == 3
+
+    # Remaining 4 inflation events correspond to S5B1 windows 2, 3, 4, 5
+    remaining_windows = []
+    for next_iter in (50, 90, 130, 170, 210):
+        evt = fresh_owner.schedule.inflation_event(iteration=next_iter, stage=0)
+        if evt is not None:
+            remaining_windows.append(fresh_owner.schedule.window_count)
+    assert remaining_windows == [2, 3, 4, 5]
+
+    fresh_model = SimpleNamespace(
+        apply_timing_grad_balance_state=Mock(),
+        enable_l_shape_routability=False,
+    )
+    session.schedule.restore_model_state(fresh, fresh_model, engine.params)
+    assert fresh._diff_tdp_step_status["timing_objective_active"] is True
+    assert fresh_model.timing_wns_coeff == pytest.approx(750.0)
+    assert fresh_model.timing_tns_coeff == pytest.approx(7.5)
+    fresh_model.apply_timing_grad_balance_state.assert_called_once_with(
+        {"initialized": True, "weight_applied": 0.25}
+    )
+
+
+

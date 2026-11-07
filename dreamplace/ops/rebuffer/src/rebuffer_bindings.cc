@@ -48,7 +48,18 @@ PYBIND11_MODULE(rebuffer_cpp, module)
   rebuffer::registerElectricalObservationBindings(module);
   rebuffer::registerRepairLibraryMetadata(module);
   rebuffer::registerCellSelectionBindings(module);
-  py::class_<rebuffer::TimingGraphIndex, std::shared_ptr<rebuffer::TimingGraphIndex>>(module, "TimingGraphIndex");
+  py::class_<rebuffer::TimingGraphIndex, std::shared_ptr<rebuffer::TimingGraphIndex>>(module, "TimingGraphIndex")
+      .def("update_cells", [](rebuffer::TimingGraphIndex& self, const std::vector<int>& indices,
+                              const std::vector<rebuffer::TimingCellArc>& rows) {
+        for (std::size_t i = 0; i < indices.size() && i < rows.size(); ++i) {
+          const int id = indices[i];
+          if (id >= 0 && id < static_cast<int>(self.cells.size())) {
+            self.arc_ids.erase(self.key(id));
+            self.cells[id] = rows[i];
+            self.arc_ids.emplace(self.key(id), id);
+          }
+        }
+      });
   py::class_<rebuffer::PersistentTimingGraphCheckpoint,
              std::shared_ptr<rebuffer::PersistentTimingGraphCheckpoint>>(
       module, "PersistentTimingGraphCheckpoint");

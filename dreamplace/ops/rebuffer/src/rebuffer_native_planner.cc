@@ -82,6 +82,49 @@ bool timingBufferMoveEligible(const DesignView& design, int net_id,
          && (config.timing_max_fanout <= 0 || fanout < config.timing_max_fanout);
 }
 
+bool isExternalPadNet(const DesignView& design, int net_id)
+{
+  if (design.num_terminal_nis <= 0
+      || net_id < 0
+      || net_id + 1 >= static_cast<int>(design.flat_net2pin_start_map.size())) {
+    return false;
+  }
+  const int base_nodes = design.num_base_nodes > 0 ? design.num_base_nodes : design.num_nodes;
+  const int io_begin = base_nodes - design.num_terminal_nis;
+  if (io_begin < 0 || io_begin > base_nodes) return false;
+  const int fixed_begin = io_begin - std::max(0, design.num_terminals);
+  const int begin = design.flat_net2pin_start_map[net_id];
+  const int end = design.flat_net2pin_start_map[net_id + 1];
+  if (begin < 0 || end < begin || end > static_cast<int>(design.flat_net2pin_map.size())) {
+    return false;
+  }
+  bool has_top_port = false;
+  bool has_fixed_terminal = false;
+  bool has_movable_cell = false;
+  for (int index = begin; index < end; ++index) {
+    const int pin = design.flat_net2pin_map[index];
+    if (pin < 0 || pin >= static_cast<int>(design.pin2node_map.size())) continue;
+    const int node = design.pin2node_map[pin];
+    const bool is_top_port = node >= io_begin && node < base_nodes;
+    const bool is_fixed = (!design.node_is_fixed.empty()
+                           && node >= 0
+                           && node < static_cast<int>(design.node_is_fixed.size())
+                           && design.node_is_fixed[node] != 0)
+                          || (design.num_terminals > 0
+                              && fixed_begin >= 0
+                              && node >= fixed_begin
+                              && node < io_begin);
+    if (is_top_port) {
+      has_top_port = true;
+    } else if (is_fixed) {
+      has_fixed_terminal = true;
+    } else if (node >= 0 && node < design.num_nodes) {
+      has_movable_cell = true;
+    }
+  }
+  return has_top_port && has_fixed_terminal && !has_movable_cell;
+}
+
 bool hasTopLevelOutputPort(const DesignView& design, int net_id)
 {
   if (design.num_terminal_nis <= 0
@@ -157,6 +200,9 @@ py::dict planNativeCurrentTree(const py::dict& request,
       const auto& liberty = input.liberty;
       const auto& characterization = input.characterization;
       const auto config = rebuffer_python::configFromDict(planner_config);
+      if (isExternalPadNet(design, tree->root_net_id)) {
+        return unsupported("timing_buffer_move_external_pad_net");
+      }
       if (planner_config.contains("native_skip_top_level_output_ports")
           && planner_config["native_skip_top_level_output_ports"].cast<bool>()
           && hasTopLevelOutputPort(design, tree->root_net_id)) {

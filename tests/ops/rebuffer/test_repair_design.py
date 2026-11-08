@@ -916,3 +916,32 @@ def test_repair_design_max_wire_length_is_native_and_opt_in():
     assert result["actions"]
     assert all(action["reason"] == "wire_length" for action in result["actions"])
     assert len(result["actions"]) >= 2
+
+
+def test_repair_design_skips_external_pad_net():
+    design = _design()
+    design["num_base_nodes"] = 2
+    design["num_terminals"] = 1
+    design["num_terminal_NIs"] = 1
+    design["pin2node_map"] = [1, 0]
+    design["node_is_fixed"] = [1, 0]
+    timing = _timing()
+    timing["pin_max_slew"] = [0.0, 0.05]
+
+    result = rebuffer_cpp.plan_repair_design(
+        design,
+        timing,
+        _steiner(),
+        _liberty(),
+        _characterization(),
+        {
+            "resize_drivers": False,
+            "insert_buffers": True,
+            "repair_net_tree": True,
+        },
+    )
+
+    assert result["status"] == "ok"
+    assert result["actions"] == []
+    assert result["resizes"] == []
+

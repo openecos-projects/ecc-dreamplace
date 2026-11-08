@@ -694,6 +694,63 @@ bool isClockPin(const TimingView& timing, int pin)
          != timing.clock_pins.end();
 }
 
+bool isTopLevelPortNode(const DesignView& design, int node)
+{
+  if (design.num_terminal_nis <= 0) {
+    return false;
+  }
+  const int base_nodes
+      = design.num_base_nodes > 0 ? design.num_base_nodes : design.num_nodes;
+  const int io_begin = base_nodes - design.num_terminal_nis;
+  return io_begin >= 0 && node >= io_begin && node < base_nodes;
+}
+
+bool isFixedTerminalNode(const DesignView& design, int node)
+{
+  if (node < 0) {
+    return false;
+  }
+  if (!design.node_is_fixed.empty()
+      && node < static_cast<int>(design.node_is_fixed.size())
+      && design.node_is_fixed[node] != 0) {
+    return true;
+  }
+  if (design.num_terminals <= 0) {
+    return false;
+  }
+  const int base_nodes
+      = design.num_base_nodes > 0 ? design.num_base_nodes : design.num_nodes;
+  const int io_begin = base_nodes - std::max(0, design.num_terminal_nis);
+  const int fixed_begin = io_begin - design.num_terminals;
+  return fixed_begin >= 0 && node >= fixed_begin && node < io_begin;
+}
+
+bool isExternalPadNet(const DesignView& design, int pin_begin, int pin_end)
+{
+  bool has_top_port = false;
+  bool has_fixed_terminal = false;
+  bool has_movable_cell = false;
+  for (int index = pin_begin; index < pin_end; ++index) {
+    if (index < 0
+        || index >= static_cast<int>(design.flat_net2pin_map.size())) {
+      continue;
+    }
+    const int pin = design.flat_net2pin_map[index];
+    if (pin < 0 || pin >= static_cast<int>(design.pin2node_map.size())) {
+      continue;
+    }
+    const int node = design.pin2node_map[pin];
+    if (isTopLevelPortNode(design, node)) {
+      has_top_port = true;
+    } else if (isFixedTerminalNode(design, node)) {
+      has_fixed_terminal = true;
+    } else if (node >= 0 && node < design.num_nodes) {
+      has_movable_cell = true;
+    }
+  }
+  return has_top_port && has_fixed_terminal && !has_movable_cell;
+}
+
 bool validLengths(const DesignView& design,
                   const TimingView& timing,
                   const SteinerView& steiner,
@@ -1083,6 +1140,9 @@ bool planRepairDesign(const DesignView& design,
     const int pin_begin = design.flat_net2pin_start_map[net_id];
     const int pin_end = design.flat_net2pin_start_map[net_id + 1];
     if (pin_end - pin_begin < 2) {
+      continue;
+    }
+    if (isExternalPadNet(design, pin_begin, pin_end)) {
       continue;
     }
     int load_pin_count = 0;

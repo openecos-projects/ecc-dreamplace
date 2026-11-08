@@ -116,7 +116,21 @@ def test_diff_opt_each_phase_uses_its_four_terms_and_restores_model_state(monkey
 
         def prepare(self, model, pos, *, active_only):
             preparations.append(active_only)
-            self.lane = SimpleNamespace(_current_state=lambda: object())
+            self.lane = SimpleNamespace(
+                _current_state=lambda: object(),
+                summarize=lambda: {
+                    "candidate_count": 4,
+                    "net_count": 2,
+                    "state_kind": "candidate",
+                    "candidate_geometry_refresh": {
+                        "candidate_topology_generation": 1,
+                        "candidate_geometry_generation": 2,
+                        "candidate_geometry_digest": "abc",
+                        "dirty_node_ids": [1, 2, 3],
+                        "dirty_edge_ids": [4, 5, 6],
+                    },
+                },
+            )
 
         def probe(self, model, pos, capacity):
             assert params.timing_objective_lane == "timing_slew_cap"
@@ -195,6 +209,11 @@ def test_diff_opt_each_phase_uses_its_four_terms_and_restores_model_state(monkey
     traces = [phase for phase in summary["phases"] if phase["action"] == "bf"]
     assert len({phase["trace_path"] for phase in traces}) == 2
     for phase in traces:
+        assert phase["candidate_state"]["candidate_geometry_refresh"] == {
+            "candidate_topology_generation": 1,
+            "candidate_geometry_generation": 2,
+            "candidate_geometry_digest": "abc",
+        }
         assert (
             hashlib.sha256(Path(phase["trace_path"]).read_bytes()).hexdigest()
             == phase["trace_sha256"]

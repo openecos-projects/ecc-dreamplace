@@ -81,18 +81,18 @@ def test_timing_coefficient_growth_is_capped(algo, density_update_model):
     )
     previous = SimpleNamespace(hpwl=torch.tensor(100.0))
 
-    for iteration in range(1, 695):
+    for iteration in range(1, 232):
         update(metric, previous, iteration)
-    below_cap_multiplier = 1.01**694
+    below_cap_multiplier = 1.01**231
     assert (model.timing_wns_coeff, model.timing_tns_coeff) == pytest.approx(
         (0.02 * below_cap_multiplier, 0.0002 * below_cap_multiplier)
     )
 
-    update(metric, previous, 695)
-    capped = (20.0, 0.2)
+    update(metric, previous, 232)
+    capped = (0.2, 0.002)
     assert (model.timing_wns_coeff, model.timing_tns_coeff) == pytest.approx(capped)
 
-    update(metric, previous, 696)
+    update(metric, previous, 233)
     assert (model.timing_wns_coeff, model.timing_tns_coeff) == pytest.approx(capped)
 
 

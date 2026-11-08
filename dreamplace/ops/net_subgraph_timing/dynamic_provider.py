@@ -224,6 +224,8 @@ class RelaxedBufferDynamicNetProvider(DynamicNetProvider):
         }
 
     def has_dynamic_nets(self, net_ids, *, level_id=None, level_view_epoch=None):
+        if not self.affected_net_ids:
+            return False
         return bool(_as_net_id_set(net_ids) & self.affected_net_ids)
 
     def bind_live_geometry(

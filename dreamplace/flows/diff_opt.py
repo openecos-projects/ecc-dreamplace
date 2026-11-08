@@ -224,6 +224,22 @@ class DiffOptController:
                     )
                     if lane_summary.get(key) is not None
                 }
+                refresh = result["candidate_state"].get("candidate_geometry_refresh")
+                if isinstance(refresh, dict):
+                    result["candidate_state"]["candidate_geometry_refresh"] = {
+                        key: refresh.get(key)
+                        for key in (
+                            "candidate_topology_generation",
+                            "candidate_geometry_generation",
+                            "candidate_geometry_digest",
+                            "candidate_topology_digest",
+                            "candidate_geometry_invalidated_count",
+                            "candidate_activation_remap",
+                            "candidate_geometry_refresh_reason",
+                            "candidate_geometry_refresh_status",
+                        )
+                        if refresh.get(key) is not None
+                    }
             if result.get("trace_path"):
                 source = result["trace_path"]
                 directory, name = os.path.split(source)
@@ -378,14 +394,17 @@ def run_diff_opt(engine):
     # Build only the timing model here, then restore the mode for the
     # standalone controller and terminal commit.
     saved_flow_kind = getattr(engine.params, "flow_kind", None)
+    saved_build_model_only = getattr(engine.params, "build_model_only", False)
     engine.params.flow_kind = "placement"
     engine.params.global_place_flag = 1
     engine.params.legalize_flag = 0
     engine.params.detailed_place_flag = 0
+    engine.params.build_model_only = True
     try:
         engine.place()
     finally:
         engine.params.flow_kind = saved_flow_kind
+        engine.params.build_model_only = saved_build_model_only
     model = getattr(engine.placer, "last_global_place_model", None)
     if model is None:
         raise RuntimeError("diff_opt did not construct a placement timing model")

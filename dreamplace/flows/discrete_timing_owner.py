@@ -1116,7 +1116,9 @@ class DiscreteTimingOwner:
         rounds, best_round = [], 0
         best_round_committed = False
         native_action_backward_used = False
-        for round_id in range(1, int(self.params.timing_opt_sizing_rounds) + 1):
+        total_rounds = int(self.params.timing_opt_sizing_rounds)
+        for round_id in range(1, total_rounds + 1):
+            has_next_round = round_id < total_rounds
             self.round_index += 1
             if self.action_mode == "lut_action" and action_context is None:
                 started_at = time.perf_counter()
@@ -1353,32 +1355,34 @@ class DiscreteTimingOwner:
                 fits_started_at = time.perf_counter()
                 fits = self._fits(model, capacity)
                 fits_ms.append((time.perf_counter() - fits_started_at) * 1000.0)
-                rounds.append(
-                    {
-                        "round": round_id,
-                        "loss": float(loss.detach()),
-                        # The next round compares against this entry's terms.
-                        "objective_terms": objective_snapshot(model, loss),
-                        "fits": fits,
-                        "actions": summary.get("selected_scores", ()),
-                        "action_counts": dict(summary.get("action_counts", {}) or {}),
-                        "action_score_stats": summary.get("action_score_stats"),
-                        "trial_tns": summary.get("trial_tns"),
-                        "predicted_delta_sum": float(
-                            sum(
-                                float(item.get("predicted_delta_obj", 0.0))
-                                for item in summary.get("selected_scores", ()) or ()
-                            )
-                        ),
-                        "action_digest": summary.get("action_digest"),
-                        "input_state_digest": summary.get("input_state_digest"),
-                        "output_state_digest": summary.get("output_state_digest"),
-                        "changed_instance_count": 0,
-                        "no_action": True,
-                    }
-                )
+                round_record = {
+                    "round": round_id,
+                    "loss": float(loss.detach()),
+                    # The next round compares against this entry's terms.
+                    "objective_terms": objective_snapshot(model, loss),
+                    "fits": fits,
+                    "action_counts": dict(summary.get("action_counts", {}) or {}),
+                    "action_score_stats": summary.get("action_score_stats"),
+                    "trial_tns": summary.get("trial_tns"),
+                    "predicted_delta_sum": float(
+                        sum(
+                            float(item.get("predicted_delta_obj", 0.0))
+                            for item in summary.get("selected_scores", ()) or ()
+                        )
+                    ),
+                    "action_digest": summary.get("action_digest"),
+                    "input_state_digest": summary.get("input_state_digest"),
+                    "output_state_digest": summary.get("output_state_digest"),
+                    "changed_instance_count": 0,
+                    "no_action": True,
+                }
+                if bool(getattr(self.params, "dump_sizing_round_actions_flag", False)):
+                    round_record["actions"] = summary.get("selected_scores", ())
+                rounds.append(round_record)
                 # Consume the no-op attempt while rebuilding the graph for the
                 # next fixed-budget sizing round.
+                if not has_next_round:
+                    continue
                 if self.action_mode == "lut_action":
                     started_at = time.perf_counter()
                     loss, action_context = self._action_loss(model, pos)
@@ -1457,7 +1461,7 @@ class DiscreteTimingOwner:
             # pays for one timing evaluation instead of a value-only pass plus
             # a second action pass.
             started_at = time.perf_counter()
-            if self.action_mode == "lut_action":
+            if self.action_mode == "lut_action" and has_next_round:
                 loss, action_context = self._action_loss(model, pos)
                 action_build_ms.append(
                     float(action_context.mapping_summary.get("build_ms", 0.0) or 0.0)
@@ -1497,11 +1501,16 @@ class DiscreteTimingOwner:
                         ),
                     }
                 )
-            else:
+            elif has_next_round:
                 loss = self._loss(model, pos)
                 action_context = None
+            else:
+                with torch.no_grad():
+                    loss = self._loss(model, pos)
+                if self.action_mode != "lut_action":
+                    action_context = None
             forward_ms.append((time.perf_counter() - started_at) * 1000.0)
-            if self.action_mode != "lut_action":
+            if self.action_mode != "lut_action" or not has_next_round:
                 timing_forward_ms.append(forward_ms[-1])
             actual = float(loss.detach())
             fits_started_at = time.perf_counter()
@@ -1536,44 +1545,48 @@ class DiscreteTimingOwner:
             actual_delta_wns = _term_delta(
                 step_terms.get("wns"), previous_terms.get("wns")
             )
-            rounds.append(
-                {
-                    "round": round_id,
-                    "loss": actual,
-                    "objective_terms": step_terms,
-                    "predicted_delta_tns": predicted_tns,
-                    "predicted_delta_tns_raw": predicted_tns_raw,
-                    "first_order_sum_tns": predicted_tns_raw,
-                    "step_tns_calibration": calibration,
-                    "predicted_delta_wns": predicted_wns,
-                    "actual_delta_tns": actual_delta_tns,
-                    "actual_delta_wns": actual_delta_wns,
-                    "fits": fits,
-                    "actions": summary["selected_scores"],
-                    "action_counts": dict(summary.get("action_counts", {}) or {}),
-                    "action_score_stats": summary.get("action_score_stats"),
-                    "gradient_norms": (
-                        summary.get("action_mapping") or {}
-                    ).get("gradient_norms"),
-                    "trial_tns": summary.get("trial_tns"),
-                    "predicted_delta_sum": float(
-                        sum(
-                            float(item.get("predicted_delta_obj", 0.0))
-                            for item in summary.get("selected_scores", ()) or ()
-                        )
-                    ),
-                    "actual_delta": actual
-                    - (rounds[-1]["loss"] if rounds else initial_loss),
-                    "action_digest": summary.get("action_digest"),
-                    "input_state_digest": summary.get("input_state_digest"),
-                    "output_state_digest": summary.get("output_state_digest"),
-                    "changed_instance_count": int(summary.get("num_changed_instances", 0) or 0),
-                    "applied_instance_ids": list(summary.get("applied_instance_ids", ()) or ()),
-                    "applied_cell_ids": list(summary.get("applied_cell_ids", ()) or ()),
-                    "runtime_cell_state_generation": summary.get("runtime_cell_state_generation"),
-                    "timing_cache_generation": summary.get("timing_cache_generation"),
-                }
-            )
+            round_record = {
+                "round": round_id,
+                "loss": actual,
+                "objective_terms": step_terms,
+                "predicted_delta_tns": predicted_tns,
+                "predicted_delta_tns_raw": predicted_tns_raw,
+                "first_order_sum_tns": predicted_tns_raw,
+                "step_tns_calibration": calibration,
+                "predicted_delta_wns": predicted_wns,
+                "actual_delta_tns": actual_delta_tns,
+                "actual_delta_wns": actual_delta_wns,
+                "fits": fits,
+                "action_counts": dict(summary.get("action_counts", {}) or {}),
+                "action_score_stats": summary.get("action_score_stats"),
+                "gradient_norms": (
+                    summary.get("action_mapping") or {}
+                ).get("gradient_norms"),
+                "trial_tns": summary.get("trial_tns"),
+                "predicted_delta_sum": float(
+                    sum(
+                        float(item.get("predicted_delta_obj", 0.0))
+                        for item in summary.get("selected_scores", ()) or ()
+                    )
+                ),
+                "actual_delta": actual
+                - (rounds[-1]["loss"] if rounds else initial_loss),
+                "action_digest": summary.get("action_digest"),
+                "input_state_digest": summary.get("input_state_digest"),
+                "output_state_digest": summary.get("output_state_digest"),
+                "changed_instance_count": int(summary.get("num_changed_instances", 0) or 0),
+                "runtime_cell_state_generation": summary.get("runtime_cell_state_generation"),
+                "timing_cache_generation": summary.get("timing_cache_generation"),
+            }
+            if bool(getattr(self.params, "dump_sizing_round_actions_flag", False)):
+                round_record["actions"] = summary["selected_scores"]
+                round_record["applied_instance_ids"] = list(
+                    summary.get("applied_instance_ids", ()) or ()
+                )
+                round_record["applied_cell_ids"] = list(
+                    summary.get("applied_cell_ids", ()) or ()
+                )
+            rounds.append(round_record)
             if fits and actual < best_loss:
                 capture_started_at = time.perf_counter()
                 best, best_loss, best_round = (

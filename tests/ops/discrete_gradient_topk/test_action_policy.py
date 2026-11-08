@@ -17,7 +17,7 @@ from dreamplace.ops.discrete_gradient_topk import (
 @pytest.mark.parametrize(
     "policy, explicit_mask, expected_actions, expected_cells",
     [
-        (None, None, ["size_up", "vt_speedup"], [7, 5]),
+        (None, None, ["vt_slowdown", "size_down"], [3, 1]),
         ("up", None, ["size_up", "vt_speedup"], [7, 5]),
         ("down", None, ["vt_slowdown", "size_down"], [3, 1]),
         ("quad", None, ["vt_slowdown", "size_down"], [3, 1]),

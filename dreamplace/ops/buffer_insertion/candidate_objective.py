@@ -10,12 +10,17 @@ def objective_snapshot(model, loss, metrics):
     terms = dict(getattr(model, "last_timing_objective_terms", {}) or {})
     raw_terms = dict(terms.get("raw_terms", {}) or {})
     weighted_terms = dict(terms.get("weighted_terms", {}) or {})
+    report_aligned = dict(terms.get("report_aligned_terms", {}) or {})
     timing_op = getattr(getattr(model, "op_collections", None), "timing_propagation_op", None)
     timing_metrics = dict(getattr(model, "_diff_opt_last_timing_metrics", {}) or {})
-    slew = raw_terms.get("slew")
-    cap = raw_terms.get("cap")
+    slew = report_aligned.get("slew_violation_ns")
+    if slew is None and raw_terms.get("slew") is not None:
+        slew = float(raw_terms["slew"]) / 1000.0
     if slew is None and timing_op is not None:
         slew = getattr(timing_op, "last_total_slew_violation", None)
+    cap = report_aligned.get("cap_violation_pF")
+    if cap is None and raw_terms.get("cap") is not None:
+        cap = float(raw_terms["cap"]) / 1000.0
     if cap is None and timing_op is not None:
         cap = getattr(timing_op, "last_total_cap_violation", None)
     total_slew = (

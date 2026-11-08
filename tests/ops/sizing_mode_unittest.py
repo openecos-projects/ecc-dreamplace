@@ -72,7 +72,7 @@ class SizingModeTest(unittest.TestCase):
                 last_total_cap_violation_tensor=torch.tensor(5.0, dtype=torch.float32),
                 last_total_leakage_tensor=torch.tensor(0.0, dtype=torch.float32),
                 last_total_slew_violation=0.004,
-                last_total_cap_violation=5000.0,
+                last_total_cap_violation=0.005,
                 last_total_leakage=0.0,
             ),
         )
@@ -2124,8 +2124,8 @@ class SizingModeTest(unittest.TestCase):
             torch.tensor([2.0], dtype=torch.float32),
         )
         total.backward()
-        self.assertAlmostEqual(total.item(), 0.004, places=6)
-        self.assertAlmostEqual(x.grad.item(), 0.001, places=6)
+        self.assertAlmostEqual(total.item(), 4.0, places=6)
+        self.assertAlmostEqual(x.grad.item(), 1.0, places=6)
 
     def test_timing_propagation_cap_violation_prefers_live_tensor(self):
         op = TimingPropagation.__new__(TimingPropagation)
@@ -2140,8 +2140,8 @@ class SizingModeTest(unittest.TestCase):
             torch.tensor([0.005], dtype=torch.float32),
         )
         total.backward()
-        self.assertAlmostEqual(total.item(), 0.015, places=6)
-        self.assertAlmostEqual(x.grad.item(), 1.0, places=6)
+        self.assertAlmostEqual(total.item(), 15.0, places=5)
+        self.assertAlmostEqual(x.grad.item(), 1000.0, places=5)
 
     def test_size_only_obj_fn_records_objective_term_breakdown_and_lane_identity(self):
         obj = self._make_size_only_place_obj(
@@ -2161,9 +2161,11 @@ class SizingModeTest(unittest.TestCase):
         self.assertAlmostEqual(terms["weighted_terms"]["slew"], 6.0, places=6)
         self.assertAlmostEqual(terms["raw_terms"]["cap"], 5.0, places=6)
         self.assertAlmostEqual(terms["weighted_terms"]["cap"], 0.0, places=6)
-        self.assertEqual(terms["units"]["slew"], "ns")
-        self.assertEqual(terms["units"]["cap"], "pF")
-        self.assertAlmostEqual(terms["report_aligned_terms"]["cap_violation_fF"], 5000.0, places=6)
+        self.assertEqual(terms["units"]["slew"], "ps")
+        self.assertEqual(terms["units"]["cap"], "fF")
+        self.assertAlmostEqual(terms["report_aligned_terms"]["slew_violation_ns"], 0.004, places=6)
+        self.assertAlmostEqual(terms["report_aligned_terms"]["cap_violation_pF"], 0.005, places=6)
+        self.assertAlmostEqual(terms["report_aligned_terms"]["cap_violation_fF"], 5.0, places=6)
 
     def test_timing_lane_slew_term_changes_gradient_when_enabled(self):
         obj = self._make_size_only_place_obj(timing_lane="timing_slew", slew_weight=2.0)
@@ -2289,8 +2291,8 @@ class SizingModeTest(unittest.TestCase):
                     "enabled_terms": ["timing", "slew", "cap"],
                     "units": {
                         "timing": "loss_proxy",
-                        "slew": "ns",
-                        "cap": "pF",
+                        "slew": "ps",
+                        "cap": "fF",
                         "leakage": "mW",
                     },
                     "weights": {
@@ -2312,8 +2314,8 @@ class SizingModeTest(unittest.TestCase):
                         "leakage": 0.0,
                     },
                     "report_aligned_terms": {
-                        "slew_violation_ns": 4.0,
-                        "cap_violation_fF": 5000.0,
+                        "slew_violation_ns": 0.004,
+                        "cap_violation_fF": 5.0,
                         "leakage_mW": None,
                     },
                     "total_loss": 23.011,
@@ -2331,9 +2333,10 @@ class SizingModeTest(unittest.TestCase):
                 payload = json.load(f)
             self.assertEqual(payload["lane"], "timing_slew_cap")
             self.assertEqual(payload["enabled_terms"], ["timing", "slew", "cap"])
-            self.assertEqual(payload["units"]["cap"], "pF")
+            self.assertEqual(payload["units"]["slew"], "ps")
+            self.assertEqual(payload["units"]["cap"], "fF")
             self.assertAlmostEqual(payload["weighted_terms"]["cap"], 15.0, places=6)
-            self.assertAlmostEqual(payload["report_aligned_terms"]["cap_violation_fF"], 5000.0, places=6)
+            self.assertAlmostEqual(payload["report_aligned_terms"]["cap_violation_fF"], 5.0, places=6)
 
 
 

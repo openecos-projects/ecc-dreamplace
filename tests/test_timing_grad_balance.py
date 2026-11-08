@@ -156,6 +156,59 @@ def test_timing_grad_balance_initializes_from_real_autograd_gradients():
     assert pos.grad is None
 
 
+def test_timing_grad_balance_scales_all_active_terms_in_timing_slew_cap_lane():
+    model = _model(timing_objective_lane="timing_slew_cap")
+    model.timing_wns_coeff = 1.0
+    model.timing_tns_coeff = 0.0
+    model.timing_slew_weight = 2.0
+    model.timing_cap_weight = 3.0
+    model.timing_grad_balance_target_ratio = 0.1
+    model.timing_grad_balance_summary = {
+        "status": "pending",
+        "initialized": False,
+    }
+    timing_op = SimpleNamespace(
+        last_total_slew_violation_tensor=None,
+        last_total_cap_violation_tensor=None,
+        last_total_leakage_tensor=None,
+        last_total_slew_violation=4.5,
+        last_total_cap_violation=6.0,
+        last_total_leakage=0.0,
+    )
+    model.op_collections.timing_propagation_op = timing_op
+    model.op_collections.wirelength_op = lambda pos: (2.0 * pos).sum()
+
+    def _timing_obj(pos):
+        timing_op.last_total_slew_violation_tensor = (pos * 1.5).sum()
+        timing_op.last_total_cap_violation_tensor = (pos * 2.0).sum()
+        return (
+            -(pos * 1.0).sum(),
+            pos.sum() * 0.0,
+            None,
+            None,
+        )
+
+    model.timing_obj = _timing_obj
+    pos = torch.tensor([1.0, 2.0], requires_grad=True)
+
+    result = model.initialize_timing_grad_balance(
+        pos,
+        iteration=20,
+        overflow=0.19,
+    )
+
+    # Per coordinate: timing=1, weighted slew=2*1.5=3, weighted cap=3*2=6 -> total=10; 2 coords -> L1 norm=20.
+    assert result["wirelength_grad_norm"] == pytest.approx(4.0)
+    assert result["timing_grad_norm"] == pytest.approx(20.0)
+    assert result["weight_applied"] == pytest.approx(0.02)
+    assert result["lane"] == "timing_slew_cap"
+    assert result["enabled_terms"] == ["timing", "slew", "cap"]
+
+    loss = model._timing_loss(*model.timing_obj(pos))
+    grad = torch.autograd.grad(loss, pos)[0]
+    assert grad.abs().sum().item() == pytest.approx(0.4)
+
+
 def test_timing_grad_balance_reset_recomputes_from_restart_geometry():
     model = _model()
     model.timing_grad_balance_target_ratio = 0.05

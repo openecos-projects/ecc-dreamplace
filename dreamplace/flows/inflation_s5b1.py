@@ -689,8 +689,12 @@ class InflationS5B1:
                     )
                 )
                 timing = self.ops.timing_propagation_op
+                raw_cap = timing.last_total_cap_violation
                 gp_timing["slew_violation_ns"] = timing.last_total_slew_violation
-                gp_timing["cap_violation_ff"] = timing.last_total_cap_violation
+                gp_timing["cap_violation_pf"] = raw_cap
+                gp_timing["cap_violation_ff"] = (
+                    None if raw_cap is None else float(raw_cap) * 1000.0
+                )
                 gp_timing["objective_terms"] = dict(model.last_timing_objective_terms)
         finally:
             self.params.enable_relaxed_buffer_timing = candidate_provider_was_enabled

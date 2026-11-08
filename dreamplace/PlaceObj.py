@@ -1236,7 +1236,7 @@ class PlaceObj(nn.Module):
             warmup_size_interpolated_pin_native_cache(self.data_collections)
 
     def _timing_objective_lane(self):
-        return getattr(self.params, "timing_objective_lane", "timing_slew_cap")
+        return getattr(self.params, "timing_objective_lane", "timing_only")
 
     def _timing_objective_lane_enabled_terms(self):
         lane = self._timing_objective_lane()
@@ -1519,6 +1519,17 @@ class PlaceObj(nn.Module):
             return full_wns, full_tns, metadata
         return selector(full_wns, full_tns)
 
+    def _timing_grad_balance_scales_term(self, term_name):
+        if term_name == "timing":
+            return True
+        summary = getattr(self, "timing_grad_balance_summary", None) or {}
+        enabled = summary.get("enabled_terms")
+        if enabled is not None:
+            return term_name in enabled
+        if getattr(self.params, "placement_sizing_mode", "place_only") != "size_only":
+            return term_name in self._timing_objective_lane_enabled_terms()
+        return False
+
     def _timing_objective_term_components(self, wns, tns):
         enabled_terms = self._timing_objective_lane_enabled_terms()
         effective_wns, effective_tns, pruning_metadata = (
@@ -1534,12 +1545,12 @@ class PlaceObj(nn.Module):
             "slew": self._timing_objective_term_tensor(
                 "last_total_slew_violation_tensor",
                 "last_total_slew_violation",
-                default_scale=1.0,
+                default_scale=1000.0,
             ),
             "cap": self._timing_objective_term_tensor(
                 "last_total_cap_violation_tensor",
                 "last_total_cap_violation",
-                default_scale=1.0,
+                default_scale=1000.0,
             ),
             "leakage": self._timing_objective_term_tensor(
                 "last_total_leakage_tensor",
@@ -1554,8 +1565,9 @@ class PlaceObj(nn.Module):
             "cap": None if timing_op is None else getattr(timing_op, "last_total_cap_violation", None),
             "leakage": None if timing_op is None else getattr(timing_op, "last_total_leakage", None),
         }
-        weights = {
-            "timing": float(getattr(self, "timing_grad_balance_weight", 1.0)),
+        balance_weight = float(getattr(self, "timing_grad_balance_weight", 1.0))
+        base_weights = {
+            "timing": 1.0,
             "slew": float(
                 getattr(
                     self,
@@ -1577,6 +1589,14 @@ class PlaceObj(nn.Module):
                     getattr(self.params, "timing_leakage_weight", 0.0),
                 )
             ),
+        }
+        weights = {
+            name: (
+                value * balance_weight
+                if self._timing_grad_balance_scales_term(name)
+                else value
+            )
+            for name, value in base_weights.items()
         }
         weighted_terms = {}
         total_loss = zero
@@ -1607,8 +1627,8 @@ class PlaceObj(nn.Module):
             "enabled_terms": list(enabled_terms),
             "units": {
                 "timing": "loss_proxy",
-                "slew": "ns",
-                "cap": "pF",
+                "slew": "ps",
+                "cap": "fF",
                 "leakage": "mW",
             },
             "weights": {name: float(value) for name, value in weights.items()},
@@ -1623,13 +1643,12 @@ class PlaceObj(nn.Module):
             "critical_endpoint_pruning": pruning_metadata,
             "detached_zero_terms": detached_zero_terms,
         }
+        raw_slew = self.last_timing_objective_terms["raw_terms"]["slew"]
+        raw_cap = self.last_timing_objective_terms["raw_terms"]["cap"]
         self.last_timing_objective_terms["report_aligned_terms"] = {
-            "slew_violation_ns": self.last_timing_objective_terms["raw_terms"]["slew"],
-            "cap_violation_fF": (
-                None
-                if self.last_timing_objective_terms["raw_terms"]["cap"] is None
-                else self.last_timing_objective_terms["raw_terms"]["cap"] * 1000.0
-            ),
+            "slew_violation_ns": None if raw_slew is None else raw_slew / 1000.0,
+            "cap_violation_pF": None if raw_cap is None else raw_cap / 1000.0,
+            "cap_violation_fF": raw_cap,
             "leakage_mW": self.last_timing_objective_terms["raw_terms"]["leakage"],
         }
         hold_term = zero
@@ -1768,6 +1787,7 @@ class PlaceObj(nn.Module):
                 target_ratio=target_ratio,
             )
         else:
+            self.timing_grad_balance_weight = 1.0
             wirelength = self.op_collections.wirelength_op(pos)
             wirelength_grad = torch.autograd.grad(
                 wirelength,
@@ -1807,6 +1827,8 @@ class PlaceObj(nn.Module):
         result.update(
             iteration=int(iteration),
             overflow=float(torch.as_tensor(overflow).detach().cpu().item()),
+            lane=self._timing_objective_lane(),
+            enabled_terms=list(self._timing_objective_lane_enabled_terms()),
             timing_wns_coeff=float(self.timing_wns_coeff),
             timing_tns_coeff=float(self.timing_tns_coeff),
         )
@@ -6074,6 +6096,7 @@ class PlaceObj(nn.Module):
                 sparse_runtime = getattr(timing_op, "_sparse_runtime", None)
                 if sparse_runtime is not None:
                     sparse_runtime.timing._active_discrete_action_context = None
+            self._active_timing_surrogate_mode = None
 
     def _timing_obj_impl(
         self,
@@ -6395,91 +6418,91 @@ class PlaceObj(nn.Module):
             if self._should_copy_pin_slack_after_timing(timing_artifact_enabled):
                 self.data_collections.pin_slack = timing_op.get_pin_slack()
             _profile_add("pin_slack_get_ms", profile_stage_start)
+            profile_stage_start = _profile_now()
+            if timing_artifact_enabled:
+                self._write_critical_endpoint_pruning_artifact(
+                    iteration=self.invoke_timing_count,
+                )
+            elif self._production_fast_loop_enabled():
+                profile_record["artifact_write_skipped_by_fast_loop"] = True
+            _profile_add("critical_endpoint_artifact_ms", profile_stage_start)
+            profile_stage_start = _profile_now()
+            if timing_artifact_enabled:
+                self._write_timing_propagation_profile_artifact()
+            _profile_add("timing_profile_artifact_ms", profile_stage_start)
+            profile_stage_start = _profile_now()
+            if timing_artifact_enabled:
+                self._write_timing_propagation_parity_artifact()
+            _profile_add("timing_parity_artifact_ms", profile_stage_start)
+            profile_stage_start = _profile_now()
+            aux_slew_pin_mask = None
+            aux_cap_pin_mask = None
+            if self._should_use_active_cone_aux_pin_masks():
+                aux_slew_pin_mask, aux_cap_pin_mask, aux_mask_metadata = (
+                    self._active_cone_aux_pin_masks(timing_op)
+                )
+                profile_record["active_cone_aux_pin_mask"].update(aux_mask_metadata)
+            aux_limit_pin_mask = None
+            if aux_slew_pin_mask is not None and aux_cap_pin_mask is not None:
+                aux_limit_pin_mask = aux_slew_pin_mask | aux_cap_pin_mask.to(
+                    device=aux_slew_pin_mask.device
+                )
+            reuse_zero_slew_aux = self._should_reuse_zero_slew_aux(timing_op)
+            profile_record["zero_slew_aux_reuse"]["applied"] = bool(reuse_zero_slew_aux)
+            if timing_profile_enabled:
+                self.data_collections._size_interpolated_pin_profile_enabled = True
+            if self._current_timing_surrogate_mode() == "lut_only":
+                # A legal master owns exact limits. Soft VT probabilities belong
+                # to the surrogate; beta supplies the action interpolation below.
+                slew_limit_table = self.data_collections.flat_lib_pin_slew_limit
+                cap_limit_table = self.data_collections.flat_lib_pin_cap_limit
+                slew_limits = (
+                    None
+                    if reuse_zero_slew_aux
+                    else slew_limit_table[
+                        self.pin2libpin_flat_ids.to(device=slew_limit_table.device)
+                    ]
+                )
+                cap_limits = cap_limit_table[
+                    self.pin2libpin_flat_ids.to(device=cap_limit_table.device)
+                ]
+            elif reuse_zero_slew_aux:
+                cap_limits = compute_size_interpolated_pin_properties(
+                    self.data_collections,
+                    [self.data_collections.flat_lib_pin_cap_limit],
+                    pin_mask=self._zero_slew_reuse_cap_limit_interpolation_pin_mask(
+                        aux_cap_pin_mask,
+                        self.output_pin_mask,
+                    ),
+                )[0]
+                slew_limits = None
+            else:
+                slew_limits, cap_limits = compute_size_interpolated_pin_properties(
+                    self.data_collections,
+                    [
+                        self.data_collections.flat_lib_pin_slew_limit,
+                        self.data_collections.flat_lib_pin_cap_limit,
+                    ],
+                    pin_mask=aux_limit_pin_mask,
+                )
+                if slew_limits is None:
+                    slew_limit_table = self.data_collections.flat_lib_pin_slew_limit
+                    slew_limits = slew_limit_table[
+                        self.pin2libpin_flat_ids.to(device=slew_limit_table.device)
+                    ]
+            if cap_limits is None:
+                cap_limit_table = self.data_collections.flat_lib_pin_cap_limit
+                cap_limits = cap_limit_table[
+                    self.pin2libpin_flat_ids.to(device=cap_limit_table.device)
+                ]
+            slew_limits, cap_limits = self._apply_discrete_action_limits(
+                slew_limits,
+                cap_limits,
+                self.data_collections,
+            )
+            _profile_add("slew_cap_limit_ms", profile_stage_start)
         finally:
             self._active_timing_surrogate_mode = None
-        profile_stage_start = _profile_now()
-        if timing_artifact_enabled:
-            self._write_critical_endpoint_pruning_artifact(
-                iteration=self.invoke_timing_count,
-            )
-        elif self._production_fast_loop_enabled():
-            profile_record["artifact_write_skipped_by_fast_loop"] = True
-        _profile_add("critical_endpoint_artifact_ms", profile_stage_start)
-        profile_stage_start = _profile_now()
-        if timing_artifact_enabled:
-            self._write_timing_propagation_profile_artifact()
-        _profile_add("timing_profile_artifact_ms", profile_stage_start)
-        profile_stage_start = _profile_now()
-        if timing_artifact_enabled:
-            self._write_timing_propagation_parity_artifact()
-        _profile_add("timing_parity_artifact_ms", profile_stage_start)
-        profile_stage_start = _profile_now()
-        aux_slew_pin_mask = None
-        aux_cap_pin_mask = None
-        if self._should_use_active_cone_aux_pin_masks():
-            aux_slew_pin_mask, aux_cap_pin_mask, aux_mask_metadata = (
-                self._active_cone_aux_pin_masks(timing_op)
-            )
-            profile_record["active_cone_aux_pin_mask"].update(aux_mask_metadata)
-        aux_limit_pin_mask = None
-        if aux_slew_pin_mask is not None and aux_cap_pin_mask is not None:
-            aux_limit_pin_mask = aux_slew_pin_mask | aux_cap_pin_mask.to(
-                device=aux_slew_pin_mask.device
-            )
-        reuse_zero_slew_aux = self._should_reuse_zero_slew_aux(timing_op)
-        profile_record["zero_slew_aux_reuse"]["applied"] = bool(reuse_zero_slew_aux)
-        if timing_profile_enabled:
-            self.data_collections._size_interpolated_pin_profile_enabled = True
-        if self._current_timing_surrogate_mode() == "lut_only":
-            # A legal master owns exact limits. Soft VT probabilities belong
-            # to the surrogate; beta supplies the action interpolation below.
-            slew_limit_table = self.data_collections.flat_lib_pin_slew_limit
-            cap_limit_table = self.data_collections.flat_lib_pin_cap_limit
-            slew_limits = (
-                None
-                if reuse_zero_slew_aux
-                else slew_limit_table[
-                    self.pin2libpin_flat_ids.to(device=slew_limit_table.device)
-                ]
-            )
-            cap_limits = cap_limit_table[
-                self.pin2libpin_flat_ids.to(device=cap_limit_table.device)
-            ]
-        elif reuse_zero_slew_aux:
-            cap_limits = compute_size_interpolated_pin_properties(
-                self.data_collections,
-                [self.data_collections.flat_lib_pin_cap_limit],
-                pin_mask=self._zero_slew_reuse_cap_limit_interpolation_pin_mask(
-                    aux_cap_pin_mask,
-                    self.output_pin_mask,
-                ),
-            )[0]
-            slew_limits = None
-        else:
-            slew_limits, cap_limits = compute_size_interpolated_pin_properties(
-                self.data_collections,
-                [
-                    self.data_collections.flat_lib_pin_slew_limit,
-                    self.data_collections.flat_lib_pin_cap_limit,
-                ],
-                pin_mask=aux_limit_pin_mask,
-            )
-            if slew_limits is None:
-                slew_limit_table = self.data_collections.flat_lib_pin_slew_limit
-                slew_limits = slew_limit_table[
-                    self.pin2libpin_flat_ids.to(device=slew_limit_table.device)
-                ]
-        if cap_limits is None:
-            cap_limit_table = self.data_collections.flat_lib_pin_cap_limit
-            cap_limits = cap_limit_table[
-                self.pin2libpin_flat_ids.to(device=cap_limit_table.device)
-            ]
-        slew_limits, cap_limits = self._apply_discrete_action_limits(
-            slew_limits,
-            cap_limits,
-            self.data_collections,
-        )
-        _profile_add("slew_cap_limit_ms", profile_stage_start)
         if timing_profile_enabled:
             profile_record["size_interpolated_pin_profile"] = dict(
                 getattr(
@@ -6500,8 +6523,9 @@ class PlaceObj(nn.Module):
                 aux_slew_pin_mask if aux_slew_pin_mask is not None else self.inst_pins_mask,
                 slew_limits,
             )
-            timing_op.last_total_slew_violation = float(
-                timing_op.last_total_slew_violation_tensor.detach().item()
+            timing_op.last_total_slew_violation = (
+                float(timing_op.last_total_slew_violation_tensor.detach().item())
+                / 1000.0
             )
         _profile_add("slew_violation_ms", profile_stage_start)
         profile_stage_start = _profile_now()
@@ -6509,8 +6533,9 @@ class PlaceObj(nn.Module):
             aux_cap_pin_mask if aux_cap_pin_mask is not None else self.output_pin_mask,
             cap_limits,
         )
-        timing_op.last_total_cap_violation = float(
-            timing_op.last_total_cap_violation_tensor.detach().item() * 1000.0
+        timing_op.last_total_cap_violation = (
+            float(timing_op.last_total_cap_violation_tensor.detach().item())
+            / 1000.0
         )
         _profile_add("cap_violation_ms", profile_stage_start)
         profile_stage_start = _profile_now()

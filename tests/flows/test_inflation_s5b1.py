@@ -141,14 +141,16 @@ def test_phase_metrics_keep_unweighted_reporting_units():
             "wns": -1200.0,
             "tns": -450000.0,
             "total_slew_violation": 12.5,
-            "total_cap_violation": 37.0,
+            "total_cap_violation": 0.037,
         }
     ) == {
         "wns_ns": -1.2,
         "tns_ns": -450.0,
         "total_slew_violation_ns": 12.5,
+        "total_cap_violation_pf": 0.037,
         "total_cap_violation_ff": 37.0,
     }
+    assert phase_metrics({"cap_violation": 0.25})["total_cap_violation_pf"] == 0.25
     assert phase_metrics({"cap_violation": 0.25})["total_cap_violation_ff"] == 250.0
 
 

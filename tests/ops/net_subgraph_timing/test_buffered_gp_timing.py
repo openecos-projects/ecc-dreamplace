@@ -276,11 +276,11 @@ def test_virtual_drv_reaches_timing_aux_with_worst_phase_per_buffer():
         [
             torch.maximum(
                 expected[0]["buffer_slew_violation"], expected[1]["buffer_slew_violation"]
-            ).sum()
-            / 1000,
+            ).sum(),
             torch.maximum(
                 expected[0]["buffer_cap_violation"], expected[1]["buffer_cap_violation"]
-            ).sum(),
+            ).sum()
+            * 1000,
         ]
     )
     torch.testing.assert_close(actual, reference)

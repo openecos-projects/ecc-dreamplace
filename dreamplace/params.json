@@ -13,7 +13,7 @@
     },
     "timing_objective_lane": {
         "description": "timing objective terms, timing_only | timing_slew_cap",
-        "default": "timing_slew_cap"
+        "default": "timing_only"
     },
     "timing_aggregation_mode": {
         "description": "AAT/RAT aggregation: hard max/min or smooth LSE; endpoint WNS/TNS retain hard reductions",

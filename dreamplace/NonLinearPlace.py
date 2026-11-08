@@ -1027,15 +1027,15 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         model_params = getattr(model, "params", params)
         payload.setdefault(
             "lane",
-            getattr(model_params, "timing_objective_lane", "timing_slew_cap"),
+            getattr(model_params, "timing_objective_lane", "timing_only"),
         )
         payload.setdefault("enabled_terms", ["timing"])
         payload.setdefault(
             "units",
             {
                 "timing": "loss_proxy",
-                "slew": "ns",
-                "cap": "pF",
+                "slew": "ps",
+                "cap": "fF",
                 "leakage": "mW",
             },
         )

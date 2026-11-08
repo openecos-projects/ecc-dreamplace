@@ -5740,14 +5740,12 @@ class TimingPropagation(nn.Module):
                 logging.info(f"{pin_idx}, {rv:.3f}, {fv:.3f}, {lv:.3f}, {tv:.3f}")
             logging.info(f"Total slew violation: {total_violation_per_pin.sum().item() / 1000.0:.3f} ns")
 
-        # Helper/golden-compatible slew aggregation uses the worst rise/fall
-        # excess per pin, with the exported scalar kept in ns.
-        total = total_violation_per_pin.sum() / 1000.0
+        total = total_violation_per_pin.sum()
         return total if virtual_drv is None else total + virtual_drv[0]
 
     def get_total_cap_violation(self, output_pin_mask, cap_limits_pf):
         total_violation = self.get_total_cap_violation_tensor(output_pin_mask, cap_limits_pf)
-        return float(total_violation.detach().item() * 1000.0)
+        return float(total_violation.detach().item())
 
     def get_total_cap_violation_tensor(self, output_pin_mask, cap_limits_pf):
         virtual_drv = getattr(self, "virtual_buffer_drv", None)
@@ -5811,7 +5809,7 @@ class TimingPropagation(nn.Module):
 
         # Helper/golden-compatible cap aggregation uses the worst rise/fall
         # excess per pin, with the exported scalar kept in fF.
-        total = total_violation_per_pin.sum()
+        total = total_violation_per_pin.sum() * 1000.0
         return total if virtual_drv is None else total + virtual_drv[1]
 
     def get_critical_paths(self, endpoints, K: int = 1, max_depth: Optional[int] = None,

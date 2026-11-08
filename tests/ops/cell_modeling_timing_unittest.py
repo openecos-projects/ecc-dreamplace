@@ -829,7 +829,7 @@ class TimingViolationStatsTest(unittest.TestCase):
             torch.tensor([100.0, 130.0, 1.0], dtype=torch.float32),
         )
 
-        self.assertAlmostEqual(total_violation, 0.04)
+        self.assertAlmostEqual(total_violation, 40.0)
 
 
 if __name__ == "__main__":

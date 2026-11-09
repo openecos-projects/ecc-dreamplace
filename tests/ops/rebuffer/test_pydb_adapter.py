@@ -65,6 +65,9 @@ def test_builds_native_ready_design_view_from_pydb():
     assert design["num_nets"] == 2
     assert design["num_pins"] == 5
     assert design["num_nodes"] == 5
+    assert design["num_base_nodes"] == 5
+    assert design["num_terminals"] == 0
+    assert design["num_terminal_NIs"] == 0
     assert design["num_libcells"] == 2
     assert design["num_lib_pins"] == 4
     assert design["summary"] == {

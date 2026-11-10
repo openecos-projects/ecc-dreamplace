@@ -99,6 +99,8 @@ PYBIND11_MODULE(rebuffer_cpp, module)
            py::arg("actions"), py::arg("config"))
       .def("local_planning_snapshot", &rebuffer::PersistentTimingGraph::localPlanningSnapshot,
            py::arg("actions"), py::arg("config"))
+      .def("create_net_topology", &rebuffer::PersistentTimingGraph::createNetTopology,
+           py::arg("net_id"))
       .def("initialize_mutations", &rebuffer::PersistentTimingGraph::initializeMutations)
       .def("mutation_view", &rebuffer::PersistentTimingGraph::mutationView)
       .def("mutation_statistics", &rebuffer::PersistentTimingGraph::mutationStatistics)

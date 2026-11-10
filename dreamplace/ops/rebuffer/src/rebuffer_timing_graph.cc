@@ -3,6 +3,7 @@
 #include "rebuffer_timing_graph.hh"
 #include "rebuffer_timing_mutation.hh"
 #include "rebuffer_timing_buffer_state.hh"
+#include "rebuffer_timing_local_index.hh"
 #include "rebuffer_timing_state.hh"
 
 #include <algorithm>
@@ -16,6 +17,7 @@
 #include "rebuffer_overlay_carrier.hh"
 #include "rebuffer_overlay_actions.hh"
 #include "rebuffer_python_views.hh"
+#include "rebuffer_topology_history.hh"
 
 namespace py = pybind11;
 
@@ -39,22 +41,57 @@ PersistentTimingGraph::PersistentTimingGraph(const py::object& carrier)
 
 py::dict PersistentTimingGraph::summary() const
 {
+  if (!cached_active_counts_valid_) {
+    cached_active_net_arcs_ = timing_index_->net_active.empty()
+        ? timing_index_->nets.size()
+        : std::count(timing_index_->net_active.begin(), timing_index_->net_active.end(), 1);
+    cached_active_pins_ = mutation_state_ == nullptr
+        ? timing_index_->pins.size()
+        : std::count(mutation_state_->pin_active.begin(), mutation_state_->pin_active.end(), 1);
+    cached_active_cell_arcs_ = mutation_state_ == nullptr
+        ? timing_index_->cells.size()
+        : std::count(mutation_state_->cell_active.begin(), mutation_state_->cell_active.end(), 1);
+    cached_active_counts_valid_ = true;
+  }
   py::dict result;
   result["status"] = "ok";
   result["pin_count"] = static_cast<int>(timing_index_->pins.size());
   result["cell_arc_count"] = static_cast<int>(timing_index_->cells.size());
   result["net_arc_count"] = static_cast<int>(timing_index_->nets.size());
-  result["active_net_arc_count"] = timing_index_->net_active.empty() ? timing_index_->nets.size()
-      : std::count(timing_index_->net_active.begin(), timing_index_->net_active.end(), 1);
+  result["active_net_arc_count"] = cached_active_net_arcs_;
   result["clock_pin_count"] = static_cast<int>(timing_index_->clocks.size());
   result["clock_end"] = timing_index_->clock_end;
   result["net_count"] = static_cast<int>(net_states_.size());
   result["journal_size"] = static_cast<std::int64_t>(journal_.size());
-  std::size_t full_values = 0, sparse_values = 0;
-  for (const auto& entry : journal_) {
-    full_values += entry.previous.size();
-    if (entry.state_undo) sparse_values += entry.state_undo->value_count;
+  if (journal_.empty()) {
+    cached_journal_full_values_ = 0;
+    cached_journal_sparse_values_ = 0;
+    cached_journal_stats_size_ = 0;
+    cached_journal_stats_head_seq_ = 0;
+  } else if (journal_.size() >= cached_journal_stats_size_
+             && (cached_journal_stats_size_ == 0
+                 || journal_[cached_journal_stats_size_ - 1].sequence
+                        == cached_journal_stats_head_seq_)) {
+    for (std::size_t i = cached_journal_stats_size_; i < journal_.size(); ++i) {
+      const auto& entry = journal_[i];
+      cached_journal_full_values_ += entry.previous.size();
+      if (entry.state_undo) cached_journal_sparse_values_ += entry.state_undo->value_count;
+    }
+    cached_journal_stats_size_ = journal_.size();
+    cached_journal_stats_head_seq_ = journal_.back().sequence;
+  } else {
+    std::size_t full_values = 0, sparse_values = 0;
+    for (const auto& entry : journal_) {
+      full_values += entry.previous.size();
+      if (entry.state_undo) sparse_values += entry.state_undo->value_count;
+    }
+    cached_journal_full_values_ = full_values;
+    cached_journal_sparse_values_ = sparse_values;
+    cached_journal_stats_size_ = journal_.size();
+    cached_journal_stats_head_seq_ = journal_.back().sequence;
   }
+  const std::size_t full_values = cached_journal_full_values_;
+  const std::size_t sparse_values = cached_journal_sparse_values_;
   result["journal_full_state_values"] = full_values;
   result["journal_sparse_state_values"] = sparse_values;
   result["journal_state_value_bytes"]
@@ -63,10 +100,8 @@ py::dict PersistentTimingGraph::summary() const
   result["timing_state_initialized"] = timing_state_initialized_;
   result["propagation_initialized"] = propagation_program_ != nullptr;
   result["mutations_initialized"] = mutation_state_ != nullptr;
-  result["active_pin_count"] = mutation_state_ == nullptr ? timing_index_->pins.size()
-      : std::count(mutation_state_->pin_active.begin(), mutation_state_->pin_active.end(), 1);
-  result["active_cell_arc_count"] = mutation_state_ == nullptr ? timing_index_->cells.size()
-      : std::count(mutation_state_->cell_active.begin(), mutation_state_->cell_active.end(), 1);
+  result["active_pin_count"] = cached_active_pins_;
+  result["active_cell_arc_count"] = cached_active_cell_arcs_;
   py::list fields;
   for (const auto& [name, _] : state_) {
     fields.append(name);
@@ -101,10 +136,12 @@ py::dict PersistentTimingGraph::attachNetTopology(
     throw py::value_error(reason);
   }
   net_states_.emplace(net_id, state);
+  topology_revision_ = ++next_topology_revision_;
+  ++net_states_revision_;
   return incrementalTopologyView(*state);
 }
 
-py::dict PersistentTimingGraph::attachNetTopologyState(
+void PersistentTimingGraph::attachNetTopologyStateFast(
     const int net_id,
     const std::shared_ptr<IncrementalTopologyState>& state)
 {
@@ -118,7 +155,18 @@ py::dict PersistentTimingGraph::attachNetTopologyState(
   if (found != net_states_.end() && found->second != state) {
     throw py::value_error("persistent timing graph net topology is already attached");
   }
-  net_states_[net_id] = state;
+  if (found == net_states_.end()) {
+    topology_revision_ = ++next_topology_revision_;
+    ++net_states_revision_;
+    net_states_.emplace(net_id, state);
+  }
+}
+
+py::dict PersistentTimingGraph::attachNetTopologyState(
+    const int net_id,
+    const std::shared_ptr<IncrementalTopologyState>& state)
+{
+  attachNetTopologyStateFast(net_id, state);
   return incrementalTopologyView(*state);
 }
 
@@ -126,6 +174,8 @@ py::dict PersistentTimingGraph::clearNetTopologies()
 {
   const int removed_count = static_cast<int>(net_states_.size());
   net_states_.clear();
+  topology_revision_ = ++next_topology_revision_;
+  ++net_states_revision_;
   py::dict result;
   result["status"] = "ok";
   result["removed_count"] = removed_count;
@@ -288,7 +338,9 @@ py::dict PersistentTimingGraph::compactNetTopology(const int net_id)
         = pin_count + static_cast<int>(nodes.size());
     compacted->next_node_id = compact_next_node;
     compacted->base_next_node_id = compact_next_node;
+    invalidateIncrementalTopologyCaches(*compacted);
     *state = *compacted;
+    topology_revision_ = ++next_topology_revision_;
   }
 
   py::dict result;
@@ -556,6 +608,7 @@ PersistentTimingGraph::checkpoint() const
   auto result = std::make_shared<PersistentTimingGraphCheckpoint>();
   result->journal_size = journal_.size();
   result->epoch = epoch_;
+  result->topology_revision = topology_revision_;
   result->timing_state_initialized = timing_state_initialized_;
   result->graph_identity = checkpoint_identity_;
   result->journal_generation = journal_generation_;
@@ -575,17 +628,71 @@ void PersistentTimingGraph::restoreTo(const std::size_t journal_size)
   if (journal_size < journal_.size()) detachStateViews();
   while (journal_.size() > journal_size) {
     const JournalEntry& entry = journal_.back();
+    if (cached_journal_stats_size_ == journal_.size()
+        && cached_journal_stats_head_seq_ == entry.sequence) {
+      cached_journal_full_values_ -= entry.previous.size();
+      if (entry.state_undo) cached_journal_sparse_values_ -= entry.state_undo->value_count;
+      --cached_journal_stats_size_;
+      cached_journal_stats_head_seq_ =
+          cached_journal_stats_size_ > 0 ? journal_[cached_journal_stats_size_ - 1].sequence : 0;
+    }
     if (entry.propagation_undo) propagation_mark_ = *entry.propagation_undo;
     if (entry.topology_undo != nullptr) {
+      for (const auto& pin : entry.topology_undo->previous_pins) {
+        markElectricalDirtyPin(pin.id);
+      }
+      for (const auto& net : entry.topology_undo->previous_nets) {
+        for (const int pin : net.pins) markElectricalDirtyPin(pin);
+      }
+      if (cached_active_counts_valid_) {
+        const auto& undo = *entry.topology_undo;
+        for (const auto& pin : undo.previous_pins) {
+          cached_active_pins_ += static_cast<int>(pin.active)
+                               - static_cast<int>(mutation_state_->pin_active[pin.id]);
+        }
+        for (std::size_t p = undo.pins; p < mutation_state_->pin_active.size(); ++p) {
+          cached_active_pins_ -= static_cast<std::size_t>(mutation_state_->pin_active[p]);
+        }
+        for (const auto& arc : undo.previous_arcs) {
+          cached_active_cell_arcs_ += static_cast<int>(arc.active)
+                                    - static_cast<int>(mutation_state_->cell_active[arc.id]);
+        }
+        for (std::size_t a = undo.arcs; a < mutation_state_->cell_active.size(); ++a) {
+          cached_active_cell_arcs_ -= static_cast<std::size_t>(mutation_state_->cell_active[a]);
+        }
+        for (const auto& row : undo.index_undo->net_rows) {
+          cached_active_net_arcs_ += static_cast<int>(row.active)
+                                   - static_cast<int>(timing_index_->net_active[row.id]);
+        }
+        for (std::size_t n = undo.index_undo->nets; n < timing_index_->net_active.size(); ++n) {
+          cached_active_net_arcs_ -= static_cast<std::size_t>(timing_index_->net_active[n]);
+        }
+      }
       restoreTimingTopology(*mutation_state_, *timing_index_, *entry.topology_undo);
+      topology_revision_ = entry.previous_topology_revision;
     } else if (entry.resize_undo != nullptr) {
+      for (const auto& [pin, _] : entry.resize_undo->pins) {
+        markElectricalDirtyPin(pin);
+      }
       restoreTimingResize(*mutation_state_, *timing_index_, *entry.resize_undo);
+      topology_revision_ = entry.previous_topology_revision;
     } else if (entry.state_undo != nullptr) {
+      for (const char* field :
+           {"pin_rtran", "pin_ftran", "pin_net_cap_rise", "pin_net_cap_fall"}) {
+        const auto found = entry.state_undo->fields.find(field);
+        if (found != entry.state_undo->fields.end()) {
+          for (const auto& old : found->second.previous) {
+            markElectricalDirtyPin(static_cast<int>(old.index));
+          }
+        }
+      }
       restoreTimingState(state_, *entry.state_undo);
     } else if (entry.existed) {
       state_[entry.name] = entry.previous;
+      markElectricalFullDirty();
     } else {
       state_.erase(entry.name);
+      markElectricalFullDirty();
     }
     epoch_ = entry.previous_epoch;
     journal_.pop_back();
@@ -630,15 +737,19 @@ void PersistentTimingGraph::restoreState(
       throw py::value_error(reason);
     }
   }
+  bool erased_net_state = false;
   for (auto it = net_states_.begin(); it != net_states_.end();) {
     if (checkpoint->topology_checkpoints.find(it->first)
         == checkpoint->topology_checkpoints.end()) {
       it = net_states_.erase(it);
+      erased_net_state = true;
     } else {
       ++it;
     }
   }
+  if (erased_net_state) ++net_states_revision_;
   restoreTo(checkpoint->journal_size);
+  topology_revision_ = checkpoint->topology_revision;
   timing_state_initialized_ = checkpoint->timing_state_initialized;
 }
 

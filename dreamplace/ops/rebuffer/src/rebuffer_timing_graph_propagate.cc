@@ -44,11 +44,11 @@ py::dict PersistentTimingGraph::propagate()
   if (!timing_state_initialized_ || propagation_program_ == nullptr) {
     throw py::value_error("propagation requires initialized timing state and inputs");
   }
-  for (const auto& [_, state] : net_states_) {
+  if (!net_states_.empty()) {
     if (mutation_state_ == nullptr) {
       throw py::value_error("full-seed propagation requires synchronized buffer timing records");
     }
-    requireSynchronizedTimingTopology(*mutation_state_, *state);
+    requireSynchronizedTimingTopologies(*mutation_state_, net_states_);
   }
   const auto& p = *propagation_program_;
   std::shared_ptr<TimingPropagationSchedule> generated;

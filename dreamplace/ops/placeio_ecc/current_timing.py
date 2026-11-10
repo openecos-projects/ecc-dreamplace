@@ -50,8 +50,18 @@ class PersistentGraphBridge:
             self._states[net_id] = state
 
     def attach_overlay(self, overlay):
+        if (
+            getattr(overlay, "native_timing_bridge", None) is self
+            and getattr(overlay, "_synced_bridge_id", None) == id(self)
+            and getattr(overlay, "_synced_topology_count", -1)
+            == len(overlay.native_topologies)
+        ):
+            return
         for name in sorted(overlay.native_topologies):
             self.attach_state(overlay.native_topologies[name])
+        if getattr(overlay, "native_timing_bridge", None) is self:
+            overlay._synced_bridge_id = id(self)
+            overlay._synced_topology_count = len(overlay.native_topologies)
 
     def checkpoint(self):
         # BufferOverlay already checkpoints each mutable IncrementalTopologyState
@@ -151,9 +161,8 @@ def _evaluate_persistent_graph_overlay(owner, base_pydb, overlay):
         if (
             getattr(owner, "_overlay_runtime", None) is None
             or owner._overlay_runtime.key != key
-        ):
-            if hasattr(owner, "invalidate_native_setup_path_cache"):
-                owner.invalidate_native_setup_path_cache()
+        ) and hasattr(owner, "invalidate_native_setup_path_cache"):
+            owner.invalidate_native_setup_path_cache()
         owner._overlay_runtime = cached
         owner.model = cached.model.model
         if getattr(owner, "use_persistent_graph", False):

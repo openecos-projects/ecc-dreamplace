@@ -124,7 +124,12 @@ void RepairTimingCampaignSession::attachTopology(
   }
   const auto found = topologies_.find(net_id);
   if (found != topologies_.end() && found->second == topology) return;
-  if (timing_graph_) timing_graph_->attachNetTopologyState(net_id, topology);
+  if (timing_graph_) {
+    timing_graph_->attachNetTopologyStateFast(net_id, topology);
+    if (found == topologies_.end()) {
+      undo_journal_.push_back({true, net_id, false, {}});
+    }
+  }
   topologies_[net_id] = topology;
 }
 
@@ -182,6 +187,14 @@ py::dict RepairTimingCampaignSession::recordActionState(
 {
   if (action_id < 0) {
     throw py::value_error("campaign action id must be nonnegative");
+  }
+  if (timing_graph_) {
+    const auto it = action_ledger_.find(action_id);
+    if (it == action_ledger_.end()) {
+      undo_journal_.push_back({false, action_id, false, {}});
+    } else if (it->second != state) {
+      undo_journal_.push_back({false, action_id, true, it->second});
+    }
   }
   action_ledger_[action_id] = state;
   RepairTimingLedgerEntry entry;
@@ -308,13 +321,14 @@ std::shared_ptr<RepairTimingCampaignCheckpoint>
 RepairTimingCampaignSession::checkpoint() const
 {
   auto result = std::make_shared<RepairTimingCampaignCheckpoint>();
-  result->topologies = topologies_;
-  result->action_ledger = action_ledger_;
   if (timing_graph_) {
+    result->undo_size = undo_journal_.size();
     result->timing_graph = timing_graph_->checkpoint();
     result->campaign_identity = checkpoint_identity_;
     return result;
   }
+  result->topologies = topologies_;
+  result->action_ledger = action_ledger_;
   for (const auto& [net_id, topology] : topologies_) {
     result->checkpoints[net_id] = checkpointIncrementalTopology(*topology);
   }
@@ -343,8 +357,17 @@ void RepairTimingCampaignSession::restoreState(
       throw py::value_error("campaign checkpoint belongs to another timing campaign");
     }
     timing_graph_->restoreState(checkpoint->timing_graph);
-    topologies_ = checkpoint->topologies;
-    action_ledger_ = checkpoint->action_ledger;
+    while (undo_journal_.size() > checkpoint->undo_size) {
+      const auto& entry = undo_journal_.back();
+      if (entry.is_topology) {
+        topologies_.erase(entry.key);
+      } else if (entry.existed) {
+        action_ledger_[entry.key] = entry.previous_state;
+      } else {
+        action_ledger_.erase(entry.key);
+      }
+      undo_journal_.pop_back();
+    }
     return;
   }
   std::map<int, std::shared_ptr<IncrementalTopologyState>> restored;

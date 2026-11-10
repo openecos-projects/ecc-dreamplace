@@ -91,6 +91,20 @@ std::shared_ptr<NativeTimingPlanningSnapshot> PersistentTimingGraph::planningSna
       new NativeTimingPlanningSnapshot(shared_from_this(), planning_inputs_, actions, config));
 }
 
+std::shared_ptr<IncrementalTopologyState> PersistentTimingGraph::createNetTopology(
+    int net_id) const
+{
+  require(planning_inputs_ != nullptr, "native planning inputs are not initialized");
+  require(net_id >= 0 && net_id < planning_inputs_->design.num_nets,
+          "net_id is out of range for native planning");
+  return incrementalTopologyFromSteiner(
+      planning_inputs_->steiner,
+      net_id,
+      planning_inputs_->design.net2driver_pin_map.at(net_id),
+      planning_inputs_->r_unit,
+      planning_inputs_->c_unit);
+}
+
 NativeTimingPlanningSnapshot::NativeTimingPlanningSnapshot(
     std::shared_ptr<PersistentTimingGraph> graph,
     std::shared_ptr<const TimingPlanningInputs> inputs,

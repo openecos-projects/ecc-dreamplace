@@ -339,8 +339,19 @@ class RebufferTimingModel:
         from .payloads import steiner_payload
 
         net_id = self._net_id(net_name)
+        bridge = (
+            getattr(self._bound_overlay, "native_timing_bridge", None)
+            if self._bound_overlay is not None
+            else None
+        ) or getattr(self, "_native_timing_bridge", None)
+        if bridge is not None and getattr(bridge, "_planning_config", None) is not None:
+            return bridge.graph.create_net_topology(net_id)
+        payload = getattr(self, "_overlay_steiner_payload", None)
+        if payload is None:
+            payload = steiner_payload(self.pydb, self)
+            self._overlay_steiner_payload = payload
         return rebuffer_cpp.incremental_topology_from_steiner(
-            steiner_payload(self.pydb, self),
+            payload,
             net_id,
             int(self.pydb.net2driver_pin_map[net_id]),
             self.r_unit,
@@ -436,6 +447,7 @@ class RebufferTimingModel:
                 overlay.native_timing_bridge = NativeTimingBridge(self, overlay.base_pydb)
                 overlay.native_campaign_session = overlay.native_timing_bridge.campaign
             self._persistent_graph_bridge = overlay.native_timing_bridge
+            self._native_timing_bridge = overlay.native_timing_bridge
         elif self.use_persistent_graph:
             from dreamplace.ops.placeio_ecc.current_timing import PersistentGraphBridge
 

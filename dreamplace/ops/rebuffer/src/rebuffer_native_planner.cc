@@ -222,7 +222,9 @@ py::dict planNativeCurrentTree(const py::dict& request,
                                  *tree,
                                  result,
                                  reason,
-                                 input.phase_timings);
+                                 input.phase_timings,
+                                 false,
+                                 request.contains("legacy_phase"));
       if (input.phase_timings) (*input.phase_timings)["vgdp"] +=
           std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - vgdp_started).count();
       if (!optimized) {

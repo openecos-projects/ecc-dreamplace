@@ -1,6 +1,7 @@
 """Immutable transport records shared by native overlay journal checkpoints."""
 
 import json
+import math
 
 
 def _readonly(*_args, **_kwargs):
@@ -53,13 +54,34 @@ def _freeze(value):
     return value
 
 
+def _fast_freeze(value):
+    t = type(value)
+    if t is str or t is int or t is bool or value is None:
+        return value
+    if t is float:
+        if not math.isfinite(value):
+            raise ValueError("Out of range float values are not JSON compliant")
+        return value
+    if t is dict or t is FrozenRecord:
+        for k in value:
+            if type(k) is not str:
+                raise TypeError("non-string dict key")
+        return FrozenRecord((k, _fast_freeze(value[k])) for k in sorted(value))
+    if t is list or t is tuple or t is FrozenValues:
+        return FrozenValues(_fast_freeze(item) for item in value)
+    raise TypeError("fallback")
+
+
 def freeze_record(value):
     if isinstance(value, (FrozenRecord, FrozenValues)):
         return value
-    # Match the existing JSON transport contract once when publishing a record.
-    return _freeze(
-        json.loads(json.dumps(value, allow_nan=False, separators=(",", ":"), sort_keys=True))
-    )
+    try:
+        return _fast_freeze(value)
+    except TypeError:
+        # Match the existing JSON transport contract once when publishing a record.
+        return _freeze(
+            json.loads(json.dumps(value, allow_nan=False, separators=(",", ":"), sort_keys=True))
+        )
 
 
 def frozen_mutation_arguments(name, arguments):
@@ -81,8 +103,11 @@ def frozen_mutation_arguments(name, arguments):
 
 
 class RecordList(list):
-    def __init__(self, values=()):
-        super().__init__(freeze_record(value) for value in values)
+    def __init__(self, values=(), *, already_frozen=False):
+        if already_frozen:
+            super().__init__(values)
+        else:
+            super().__init__(freeze_record(value) for value in values)
 
 
 def _record_mutation(name):
@@ -152,6 +177,7 @@ class NativeOverlayMetadata:
         return {
             "metadata_journal": True,
             "actions": tuple(self.actions),
+            "actions_digest": getattr(self.actions, "_digest", None),
             "base_removals": tuple(self.base_removals),
             "native_topology_events": tuple(self.native_topology_events),
             "projection_audit": self.projection_audit,

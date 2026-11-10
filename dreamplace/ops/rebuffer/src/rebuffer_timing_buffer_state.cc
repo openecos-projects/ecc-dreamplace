@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <set>
+#include <unordered_map>
 
 namespace rebuffer {
 namespace {
@@ -47,19 +48,35 @@ void requireSynchronizedTimingTopology(const TimingMutationState& m,
   const auto epoch = m.topology_epochs.find(source);
   require(epoch == m.topology_epochs.end() || epoch->second == topology.epoch,
           "native topology changed outside graph timing mutation");
+  const auto& source_buffers = m.buffers_by_source_net.at(source);
   std::size_t active = 0;
-  for (const auto& row : m.buffers) {
-    if (row.source_net == source && row.active) ++active;
+  for (int id : source_buffers) {
+    if (m.buffers[id].active) ++active;
   }
   require(active == topology.buffers.size(), "native topology buffer records are not synchronized");
   for (const auto& buffer : topology.buffers) {
-    const auto found = std::find_if(m.buffers.begin(), m.buffers.end(), [&](const auto& row) {
-      return row.source_net == source && row.action_id == buffer.action_id && row.active;
-    });
-    require(found != m.buffers.end() && found->logical_input == buffer.input_node
-                && found->logical_output == buffer.output_node && found->split_ratio == buffer.split_ratio
-                && m.cell_names.at(m.node_cells.at(found->node)) == buffer.master_name,
+    int found_id = -1;
+    for (int id : source_buffers) {
+      const auto& row = m.buffers[id];
+      if (row.action_id == buffer.action_id && row.active) {
+        found_id = id;
+        break;
+      }
+    }
+    require(found_id >= 0 && m.buffers[found_id].logical_input == buffer.input_node
+                && m.buffers[found_id].logical_output == buffer.output_node
+                && m.buffers[found_id].split_ratio == buffer.split_ratio
+                && m.cell_names.at(m.node_cells.at(m.buffers[found_id].node)) == buffer.master_name,
             "native topology buffer identity is not synchronized");
+  }
+}
+
+void requireSynchronizedTimingTopologies(
+    const TimingMutationState& m,
+    const std::map<int, std::shared_ptr<IncrementalTopologyState>>& topologies)
+{
+  for (const auto& [_, state_ptr] : topologies) {
+    requireSynchronizedTimingTopology(m, *state_ptr);
   }
 }
 
@@ -76,9 +93,8 @@ std::shared_ptr<TimingTopologyUndo> captureTimingTopology(
   std::set<int> pins(m.base_net_pins.at(source_net).begin(),
                       m.base_net_pins.at(source_net).end());
   std::set<int> nets{source_net};
-  for (int id = 0; id < static_cast<int>(m.buffers.size()); ++id) {
+  for (int id : m.buffers_by_source_net.at(source_net)) {
     const auto& buffer = m.buffers[id];
-    if (buffer.source_net != source_net) continue;
     undo->previous_buffers.emplace_back(id, buffer);
     undo->previous_cells.emplace_back(buffer.node, m.node_cells[buffer.node]);
     pins.insert(buffer.input_pin); pins.insert(buffer.output_pin);
@@ -107,6 +123,14 @@ void restoreTimingTopology(TimingMutationState& m, TimingGraphIndex& index,
   m.net_names.resize(undo.nets); m.net_drivers.resize(undo.nets);
   m.net_pins.resize(undo.nets);
   m.cells.resize(undo.arcs); m.cell_active.resize(undo.arcs);
+  for (std::size_t id = undo.buffers; id < m.buffers.size(); ++id) {
+    const auto& buf = m.buffers[id];
+    m.buffer_id_by_action_id.erase(buf.action_id);
+    if (buf.source_net >= 0 && buf.source_net < static_cast<int>(m.buffers_by_source_net.size())) {
+      auto& vec = m.buffers_by_source_net[buf.source_net];
+      vec.erase(std::remove(vec.begin(), vec.end(), static_cast<int>(id)), vec.end());
+    }
+  }
   m.buffers.resize(undo.buffers);
   for (const auto& [id, buffer] : undo.previous_buffers) {
     m.buffers[id] = buffer;
@@ -140,9 +164,9 @@ void synchronizeTimingBuffers(TimingMutationState& m, TimingGraphIndex& index,
   std::set<int> active_actions;
   for (const auto& physical : topology.buffers) {
     require(active_actions.insert(physical.action_id).second, "duplicate buffer action");
-    const auto master = std::find(m.cell_names.begin(), m.cell_names.end(), physical.master_name);
-    require(master != m.cell_names.end(), "buffer master is absent from Liberty");
-    const int cell = master - m.cell_names.begin();
+    const auto master_it = m.cell_ids_by_name.find(physical.master_name);
+    require(master_it != m.cell_ids_by_name.end(), "buffer master is absent from Liberty");
+    const int cell = master_it->second;
     const int first = m.cell_arc_start[cell], last = m.cell_arc_start[cell + 1];
     require(first < last, "buffer master has no timing arcs");
     const auto& signature = m.library_arcs.at(first);
@@ -162,13 +186,11 @@ void synchronizeTimingBuffers(TimingMutationState& m, TimingGraphIndex& index,
                   && std::isfinite(lane[output_lib]) && lane[output_lib] >= 0,
               "buffer Liberty pin values must be finite and nonnegative");
     }
-    auto found = std::find_if(m.buffers.begin(), m.buffers.end(), [&](const auto& row) {
-      return row.action_id == physical.action_id;
-    });
+    const auto action_it = m.buffer_id_by_action_id.find(physical.action_id);
     int id;
-    if (found == m.buffers.end()) {
+    if (action_it == m.buffer_id_by_action_id.end()) {
       const std::string name = "__dreamplace_rebuffer_" + std::to_string(physical.action_id);
-      require(std::find(m.node_names.begin(), m.node_names.end(), name) == m.node_names.end(),
+      require(!m.has_rebuffer_prefix_in_base_nodes || m.base_node_ids_by_name.count(name) == 0,
               "buffer instance identity collides with the base graph");
       id = m.buffers.size();
       TimingBufferRecord buffer;
@@ -189,8 +211,11 @@ void synchronizeTimingBuffers(TimingMutationState& m, TimingGraphIndex& index,
       m.net_names.push_back(name + "_out");
       m.net_drivers.push_back(buffer.output_pin); m.net_pins.emplace_back();
       m.buffers.push_back(buffer);
+      m.buffers_by_source_net.at(source).push_back(id);
+      m.buffer_id_by_action_id.emplace(buffer.action_id, id);
     } else {
-      id = found - m.buffers.begin();
+      id = action_it->second;
+      const auto* found = &m.buffers[id];
       require(found->source_net == source, "buffer action identity belongs to another source net");
       require(m.pin_ports[found->input_pin] == signature.source
                   && m.pin_ports[found->output_pin] == signature.sink,
@@ -226,8 +251,9 @@ void synchronizeTimingBuffers(TimingMutationState& m, TimingGraphIndex& index,
     m.node_arcs[buffer.node] = buffer.arcs;
     records.push_back(id);
   }
-  for (auto& buffer : m.buffers) {
-    if (buffer.source_net != source || active_actions.count(buffer.action_id)) continue;
+  for (int id : m.buffers_by_source_net.at(source)) {
+    auto& buffer = m.buffers[id];
+    if (active_actions.count(buffer.action_id)) continue;
     buffer.active = false;
     m.node_cells[buffer.node] = -1;
     m.pin_active[buffer.input_pin] = m.pin_active[buffer.output_pin] = 0;

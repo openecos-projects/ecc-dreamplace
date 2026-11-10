@@ -34,9 +34,9 @@ TimingSetupPaths PersistentTimingGraph::nativeSetupPaths(
       || !seeds.retired_arcs.empty()) {
     throw py::value_error("setup paths require current native propagation");
   }
-  for (const auto& [_, topology] : net_states_) {
+  if (!net_states_.empty()) {
     if (!mutation_state_) throw py::value_error("setup paths require synchronized native topology");
-    requireSynchronizedTimingTopology(*mutation_state_, *topology);
+    requireSynchronizedTimingTopologies(*mutation_state_, net_states_);
   }
   const auto& p = *propagation_program_;
   const auto& index = *timing_index_;
@@ -74,8 +74,8 @@ TimingSetupPaths PersistentTimingGraph::nativeSetupPaths(
     if (!rise_valid && !fall_valid) continue;
     const auto& arc = p.setup_arcs[row];
     const auto pin = arc[1];
-    constraint_pins.insert(pin);
     if (!included(pin)) continue;
+    if (p.timing_check_pins.empty()) constraint_pins.insert(pin);
     const int endpoint_row = p.endpoint_row_by_pin[pin];
     const auto candidate = dreamplace::timing::setupRatRow(arc.data(),
         endpoint_row < 0 ? 2e8 : p.endpoint_rRAT[endpoint_row],
@@ -86,6 +86,7 @@ TimingSetupPaths PersistentTimingGraph::nativeSetupPaths(
                      fall_valid ? candidate.second - fa[pin] : inf);
   }
   for (auto pin : p.endpoint_pins) {
+    if (!included(pin)) continue;
     if (!p.endpoint_valid[pin * 2] && !p.endpoint_valid[pin * 2 + 1]) continue;
     // Match TP's actual no-setup-rows fallback, including recovery-only pins.
     if (!p.setup_arcs.empty()) {

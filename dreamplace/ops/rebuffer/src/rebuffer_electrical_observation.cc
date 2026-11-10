@@ -186,6 +186,10 @@ py::dict compareElectricalObservations(const py::dict& before, const py::dict& a
   const auto previous = before["electrical"].cast<py::dict>()["violations_by_pin"].cast<py::dict>();
   const auto current = after["electrical"].cast<py::dict>()["violations_by_pin"].cast<py::dict>();
   for (const auto& pin : current) {
+    PyObject* prev_obj = PyDict_GetItem(previous.ptr(), pin.first.ptr());
+    if (prev_obj != nullptr && prev_obj == pin.second.ptr()) {
+      continue;
+    }
     const auto row = pin.second.cast<py::dict>();
     const auto old = previous.contains(pin.first) ? previous[pin.first].cast<py::dict>() : py::dict();
     for (int field = 0; field < 3; ++field) {

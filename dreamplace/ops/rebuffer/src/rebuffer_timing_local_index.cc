@@ -93,8 +93,8 @@ void updateTimingLocalIndex(TimingMutationState& m, TimingGraphIndex& index,
   std::set<int> pins, cells, structural, rank_seeds, events;
   for (const auto& pin : topology_undo.previous_pins) pins.insert(pin.id);
   for (const auto& arc : topology_undo.previous_arcs) cells.insert(arc.id);
-  for (const auto& buffer : m.buffers) {
-    if (buffer.source_net != topology_undo.source_net) continue;
+  for (int buf_id : m.buffers_by_source_net.at(topology_undo.source_net)) {
+    const auto& buffer = m.buffers[buf_id];
     pins.insert(buffer.input_pin); pins.insert(buffer.output_pin);
     cells.insert(buffer.arcs.begin(), buffer.arcs.end());
   }

@@ -69,6 +69,7 @@ bool planCurrentDriverTree(const DesignView& design,
                            const RepairConfig& config,
                            const CurrentDriverTree& tree,
                            TreeVgdpResult& result,
-                           std::string& reason);
+                           std::string& reason,
+                           bool record_trace = true);
 
 }  // namespace rebuffer

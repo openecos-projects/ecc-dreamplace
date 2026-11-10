@@ -14,6 +14,7 @@ struct OverlayActionInputs
 {
   std::vector<std::string> cells, pins, nets;
   std::vector<int> pin2node, pin2net, drivers;
+  std::vector<int> buffer_input_pin_by_net;
 };
 
 struct OverlayCarrierInputs
@@ -25,6 +26,7 @@ struct OverlayCarrierInputs
   };
   OverlayActionInputs identity;
   int dbu, num_terminals, num_terminal_nis;
+  bool has_rebuffer_prefix = false;
   std::vector<std::string> nodes, masters, pin_direct;
   std::unordered_set<std::string> node_name_set, net_name_set;
   std::vector<int> cell_arc_start;

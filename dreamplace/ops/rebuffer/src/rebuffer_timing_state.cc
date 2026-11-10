@@ -129,7 +129,11 @@ py::dict PersistentTimingGraph::applyStateValues(
     std::map<std::string, std::vector<double>> values)
 {
   journal_.reserve(journal_.size() + values.size());
-  if (!values.empty()) detachStateViews();
+  if (!values.empty()) {
+    detachStateViews();
+    cached_endpoint_slacks_valid_ = false;
+    markElectricalFullDirty();
+  }
   for (auto& [name, value] : values) {
     const auto previous = state_.find(name);
     JournalEntry entry;
@@ -174,6 +178,7 @@ py::dict PersistentTimingGraph::setState(const py::dict& values)
       }
     }
     compactTimingUndo(*undo, state_);
+    markElectricalFullDirty();
     applyStateValues(std::move(generic));
     return summary();
   } catch (...) {

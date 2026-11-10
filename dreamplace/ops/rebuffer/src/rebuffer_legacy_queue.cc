@@ -103,6 +103,30 @@ py::dict runRepairTimingLegacyQueueOperator(
   py::list history;
   std::vector<py::dict> actions;
   int attempts = 0, evaluations = 1, snapshots = 0, pass_count = 0;
+  int opto_iteration = 0;
+  const double initial_tns = number(initial, "tns_ps");
+  double prev_tns = initial_tns;
+  double fix_rate_threshold = 0.0001;
+  bool prev_termination = false, two_cons_terminations = false;
+  auto advance_opto_iteration = [&](const py::dict& best_state) {
+    ++opto_iteration;
+    if (opto_iteration % 1000 == 0) {
+      fix_rate_threshold *= 2.0;
+    }
+    if (opto_iteration % 100 == 0) {
+      const double curr_tns = number(best_state, "tns_ps");
+      const double inc_fix_rate = initial_tns != 0.0
+          ? (prev_tns - curr_tns) / initial_tns : 0.0;
+      prev_tns = curr_tns;
+      if (opto_iteration > 1000 && inc_fix_rate < fix_rate_threshold) {
+        if (prev_termination) two_cons_terminations = true;
+        else prev_termination = true;
+        return true;
+      }
+      prev_termination = false;
+    }
+    return false;
+  };
   std::string stop = "endpoints_exhausted";
   const auto exhausted = [&]() {
     return attempts >= max_attempts
@@ -137,6 +161,7 @@ py::dict runRepairTimingLegacyQueueOperator(
       int decreasing = 0;
       bool provisional = false;
       for (int pass = 1; pass <= max_passes && !exhausted(); ++pass) {
+        if (advance_opto_iteration(best)) break;
         // Preserve the LEGACY pass boundary: a newly clean current endpoint
         // ends this search before considering another global worst endpoint.
         if (endpoint.slack >= margin) break;
@@ -258,13 +283,15 @@ py::dict runRepairTimingLegacyQueueOperator(
           decreasing = 0;
           provisional = false;
           row["status"] = "accepted";
+          row["decreasing_slack_passes"] = decreasing;
+          history.append(std::move(row));
         } else {
           ++decreasing;
           row["status"] = "provisional";
+          row["decreasing_slack_passes"] = decreasing;
+          history.append(std::move(row));
+          if (decreasing > decreasing_limit) break;
         }
-        row["decreasing_slack_passes"] = decreasing;
-        history.append(std::move(row));
-        if (decreasing > decreasing_limit) break;
         if (slot == 0 && endpoint.slack < margin) {
           const auto now = endpoints(endpoint_state, margin);
           if (!now.empty()) endpoint = now.front();
@@ -282,6 +309,10 @@ py::dict runRepairTimingLegacyQueueOperator(
         history.append(std::move(row));
       }
       releaseCheckpoint(release_checkpoint, best_token);
+      if (two_cons_terminations) {
+        stop = "no_tns_progress";
+        break;
+      }
     }
   } catch (...) {
     clear_endpoint();

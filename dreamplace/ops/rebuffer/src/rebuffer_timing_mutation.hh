@@ -4,6 +4,7 @@
 #include <array>
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -36,6 +37,12 @@ struct TimingMutationState
   std::vector<ProgramCellArc> cells;
   std::vector<unsigned char> cell_active, pin_active;
   std::vector<TimingBufferRecord> buffers;
+  std::vector<std::vector<int>> buffers_by_source_net;
+  std::unordered_map<int, int> buffer_id_by_action_id;
+  bool has_rebuffer_prefix_in_base_nodes = false;
+  std::unordered_map<std::string, int> base_node_ids_by_name;
+  std::unordered_map<std::string, int> cell_ids_by_name;
+  std::vector<unsigned char> base_node_constraint_flags;
   std::vector<std::vector<int>> base_net_pins;
   std::vector<unsigned char> base_net_is_clock;
   std::vector<std::string> net_names;
@@ -69,5 +76,20 @@ struct TimingResizeUndo
 
 void restoreTimingResize(TimingMutationState& state, TimingGraphIndex& index,
                          const TimingResizeUndo& undo);
+
+inline int sourceNetForMutationNet(const TimingMutationState& state, int net)
+{
+  const int base_nets = static_cast<int>(state.base_net_pins.size());
+  if (net < base_nets) return net;
+  const int idx = net - base_nets;
+  if (idx >= 0 && idx < static_cast<int>(state.buffers.size())
+      && state.buffers[idx].active && state.buffers[idx].output_net == net) {
+    return state.buffers[idx].source_net;
+  }
+  for (const auto& buffer : state.buffers) {
+    if (buffer.active && buffer.output_net == net) return buffer.source_net;
+  }
+  return -1;
+}
 
 }  // namespace rebuffer

@@ -14,11 +14,24 @@ namespace rebuffer {
 
 std::shared_ptr<LocalPlanningView> NativeTimingLocalPlanningSnapshot::view(int root)
 {
-  const auto cached = views_.find(root);
-  if (cached != views_.end()) return cached->second;
+  if (last_view_ != nullptr && last_view_root_ == root) return last_view_;
   requireCurrent();
   requireLocal(root >= 0 && root < net_count_, "local tree root is out of range");
-  auto result = std::make_shared<LocalPlanningView>();
+  const auto existing_tree = trees_.find(root);
+  const bool already_visited = existing_tree != trees_.end();
+  const int prev_filled_vertices = filled_vertices_;
+  const int prev_filled_pins = filled_pins_;
+  std::shared_ptr<LocalPlanningView> result;
+  if (last_view_ != nullptr && last_view_.use_count() == 1) {
+    resetLocalPlanningView(*last_view_);
+    result = std::move(last_view_);
+    last_view_root_ = -1;
+  } else if (!inputs_->local_view_pool.empty()) {
+    result = std::move(inputs_->local_view_pool.back());
+    inputs_->local_view_pool.pop_back();
+  } else {
+    result = std::make_shared<LocalPlanningView>();
+  }
   const auto nets = reachable(root);
   result->nets.insert(nets.begin(), nets.end());
   auto started = std::chrono::steady_clock::now();
@@ -27,54 +40,99 @@ std::shared_ptr<LocalPlanningView> NativeTimingLocalPlanningSnapshot::view(int r
   started = std::chrono::steady_clock::now();
   buildViews(*result);
   timings_["local_views"] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-  started = std::chrono::steady_clock::now();
-  TopologyView topology;
-  const auto& p = result->projection;
-  topology.steiner_node_base = pin_count_;
-  topology.net_ids = nets;
-  topology.net_flat_topo_sort_start.push_back(0);
-  topology.pin_fa = std::move(result->projection.steiner.pin_fa);
-  for (const int net : nets) {
-    const auto& nodes = p.topologies.at(net);
-    topology.net_flat_topo_sort.insert(topology.net_flat_topo_sort.end(), nodes.begin(), nodes.end());
-    for (const int node : nodes) {
-      topology.node_x.emplace(node, p.steiner.node_x[node]);
-      topology.node_y.emplace(node, p.steiner.node_y[node]);
+  if (already_visited) {
+    filled_vertices_ = prev_filled_vertices;
+    filled_pins_ = prev_filled_pins;
+    result->tree = existing_tree->second;
+  } else {
+    started = std::chrono::steady_clock::now();
+    TopologyView topology;
+    const auto& p = result->projection;
+    topology.steiner_node_base = pin_count_;
+    topology.net_ids = nets;
+    topology.net_flat_topo_sort_start.push_back(0);
+    topology.pin_fa = std::move(result->projection.steiner.pin_fa);
+    for (const int net : nets) {
+      const auto& nodes = p.topologies.at(net);
+      topology.net_flat_topo_sort.insert(topology.net_flat_topo_sort.end(), nodes.begin(), nodes.end());
+      for (const int node : nodes) {
+        topology.node_x.emplace(node, p.steiner.node_x[node]);
+        topology.node_y.emplace(node, p.steiner.node_y[node]);
+      }
+      topology.net_flat_topo_sort_start.push_back(topology.net_flat_topo_sort.size());
     }
-    topology.net_flat_topo_sort_start.push_back(topology.net_flat_topo_sort.size());
+    result->tree = std::make_shared<CurrentDriverTree>();
+    std::string reason;
+    const bool stop_at_existing_buffers = config_.contains("native_tree_stop_at_existing_buffers")
+        && config_["native_tree_stop_at_existing_buffers"].cast<bool>();
+    std::vector<std::size_t> local_link_indices;
+    for (const int net : result->nets) {
+      if (net >= 0 && net < static_cast<int>(identity_->link_by_output.size())
+          && identity_->link_by_output[net] >= 0) {
+        local_link_indices.push_back(static_cast<std::size_t>(identity_->link_by_output[net]));
+      }
+      auto it = std::lower_bound(
+          identity_->links.begin(), identity_->links.end(), net,
+          [](const CurrentDriverBufferLink& link, int target) {
+            return link.input_net_id < target;
+          });
+      for (; it != identity_->links.end() && it->input_net_id == net; ++it) {
+        local_link_indices.push_back(static_cast<std::size_t>(it - identity_->links.begin()));
+      }
+    }
+    std::sort(local_link_indices.begin(), local_link_indices.end());
+    local_link_indices.erase(
+        std::unique(local_link_indices.begin(), local_link_indices.end()),
+        local_link_indices.end());
+    std::vector<CurrentDriverBufferLink> local_links;
+    local_links.reserve(local_link_indices.size());
+    for (const std::size_t idx : local_link_indices) {
+      local_links.push_back(identity_->links[idx]);
+    }
+    const bool imported = importCurrentDriverTree(
+        p.design, topology, root, local_links, *result->tree, reason, stop_at_existing_buffers);
+    result->projection.steiner.pin_fa = std::move(topology.pin_fa);
+    requireLocal(imported, reason);
+    timings_["tree_import"] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+    trees_.emplace(root, result->tree);
   }
-  result->tree = std::make_shared<CurrentDriverTree>();
-  std::string reason;
-  const bool stop_at_existing_buffers = config_.contains("native_tree_stop_at_existing_buffers")
-      && config_["native_tree_stop_at_existing_buffers"].cast<bool>();
-  requireLocal(importCurrentDriverTree(p.design, topology, root, links_, *result->tree, reason,
-                                       stop_at_existing_buffers), reason);
-  timings_["tree_import"] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-  views_.emplace(root, result);
+  last_view_ = result;
+  last_view_root_ = root;
   return result;
 }
 
 void NativeTimingLocalPlanningSnapshot::buildTopology(LocalPlanningView& out)
 {
   const auto& m = *graph_->mutation_state_;
+  const int base_nets = inputs_->design.num_nets;
   auto& p = out.projection;
   p.topologies.resize(net_count_);
   p.steiner.steiner_node_base = pin_count_;
-  p.steiner.pin_fa.assign(vertex_count_, -1);
-  p.steiner.node_x.resize(vertex_count_);
-  p.steiner.node_y.resize(vertex_count_);
-  p.actions.original_net_by_net.resize(net_count_);
-  std::iota(p.actions.original_net_by_net.begin(), p.actions.original_net_by_net.end(), 0);
-  for (const auto& [net, owner] : original_by_net_) p.actions.original_net_by_net[net] = owner;
-  p.actions.state_node_by_vertex.assign(vertex_count_, -1);
-  p.actions.state_net_by_vertex.assign(vertex_count_, -1);
+  p.steiner.pin_fa.resize(vertex_count_, -1);
+  p.steiner.node_x.resize(vertex_count_, 0.0);
+  p.steiner.node_y.resize(vertex_count_, 0.0);
+  if (static_cast<int>(p.actions.original_net_by_net.size()) < base_nets) {
+    p.actions.original_net_by_net.resize(base_nets);
+    std::iota(p.actions.original_net_by_net.begin(),
+              p.actions.original_net_by_net.begin() + base_nets, 0);
+  }
+  if (out.cached_topology_revision != identity_->topology_revision
+      || static_cast<int>(p.actions.original_net_by_net.size()) != net_count_) {
+    p.actions.original_net_by_net.resize(net_count_);
+    for (std::size_t i = 0; i < identity_->original_by_net.size(); ++i) {
+      p.actions.original_net_by_net[base_nets + static_cast<int>(i)] = identity_->original_by_net[i];
+    }
+  }
+  p.actions.state_node_by_vertex.resize(vertex_count_, -1);
+  p.actions.state_net_by_vertex.resize(vertex_count_, -1);
   for (const int net : out.nets) {
     const int owner = originalNet(net), native_net = graphNet(net);
     const int driver = m.net_drivers.at(native_net);
     requireLocal(driver >= 0, "local partition has no driver");
     int source_root = driver;
     if (driver >= inputs_->design.num_pins) {
-      const auto& source = source_by_pin_.at(pinId(driver));
+      const int canonical_pin = pinId(driver);
+      const auto& source = identity_->source_by_pin.at(canonical_pin - inputs_->design.num_pins);
       requireLocal(source.first == owner, "local driver has a different native topology owner");
       source_root = source.second;
     }
@@ -87,6 +145,7 @@ void NativeTimingLocalPlanningSnapshot::buildTopology(LocalPlanningView& out)
       p.actions.state_node_by_vertex[id] = source;
       p.actions.state_net_by_vertex[id] = owner;
       p.actions.state_provenance.push_back({{net, id}, {owner, source}});
+      out.touched_vertices.push_back(id);
       if (id < pin_count_) out.pins.insert(id);
     };
     const auto current = graph_->net_states_.find(owner);

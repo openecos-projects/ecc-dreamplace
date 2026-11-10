@@ -6,6 +6,7 @@
 #include "rebuffer_driver_tree_links.hh"
 #include "rebuffer_timing_mutation.hh"
 #include <set>
+#include <unordered_map>
 
 namespace rebuffer {
 
@@ -14,6 +15,25 @@ inline void requireLocal(bool valid, const std::string& message)
   if (!valid) throw pybind11::value_error(message);
 }
 
+struct CachedLocalPlanningIdentity
+{
+  std::uint64_t topology_revision = 0;
+  std::uint64_t net_states_revision = 0;
+  std::vector<std::shared_ptr<IncrementalTopologyState>> net_state_list;
+  mutable std::vector<int> net_state_epochs;
+  std::vector<TimingBufferRecord> buffers;
+  std::vector<std::array<double, 2>> buffer_coordinates;
+  std::vector<int> buffer_index_by_node;
+  std::vector<int> pin_to_canonical, canonical_to_pin;
+  std::vector<int> node_to_canonical;
+  std::vector<int> net_to_canonical, canonical_to_net, original_by_net;
+  std::vector<std::pair<std::pair<int, int>, int>> virtual_pins;
+  std::vector<std::pair<int, int>> source_by_pin;
+  std::vector<CurrentDriverBufferLink> links;
+  std::vector<int> link_by_output;
+  int pin_count = 0, node_count = 0, net_count = 0, vertex_count = 0;
+};
+
 struct LocalPlanningView
 {
   OverlayCarrierProjection projection;
@@ -21,12 +41,18 @@ struct LocalPlanningView
   std::shared_ptr<CurrentDriverTree> tree;
   std::set<int> pins;
   std::set<int> nets;
+  std::vector<int> touched_vertices;
+  std::vector<int> touched_pins;
+  std::vector<int> touched_nodes;
+  std::uint64_t cached_topology_revision = 0;
+  bool static_design_initialized = false;
 };
 
 class NativeTimingLocalPlanningSnapshot
     : public std::enable_shared_from_this<NativeTimingLocalPlanningSnapshot>
 {
  public:
+  ~NativeTimingLocalPlanningSnapshot();
   pybind11::dict queueState();
   pybind11::dict plan(const pybind11::dict& request, const pybind11::dict& config);
   std::vector<int> sourceNets(const pybind11::list& actions) const;
@@ -54,24 +80,21 @@ class NativeTimingLocalPlanningSnapshot
   std::shared_ptr<PersistentTimingGraph> graph_;
   std::shared_ptr<PersistentTimingGraphCheckpoint> checkpoint_;
   std::shared_ptr<const TimingPlanningInputs> inputs_;
+  std::shared_ptr<CachedLocalPlanningIdentity> identity_;
   pybind11::dict config_, queue_metadata_;
   std::shared_ptr<NativeTimingQueueSnapshot> queue_;
-  std::vector<TimingBufferRecord> buffers_;
-  std::map<int, int> pin_to_canonical_, canonical_to_pin_;
-  std::map<int, int> node_to_canonical_, canonical_to_node_;
-  std::map<int, int> net_to_canonical_, canonical_to_net_, original_by_net_;
-  std::map<std::pair<int, int>, int> virtual_pins_;
-  std::map<int, std::pair<int, int>> source_by_pin_;
-  std::vector<CurrentDriverBufferLink> links_;
-  std::map<int, int> input_by_output_;
-  std::map<int, std::vector<int>> outputs_by_input_;
-  std::map<int, std::shared_ptr<LocalPlanningView>> views_;
+  std::unordered_map<int, std::shared_ptr<LocalPlanningView>> views_;
+  std::unordered_map<int, std::shared_ptr<CurrentDriverTree>> trees_;
   std::shared_ptr<LocalPlanningView> last_view_;
+  int last_view_root_ = -1;
+  std::vector<double> endpoint_slacks_;
+  bool shared_view_data_ready_ = false;
   std::map<std::string, double> timings_;
   int pin_count_ = 0, node_count_ = 0, net_count_ = 0, vertex_count_ = 0;
   int planned_ = 0, filled_pins_ = 0, filled_vertices_ = 0;
 };
 
+void resetLocalPlanningView(LocalPlanningView& v);
 void registerTimingLocalBindings(pybind11::module_& module);
 
 }  // namespace rebuffer

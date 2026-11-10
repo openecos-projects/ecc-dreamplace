@@ -56,6 +56,7 @@ struct RepairTimingCampaignCheckpoint
   std::map<int, std::shared_ptr<IncrementalTopologyState>> topologies;
   std::map<int, std::shared_ptr<IncrementalTopologyCheckpoint>> checkpoints;
   std::map<int, std::string> action_ledger;
+  std::size_t undo_size = 0;
   std::shared_ptr<PersistentTimingGraphCheckpoint> timing_graph;
   std::weak_ptr<const unsigned char> campaign_identity;
 };
@@ -109,10 +110,18 @@ class RepairTimingCampaignSession
   }
 
  private:
+  struct CampaignUndoEntry
+  {
+    bool is_topology = false;
+    int key = -1;
+    bool existed = false;
+    std::string previous_state;
+  };
   void appendLedgerEntry(RepairTimingLedgerEntry entry);
 
   std::map<int, std::shared_ptr<IncrementalTopologyState>> topologies_;
   std::map<int, std::string> action_ledger_;
+  std::vector<CampaignUndoEntry> undo_journal_;
   std::vector<RepairTimingLedgerEntry> ledger_history_;
   int next_ledger_sequence_ = 0;
   std::shared_ptr<PersistentTimingGraph> timing_graph_;

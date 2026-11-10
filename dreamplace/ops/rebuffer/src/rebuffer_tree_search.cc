@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include "rebuffer_tree_annotation.hh"
 
 namespace rebuffer {
@@ -74,17 +75,19 @@ bool optimizeCurrentDriverTree(
     const DesignView& design, const TimingView& timing, const LibertyView& liberty,
     const CharacterizationResult& characterization, const RepairConfig& config,
     const CurrentDriverTree& source, TreeVgdpResult& result, std::string& reason,
-    std::map<std::string, double>* phase_timings)
+    std::map<std::string, double>* phase_timings,
+    bool record_trace,
+    bool prune_worse_than_unbuffered)
 {
   auto record = [&](const char* phase, std::chrono::steady_clock::time_point started) {
     if (phase_timings) (*phase_timings)[phase] += std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - started).count();
   };
   auto plan = [&](const CurrentDriverTree& tree, const RepairConfig& settings,
-                  TreeVgdpResult& planned, std::string& rejected) {
+                  TreeVgdpResult& planned, std::string& rejected, bool trace = false) {
     const auto started = std::chrono::steady_clock::now();
     const bool ok = planCurrentDriverTree(design, timing, liberty, characterization,
-                                         settings, tree, planned, rejected);
+                                         settings, tree, planned, rejected, trace);
     // Both paths use the same linear model. Only search enumerates insertions.
     record(settings.insert_buffers ? "vgdp_dp" : "vgdp_rescore", started);
     return ok;
@@ -102,31 +105,52 @@ bool optimizeCurrentDriverTree(
     record("vgdp_materialize", started);
     return ok;
   };
-  if (!plan(source, config, result, reason)) return false;
+  if (!plan(source, config, result, reason, record_trace)) return false;
   result.timing_round_count = 1;
   result.round_source_tree_digests.push_back(source.tree_digest);
   result.round_source_buffer_counts.push_back(0);
-  auto score = [&](const std::vector<BufferAction>& actions, TreeVgdpCandidate& candidate) {
-    if (actions.size() > static_cast<std::size_t>(config.tree_max_buffers)) return false;
-    CurrentDriverTree tree;
+  auto scoring_config = config;
+  scoring_config.insert_buffers = false;
+  auto score_tree = [&](const CurrentDriverTree& tree,
+                        const std::vector<BufferAction>& actions,
+                        TreeVgdpCandidate& candidate) {
     std::string rejected;
-    if (!materialize(source, actions, tree, rejected)) return false;
-    auto scoring_config = config;
-    scoring_config.insert_buffers = false;
     TreeVgdpResult scored;
-    if (!plan(tree, scoring_config, scored, rejected)) return false;
+    if (!plan(tree, scoring_config, scored, rejected, false)) return false;
     candidate = scored.candidates.front();
     candidate.actions = actions;
     candidate.buffer_count = static_cast<int>(actions.size());
     return true;
   };
+  auto score = [&](const std::vector<BufferAction>& actions, TreeVgdpCandidate& candidate) {
+    if (actions.size() > static_cast<std::size_t>(config.tree_max_buffers)) return false;
+    CurrentDriverTree tree;
+    std::string rejected;
+    if (!materialize(source, actions, tree, rejected)) return false;
+    return score_tree(tree, actions, candidate);
+  };
 
   // Re-score the materialized tree as well as DP options. Integer DBU sites
   // and concrete buffer cell IDs must obey the same model used by recovery.
   auto raw = std::move(result.candidates);
+  double unbuffered_slack = -std::numeric_limits<double>::infinity();
   for (const auto& candidate : raw) {
     TreeVgdpCandidate scored;
-    if (score(candidate.actions, scored)) result.candidates.push_back(std::move(scored));
+    if (score(candidate.actions, scored)) {
+      if (scored.actions.empty()) {
+        unbuffered_slack = std::max(unbuffered_slack, scored.slack);
+      }
+      result.candidates.push_back(std::move(scored));
+    }
+  }
+  if (prune_worse_than_unbuffered && std::isfinite(unbuffered_slack)) {
+    result.candidates.erase(
+        std::remove_if(result.candidates.begin(), result.candidates.end(),
+                       [&](const TreeVgdpCandidate& candidate) {
+                         return !candidate.actions.empty()
+                                && candidate.slack <= unbuffered_slack + 1.0e-9;
+                       }),
+        result.candidates.end());
   }
   if (result.candidates.empty()) {
     reason = "tree_no_materializable_candidate";
@@ -143,7 +167,7 @@ bool optimizeCurrentDriverTree(
     tree.tree_digest = currentDriverTreeDigest(tree);
     result.round_source_tree_digests.push_back(tree.tree_digest);
     result.round_source_buffer_counts.push_back(incumbent.buffer_count);
-    if (!plan(tree, config, next, no_improvement)) break;
+    if (!plan(tree, config, next, no_improvement, false)) break;
     result.generated_option_count += next.generated_option_count;
     result.pruned_option_count += next.pruned_option_count;
     result.long_wire_edge_count += next.long_wire_edge_count;
@@ -167,6 +191,10 @@ bool optimizeCurrentDriverTree(
   // removal/rewrite remains owned by rebuffer_tree_recovery/placeio_ecc.
   // Preserve the best predicted timing; no unqualified relaxation allowance.
   for (int round = 0; round < config.tree_recovery_rounds; ++round) {
+    if (incumbent.actions.empty()) break;
+    CurrentDriverTree incumbent_tree;
+    std::string rejected;
+    if (!materialize(source, incumbent.actions, incumbent_tree, rejected)) break;
     auto recovered = incumbent;
     for (int index = 0; index < static_cast<int>(incumbent.actions.size()); ++index) {
       const int old_cell = incumbent.actions[index].buffer_cell_index;
@@ -179,14 +207,26 @@ bool optimizeCurrentDriverTree(
       auto removed = incumbent.actions;
       removed.erase(removed.begin() + index);
       probe(std::move(removed));
+      const int node_id = static_cast<int>(source.nodes.size()) + index;
       for (const auto& buffer : characterization.filtered_buffers) {
         if (buffer.cell_index < 0 || buffer.cell_index >= static_cast<int>(liberty.cells.size())) continue;
         const auto& cell = liberty.cells[buffer.cell_index];
         if (!cell.is_buffer || cell.main_id != liberty.cells[old_cell].main_id
             || cell.area >= liberty.cells[old_cell].area) continue;
+        ++result.recovery_attempt_count;
+        if (incumbent.area - liberty.cells[old_cell].area + cell.area >= recovered.area) {
+          continue;
+        }
         auto rewritten = incumbent.actions;
         rewritten[index].buffer_cell_index = buffer.cell_index;
-        probe(std::move(rewritten));
+        incumbent_tree.nodes[node_id].cell_id = buffer.cell_index;
+        TreeVgdpCandidate candidate;
+        const bool ok = score_tree(incumbent_tree, rewritten, candidate);
+        incumbent_tree.nodes[node_id].cell_id = old_cell;
+        if (ok && candidate.slack >= incumbent.slack - 1.0e-9
+            && candidate.area < recovered.area) {
+          recovered = std::move(candidate);
+        }
       }
     }
     if (recovered.area >= incumbent.area) break;

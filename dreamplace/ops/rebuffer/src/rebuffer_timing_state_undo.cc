@@ -91,6 +91,7 @@ void PersistentTimingGraph::applyTimingRc(const std::vector<TimingNetRcValues>& 
       "pin_net_cap_rise", "pin_net_cap_fall", "pin_net_delay_rise", "pin_net_delay_fall",
       "pin_net_impulse_rise", "pin_net_impulse_fall"};
   for (const auto& rc : changes) {
+    for (int pin : rc.pins) markElectricalDirtyPin(pin);
     for (std::size_t lane = 0; lane < names.size(); ++lane) {
       auto& target = state_.at(names[lane]);
       for (std::size_t row = 0; row < rc.pins.size(); ++row) {
@@ -98,6 +99,7 @@ void PersistentTimingGraph::applyTimingRc(const std::vector<TimingNetRcValues>& 
       }
     }
   }
+  for (int pin : inactive_pins) markElectricalDirtyPin(pin);
   for (const auto* name : names) {
     for (int pin : inactive_pins) patchTimingValue(*undo, name, state_.at(name), pin, 0);
   }

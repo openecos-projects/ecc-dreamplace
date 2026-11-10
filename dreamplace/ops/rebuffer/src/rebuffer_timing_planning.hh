@@ -19,6 +19,8 @@ namespace rebuffer {
 class PersistentTimingGraph;
 struct IncrementalTopologyState;
 class PersistentTimingGraphCheckpoint;
+struct CachedLocalPlanningIdentity;
+struct LocalPlanningView;
 
 struct TimingPlanningInputs
 {
@@ -37,6 +39,12 @@ struct TimingPlanningInputs
   mutable std::size_t active_links_journal_size = 0;
   mutable std::uint64_t active_links_journal_head = 0;
   mutable bool active_links_valid = false;
+  mutable std::shared_ptr<CachedLocalPlanningIdentity> cached_local_identity;
+  mutable std::vector<int> metric_row_by_pin;
+  mutable std::vector<int> clock_order_by_pin;
+  mutable bool clock_pins_unique = true;
+  mutable bool static_pin_lookup_ready = false;
+  mutable std::vector<std::shared_ptr<LocalPlanningView>> local_view_pool;
 };
 
 // References are borrowed only for the duration of the shared native planner.

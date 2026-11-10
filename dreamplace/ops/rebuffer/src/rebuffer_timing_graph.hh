@@ -32,6 +32,7 @@ struct TimingSetupPaths;
 struct LibertyView;
 struct TimingPlanningInputs;
 struct TimingEndpointState;
+struct ElectricalObservationCache;
 class NativeTimingPlanningSnapshot;
 class NativeTimingLocalPlanningSnapshot;
 enum class TimingTopologyOperation;
@@ -47,6 +48,7 @@ class PersistentTimingGraphCheckpoint
  public:
   std::size_t journal_size = 0;
   std::uint64_t epoch = 0;
+  std::uint64_t topology_revision = 0;
   bool timing_state_initialized = false;
   std::weak_ptr<const unsigned char> graph_identity;
   std::uint64_t journal_generation = 0;
@@ -94,6 +96,7 @@ class PersistentTimingGraph : public std::enable_shared_from_this<PersistentTimi
       const pybind11::list& actions, const pybind11::dict& config);
   std::shared_ptr<NativeTimingLocalPlanningSnapshot> localPlanningSnapshot(
       const pybind11::list& actions, const pybind11::dict& config);
+  std::shared_ptr<IncrementalTopologyState> createNetTopology(int net_id) const;
   pybind11::dict initializeMutations();
   void requireTimingMutationOwner() const;
   pybind11::dict mutationView() const;
@@ -109,6 +112,9 @@ class PersistentTimingGraph : public std::enable_shared_from_this<PersistentTimi
       int next_node_id,
       const pybind11::dict& topology_values);
   pybind11::dict attachNetTopologyState(
+      int net_id,
+      const std::shared_ptr<IncrementalTopologyState>& state);
+  void attachNetTopologyStateFast(
       int net_id,
       const std::shared_ptr<IncrementalTopologyState>& state);
   pybind11::dict clearNetTopologies();
@@ -169,6 +175,7 @@ class PersistentTimingGraph : public std::enable_shared_from_this<PersistentTimi
     std::string name;
     bool existed = false;
     std::uint64_t previous_epoch = 0;
+    std::uint64_t previous_topology_revision = 0;
     std::uint64_t sequence = 0;
     std::vector<double> previous;
     std::shared_ptr<TimingResizeUndo> resize_undo;
@@ -210,6 +217,8 @@ class PersistentTimingGraph : public std::enable_shared_from_this<PersistentTimi
       const std::shared_ptr<PersistentTimingGraphCheckpoint>& checkpoint) const;
   void restoreTo(std::size_t journal_size);
   std::shared_ptr<IncrementalTopologyState> topologyState(int net_id) const;
+  void markElectricalDirtyPin(int pin) const;
+  void markElectricalFullDirty() const;
 
   pybind11::object carrier_;
   std::shared_ptr<TimingGraphIndex> timing_index_;
@@ -222,6 +231,9 @@ class PersistentTimingGraph : public std::enable_shared_from_this<PersistentTimi
   std::vector<JournalEntry> journal_;
   std::map<int, std::shared_ptr<IncrementalTopologyState>> net_states_;
   std::uint64_t epoch_ = 0;
+  std::uint64_t topology_revision_ = 1;
+  std::uint64_t next_topology_revision_ = 1;
+  std::uint64_t net_states_revision_ = 1;
   bool timing_state_initialized_ = false;
   std::shared_ptr<const TimingPropagationProgram> propagation_program_;
   std::shared_ptr<TimingMutationState> mutation_state_;
@@ -229,6 +241,20 @@ class PersistentTimingGraph : public std::enable_shared_from_this<PersistentTimi
   std::shared_ptr<const TimingPlanningInputs> planning_inputs_;
   std::vector<std::uint8_t> queue_original_buffer_nodes_;
   TimingPropagationMark propagation_mark_;
+  mutable std::vector<double> cached_endpoint_slacks_;
+  mutable bool cached_endpoint_slacks_valid_ = false;
+  mutable pybind11::dict cached_endpoint_slacks_by_name_;
+  mutable std::vector<double> cached_endpoint_slacks_by_name_values_;
+  mutable std::vector<pybind11::str> cached_endpoint_pin_names_;
+  mutable std::shared_ptr<ElectricalObservationCache> electrical_cache_;
+  mutable std::size_t cached_active_net_arcs_ = 0;
+  mutable std::size_t cached_active_pins_ = 0;
+  mutable std::size_t cached_active_cell_arcs_ = 0;
+  mutable bool cached_active_counts_valid_ = false;
+  mutable std::size_t cached_journal_full_values_ = 0;
+  mutable std::size_t cached_journal_sparse_values_ = 0;
+  mutable std::size_t cached_journal_stats_size_ = 0;
+  mutable std::uint64_t cached_journal_stats_head_seq_ = 0;
   std::shared_ptr<const unsigned char> checkpoint_identity_
       = std::make_shared<const unsigned char>(0);
   std::uint64_t journal_generation_ = 0;

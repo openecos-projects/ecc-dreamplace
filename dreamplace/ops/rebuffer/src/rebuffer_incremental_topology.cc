@@ -289,13 +289,17 @@ bool validateIncrementalTopology(
     const IncrementalTopologyState& state,
     std::string& reason)
 {
+  if (state.validated_epoch == state.epoch && state.epoch >= 0) {
+    reason.clear();
+    return true;
+  }
   if (state.driver_pin_id < 0) {
     reason = "driver_pin_id_must_be_nonnegative";
     return false;
   }
   std::unordered_set<int> nodes{state.driver_pin_id};
   std::unordered_set<int> children;
-  std::unordered_set<std::string> edge_keys;
+  std::unordered_set<std::uint64_t> edge_keys;
   std::unordered_map<int, std::vector<int>> adjacency;
   for (const auto& edge : state.edges) {
     if (edge.parent < 0 || edge.child < 0 || edge.parent == edge.child) {
@@ -307,9 +311,10 @@ bool validateIncrementalTopology(
       reason = "invalid_edge_rc";
       return false;
     }
-    std::ostringstream key;
-    key << edge.parent << ':' << edge.child;
-    if (!edge_keys.insert(key.str()).second) {
+    const std::uint64_t key =
+        (static_cast<std::uint64_t>(static_cast<std::uint32_t>(edge.parent)) << 32)
+        | static_cast<std::uint32_t>(edge.child);
+    if (!edge_keys.insert(key).second) {
       reason = "duplicate_edge";
       return false;
     }
@@ -390,6 +395,7 @@ bool validateIncrementalTopology(
       }
     }
   }
+  state.validated_epoch = state.epoch;
   return true;
 }
 

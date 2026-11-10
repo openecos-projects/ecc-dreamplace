@@ -16,6 +16,7 @@ from .overlay_metadata import (
     FrozenRecord,
     FrozenValues,
     NativeOverlayMetadata,
+    RecordList,
     freeze_record,
     frozen_mutation_arguments,
 )
@@ -51,13 +52,13 @@ class _ActionList(list):
 
     __slots__ = ("_digest", "_freeze")
 
-    def __init__(self, values=(), *, freeze=False):
+    def __init__(self, values=(), *, freeze=False, already_frozen=False, digest=None):
         self._freeze = freeze
-        if freeze:
+        if freeze and not already_frozen:
             super().__init__(freeze_record(value) for value in values)
         else:
             super().__init__(values)
-        self._digest = None
+        self._digest = digest
 
     def digest(self):
         if self._digest is None:
@@ -91,8 +92,29 @@ for _name in (
     setattr(_ActionList, _name, _invalidating(_name))
 
 
+def _fast_json_safe(value):
+    t = type(value)
+    if t is str or t is int or t is bool or value is None:
+        return value
+    if t is float:
+        if value != value or value == float("inf") or value == float("-inf"):
+            raise ValueError("Out of range float values are not JSON compliant")
+        return value
+    if t is dict or t is FrozenRecord:
+        for k in value:
+            if type(k) is not str:
+                raise TypeError("non-string dict key")
+        return {k: _fast_json_safe(value[k]) for k in sorted(value)}
+    if t is list or t is tuple or t is FrozenValues:
+        return [_fast_json_safe(item) for item in value]
+    raise TypeError("fallback")
+
+
 def _json_safe(value):
-    return json.loads(json.dumps(value, allow_nan=False, separators=(",", ":"), sort_keys=True))
+    try:
+        return _fast_json_safe(value)
+    except TypeError:
+        return json.loads(json.dumps(value, allow_nan=False, separators=(",", ":"), sort_keys=True))
 
 
 def _names(value):
@@ -123,6 +145,7 @@ class BufferOverlay(NativeOverlayMetadata):
         self._checkpoints = {}
         self._next_checkpoint_id = 0
         self.native_topologies = {}
+        self._synced_topology_count = 0
         self.native_repair_sessions = {}
         self.native_campaign_session = None
         self.native_timing_bridge = None
@@ -164,6 +187,10 @@ class BufferOverlay(NativeOverlayMetadata):
         if create_overlay is not None:
             state = create_overlay(str(net_name))
             self.native_topologies[str(net_name)] = state
+            if self.native_timing_bridge is not None and state is not None:
+                self.native_timing_bridge.attach_state(state)
+                if getattr(self, "_synced_bridge_id", None) == id(self.native_timing_bridge):
+                    self._synced_topology_count = len(self.native_topologies)
             return state
         try:
             net_id = int(self.timing_model._net_id(str(net_name)))
@@ -212,6 +239,10 @@ class BufferOverlay(NativeOverlayMetadata):
             )
             return None
         self.native_topologies[str(net_name)] = state
+        if self.native_timing_bridge is not None and state is not None:
+            self.native_timing_bridge.attach_state(state)
+            if getattr(self, "_synced_bridge_id", None) == id(self.native_timing_bridge):
+                self._synced_topology_count = len(self.native_topologies)
         return state
 
     def _native_repair_session(self, net_name):
@@ -620,8 +651,11 @@ class BufferOverlay(NativeOverlayMetadata):
         return _names(getattr(self.base_pydb, "net_names", ()))
 
     def _known_net(self, net_name):
-        names = self._net_names()
-        return not names or net_name in names
+        name_set = getattr(self, "_net_name_set", None)
+        if name_set is None:
+            name_set = frozenset(self._net_names())
+            self._net_name_set = name_set
+        return not name_set or net_name in name_set
 
     def _normalize_action(self, action, *, preserve_session_id=False):
         if not isinstance(action, Mapping):
@@ -745,17 +779,9 @@ class BufferOverlay(NativeOverlayMetadata):
                 ("action_count", (int(old["action_count"]) if old is not None else 0) + 1),
             )
         )
-        rows = []
-        replaced = False
-        for key, value in current.items():
-            if key == net_name:
-                rows.append((key, patch))
-                replaced = True
-            else:
-                rows.append((key, value))
-        if not replaced:
-            rows.append((net_name, patch))
-        self._net_patches = FrozenRecord(rows)
+        next_patches = dict(current)
+        next_patches[net_name] = patch
+        self._net_patches = FrozenRecord(next_patches)
         return True
 
     def apply(self, actions, *, transactional=True):
@@ -988,11 +1014,27 @@ class BufferOverlay(NativeOverlayMetadata):
             if self.native_timing_bridge is None:
                 raise ValueError("native timing checkpoint has no campaign owner")
             self.native_timing_bridge.restore(native_timing_checkpoint)
-        self.actions = clone(checkpoint["actions"])
+        if shared_metadata and self._metadata_journal_enabled:
+            self._actions = _ActionList(
+                checkpoint["actions"],
+                freeze=True,
+                already_frozen=True,
+                digest=checkpoint.get("actions_digest"),
+            )
+            self._base_removals = RecordList(
+                checkpoint["base_removals"], already_frozen=True
+            )
+        else:
+            self.actions = clone(checkpoint["actions"])
+            self.base_removals = clone(checkpoint["base_removals"])
         self._next_buffer_id = checkpoint["next_buffer_id"]
         self.removed_buffer_ids = set(checkpoint["removed_buffer_ids"])
-        self.base_removals = clone(checkpoint["base_removals"])
         self.native_topologies = dict(checkpoint["native_topologies"])
+        if native_timing_checkpoint is not None and self.native_timing_bridge is not None:
+            self._synced_bridge_id = id(self.native_timing_bridge)
+            self._synced_topology_count = len(self.native_topologies)
+        else:
+            self._synced_topology_count = -1
         self.native_repair_sessions = {
             name: session
             for name, session in self.native_repair_sessions.items()
@@ -1026,14 +1068,21 @@ class BufferOverlay(NativeOverlayMetadata):
             self.native_campaign_session.restore(campaign_checkpoint)
         elif campaign_checkpoint is None and self.native_timing_bridge is None:
             self.native_campaign_session = None
-        self.native_topology_events = clone(checkpoint["native_topology_events"])
-        self.projection_audit = clone(
-            checkpoint.get("projection_audit", {})
-        )
-        if shared_metadata:
-            self.net_patches = checkpoint["net_patches"]
+        if shared_metadata and self._metadata_journal_enabled:
+            self._native_topology_events = RecordList(
+                checkpoint["native_topology_events"], already_frozen=True
+            )
+            self._projection_audit = checkpoint.get("projection_audit", FrozenRecord())
+            self._net_patches = checkpoint["net_patches"]
         else:
-            self._rebuild_patches()
+            self.native_topology_events = clone(checkpoint["native_topology_events"])
+            self.projection_audit = clone(
+                checkpoint.get("projection_audit", {})
+            )
+            if shared_metadata:
+                self.net_patches = checkpoint["net_patches"]
+            else:
+                self._rebuild_patches()
         self.epoch = checkpoint["epoch"]
 
     def restore(self, checkpoint_id):
@@ -1066,6 +1115,7 @@ class BufferOverlay(NativeOverlayMetadata):
         self._checkpoints = {}
         self._next_checkpoint_id = 0
         self.native_topologies = {}
+        self._synced_topology_count = 0
         self.native_repair_sessions = {}
         self.native_campaign_session = (
             self.native_timing_bridge.campaign

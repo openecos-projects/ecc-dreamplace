@@ -10,6 +10,8 @@ namespace rebuffer {
 void invalidateIncrementalTopologyCaches(IncrementalTopologyState& state)
 {
   state.checkpoint_image.reset();
+  state.cached_checkpoint.reset();
+  state.validated_epoch = -1;
   state.schedule_cache = py::dict();
   state.schedule_cache_changed_pins.clear();
   state.schedule_cache_epoch = -1;
@@ -125,6 +127,21 @@ bool redoTopologySplit(
 std::shared_ptr<IncrementalTopologyCheckpoint> checkpointIncrementalTopology(
     const IncrementalTopologyState& state)
 {
+  if (state.cached_checkpoint != nullptr
+      && state.cached_checkpoint->net_id == state.net_id
+      && state.cached_checkpoint->driver_pin_id == state.driver_pin_id
+      && state.cached_checkpoint->buffer_count == state.buffers.size()
+      && state.cached_checkpoint->next_node_id == state.next_node_id
+      && state.cached_checkpoint->epoch == state.epoch
+      && state.cached_checkpoint->schedule_cache_epoch == state.schedule_cache_epoch
+      && state.cached_checkpoint->schedule_cache_slot == state.schedule_cache_slot
+      && state.cached_checkpoint->schedule_cache_pin_count == state.schedule_cache_pin_count
+      && state.cached_checkpoint->schedule_cache_row_count == state.schedule_cache_row_count
+      && state.cached_checkpoint->schedule_cache_net_count == state.schedule_cache_net_count
+      && state.cached_checkpoint->schedule_cache_event == state.schedule_cache_event
+      && (!state.general_removal || state.cached_checkpoint->image != nullptr)) {
+    return state.cached_checkpoint;
+  }
   auto checkpoint = std::make_shared<IncrementalTopologyCheckpoint>();
   checkpoint->net_id = state.net_id;
   checkpoint->driver_pin_id = state.driver_pin_id;
@@ -150,6 +167,7 @@ std::shared_ptr<IncrementalTopologyCheckpoint> checkpointIncrementalTopology(
     }
     checkpoint->image = state.checkpoint_image;
   }
+  state.cached_checkpoint = checkpoint;
   return checkpoint;
 }
 
@@ -158,6 +176,12 @@ bool restoreIncrementalTopology(
     const IncrementalTopologyCheckpoint& checkpoint,
     std::string& reason)
 {
+  if (state.cached_checkpoint != nullptr
+      && state.cached_checkpoint.get() == &checkpoint
+      && state.validated_epoch == state.epoch
+      && state.epoch == checkpoint.epoch) {
+    return true;
+  }
   if (checkpoint.net_id != state.net_id
       || checkpoint.driver_pin_id != state.driver_pin_id) {
     reason = "topology_checkpoint_identity_mismatch";
@@ -238,7 +262,11 @@ bool restoreIncrementalTopology(
   state.schedule_cache_row_count = checkpoint.schedule_cache_row_count;
   state.schedule_cache_net_count = checkpoint.schedule_cache_net_count;
   state.schedule_cache_event = checkpoint.schedule_cache_event;
-  return validateIncrementalTopology(state, reason);
+  if (!validateIncrementalTopology(state, reason)) {
+    return false;
+  }
+  state.cached_checkpoint = std::make_shared<IncrementalTopologyCheckpoint>(checkpoint);
+  return true;
 }
 
 

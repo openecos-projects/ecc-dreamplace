@@ -79,6 +79,9 @@ std::pair<py::dict, std::vector<double>> observe(const TimingPropagationProgram&
 
 std::vector<double> PersistentTimingGraph::endpointSlacks() const
 {
+  if (cached_endpoint_slacks_valid_) {
+    return cached_endpoint_slacks_;
+  }
   const auto& p = *propagation_program_;
   const auto& ra = state_.at("pin_rAAT");
   const auto& fa = state_.at("pin_fAAT");
@@ -89,6 +92,8 @@ std::vector<double> PersistentTimingGraph::endpointSlacks() const
   for (auto id : p.metric_pins) {
     slacks.push_back(qualifiedSlack(p, rr[id], fr[id], ra[id], fa[id], id));
   }
+  cached_endpoint_slacks_ = slacks;
+  cached_endpoint_slacks_valid_ = true;
   return slacks;
 }
 
@@ -111,6 +116,8 @@ py::dict PersistentTimingGraph::finishPropagation(
       std::move(changed_pins), std::move(coverage), mode, endpointSlacks());
   result["endpoint_slacks"] = writeState(slacks);
   result["state"] = applyStateValues(std::move(output));
+  cached_endpoint_slacks_ = std::move(slacks);
+  cached_endpoint_slacks_valid_ = true;
   journal_.back().propagation_undo = propagation_mark_;
   propagation_mark_ = {true, journal_.back().sequence};
   return result;
@@ -124,10 +131,13 @@ py::dict PersistentTimingGraph::finishSparsePropagation(
   // rows. The worklist therefore guarantees unique field/index captures.
   compactTimingUndo(*undo, state_, true);
   std::sort(changed.begin(), changed.end());
+  for (const int64_t pin : changed) markElectricalDirtyPin(static_cast<int>(pin));
   auto [result, slacks] = observe(*propagation_program_, state_, state_.at("pin_net_cap_rise"),
       std::move(changed), std::move(coverage), "events",
       previous_slacks);
   result["endpoint_slacks"] = writeState(slacks);
+  cached_endpoint_slacks_ = std::move(slacks);
+  cached_endpoint_slacks_valid_ = true;
   result["state"] = summary();
   journal_.back().propagation_undo = propagation_mark_;
   propagation_mark_ = {true, journal_.back().sequence};

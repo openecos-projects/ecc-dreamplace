@@ -50,6 +50,9 @@ void synchronizeTimingBuffers(TimingMutationState& state, TimingGraphIndex& inde
                                const IncrementalTopologyState& topology);
 void requireSynchronizedTimingTopology(const TimingMutationState& state,
                                        const IncrementalTopologyState& topology);
+void requireSynchronizedTimingTopologies(
+    const TimingMutationState& state,
+    const std::map<int, std::shared_ptr<IncrementalTopologyState>>& topologies);
 
 struct TimingNetRcValues
 {

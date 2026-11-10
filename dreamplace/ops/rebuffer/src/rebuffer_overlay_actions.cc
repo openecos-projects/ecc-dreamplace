@@ -384,6 +384,9 @@ py::list projectOverlayActionsFromProjection(
       if (downstream_net < 0 || downstream_net >= static_cast<int>(drivers.size())) {
         return -1;
       }
+      if (base.buffer_input_pin_by_net.size() == drivers.size()) {
+        return base.buffer_input_pin_by_net[downstream_net];
+      }
       const int downstream_driver = drivers.at(downstream_net);
       if (downstream_driver < 0
           || downstream_driver >= static_cast<int>(pin2node.size())) {

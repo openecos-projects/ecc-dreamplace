@@ -15,6 +15,7 @@ namespace rebuffer {
 
 struct SteinerView;
 struct IncrementalTopologyImage;
+struct IncrementalTopologyCheckpoint;
 
 struct IncrementalEdge
 {
@@ -68,6 +69,8 @@ struct IncrementalTopologyState
   std::vector<IncrementalBuffer> buffers;
   bool general_removal = false;
   mutable std::shared_ptr<const IncrementalTopologyImage> checkpoint_image;
+  mutable std::shared_ptr<IncrementalTopologyCheckpoint> cached_checkpoint;
+  mutable int validated_epoch = -1;
 
   // One immutable base copy lets restore rebuild a divergent checkpoint
   // history without retaining a full edge/load snapshot in every checkpoint.
@@ -100,6 +103,7 @@ struct IncrementalTopologyImage
   explicit IncrementalTopologyImage(const IncrementalTopologyState& source) : state(source)
   {
     state.checkpoint_image.reset();
+    state.cached_checkpoint.reset();
   }
   IncrementalTopologyState state;
 };

@@ -69,6 +69,17 @@ py::dict PersistentTimingGraph::initializeMutations()
   m.library_pin_names = carrierArray<std::string>(carrier_, "flat_lib_pin_names");
   const int pins = timing_index_->pins.size(), nodes = m.node_names.size();
   m.original_node_count = nodes;
+  m.base_node_ids_by_name.reserve(nodes);
+  for (int node = 0; node < nodes; ++node) {
+    m.base_node_ids_by_name.emplace(m.node_names[node], node);
+    if (m.node_names[node].rfind("__dreamplace_rebuffer_", 0) == 0) {
+      m.has_rebuffer_prefix_in_base_nodes = true;
+    }
+  }
+  m.cell_ids_by_name.reserve(m.cell_names.size());
+  for (int cell = 0; cell < static_cast<int>(m.cell_names.size()); ++cell) {
+    m.cell_ids_by_name.emplace(m.cell_names[cell], cell);
+  }
   const auto mains = carrierArray<int>(carrier_, "inst_main_id");
   const auto sizes = carrierArray<int>(carrier_, "inst_libcell_offset");
   const auto main_start = carrierArray<int>(carrier_, "main_id_2_cell_id_start");
@@ -134,6 +145,16 @@ py::dict PersistentTimingGraph::initializeMutations()
     m.node_arcs[node].push_back(id);
   }
   m.base_net_pins = m.net_pins;
+  m.buffers_by_source_net.resize(m.base_net_pins.size());
+  m.base_node_constraint_flags.assign(nodes, 0);
+  for (const auto& arc : propagation_program_->setup_arcs) {
+    const int owner = m.pin_owner[arc[1]];
+    if (owner >= 0 && owner < nodes) m.base_node_constraint_flags[owner] |= 1;
+  }
+  for (const auto& arc : propagation_program_->recovery_arcs) {
+    const int owner = m.pin_owner[arc[1]];
+    if (owner >= 0 && owner < nodes) m.base_node_constraint_flags[owner] |= 2;
+  }
   const auto caps = timingPinCapacitance(carrier_);
   constexpr std::array<const char*, 5> names{
       "caps", "rcaps", "fcaps", "max_slew", "max_cap"};
@@ -154,6 +175,9 @@ py::dict PersistentTimingGraph::initializeMutations()
   initializeTimingLocalIndex(m, *index, *propagation_program_);
   mutation_state_ = std::move(value);
   timing_index_ = std::move(index);
+  cached_active_counts_valid_ = false;
+  topology_revision_ = ++next_topology_revision_;
+  markElectricalFullDirty();
   return summary();
 }
 
@@ -239,31 +263,51 @@ py::dict PersistentTimingGraph::resizeCell(const std::string& instance_name,
   require(mutation_state_ != nullptr && timing_state_initialized_,
           "resize requires initialized mutation inputs and timing state");
   auto& m = *mutation_state_;
-  const auto node_it = std::find(m.node_names.begin(), m.node_names.end(), instance_name);
-  const auto cell_it = std::find(m.cell_names.begin(), m.cell_names.end(), master_name);
-  require(node_it != m.node_names.end(), "resize instance is absent from graph");
-  require(cell_it != m.cell_names.end(), "resize master is absent from Liberty");
-  const int node = node_it - m.node_names.begin(), cell = cell_it - m.cell_names.begin();
+  int node = -1;
+  const auto base_node_it = m.base_node_ids_by_name.find(instance_name);
+  if (base_node_it != m.base_node_ids_by_name.end()) {
+    node = base_node_it->second;
+  } else {
+    for (int id = m.original_node_count; id < static_cast<int>(m.node_names.size()); ++id) {
+      if (m.node_names[id] == instance_name) {
+        node = id;
+        break;
+      }
+    }
+  }
+  const auto cell_it = m.cell_ids_by_name.find(master_name);
+  require(node >= 0, "resize instance is absent from graph");
+  require(cell_it != m.cell_ids_by_name.end(), "resize master is absent from Liberty");
+  const int cell = cell_it->second;
   const int previous = m.node_cells[node];
   require(previous >= 0 && m.cell_mains[cell] == m.cell_mains[previous],
           "resize requires an equivalent instance master");
   require(!m.node_arcs[node].empty(), "resize instance has no timing arcs");
-  for (const auto& buffer : m.buffers) {
-    if (buffer.active && buffer.node == node) {
-      py::dict action;
-      action["action_id"] = buffer.action_id;
-      action["buffer_master_name"] = master_name;
-      return resizeBuffer(buffer.source_net, action);
+  if (node >= m.original_node_count) {
+    for (const auto& buffer : m.buffers) {
+      if (buffer.active && buffer.node == node) {
+        py::dict action;
+        action["action_id"] = buffer.action_id;
+        action["buffer_master_name"] = master_name;
+        return resizeBuffer(buffer.source_net, action);
+      }
     }
   }
   for (auto id : m.node_arcs[node]) {
     require(id >= timing_index_->clock_end, "sequential cell resize is not yet supported");
   }
-  for (const auto& arc : propagation_program_->setup_arcs) {
-    require(m.pin_owner[arc[1]] != node, "setup-constrained cell resize is not yet supported");
-  }
-  for (const auto& arc : propagation_program_->recovery_arcs) {
-    require(m.pin_owner[arc[1]] != node, "recovery-constrained cell resize is not yet supported");
+  if (node < m.original_node_count) {
+    require(!(m.base_node_constraint_flags[node] & 1),
+            "setup-constrained cell resize is not yet supported");
+    require(!(m.base_node_constraint_flags[node] & 2),
+            "recovery-constrained cell resize is not yet supported");
+  } else {
+    for (const auto& arc : propagation_program_->setup_arcs) {
+      require(m.pin_owner[arc[1]] != node, "setup-constrained cell resize is not yet supported");
+    }
+    for (const auto& arc : propagation_program_->recovery_arcs) {
+      require(m.pin_owner[arc[1]] != node, "recovery-constrained cell resize is not yet supported");
+    }
   }
   py::dict result;
   result["status"] = "ok";
@@ -314,13 +358,8 @@ py::dict PersistentTimingGraph::resizeCell(const std::string& instance_name,
   std::set<int> source_nets;
   for (int net : changed_nets) {
     require(net >= 0 && net < m.net_drivers.size(), "resize pin has no RC net");
-    int source = net;
-    if (net >= static_cast<int>(m.base_net_pins.size())) {
-      const auto found = std::find_if(m.buffers.begin(), m.buffers.end(),
-          [&](const auto& buffer) { return buffer.active && buffer.output_net == net; });
-      require(found != m.buffers.end(), "resize input has no source net provenance");
-      source = found->source_net;
-    }
+    const int source = sourceNetForMutationNet(m, net);
+    require(source >= 0, "resize input has no source net provenance");
     source_nets.insert(source);
   }
   // Validate Liberty before writing. Register the local metadata undo before
@@ -329,6 +368,7 @@ py::dict PersistentTimingGraph::resizeCell(const std::string& instance_name,
   try {
     JournalEntry entry;
     entry.previous_epoch = epoch_;
+    entry.previous_topology_revision = topology_revision_;
     entry.sequence = next_journal_sequence_++;
     entry.resize_undo = std::move(undo);
     journal_.push_back(std::move(entry));
@@ -337,7 +377,9 @@ py::dict PersistentTimingGraph::resizeCell(const std::string& instance_name,
     for (const auto& [id, row] : rows) replaceArc(m, *timing_index_, id, row);
     for (const auto& [pin, values] : proposed_pins) {
       for (int lane = 0; lane < 5; ++lane) m.pin_values[lane][pin] = values[lane];
+      markElectricalDirtyPin(pin);
     }
+    topology_revision_ = ++next_topology_revision_;
     std::vector<TimingNetRcValues> rc_values;
     for (int source : source_nets) {
       const auto topology = topologyState(source);

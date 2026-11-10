@@ -105,11 +105,11 @@ TimingEventSeeds PersistentTimingGraph::timingEventSeeds() const
 py::dict PersistentTimingGraph::propagateIncremental()
 {
   if (!timing_state_initialized_ || !propagation_program_) return propagate();
-  for (const auto& [_, topology] : net_states_) {
+  if (! net_states_.empty()) {
     if (!mutation_state_) {
       throw py::value_error("event propagation requires synchronized native topology");
     }
-    requireSynchronizedTimingTopology(*mutation_state_, *topology);
+    requireSynchronizedTimingTopologies(*mutation_state_, net_states_);
   }
   const auto seeds = timingEventSeeds();
   if (seeds.require_full) {

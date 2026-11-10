@@ -49,6 +49,7 @@ py::dict PersistentTimingGraph::stateView(bool copy) const
 
 void PersistentTimingGraph::detachStateViews()
 {
+  cached_endpoint_slacks_valid_ = false;
   if (state_views_.empty()) return;
   // Ownership transfer below may release references from every view holder.
   // Keep this graph alive until the complete transfer has finished.

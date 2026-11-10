@@ -61,9 +61,7 @@ py::dict PersistentTimingGraph::compact()
   if (!journal_.empty()) {
     throw py::value_error("compact requires a committed journal boundary");
   }
-  for (const auto& [_, topology] : net_states_) {
-    requireSynchronizedTimingTopology(*mutation_state_, *topology);
-  }
+  requireSynchronizedTimingTopologies(*mutation_state_, net_states_);
   const auto& old = *mutation_state_;
   const auto pins = liveMap(old.pin_active, propagation_program_->pin_count);
   const auto arcs = liveMap(old.cell_active, propagation_program_->schedule.cells.size());
@@ -131,6 +129,8 @@ py::dict PersistentTimingGraph::compact()
   for (int& driver : m.net_drivers) if (driver >= 0) driver = mapped(driver, pins);
   for (auto& row : m.net_pins) for (int& pin : row) pin = mapped(pin, pins);
   m.buffers.clear();
+  for (auto& vec : m.buffers_by_source_net) vec.clear();
+  m.buffer_id_by_action_id.clear();
   for (const auto& previous : old.buffers) {
     if (!previous.active) continue;
     auto row = previous;
@@ -138,6 +138,9 @@ py::dict PersistentTimingGraph::compact()
     row.input_pin = mapped(row.input_pin, pins); row.output_pin = mapped(row.output_pin, pins);
     row.output_net = mapped(row.output_net, nets);
     for (int& arc : row.arcs) arc = mapped(arc, arcs);
+    const int new_id = static_cast<int>(m.buffers.size());
+    m.buffers_by_source_net.at(row.source_net).push_back(new_id);
+    m.buffer_id_by_action_id.emplace(row.action_id, new_id);
     m.buffers.push_back(std::move(row));
   }
   auto values = remappedTimingState(pins, arcs);
@@ -159,6 +162,11 @@ py::dict PersistentTimingGraph::compact()
   mutation_state_ = std::move(next);
   timing_index_ = std::move(index);
   state_ = std::move(values);
+  cached_active_counts_valid_ = false;
+  ++topology_revision_;
+  markElectricalFullDirty();
+  cached_endpoint_pin_names_.clear();
+  cached_endpoint_slacks_by_name_values_.clear();
   ++epoch_;
   ++journal_generation_;
   result["state"] = summary();

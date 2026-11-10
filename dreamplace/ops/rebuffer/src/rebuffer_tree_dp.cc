@@ -8,9 +8,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <limits>
-#include <map>
 
 namespace rebuffer {
 using Option = TreeOption;
@@ -37,19 +37,21 @@ void pruneTreeOptions(std::vector<Option>& options,
   double best_slack = -kInf;
   for (int index = 0; index < static_cast<int>(options.size()); ++index) {
     const bool dominated = !survivors.empty() && options[index].slack <= best_slack;
-    TreeVgdpTrace trace;
-    trace.trace_id = next_trace_id++;
-    trace.node_id = node_id;
-    trace.operation = "pareto_prune";
-    trace.cap = options[index].cap;
-    trace.slack = options[index].slack;
-    trace.slew_rise = options[index].slew_rise;
-    trace.slew_fall = options[index].slew_fall;
-    trace.area = options[index].area;
-    trace.buffer_count = options[index].buffer_count;
-    trace.survivor = !dominated;
-    trace.reason = dominated ? "dominated" : "frontier_survivor";
-    result.trace.push_back(std::move(trace));
+    if (next_trace_id >= 0) {
+      TreeVgdpTrace trace;
+      trace.trace_id = next_trace_id++;
+      trace.node_id = node_id;
+      trace.operation = "pareto_prune";
+      trace.cap = options[index].cap;
+      trace.slack = options[index].slack;
+      trace.slew_rise = options[index].slew_rise;
+      trace.slew_fall = options[index].slew_fall;
+      trace.area = options[index].area;
+      trace.buffer_count = options[index].buffer_count;
+      trace.survivor = !dominated;
+      trace.reason = dominated ? "dominated" : "frontier_survivor";
+      result.trace.push_back(std::move(trace));
+    }
     if (!dominated) {
       best_slack = options[index].slack;
       survivors.push_back(std::move(options[index]));
@@ -59,21 +61,6 @@ void pruneTreeOptions(std::vector<Option>& options,
   options = std::move(survivors);
 }
 
-namespace {
-
-int findEdge(const CurrentDriverTree& tree, int parent, int child)
-{
-  for (int index = 0; index < static_cast<int>(tree.edges.size()); ++index) {
-    if (tree.edges[index].parent_node_id == parent
-        && tree.edges[index].child_node_id == child) {
-      return index;
-    }
-  }
-  return -1;
-}
-
-}  // namespace
-
 bool planCurrentDriverTree(const DesignView& design,
                            const TimingView& timing,
                            const LibertyView& liberty,
@@ -81,7 +68,8 @@ bool planCurrentDriverTree(const DesignView& design,
                            const RepairConfig& config,
                            const CurrentDriverTree& tree,
                            TreeVgdpResult& result,
-                           std::string& reason)
+                           std::string& reason,
+                           bool record_trace)
 {
   result = TreeVgdpResult{};
   if (!validateCurrentDriverTree(tree, reason)) {
@@ -103,8 +91,13 @@ bool planCurrentDriverTree(const DesignView& design,
   }
   result.tree_node_count = static_cast<int>(tree.nodes.size());
   result.tree_edge_count = static_cast<int>(tree.edges.size());
+  std::vector<int> edge_by_child(tree.nodes.size(), -1);
+  for (int index = 0; index < static_cast<int>(tree.edges.size()); ++index) {
+    edge_by_child[tree.edges[index].child_node_id] = index;
+  }
   std::vector<int> depth(tree.nodes.size(), 0);
   std::vector<int> traversal{tree.root_node_id};
+  traversal.reserve(tree.nodes.size());
   for (std::size_t i = 0; i < traversal.size(); ++i) {
     const int parent = traversal[i];
     if (tree.nodes[parent].child_node_ids.size() > 1) ++result.tree_branch_count;
@@ -114,13 +107,13 @@ bool planCurrentDriverTree(const DesignView& design,
       traversal.push_back(child);
     }
   }
-  std::vector<int> trace_id{0};
-  std::map<int, std::vector<Option>> memo;
+  int trace_id = record_trace ? 0 : -1;
+  std::vector<std::vector<Option>> memo(tree.nodes.size());
+  std::vector<std::uint8_t> memo_ready(tree.nodes.size(), 0);
 
-  std::function<std::vector<Option>(int)> visit = [&](const int node_id) {
-    const auto found = memo.find(node_id);
-    if (found != memo.end()) {
-      return found->second;
+  std::function<const std::vector<Option>&(int)> visit = [&](const int node_id) -> const std::vector<Option>& {
+    if (memo_ready[node_id]) {
+      return memo[node_id];
     }
     const auto& node = tree.nodes[node_id];
     std::vector<Option> options;
@@ -138,17 +131,21 @@ bool planCurrentDriverTree(const DesignView& design,
       options.push_back(std::move(sentinel));
       for (const int child_id : node.child_node_ids) {
         std::vector<Option> edge_options;
-        const auto child_options = visit(child_id);
-        const int edge_id = findEdge(tree, node_id, child_id);
-        if (edge_id < 0) {
+        const auto& child_options = visit(child_id);
+        const int edge_id = edge_by_child[child_id];
+        if (edge_id < 0 || tree.edges[edge_id].parent_node_id != node_id) {
           reason = "tree_edge_missing_from_child_ancestry";
-          return std::vector<Option>{};
+          memo_ready[node_id] = 1;
+          return memo[node_id];
         }
         const auto& edge = tree.edges[edge_id];
         edge_options = treeWireCandidates(design, liberty, characterization,
                                           config, tree, edge, depth[node_id],
-                                          child_options, result, trace_id[0], reason);
-        if (!reason.empty()) return std::vector<Option>{};
+                                          child_options, result, trace_id, reason);
+        if (!reason.empty()) {
+          memo_ready[node_id] = 1;
+          return memo[node_id];
+        }
         std::vector<Option> merged;
         if (options.size() == 1 && options.front().slack == kInf
             && options.front().cap == 0.0) {
@@ -179,10 +176,11 @@ bool planCurrentDriverTree(const DesignView& design,
           }
         }
         options = std::move(merged);
-        pruneTreeOptions(options, node_id, result, trace_id[0]);
+        pruneTreeOptions(options, node_id, result, trace_id);
         if (options.empty()) {
           reason = "tree_vgdp_frontier_empty";
-          return options;
+          memo_ready[node_id] = 1;
+          return memo[node_id];
         }
       }
     }
@@ -219,12 +217,13 @@ bool planCurrentDriverTree(const DesignView& design,
         }
       }
     }
-    pruneTreeOptions(options, node_id, result, trace_id[0]);
-    memo.emplace(node_id, options);
-    return options;
+    pruneTreeOptions(options, node_id, result, trace_id);
+    memo[node_id] = std::move(options);
+    memo_ready[node_id] = 1;
+    return memo[node_id];
   };
 
-  const auto root_options = visit(tree.root_node_id);
+  const auto& root_options = visit(tree.root_node_id);
   if (root_options.empty()) {
     if (reason.empty()) reason = "tree_vgdp_no_root_option";
     return false;
@@ -245,10 +244,12 @@ bool planCurrentDriverTree(const DesignView& design,
   }
   for (auto& option : ranked) {
     option.slack += treeRootCorrection(root, option.cap);
-    result.trace.push_back({trace_id[0]++, tree.root_node_id, "root_score",
-                            option.cap, option.slack, option.slew_rise,
-                            option.slew_fall, option.area, option.buffer_count,
-                            true, "linear_driver_load_correction"});
+    if (record_trace) {
+      result.trace.push_back({trace_id++, tree.root_node_id, "root_score",
+                              option.cap, option.slack, option.slew_rise,
+                              option.slew_fall, option.area, option.buffer_count,
+                              true, "linear_driver_load_correction"});
+    }
   }
   std::sort(ranked.begin(), ranked.end(), [](const Option& lhs, const Option& rhs) {
     if (lhs.slack != rhs.slack) return lhs.slack > rhs.slack;

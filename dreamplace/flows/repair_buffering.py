@@ -59,8 +59,8 @@ REPAIR_TIMING_DEFAULTS = {
     "native_openroad_decreasing_slack_journal": False,
     "decreasing_slack_max_passes": 5,
     "openroad_journal_keep_nonimproving": True,
-    # Physical commit is re-verified in chunks with a fresh Python TP.
-    "commit_verify_chunk": 8,
+    # Physical commit is re-verified with a fresh Python TP (0 = optimistic full batch with binary split fallback).
+    "commit_verify_chunk": 0,
     "commit_verify_wns_margin_ps": 0.0,
     "commit_verify_tns_margin_ps": 0.0,
 }
@@ -70,8 +70,8 @@ def resolve_repair_timing_config(config):
     """Return the native repair_timing config with explicit overrides."""
 
     resolved = {**REPAIR_TIMING_DEFAULTS, **dict(config or {})}
-    if int(resolved["commit_verify_chunk"]) <= 0:
-        raise ValueError("repair_timing requires commit_verify_chunk > 0")
+    if int(resolved["commit_verify_chunk"]) < 0:
+        raise ValueError("repair_timing requires commit_verify_chunk >= 0")
     if int(resolved["python_timing_candidate_top_k"]) < 1:
         raise ValueError("python_timing_candidate_top_k must be a positive integer")
     scheduler = resolved.get("timing_scheduler", "queue")
@@ -242,9 +242,20 @@ def _run_repair_timing(placedb, *, max_passes, config, profile=None):
 
     raw_db = _rawdb(placedb)
     # In repair_design_then_timing the design stage already refreshed
-    # raw_db.pydb to the dbu database.  The session and timing model must
-    # share that exact object; PlaceIOBufferSession rejects a second export.
+    # raw_db.pydb to the dbu database.  When repair_timing runs standalone
+    # after a native mutation, refresh the carrier once before opening the session.
     pydb = raw_db.pydb
+    if getattr(raw_db, "module", None) is not None and bool(
+        getattr(pydb, "native_state_dirty", False)
+    ):
+        from dreamplace.ops.placeio_ecc.timing_carrier import refresh_python_timing_carrier
+
+        with measure_phase(profile, "input_carrier_refresh_ms"):
+            pydb, _ = refresh_python_timing_carrier(raw_db)
+            try:
+                raw_db._carrier_positions_synced = True
+            except AttributeError:
+                pass
     with measure_phase(profile, "python_timing_model_build_ms"):
         timing_model = RebufferTimingModel(
             pydb,

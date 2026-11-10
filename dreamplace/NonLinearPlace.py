@@ -6263,6 +6263,23 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     num_area_adjust += 1
                                     if getattr(model, "inflation_state", None) is not None:
                                         model.inflation_state.num_area_adjust = num_area_adjust
+                                    if midplace is not None and callable(
+                                        getattr(midplace, "after_inflation_window", None)
+                                    ):
+                                        midplace.after_inflation_window(
+                                            self,
+                                            model,
+                                            Llambda_metrics[-1][-1],
+                                            eval_ops,
+                                            PlacementCursor(
+                                                cur_stage,
+                                                Lgamma_step,
+                                                model.Llambda_density_weight_iteration - 1,
+                                                model.Lsub_iteration - 1,
+                                                iteration - 1,
+                                            ),
+                                            window_index=num_area_adjust,
+                                        )
                                     # restart Llambda
                                     model.refresh_after_geometry_change()
                                     model.initialize_restart_density_weight(

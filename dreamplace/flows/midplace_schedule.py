@@ -32,6 +32,7 @@ class MidplaceSchedule:
     enable_l_shape_routability: bool = False
     use_l_shape_routability: bool = False
     l_shape_state: dict = field(default_factory=dict)
+    inflated_movable_sizes: dict[str, tuple[float, float]] = field(default_factory=dict)
 
     def capture(
         self,
@@ -50,6 +51,28 @@ class MidplaceSchedule:
             self.timing = copy.deepcopy(owner.schedule)
             self.timing_round = owner.round_index
             self.timing_summaries = copy.deepcopy(owner.summaries)
+        dc = getattr(placer, "data_collections", None)
+        placedb = getattr(placer, "placedb", None)
+        if (
+            dc is not None
+            and placedb is not None
+            and getattr(dc, "node_size_x", None) is not None
+            and getattr(dc, "original_node_size_x", None) is not None
+        ):
+            count = int(placedb.num_movable_nodes)
+            node_names = [
+                name.decode() if isinstance(name, bytes) else str(name)
+                for name in placedb.node_names[:count]
+            ]
+            wx = dc.node_size_x[:count].detach().cpu().tolist()
+            wy = dc.node_size_y[:count].detach().cpu().tolist()
+            owx = dc.original_node_size_x[:count].detach().cpu().tolist()
+            owy = dc.original_node_size_y[:count].detach().cpu().tolist()
+            self.inflated_movable_sizes = {
+                name: (float(w), float(h))
+                for name, w, h, ow, oh in zip(node_names, wx, wy, owx, owy, strict=True)
+                if w > ow + 1e-12 or h > oh + 1e-12
+            }
         controller = placer._routability_controller
         self.gp_steps = controller._gp_steps
         self.last_inflation_step = controller._last_inflation_step
@@ -238,4 +261,65 @@ class MidplaceSchedule:
             else list(self.timing.pending_milestones),
             "inflation_rounds_completed": dict(self.inflation_rounds),
             "gp_steps_completed": self.gp_steps,
+            "inflated_movable_nodes_captured": len(self.inflated_movable_sizes),
         }
+
+    def restore_inflated_geometry(self, placer, placedb, cooptimization=None):
+        if not self.inflated_movable_sizes:
+            return {"restored_inflated_nodes": 0}
+        import torch
+
+        from dreamplace.ops.routability.cooptimization_area import (
+            capture_area,
+            coordinate_area,
+        )
+
+        dc = getattr(placer, "data_collections", None)
+        if dc is None or placedb is None:
+            return {"restored_inflated_nodes": 0}
+        if not hasattr(dc, "original_node_size_x") or dc.original_node_size_x is None:
+            dc.original_node_size_x = dc.node_size_x.detach().clone()
+        if not hasattr(dc, "original_node_size_y") or dc.original_node_size_y is None:
+            dc.original_node_size_y = dc.node_size_y.detach().clone()
+        if not hasattr(dc, "original_pin_offset_x") or dc.original_pin_offset_x is None:
+            dc.original_pin_offset_x = dc.pin_offset_x.detach().clone()
+        if not hasattr(dc, "original_pin_offset_y") or dc.original_pin_offset_y is None:
+            dc.original_pin_offset_y = dc.pin_offset_y.detach().clone()
+        capacity = getattr(cooptimization, "capacity", None)
+        before = capture_area(dc, placedb, 0.0, capacity=capacity)
+        count = int(placedb.num_movable_nodes)
+        node_names = [
+            name.decode() if isinstance(name, bytes) else str(name)
+            for name in placedb.node_names[:count]
+        ]
+        pos = placer.pos[0]
+        num_nodes = int(placedb.num_nodes)
+        restored = 0
+        with torch.no_grad():
+            for node_id, name in enumerate(node_names):
+                inflated = self.inflated_movable_sizes.get(name)
+                if inflated is None:
+                    continue
+                ow = float(dc.original_node_size_x[node_id].item())
+                oh = float(dc.original_node_size_y[node_id].item())
+                nw = max(ow, float(inflated[0]))
+                nh = max(oh, float(inflated[1]))
+                if nw <= ow + 1e-12 and nh <= oh + 1e-12:
+                    continue
+                dx = (nw - ow) * 0.5
+                dy = (nh - oh) * 0.5
+                dc.node_size_x[node_id] = nw
+                dc.node_size_y[node_id] = nh
+                pos.data[node_id] -= dx
+                pos.data[num_nodes + node_id] -= dy
+                pin_start = int(placedb.flat_node2pin_start_map[node_id])
+                pin_end = int(placedb.flat_node2pin_start_map[node_id + 1])
+                if pin_end > pin_start:
+                    pins = dc.flat_node2pin_map[pin_start:pin_end].long()
+                    dc.pin_offset_x[pins] = dc.original_pin_offset_x[pins] + dx
+                    dc.pin_offset_y[pins] = dc.original_pin_offset_y[pins] + dy
+                restored += 1
+            if restored > 0:
+                coordinate_area(before, dc, placedb, pos, 0.0)
+                placedb.cooptimization_geometry = dc
+        return {"restored_inflated_nodes": restored}

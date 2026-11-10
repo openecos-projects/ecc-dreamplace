@@ -560,14 +560,22 @@ class InflationS5B1:
         preparation_ms = buffering_ms = 0.0
         buffering = {"status": "disabled", "scheduled": 0, "accepted": 0, "cumulative_count": 0}
         if bool(getattr(self.params, "timing_opt_buffering_enabled", False)):
-            self.prepare(model, pos)
-            prepared = time.perf_counter()
-            with self.electrical_window():
-                buffering = self.run_buffering(model, pos, entry.capacity)
-            buffering_done = time.perf_counter()
-            self.retain_buffered_nets(model)
-            preparation_ms = (prepared - sizing_done) * 1000.0
-            buffering_ms = (buffering_done - prepared) * 1000.0
+            if bool(getattr(self.params, "repair_buffering_midplace_enable", False)):
+                buffering = {
+                    "status": "deferred_to_midplace_repair_timing",
+                    "scheduled": 0,
+                    "accepted": 0,
+                    "cumulative_count": 0,
+                }
+            else:
+                self.prepare(model, pos)
+                prepared = time.perf_counter()
+                with self.electrical_window():
+                    buffering = self.run_buffering(model, pos, entry.capacity)
+                buffering_done = time.perf_counter()
+                self.retain_buffered_nets(model)
+                preparation_ms = (prepared - sizing_done) * 1000.0
+                buffering_ms = (buffering_done - prepared) * 1000.0
         return {
             "iteration": int(iteration),
             "sizing": sizing,
@@ -580,12 +588,17 @@ class InflationS5B1:
 
     def _sync_native_sizing(self):
         from dreamplace.ops.placeio_ecc.place_io import PlaceIOFunction
+        from dreamplace.ops.placeio_ecc.timing_carrier import (
+            CommittedTimingPyDB,
+            apply_inplace_carrier_sizing,
+        )
         from dreamplace.ops.routability.gpugr_context import invalidate_route_state
 
         if str(self.params.place_io_engine) != "ecc":
             raise ValueError("inflation S5B1 requires the ECC native backend")
         targets = self.data.inst_cell_id.detach().cpu()
-        changed = int((targets != self.native_cell_ids).sum())
+        changed_ids = torch.nonzero(targets != self.native_cell_ids).flatten().tolist()
+        changed = len(changed_ids)
         if not changed:
             return {"ok": True, "accepted_count": 0, "requested_count": 0}
         names = [
@@ -600,6 +613,12 @@ class InflationS5B1:
         )
         if not summary.get("ok") or int(summary.get("accepted_count", 0)) != changed:
             raise RuntimeError(f"S5B1 native sizing transaction failed: {summary}")
+        if isinstance(getattr(self.placedb.rawdb, "pydb", None), CommittedTimingPyDB):
+            resizes = [
+                {"node_id": int(node_id), "target_cell_index": int(targets[node_id])}
+                for node_id in changed_ids
+            ]
+            apply_inplace_carrier_sizing(self.placedb.rawdb, resizes)
         self.native_cell_ids.copy_(targets)
         invalidate_route_state(self.placedb)
         return summary

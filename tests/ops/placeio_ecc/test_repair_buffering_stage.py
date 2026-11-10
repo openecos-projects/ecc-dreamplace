@@ -242,7 +242,7 @@ def test_repair_timing_uses_the_verified_native_defaults(tmp_path, monkeypatch):
     assert stage["accepted_count"] == 1
     assert stage["verified_kept_count"] == 1
     assert stage["buffer_histogram"] == {"BUF": 1}
-    assert verified_calls[0][1]["chunk_size"] == 8
+    assert verified_calls[0][1]["chunk_size"] == 0
     assert placedb.rebuild_calls == [("verified_refreshed", "all")]
 
 
@@ -327,7 +327,7 @@ def test_repair_timing_without_accepted_actions_is_noop(monkeypatch):
 @pytest.mark.parametrize(
     ("override", "message"),
     [
-        ({"commit_verify_chunk": 0}, "commit_verify_chunk"),
+        ({"commit_verify_chunk": -1}, "commit_verify_chunk"),
         ({"python_timing_candidate_top_k": 0}, "python_timing_candidate_top_k"),
     ],
 )

@@ -611,6 +611,7 @@ def test_size_only_repair_syncs_runtime_inplace_without_restart(setup, monkeypat
 
 def test_macroplacedb_incremental_rebuild_reuses_static_arrays_with_exact_parity(tmp_path):
     from copy import deepcopy
+
     from dreamplace.macroPlaceDB import MacroPlaceDB
 
     def make_pydb(num_movable=2):
@@ -928,6 +929,132 @@ def test_first_inflation_window_replaced_by_repair_design_leaves_four_s5b1_windo
     fresh_model.apply_timing_grad_balance_state.assert_called_once_with(
         {"initialized": True, "weight_applied": 0.25}
     )
+
+
+def test_s5b1_window_runs_repair_timing_and_preserves_inflated_geometry(
+    setup, monkeypatch
+):
+    engine, session, old, model, metric, _ = setup
+    engine.params.routability_opt_flag = 1
+    engine.params.timing_opt_buffering_enabled = 1
+    engine.params.node_area_adjust_overflow = 0.15
+    schedule = TimingOptWindowSchedule([], 5)
+    schedule.inflation_event(iteration=10, stage=0)
+    schedule.inflation_event(iteration=50, stage=0)
+    old.inflation_s5b1 = SimpleNamespace(
+        schedule=schedule,
+        round_index=5,
+        summaries=[
+            {
+                "window": 2,
+                "sizing": {"best_round": 2},
+                "buffering": {
+                    "status": "deferred_to_midplace_repair_timing",
+                    "scheduled": 0,
+                    "accepted": 0,
+                    "cumulative_count": 0,
+                },
+            }
+        ],
+        capacity=1000.0,
+        sync_native_sizing=lambda: {"ok": True, "accepted_count": 0, "requested_count": 0},
+        _write_summaries=Mock(),
+    )
+    old.placedb = engine.placedb
+    old.data_collections.original_node_size_x = old.data_collections.node_size_x.clone()
+    old.data_collections.original_node_size_y = old.data_collections.node_size_y.clone()
+    old.data_collections.original_pin_offset_x = torch.zeros(
+        len(engine.placedb.pin2node_map), dtype=torch.float32
+    )
+    old.data_collections.original_pin_offset_y = torch.zeros(
+        len(engine.placedb.pin2node_map), dtype=torch.float32
+    )
+    old.data_collections.pin_offset_x = old.data_collections.original_pin_offset_x.clone()
+    old.data_collections.pin_offset_y = old.data_collections.original_pin_offset_y.clone()
+    old.data_collections.node_size_x[0] = 6.0
+    old.data_collections.node_size_y[0] = 5.0
+    old.pos[0].data[0] -= 1.0
+    old.pos[0].data[engine.placedb.num_nodes] -= 1.0
+    engine.placedb.cooptimization_geometry = old.data_collections
+    model.inflation_state = SimpleNamespace(num_area_adjust=2)
+    model.routability_Lsub_iteration = 5
+
+    observed_modes = []
+
+    def stage_fn(db, **kwargs):
+        observed_modes.append(kwargs["mode"])
+        updated = database(3)
+        db.__dict__.update(updated.__dict__)
+        db.topology_generation = 2
+        return {
+            "status": "ok",
+            "stages": {
+                "repair_timing": {
+                    "status": "ok",
+                    "accepted_count": 1,
+                    "verified_kept_count": 1,
+                    "timing_before": {"wns_ps": -200.0, "tns_ps": -500.0},
+                    "timing_after": {"wns_ps": -100.0, "tns_ps": -250.0},
+                    "plan": {"accepted_actions": [{"buffer_master_name": "BUF"}]},
+                }
+            },
+        }
+
+    monkeypatch.setattr(repair, "run_repair_buffering_stage", stage_fn)
+    metric.overflow = torch.tensor(0.14)
+    with pytest.raises(repair.MidplaceRestart):
+        session.after_inflation_window(
+            old,
+            model,
+            metric,
+            {},
+            PlacementCursor(stage=0, gamma=20, density=0, sub=0, raw_iteration=50),
+            window_index=2,
+        )
+
+    assert observed_modes == ["repair_timing"]
+    assert session.record["window_repairs"][0]["window"] == 2
+    assert session.record["window_repairs"][0]["mode"] == "repair_timing"
+    assert session.record["window_repairs"][0]["inserted_count"] == 1
+    assert old.inflation_s5b1.summaries[-1]["buffering"]["accepted"] == 1
+    assert old.inflation_s5b1.summaries[-1]["buffering"]["cumulative_count"] == 1
+
+    def build_fresh():
+        fresh_placer = placer_for(engine.placedb)
+        fresh_placer.placedb = engine.placedb
+        fresh_placer.data_collections.original_node_size_x = (
+            fresh_placer.data_collections.node_size_x.clone()
+        )
+        fresh_placer.data_collections.original_node_size_y = (
+            fresh_placer.data_collections.node_size_y.clone()
+        )
+        fresh_placer.data_collections.original_pin_offset_x = torch.zeros(
+            len(engine.placedb.pin2node_map), dtype=torch.float32
+        )
+        fresh_placer.data_collections.original_pin_offset_y = torch.zeros(
+            len(engine.placedb.pin2node_map), dtype=torch.float32
+        )
+        fresh_placer.data_collections.pin_offset_x = (
+            fresh_placer.data_collections.original_pin_offset_x.clone()
+        )
+        fresh_placer.data_collections.pin_offset_y = (
+            fresh_placer.data_collections.original_pin_offset_y.clone()
+        )
+        fresh_placer.data_collections.target_density = torch.tensor([0.8], dtype=torch.float32)
+        fresh_placer.data_collections.sorted_node_map = torch.zeros(
+            engine.placedb.num_movable_nodes, dtype=torch.int32
+        )
+        return fresh_placer
+
+    fresh = session.build_placer(build_fresh)
+    fresh_owner = SimpleNamespace(lane=None, capacity=1000.0)
+    session.runtime_ready(fresh, fresh_owner, fresh._routability_controller)
+    assert session.record["inflated_geometry_restore"] == {"restored_inflated_nodes": 1}
+    assert float(fresh.data_collections.node_size_x[0]) == pytest.approx(6.0)
+    assert float(fresh.data_collections.node_size_y[0]) == pytest.approx(5.0)
+    assert float(fresh.data_collections.original_node_size_x[0]) == pytest.approx(1.0)
+    assert float(fresh.data_collections.original_node_size_y[0]) == pytest.approx(1.0)
+
 
 
 

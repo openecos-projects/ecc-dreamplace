@@ -187,11 +187,15 @@ def polynomial_window_inputs():
     )
     data.get_continuous_size_parameter = lambda: data.real_size
     data.sizing_parameterization = "real_size"
-    params = SimpleNamespace(timing_opt_sizing_rounds=2, timing_opt_max_windows=2,
-                             discrete_gradient_topk_shared_budget_percent=1.,
-                             placement_sizing_mode="place_only", timing_objective_lane="timing_only",
-                             differentiable_timing_obj=0,
-                             timing_opt_buffering_enabled=0)
+    params = SimpleNamespace(
+        timing_opt_sizing_rounds=2,
+        timing_opt_max_windows=2,
+        discrete_gradient_topk_shared_budget_percent=1.0,
+        placement_sizing_mode="place_only",
+        timing_objective_lane="timing_only",
+        differentiable_timing_obj=0,
+        timing_opt_buffering_enabled=0,
+    )
     db = SimpleNamespace(num_movable_nodes=1, num_filler_nodes=0, area=4.,
                          total_fixed_node_area=0., total_space_area=4., regions=[])
     return params, db, data
@@ -739,3 +743,48 @@ def test_placement_window_sizing_delegates_to_lut_action_owner():
     assert owner.round_index == 2
     assert delegate._pending_dirty_instance_ids == set()
     assert delegate._pending_dirty_net_ids == set()
+
+
+def test_s5b1_run_defers_buffering_when_midplace_repair_enabled(monkeypatch):
+    from contextlib import nullcontext
+
+    owner = InflationS5B1.__new__(InflationS5B1)
+    owner.params = SimpleNamespace(
+        timing_opt_buffering_enabled=True,
+        repair_buffering_midplace_enable=True,
+    )
+    owner.placedb = SimpleNamespace(
+        regions=[],
+        num_movable_nodes=1,
+        num_filler_nodes=0,
+        area=100.0,
+        total_fixed_node_area=0.0,
+        total_space_area=100.0,
+    )
+    owner.data = SimpleNamespace(
+        sizing_parameterization="real_size",
+        node_size_x=torch.tensor([2.0]),
+        node_size_y=torch.tensor([2.0]),
+        original_node_size_x=torch.tensor([2.0]),
+        original_node_size_y=torch.tensor([2.0]),
+    )
+    owner.lane = object()
+    owner.virtual_area = lambda _model: 0.0
+    owner.electrical_window = nullcontext
+    owner._sizing_coefficients = lambda _model: nullcontext({"wns": 1.0})
+    owner.run_sizing = lambda *_args, **_kwargs: {"best_round": 1}
+    prepare_calls = []
+    owner.prepare = lambda *_args, **_kwargs: prepare_calls.append(1)
+
+    model = SimpleNamespace(_timing_geometry_cache=None)
+    pos = torch.tensor([0.0, 0.0])
+    summary = owner.run(model, pos, iteration=12)
+
+    assert prepare_calls == []
+    assert summary["buffering"] == {
+        "status": "deferred_to_midplace_repair_timing",
+        "scheduled": 0,
+        "accepted": 0,
+        "cumulative_count": 0,
+    }
+

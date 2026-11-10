@@ -143,6 +143,9 @@ class MidplaceRepairSession:
             )
         with self.profile.measure("virtual_state_validation_ms"):
             self.record["s5b1_inflation_state"] = self.schedule.restore(cooptimization, controller)
+            self.record["inflated_geometry_restore"] = self.schedule.restore_inflated_geometry(
+                placer, self.engine.placedb, cooptimization
+            )
             self.record["new_placer_id"] = id(placer)
             self.record["position_seed_consumed"] = (
                 self.engine.placedb.pending_continuation_seed is None
@@ -244,6 +247,16 @@ class MidplaceRepairSession:
         schedule = getattr(owner, "schedule", None)
         return schedule is not None and schedule.mode == "inflation"
 
+    def supports_inflation_window_repair_timing(self, placer):
+        params = self.engine.params
+        if not bool(getattr(params, "routability_opt_flag", False)):
+            return False
+        if not bool(getattr(params, "timing_opt_buffering_enabled", False)):
+            return False
+        owner = getattr(placer, "inflation_s5b1", None)
+        schedule = getattr(owner, "schedule", None)
+        return schedule is not None and schedule.mode == "inflation"
+
     def before_first_inflation(self, placer, model, metric, eval_ops, cursor):
         if self.active or self.tracker.consumed:
             return False
@@ -278,6 +291,44 @@ class MidplaceRepairSession:
         )
         return True
 
+    def after_inflation_window(
+        self, placer, model, metric, eval_ops, cursor, *, window_index
+    ):
+        if not self.supports_inflation_window_repair_timing(placer):
+            return False
+        placedb = self.engine.placedb
+        overflow = float(metric.overflow.detach().max().cpu())
+        threshold = float(
+            getattr(self.engine.params, "node_area_adjust_overflow", self.config.overflow)
+        )
+        observation = OverflowObservation(
+            overflow,
+            int(getattr(placedb, "topology_generation", 0)),
+            cursor,
+            self.completed_steps,
+            self.total_steps,
+        )
+        previous = self.tracker.previous_overflow
+        self.tracker.previous_overflow = overflow
+        request = MidplaceRequest(
+            f"midplace-w{int(window_index)}",
+            threshold,
+            previous,
+            observation,
+            observation,
+        )
+        self._execute(
+            placer,
+            model,
+            request,
+            consume_inflation_window=False,
+            metric=metric,
+            mode_override="repair_timing",
+            artifact_subdir=f"midplace-repair-w{int(window_index)}",
+            window_index=int(window_index),
+        )
+        return True
+
     def observe_initial(self, metric, cursor):
         """Capture the first metric before an S5B1 window can replace it."""
         if self.initial_observed or self.completed_steps:
@@ -301,8 +352,12 @@ class MidplaceRepairSession:
         *,
         consume_inflation_window=False,
         metric=None,
+        mode_override=None,
+        artifact_subdir=None,
+        window_index=None,
     ):
         placedb, params = self.engine.placedb, self.engine.params
+        repair_mode = mode_override or self.config.mode
         self.record.update(
             status="repair_executing",
             request=request.as_dict(),
@@ -345,23 +400,24 @@ class MidplaceRepairSession:
         # The terminal repair path reads this with a default; placement
         # workspaces that only set the midplace switches leave it absent.
         config = dict(getattr(params, "repair_buffering_config", None) or {})
-        if self.config.mode == "repair_design_then_timing":
-            config.update(
-                use_native_timing_graph=True,
-                use_native_timing_queue=True,
-                use_native_timing_evaluation=True,
-                use_native_timing_planning=True,
-            )
+        if repair_mode in ("repair_timing", "repair_design_then_timing"):
+            for flag in (
+                "use_native_timing_graph",
+                "use_native_timing_queue",
+                "use_native_timing_evaluation",
+                "use_native_timing_planning",
+            ):
+                config.setdefault(flag, True)
         can_inplace_size = _can_sync_size_only_inplace(placer, placedb)
         stage_kwargs = (
             {"skip_size_only_rebuild": True} if can_inplace_size else {}
         )
         stage = run_repair_buffering_stage(
             placedb,
-            mode=self.config.mode,
+            mode=repair_mode,
             max_passes=self.config.max_passes,
             config=config,
-            artifact_dir=self.path.parent / "midplace-repair",
+            artifact_dir=self.path.parent / (artifact_subdir or "midplace-repair"),
             topology_generation=request.execution.topology_generation,
             profile=self.profile,
             **stage_kwargs,
@@ -376,12 +432,12 @@ class MidplaceRepairSession:
                 else "repair_plan_failed"
             )
             raise RuntimeError(f"midplace repair failed: {stage['status']}")
-        design = stage["stages"]["repair_design"]
+        design = stage["stages"].get("repair_design", {})
         inserted = int(design.get("inserted_count", 0) or 0)
         resized = int(design.get("resized_count", 0) or 0)
         timing = stage["stages"].get("repair_timing")
         if timing is not None:
-            inserted += int(timing.get("verified_kept_count", 0))
+            inserted += int(timing.get("verified_kept_count", 0) or 0)
         mutation = (
             "resize+insert"
             if inserted and resized
@@ -401,6 +457,38 @@ class MidplaceRepairSession:
         self.record["incremental_full_fallback"] = self.record["timing_validation"][
             "incremental_full_fallback"
         ]
+        if window_index is not None:
+            window_entry = {
+                "window": int(window_index),
+                "mode": repair_mode,
+                "mutation_kind": mutation,
+                "inserted_count": inserted,
+                "resized_count": resized,
+                "timing_before": (timing or design).get("timing_before"),
+                "timing_after": (timing or design).get("timing_after"),
+                "artifact_path": stage.get("artifact_path"),
+            }
+            self.record.setdefault("window_repairs", []).append(window_entry)
+            owner = getattr(placer, "inflation_s5b1", None)
+            cumulative_inserted = sum(
+                int(item.get("inserted_count", 0) or 0)
+                for item in self.record.get("window_repairs", ())
+            )
+            buffering_summary = {
+                "status": "committed" if inserted > 0 else "noop",
+                "mode": repair_mode,
+                "scheduled": int((timing or {}).get("accepted_count", 0) or 0),
+                "accepted": inserted,
+                "cumulative_count": cumulative_inserted,
+                "timing_before": (timing or {}).get("timing_before"),
+                "timing_after": (timing or {}).get("timing_after"),
+            }
+            if owner is not None and owner.summaries:
+                owner.summaries[-1]["buffering"] = dict(buffering_summary)
+                if callable(getattr(owner, "_write_summaries", None)):
+                    owner._write_summaries()
+            if self.schedule.timing_summaries:
+                self.schedule.timing_summaries[-1]["buffering"] = dict(buffering_summary)
         self.active = True
         params._midplace_objectives_pending = False
         self.record["objectives_ready_after_repair"] = True
@@ -411,7 +499,7 @@ class MidplaceRepairSession:
                 window_summary={
                     "stage": int(request.execution.cursor.stage),
                     "iteration": int(request.execution.cursor.raw_iteration + 1),
-                    "mode": self.config.mode,
+                    "mode": repair_mode,
                     "mutation_kind": mutation,
                     "inserted_count": inserted,
                     "resized_count": resized,

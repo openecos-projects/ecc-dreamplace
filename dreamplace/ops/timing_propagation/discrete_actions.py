@@ -1,6 +1,5 @@
 """Opt-in four-action gradient context for fixed-master LUT timing."""
 
-import copy
 from dataclasses import dataclass, field
 
 import torch
@@ -166,7 +165,7 @@ class DiscreteActionContext:
         return self.apply_drive_load(cap_rise, cap_fall)
 
 
-def _drive_load_tables(data, table, *, device, dtype):
+def _drive_load_tables(data, table, *, device, dtype, drive_cache=None, static_key=None):
     """Per input pin cap delta for each of the four actions.
 
     Physical pin ownership supplies both the master and its Liberty offset.
@@ -174,38 +173,116 @@ def _drive_load_tables(data, table, *, device, dtype):
     can share an input. Neither is a valid domain for assigning pin caps.
     """
 
-    nodes = data.pin2node_map.to(device=device, dtype=torch.long)
     current_cells = data.inst_cell_id.to(device=device, dtype=torch.long)
-    safe_inst = nodes.clamp(min=0, max=current_cells.numel() - 1)
-    targets = table.target_cell_ids.to(device=device)[safe_inst].long()
-    starts = data.cell_id_2_libpin_id_start.to(device=device, dtype=torch.long)
-    offsets = data.pin_2_libpin_offset.to(device=device, dtype=torch.long)
-    cells = current_cells[safe_inst]
-    safe_cells = cells.clamp(min=0, max=starts.numel() - 2)
-    safe_targets = targets.clamp(min=0, max=starts.numel() - 2)
-    target_pins = starts[safe_targets] + offsets.unsqueeze(1)
-    current_pins = (starts[safe_cells] + offsets).unsqueeze(1)
-    valid_pin = (nodes >= 0) & (nodes < current_cells.numel()) & (offsets >= 0)
-    valid_pin &= (cells >= 0) & (cells + 1 < starts.numel())
-    valid_pin &= current_pins[:, 0] < starts[safe_cells + 1]
-    valid = table.valid_instances.to(device=device)[safe_inst] & valid_pin.unsqueeze(1)
-    valid &= (targets >= 0) & (targets + 1 < starts.numel())
-    valid &= target_pins < starts[safe_targets + 1]
+    num_instances = int(current_cells.numel())
+    if drive_cache is not None and drive_cache.get("static_key") == static_key:
+        nodes = drive_cache["node"]
+        safe_inst = drive_cache["safe_inst"]
+        valid_node = drive_cache["valid_node"]
+        starts = drive_cache["starts"]
+        offsets = drive_cache["offsets"]
+        rcap_table = drive_cache["rcap_table"]
+        fcap_table = drive_cache["fcap_table"]
+    else:
+        nodes = data.pin2node_map.to(device=device, dtype=torch.long)
+        safe_inst = nodes.clamp(min=0, max=max(num_instances - 1, 0))
+        starts = data.cell_id_2_libpin_id_start.to(device=device, dtype=torch.long)
+        offsets = data.pin_2_libpin_offset.to(device=device, dtype=torch.long)
+        valid_node = (nodes >= 0) & (nodes < num_instances) & (offsets >= 0)
+        rcap_table = data.flat_lib_pin_rcap.to(device=device, dtype=dtype)
+        fcap_table = data.flat_lib_pin_fcap.to(device=device, dtype=dtype)
+        if drive_cache is not None:
+            drive_pin_net = data.pin2net_map.to(
+                device=device, dtype=torch.long
+            ).clamp(min=0)
+            drive_net_count = max(int(drive_pin_net.max().item()) + 1, 1)
+            net2driver_pin_map = data.net2driver_pin_map.to(
+                device=device, dtype=torch.long
+            )
+            driver_of_pin = net2driver_pin_map[drive_pin_net]
+            drive_driver_mask = driver_of_pin == torch.arange(
+                int(drive_pin_net.numel()), device=driver_of_pin.device
+            )
+            drive_cache.update(
+                {
+                    "static_key": static_key,
+                    "node": nodes,
+                    "safe_inst": safe_inst,
+                    "valid_node": valid_node,
+                    "starts": starts,
+                    "offsets": offsets,
+                    "rcap_table": rcap_table,
+                    "fcap_table": fcap_table,
+                    "pin_net": drive_pin_net,
+                    "net_count": drive_net_count,
+                    "driver_mask": drive_driver_mask,
+                }
+            )
+            drive_cache.pop("rcap", None)
+            drive_cache.pop("fcap", None)
 
-    def one(pin_table):
-        max_pin = max(int(pin_table.numel()) - 1, 0)
-        in_bounds = (
-            (target_pins >= 0)
-            & (target_pins <= max_pin)
-            & (current_pins >= 0)
-            & (current_pins <= max_pin)
+    target_cell_ids = table.target_cell_ids.to(device=device, dtype=torch.long)
+    valid_instances = table.valid_instances.to(device=device)
+
+    def compute_rows(row_slice):
+        r_inst = safe_inst[row_slice]
+        r_targets = target_cell_ids[r_inst]
+        r_offsets = offsets[row_slice]
+        r_cells = current_cells[r_inst]
+        safe_cells = r_cells.clamp(min=0, max=starts.numel() - 2)
+        safe_targets = r_targets.clamp(min=0, max=starts.numel() - 2)
+        target_pins = starts[safe_targets] + r_offsets.unsqueeze(1)
+        current_pins = (starts[safe_cells] + r_offsets).unsqueeze(1)
+        v_pin = valid_node[row_slice] & (r_cells >= 0) & (r_cells + 1 < starts.numel())
+        v_pin &= current_pins[:, 0] < starts[safe_cells + 1]
+        valid = valid_instances[r_inst] & v_pin.unsqueeze(1)
+        valid &= (r_targets >= 0) & (r_targets + 1 < starts.numel())
+        valid &= target_pins < starts[safe_targets + 1]
+
+        def one_table(pin_table):
+            max_pin = max(int(pin_table.numel()) - 1, 0)
+            in_bounds = (
+                (target_pins >= 0)
+                & (target_pins <= max_pin)
+                & (current_pins >= 0)
+                & (current_pins <= max_pin)
+            )
+            target = pin_table[target_pins.clamp(min=0, max=max_pin)]
+            current = pin_table[current_pins.clamp(min=0, max=max_pin)]
+            return torch.where(valid & in_bounds, target - current, torch.zeros_like(target))
+
+        return one_table(rcap_table), one_table(fcap_table)
+
+    if (
+        drive_cache is not None
+        and "rcap" in drive_cache
+        and "prev_cells" in drive_cache
+    ):
+        dirty_inst_mask = (
+            (current_cells != drive_cache["prev_cells"])
+            | (valid_instances != drive_cache["prev_valid"]).any(dim=1)
+            | (target_cell_ids != drive_cache["prev_targets"]).any(dim=1)
         )
-        target = pin_table[target_pins.clamp(min=0, max=max_pin)]
-        current = pin_table[current_pins.clamp(min=0, max=max_pin)]
-        return torch.where(valid & in_bounds, target - current, torch.zeros_like(target))
+        dirty_pin_mask = valid_node & dirty_inst_mask[safe_inst]
+        dirty_count = int(dirty_pin_mask.sum().item())
+        if dirty_count == 0:
+            return drive_cache["rcap"], drive_cache["fcap"]
+        if dirty_count * 4 < int(nodes.numel()):
+            dirty_pins = torch.nonzero(dirty_pin_mask, as_tuple=False).flatten()
+            rcap, fcap = drive_cache["rcap"], drive_cache["fcap"]
+            rcap[dirty_pins], fcap[dirty_pins] = compute_rows(dirty_pins)
+            drive_cache["prev_cells"].copy_(current_cells)
+            drive_cache["prev_valid"].copy_(valid_instances)
+            drive_cache["prev_targets"].copy_(target_cell_ids)
+            return rcap, fcap
 
-    rcap = one(data.flat_lib_pin_rcap.to(device=device, dtype=dtype))
-    fcap = one(data.flat_lib_pin_fcap.to(device=device, dtype=dtype))
+    rcap, fcap = compute_rows(slice(None))
+    if drive_cache is not None:
+        drive_cache["rcap"] = rcap
+        drive_cache["fcap"] = fcap
+        drive_cache["prev_cells"] = current_cells.clone()
+        drive_cache["prev_valid"] = valid_instances.clone()
+        drive_cache["prev_targets"] = target_cell_ids.clone()
     return rcap, fcap
 
 
@@ -233,6 +310,7 @@ def build_discrete_action_context(
     """
 
     from dreamplace.ops.discrete_gradient_topk.action_arcs import (
+        _pin_names_identity_key,
         build_action_arc_table,
     )
 
@@ -254,7 +332,7 @@ def build_discrete_action_context(
             tuple(int(item) for item in value.shape),
         )
 
-    pin_names_key = None if pin_names is None else hash(tuple(pin_names))
+    pin_names_key = _pin_names_identity_key(pin_names)
     endpoint_key = tuple(
         (kind, tensor_key(attribute))
         for kind, attribute in (
@@ -290,6 +368,7 @@ def build_discrete_action_context(
     cache_hit = False
     cached = None if cache is None else cache.get("entry")
     output_cache = None if cache is None else cache.setdefault("output_tables", {})
+    drive_cache = None if cache is None else cache.setdefault("drive_cache", {})
     if cached is not None and cached.get("key") == cache_key:
         cache_hit = True
         table = cached["table"]
@@ -331,8 +410,7 @@ def build_discrete_action_context(
             )
             table.summary[kind + "_arc_count"] = int(endpoint_arcs.shape[0])
             endpoint_tables[kind] = endpoint_table
-        drive_cache = None
-        if drive_load_feedback:
+        if drive_load_feedback and drive_cache is None:
             drive_cache = {}
         if cache is not None:
             cache["entry"] = {
@@ -373,7 +451,19 @@ def build_discrete_action_context(
     drive_node = drive_pin_net = None
     drive_net_count = 0
     if drive_load_feedback:
-        if drive_cache is not None and "rcap" in drive_cache:
+        drive_static_key = (
+            tensor_key("pin2node_map"),
+            tensor_key("pin2net_map"),
+            tensor_key("net2driver_pin_map"),
+            tensor_key("cell_id_2_libpin_id_start"),
+            tensor_key("pin_2_libpin_offset"),
+            tensor_key("flat_lib_pin_rcap"),
+            tensor_key("flat_lib_pin_fcap"),
+            int(data.inst_cell_id.numel()),
+            str(device),
+            str(dtype),
+        )
+        if cache_hit and drive_cache is not None and "rcap" in drive_cache:
             drive_rcap = drive_cache["rcap"]
             drive_fcap = drive_cache["fcap"]
             drive_node = drive_cache["node"]
@@ -382,35 +472,31 @@ def build_discrete_action_context(
             drive_driver_mask = drive_cache["driver_mask"]
         else:
             drive_rcap, drive_fcap = _drive_load_tables(
-                data, table, device=device, dtype=dtype
+                data,
+                table,
+                device=device,
+                dtype=dtype,
+                drive_cache=drive_cache,
+                static_key=drive_static_key,
             )
-            drive_node = data.pin2node_map.to(device=device, dtype=torch.long)
-            drive_pin_net = data.pin2net_map.to(
-                device=device, dtype=torch.long
-            ).clamp(min=0)
-            drive_net_count = max(int(drive_pin_net.max().item()) + 1, 1)
-            net2driver_pin_map = data.net2driver_pin_map.to(
-                device=device, dtype=torch.long
-            )
-            driver_of_pin = net2driver_pin_map[drive_pin_net]
-            drive_driver_mask = driver_of_pin == torch.arange(
-                int(drive_pin_net.numel()), device=driver_of_pin.device
-            )
-            if drive_cache is not None:
-                drive_cache.update(
-                    {
-                        "rcap": drive_rcap,
-                        "fcap": drive_fcap,
-                        "node": drive_node,
-                        "pin_net": drive_pin_net,
-                        "net_count": drive_net_count,
-                        "driver_mask": drive_driver_mask,
-                    }
-                )
+            drive_node = drive_cache["node"]
+            drive_pin_net = drive_cache["pin_net"]
+            drive_net_count = drive_cache["net_count"]
+            drive_driver_mask = drive_cache["driver_mask"]
     else:
         drive_driver_mask = None
     if load_delta:
         raise ValueError("lut_action target queries must use the base-point load")
+    mapping_summary = {
+        **table.summary,
+        "timing_ms": dict(table.summary.get("timing_ms", {})),
+        "pair_cache": dict(table.summary.get("pair_cache", {})),
+        "endpoint_timing_ms": dict(endpoint_timing_ms),
+        "actions": {
+            k: {**v, "failures": dict(v.get("failures", {}))}
+            for k, v in (table.summary.get("actions") or {}).items()
+        },
+    }
     context = DiscreteActionContext(
         beta=beta,
         # These masks are intentionally private to this beta graph.  The
@@ -423,7 +509,7 @@ def build_discrete_action_context(
         inst_ids=table.inst_ids,
         action_names=tuple(action_names),
         topology_key=topology_key,
-        mapping_summary=copy.deepcopy(table.summary),
+        mapping_summary=mapping_summary,
         current_cell_ids=data.inst_cell_id.detach().to(
             device=device, dtype=torch.long
         ).clone(),
@@ -438,6 +524,10 @@ def build_discrete_action_context(
         setattr(context, kind + "_target_arc_ids", endpoint_table.target_arc_ids)
         setattr(context, kind + "_inst_ids", endpoint_table.inst_ids)
     context.validate(device=device, dtype=dtype)
+    context._refreshed_valid_arcs_version = (
+        context.valid_arcs.data_ptr(),
+        context.valid_arcs._version,
+    )
     context.mapping_summary["cache_mode"] = "hit" if cache_hit else "miss"
     context.mapping_summary["cache_hit"] = cache_hit
     return context

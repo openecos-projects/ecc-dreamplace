@@ -179,12 +179,20 @@ class SparseTimingRuntime:
         version = (base.data_ptr(), base._version)
         if version == self._master_version:
             return
-        self._cell_arcs = {
-            id(level): torch.cat(
-                (level.cell[:, :2], base[level.base_cells, 2:], level.cell[:, 8:]), dim=1
-            )
-            for level in self.schedule.levels
-        }
+        if self._cell_arcs:
+            for level in self.schedule.levels:
+                arc_tensor = self._cell_arcs.get(id(level))
+                if arc_tensor is not None:
+                    arc_tensor[:, 2:8].copy_(base.index_select(0, level.base_cells)[:, 2:8])
+        else:
+            cell_arcs = {}
+            for level in self.schedule.levels:
+                arc_tensor = torch.cat(
+                    (level.cell[:, :2], base[level.base_cells, 2:], level.cell[:, 8:]), dim=1
+                ).contiguous()
+                arc_tensor._pin_topology_static = True
+                cell_arcs[id(level)] = arc_tensor
+            self._cell_arcs = cell_arcs
         self._master_version = version
         self._topology = None
 

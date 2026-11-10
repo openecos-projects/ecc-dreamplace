@@ -64,10 +64,36 @@ void cellAatActionValuesCpuLauncher(
       for (int k = 0; k < 8; ++k) delta[k] = 0;
       finite_actions[key] = false;
       if (!valid_actions[key]) continue;
+      const int mask = columns > 8 ? arc[8] : 15;
+      if (arc[4] != 1 && arc[4] != -1 && target_senses[key] == arc[4]) {
+        scalar_t pos_cur[4], neg_cur[4], pos_tar[4], neg_tar[4];
+        cellValueRow4At<scalar_t>(in, out, arc[3], 1, pins,
+            ra, fa, rs, fs, rc, fc, rd, fd, rt, ft, pos_cur, smooth, alpha, mask);
+        cellValueRow4At<scalar_t>(in, out, arc[3], -1, pins,
+            ra, fa, rs, fs, rc, fc, rd, fd, rt, ft, neg_cur, smooth, alpha, mask);
+        cellValueRow4At<scalar_t>(in, out, target_rows[key], 1, pins,
+            ra, fa, rs, fs, rc, fc, rd, fd, rt, ft, pos_tar, smooth, alpha, mask);
+        cellValueRow4At<scalar_t>(in, out, target_rows[key], -1, pins,
+            ra, fa, rs, fs, rc, fc, rd, fd, rt, ft, neg_tar, smooth, alpha, mask);
+        bool finite = true;
+        for (int k = 0; k < 4; ++k) {
+          finite = finite && std::isfinite(pos_cur[k]) && std::isfinite(neg_cur[k])
+              && std::isfinite(pos_tar[k]) && std::isfinite(neg_tar[k]);
+        }
+        if (finite) {
+          finite_actions[key] = true;
+          for (int k = 0; k < 4; ++k) {
+            scalar_t a, b;
+            pairMaximum(pos_cur[k], neg_cur[k], smooth, alpha, a, b);
+            delta[k] = a * (pos_tar[k] - pos_cur[k]) + b * (neg_tar[k] - neg_cur[k]);
+          }
+        }
+        continue;
+      }
       scalar_t target[4];
       cellValueRow4At<scalar_t>(in, out, target_rows[key], target_senses[key], pins,
           ra, fa, rs, fs, rc, fc, rd, fd, rt, ft,
-          target, smooth, alpha, columns > 8 ? arc[8] : 15);
+          target, smooth, alpha, mask);
       bool finite = true;
       for (int k = 0; k < 4; ++k) {
         finite = finite && std::isfinite(target[k]) && std::isfinite(current[k]);
@@ -94,9 +120,6 @@ void cellAatActionBackwardCpuLauncher(
     scalar_t* grad_beta, bool* finite_actions, int64_t num_instances,
     bool smooth, scalar_t alpha) {
   const int thread_count = at::get_num_threads();
-  const int64_t grad_size = num_instances * action_count;
-  std::vector<scalar_t> local_grad(
-      static_cast<size_t>(thread_count) * static_cast<size_t>(grad_size), 0);
   #pragma omp parallel for if(count >= 2048) num_threads(thread_count) schedule(static)
   for (int i = 0; i < count; ++i) {
     const int64_t inst = inst_ids[i];
@@ -106,34 +129,52 @@ void cellAatActionBackwardCpuLauncher(
     const int64_t* arc = arcs + i * columns;
     const int64_t in = arc[0], out = arc[1];
     const scalar_t* cur = current + i * 8;
+    const int mask = columns > 8 ? arc[8] : 15;
     for (int action = 0; action < action_count; ++action) {
       const int64_t key = i * action_count + action;
       if (!valid_actions[key]) continue;
-      scalar_t target[4];
       const scalar_t target_rc = rc[out] + cap_delta_r[key];
       const scalar_t target_fc = fc[out] + cap_delta_f[key];
+      if (arc[4] != 1 && arc[4] != -1 && target_senses[key] == arc[4]) {
+        scalar_t pos_cur[4], neg_cur[4], pos_tar[4], neg_tar[4];
+        cellValueRow4AtLoad<scalar_t>(in, out, arc[3], 1, pins,
+            ra, fa, rs, fs, rc[out], fc[out], rd, fd, rt, ft, pos_cur, smooth, alpha, mask);
+        cellValueRow4AtLoad<scalar_t>(in, out, arc[3], -1, pins,
+            ra, fa, rs, fs, rc[out], fc[out], rd, fd, rt, ft, neg_cur, smooth, alpha, mask);
+        cellValueRow4AtLoad<scalar_t>(in, out, target_rows[key], 1, pins,
+            ra, fa, rs, fs, target_rc, target_fc, rd, fd, rt, ft, pos_tar, smooth, alpha, mask);
+        cellValueRow4AtLoad<scalar_t>(in, out, target_rows[key], -1, pins,
+            ra, fa, rs, fs, target_rc, target_fc, rd, fd, rt, ft, neg_tar, smooth, alpha, mask);
+        bool finite = true;
+        for (int k = 0; k < 4; ++k) {
+          finite = finite && std::isfinite(pos_cur[k]) && std::isfinite(neg_cur[k])
+              && std::isfinite(pos_tar[k]) && std::isfinite(neg_tar[k]);
+        }
+        finite_actions[key] = finite;
+        if (!finite) continue;
+        scalar_t dot = 0;
+        for (int k = 0; k < 4; ++k) {
+          scalar_t a, b;
+          pairMaximum(pos_cur[k], neg_cur[k], smooth, alpha, a, b);
+          dot += g[k] * (a * (pos_tar[k] - pos_cur[k]) + b * (neg_tar[k] - neg_cur[k]));
+        }
+        #pragma omp atomic
+        grad_beta[inst * action_count + action] += dot;
+        continue;
+      }
+      scalar_t target[4];
       cellValueRow4AtLoad<scalar_t>(in, out, target_rows[key], target_senses[key], pins,
           ra, fa, rs, fs, target_rc, target_fc, rd, fd, rt, ft,
-          target, smooth, alpha, columns > 8 ? arc[8] : 15);
+          target, smooth, alpha, mask);
       bool finite = true;
       for (int k = 0; k < 4; ++k) finite = finite && std::isfinite(target[k]);
       finite_actions[key] = finite;
       if (!finite) continue;
       scalar_t dot = 0;
       for (int k = 0; k < 4; ++k) dot += g[k] * (target[k] - cur[k]);
-      scalar_t* thread_grad = local_grad.data()
-          + static_cast<size_t>(omp_get_thread_num()) * static_cast<size_t>(grad_size);
-      thread_grad[inst * action_count + action] += dot;
+      #pragma omp atomic
+      grad_beta[inst * action_count + action] += dot;
     }
-  }
-  #pragma omp parallel for if(grad_size >= 2048) num_threads(thread_count) schedule(static)
-  for (int64_t index = 0; index < grad_size; ++index) {
-    scalar_t sum = 0;
-    for (int thread = 0; thread < thread_count; ++thread) {
-      sum += local_grad[static_cast<size_t>(thread) * static_cast<size_t>(grad_size)
-          + static_cast<size_t>(index)];
-    }
-    grad_beta[index] = sum;
   }
 }
 
@@ -183,9 +224,10 @@ std::vector<at::Tensor> cell_aat_forward_cpu(
     TORCH_CHECK(tables[i].size(0) == tables[i - i % 5].size(0), "cell AAT LUT row mismatch");
   }
   checkCpuArcIndices(arcs, ra.numel());
+  checkCpuLutRowIndices(arcs.select(1, 3), tables[0].size(0));
   for (int offset = 0; offset < 20; offset += 5) {
-    checkCpuLutRows(arcs.select(1, 3), tables[offset + 1], tables[offset + 2],
-                    tables[offset], tables[offset + 3], tables[offset + 4]);
+    checkCpuLutTableDims(tables[offset + 1], tables[offset + 2],
+                         tables[offset], tables[offset + 3], tables[offset + 4]);
   }
   auto updates = fullyWrittenCpuTensor({arcs.size(0), 8}, ra.options());
   auto jac = fullyWrittenCpuTensor({arcs.size(0), 8, 6}, ra.options());
@@ -215,9 +257,10 @@ at::Tensor cell_aat_values_cpu(
     TORCH_CHECK(tables[i].size(0) == tables[i - i % 5].size(0), "cell AAT LUT row mismatch");
   }
   checkCpuArcIndices(arcs, ra.numel());
+  checkCpuLutRowIndices(arcs.select(1, 3), tables[0].size(0));
   for (int offset = 0; offset < 20; offset += 5) {
-    checkCpuLutRows(arcs.select(1, 3), tables[offset + 1], tables[offset + 2],
-                    tables[offset], tables[offset + 3], tables[offset + 4]);
+    checkCpuLutTableDims(tables[offset + 1], tables[offset + 2],
+                         tables[offset], tables[offset + 3], tables[offset + 4]);
   }
   auto updates = fullyWrittenCpuTensor({arcs.size(0), 8}, ra.options());
   AT_DISPATCH_FLOATING_TYPES(ra.scalar_type(), "cellAatValues", [&] {
@@ -259,17 +302,13 @@ std::vector<at::Tensor> cell_aat_action_values_cpu(
     TORCH_CHECK(tables[i].size(0) == tables[i - i % 5].size(0), "cell AAT LUT row mismatch");
   }
   checkCpuArcIndices(arcs, ra.numel());
-  for (int offset = 0; offset < 20; offset += 5) {
-    checkCpuLutRows(arcs.select(1, 3), tables[offset + 1], tables[offset + 2],
-                    tables[offset], tables[offset + 3], tables[offset + 4]);
-  }
   const int64_t row_count = tables[0].size(0);
-  auto selected_targets = target_arc_ids.masked_select(valid_arcs);
-  TORCH_CHECK(
-      selected_targets.numel() == 0 ||
-          (selected_targets.min().item<int64_t>() >= 0 &&
-           selected_targets.max().item<int64_t>() < row_count),
-      "cell action target row is out of range");
+  checkCpuLutRowIndices(arcs.select(1, 3), row_count);
+  for (int offset = 0; offset < 20; offset += 5) {
+    checkCpuLutTableDims(tables[offset + 1], tables[offset + 2],
+                         tables[offset], tables[offset + 3], tables[offset + 4]);
+  }
+  checkCpuTargetLutRows(target_arc_ids, valid_arcs, row_count);
   auto updates = fullyWrittenCpuTensor({arcs.size(0), 8}, ra.options());
   auto deltas = fullyWrittenCpuTensor({arcs.size(0), action_count, 8}, ra.options());
   auto finite_actions = fullyWrittenCpuTensor(
@@ -336,17 +375,13 @@ std::vector<at::Tensor> cell_aat_action_backward_cpu(
     TORCH_CHECK(tables[i].size(0) == tables[i - i % 5].size(0), "cell AAT LUT row mismatch");
   }
   checkCpuArcIndices(arcs, ra.numel());
-  for (int offset = 0; offset < 20; offset += 5) {
-    checkCpuLutRows(arcs.select(1, 3), tables[offset + 1], tables[offset + 2],
-                    tables[offset], tables[offset + 3], tables[offset + 4]);
-  }
   const int64_t row_count = tables[0].size(0);
-  auto selected_targets = target_arc_ids.masked_select(valid_arcs);
-  TORCH_CHECK(
-      selected_targets.numel() == 0 ||
-          (selected_targets.min().item<int64_t>() >= 0 &&
-           selected_targets.max().item<int64_t>() < row_count),
-      "cell action target row is out of range");
+  checkCpuLutRowIndices(arcs.select(1, 3), row_count);
+  for (int offset = 0; offset < 20; offset += 5) {
+    checkCpuLutTableDims(tables[offset + 1], tables[offset + 2],
+                         tables[offset], tables[offset + 3], tables[offset + 4]);
+  }
+  checkCpuTargetLutRows(target_arc_ids, valid_arcs, row_count);
   auto grad_beta = at::zeros({num_instances, action_count}, ra.options());
   auto finite_actions = valid_arcs.clone();
   AT_DISPATCH_FLOATING_TYPES(ra.scalar_type(), "cellAatActionBackward", [&] {

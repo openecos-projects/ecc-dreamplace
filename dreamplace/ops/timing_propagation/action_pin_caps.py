@@ -37,20 +37,36 @@ def apply_pin_caps(model, caps, data, tables):
     device = context.beta.device
     current = tuple(cap.to(device=device) for cap in caps)
     tables = tuple(table.to(device=device) for table in tables)
-    result = current
     nodes = data.pin2node_map.to(device=device, dtype=torch.long)
     safe_nodes = nodes.clamp(min=0, max=max(context.beta.shape[0] - 1, 0))
-    for action in range(len(context.action_names)):
-        pins, valid = target_pin_ids(data, context, action)
-        targets = tuple(table[pins.clamp(min=0, max=max(table.numel() - 1, 0))] for table in tables)
-        in_bounds = valid & (pins >= 0)
-        for table in tables:
-            in_bounds &= pins < table.numel()
-        finite = torch.stack([torch.isfinite(target) for target in targets]).all(0)
-        invalidate_instances(context, data, action, in_bounds & ~finite)
-        weight = context.beta[safe_nodes, action] * (in_bounds & finite).to(context.beta.dtype)
-        result = tuple(
-            value + weight * torch.nan_to_num(target - base)
-            for value, target, base in zip(result, targets, current, strict=True)
-        )
-    return result
+    offsets = data.pin_2_libpin_offset.to(device=device, dtype=torch.long)
+    starts = data.cell_id_2_libpin_id_start.to(device=device, dtype=torch.long)
+    cells = context.target_cell_ids[safe_nodes].long()
+    safe_cells = cells.clamp(min=0, max=max(starts.numel() - 2, 0))
+    pins = starts[safe_cells] + offsets.unsqueeze(1)
+    valid = ((nodes >= 0) & (offsets >= 0)).unsqueeze(1) & (cells >= 0)
+    valid &= cells + 1 < starts.numel()
+    valid &= (pins >= 0) & (pins < starts[safe_cells + 1])
+    valid &= context.valid_instances[safe_nodes]
+    in_bounds = valid.clone()
+    for table in tables:
+        in_bounds &= pins < table.numel()
+    clamped_pins = tuple(
+        pins.clamp(min=0, max=max(table.numel() - 1, 0)) for table in tables
+    )
+    targets = tuple(
+        table[clamped] for table, clamped in zip(tables, clamped_pins, strict=True)
+    )
+    finite = torch.ones_like(in_bounds)
+    for target in targets:
+        finite &= torch.isfinite(target)
+    invalid_mask = in_bounds & ~finite
+    if bool(invalid_mask.any()):
+        for action in range(len(context.action_names)):
+            invalidate_instances(context, data, action, invalid_mask[:, action])
+    mask = (in_bounds & finite).to(context.beta.dtype)
+    weights = context.beta.index_select(0, safe_nodes) * mask
+    return tuple(
+        base + (weights * torch.nan_to_num(target - base.unsqueeze(1))).sum(dim=1)
+        for base, target in zip(current, targets, strict=True)
+    )

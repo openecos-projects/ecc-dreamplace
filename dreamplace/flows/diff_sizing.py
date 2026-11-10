@@ -116,6 +116,10 @@ def _build_timing_model(engine):
     model = getattr(engine.placer, "last_global_place_model", None)
     if model is None:
         raise RuntimeError("diff_sizing did not construct a timing model")
+    if getattr(engine.placedb, "gr_sizing", None) is None:
+        engine.placer._refresh_live_timing_topology(
+            engine.placer.data_collections.pos[0]
+        )
     return model
 
 

@@ -256,6 +256,8 @@ class InflationS5B1:
         )
 
     def _sizing(self, model, pos, geometry, capacity, *, action_mask=None):
+        from dreamplace.flows.incremental_sizing_filter import IncrementalSizingGate
+
         data = self.data
         candidates = self.candidates.with_action_mask(
             timing_sizing_action_mask(self.params, action_mask)
@@ -265,17 +267,20 @@ class InflationS5B1:
         loss = self._loss(model, pos)
         initial_loss = best_loss = float(loss.detach())
         rounds, best_round = [], 0
+        incremental_gate = IncrementalSizingGate(self, model, geometry, capacity)
         for round_id in range(1, int(self.params.timing_opt_sizing_rounds) + 1):
             size_grad, vt_grad = torch.autograd.grad(loss, (size, vt), allow_unused=False)
             model._timing_geometry_cache = None
             if not bool(torch.isfinite(size_grad).all() & torch.isfinite(vt_grad).all()):
                 raise RuntimeError("S5B1 size/VT gradient is non-finite")
             self.round_index += 1
-            blocked = self.oscillation.blocked(
-                phase="timing",
-                iteration=self.round_index,
-                count=data.inst_cell_id.numel(),
-                device=size.device,
+            blocked = incremental_gate.mask_blocked_instances(
+                self.oscillation.blocked(
+                    phase="timing",
+                    iteration=self.round_index,
+                    count=data.inst_cell_id.numel(),
+                    device=size.device,
+                )
             )
             next_size, next_vt, summary = apply_quad_gradient_from_data_collections(
                 data_collections=data,
@@ -293,6 +298,14 @@ class InflationS5B1:
                 blocked_instances=blocked,
                 size_parameterization="real_size",
             )
+            next_size, next_vt, summary = incremental_gate.filter_round(
+                pos,
+                size,
+                vt,
+                next_size,
+                next_vt,
+                summary,
+            )
             if not summary["num_changed_instances"]:
                 # A fixed-budget timing window records a no-op attempt and
                 # rebuilds the graph for the next round.  Ending early here
@@ -305,6 +318,7 @@ class InflationS5B1:
                         "actions": summary.get("selected_scores", ()),
                         "changed_instance_count": 0,
                         "no_action": True,
+                        "incremental_commit": summary.get("incremental_commit"),
                     }
                 )
                 loss = self._loss(model, pos)
@@ -331,6 +345,7 @@ class InflationS5B1:
                     "loss": actual,
                     "fits": fits,
                     "actions": summary["selected_scores"],
+                    "incremental_commit": summary.get("incremental_commit"),
                 }
             )
             if fits and actual < best_loss:

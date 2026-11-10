@@ -22,6 +22,7 @@ from dreamplace.flows.discrete_timing_common import (
     virtual_timing_area,
 )
 from dreamplace.flows.discrete_timing_diagnostics import objective_snapshot, phase_metrics
+from dreamplace.flows.incremental_sizing_filter import IncrementalSizingGate
 from dreamplace.ops.buffer_insertion.buffering_lane import (
     _tensor_digest,
 )
@@ -1116,6 +1117,7 @@ class DiscreteTimingOwner:
         rounds, best_round = [], 0
         best_round_committed = False
         native_action_backward_used = False
+        incremental_gate = IncrementalSizingGate(self, model, geometry, capacity)
         total_rounds = int(self.params.timing_opt_sizing_rounds)
         for round_id in range(1, total_rounds + 1):
             has_next_round = round_id < total_rounds
@@ -1171,6 +1173,7 @@ class DiscreteTimingOwner:
                 count=data.inst_cell_id.numel(),
                 device=size.device,
             )
+            blocked = incremental_gate.mask_blocked_instances(blocked)
             blocked_ms.append((time.perf_counter() - blocked_started_at) * 1000.0)
             select_started_at = time.perf_counter()
             if action_context is not None:
@@ -1265,11 +1268,14 @@ class DiscreteTimingOwner:
                         selection_scores=action_scores,
                         wns_scores=trial_wns_scores,
                     )
-                selection_valid = action_context.valid_instances & torch.as_tensor(
-                    action_mask,
-                    dtype=torch.bool,
-                    device=action_context.valid_instances.device,
-                ).unsqueeze(0)
+                selection_valid = incremental_gate.mask_valid_actions(
+                    action_context.valid_instances
+                    & torch.as_tensor(
+                        action_mask,
+                        dtype=torch.bool,
+                        device=action_context.valid_instances.device,
+                    ).unsqueeze(0)
+                )
                 candidate_select_started_at = time.perf_counter()
                 next_size, next_vt, summary = apply_quad_gradient_from_action_scores(
                     action_scores=action_scores,
@@ -1349,6 +1355,14 @@ class DiscreteTimingOwner:
                 candidate_select_ms.append(
                     (time.perf_counter() - candidate_select_started_at) * 1000.0
                 )
+            next_size, next_vt, summary = incremental_gate.filter_round(
+                pos,
+                size,
+                vt,
+                next_size,
+                next_vt,
+                summary,
+            )
             select_ms.append((time.perf_counter() - select_started_at) * 1000.0)
             model._timing_geometry_cache = None
             if not summary["num_changed_instances"]:
@@ -1375,6 +1389,7 @@ class DiscreteTimingOwner:
                     "output_state_digest": summary.get("output_state_digest"),
                     "changed_instance_count": 0,
                     "no_action": True,
+                    "incremental_commit": summary.get("incremental_commit"),
                 }
                 if bool(getattr(self.params, "dump_sizing_round_actions_flag", False)):
                     round_record["actions"] = summary.get("selected_scores", ())
@@ -1577,6 +1592,7 @@ class DiscreteTimingOwner:
                 "changed_instance_count": int(summary.get("num_changed_instances", 0) or 0),
                 "runtime_cell_state_generation": summary.get("runtime_cell_state_generation"),
                 "timing_cache_generation": summary.get("timing_cache_generation"),
+                "incremental_commit": summary.get("incremental_commit"),
             }
             if bool(getattr(self.params, "dump_sizing_round_actions_flag", False)):
                 round_record["actions"] = summary["selected_scores"]

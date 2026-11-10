@@ -352,6 +352,12 @@ def build_arg_parser():
         help="Freeze cells for two rounds after repeated committed master reversals (shared budget only).",
     )
     parser.add_argument(
+        "--timing-sizing-incremental-commit",
+        type=int,
+        choices=(0, 1),
+        help="Evaluate gradient-ranked sizing candidates one-by-one via C++ incremental STA.",
+    )
+    parser.add_argument(
         "--continuous-size-dynamics-mode",
         choices=(
             "none",
@@ -781,6 +787,7 @@ _MAIN_VALUE_OVERRIDES = (
     ("discrete_gradient_topk_shared_budget", int),
     ("discrete_gradient_topk_shared_budget_percent", float),
     ("discrete_gradient_topk_oscillation_veto", int),
+    ("timing_sizing_incremental_commit", int),
     ("real_size_learning_rate", float),
     ("real_size_warmup_steps", int),
     ("real_size_transition_profile", int),

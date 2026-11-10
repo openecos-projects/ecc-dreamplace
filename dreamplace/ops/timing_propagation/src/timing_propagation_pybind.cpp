@@ -1,3 +1,4 @@
+#include "incremental_sizing_engine.h"
 #include "timing_propagation_paths.h"
 #include "timing_kernels.h"
 
@@ -214,4 +215,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       py::arg("max_depth") = static_cast<int64_t>(0),
       py::arg("slack_epsilon") = 1e-3,
       "Extract a greedy critical path for each endpoint." );
+
+  py::class_<dreamplace::IncrementalSizingEngine>(m, "IncrementalSizingEngine")
+      .def(py::init<const py::dict&>(), py::arg("config"))
+      .def("sync_state",
+           &dreamplace::IncrementalSizingEngine::syncState,
+           py::arg("inst_cell_ids"),
+           py::arg("wire_cap") = py::none(),
+           py::arg("incoming_resistance") = py::none())
+      .def("evaluate_ranked_candidates",
+           &dreamplace::IncrementalSizingEngine::evaluateRankedCandidates,
+           py::arg("instance_ids"),
+           py::arg("target_cell_ids"),
+           py::arg("policy"))
+      .def("current_metrics",
+           &dreamplace::IncrementalSizingEngine::currentMetrics);
 }

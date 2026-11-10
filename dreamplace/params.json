@@ -227,6 +227,10 @@
         "description": "action family for placement sizing windows and diff_opt sizing: up | down | quad; explicit diff_sizing phase masks take precedence",
         "default": "quad"
     },
+    "timing_sizing_incremental_commit": {
+        "description": "evaluate gradient-ranked sizing candidates one-by-one via C++ incremental STA and commit only capacity-legal loss improvements",
+        "default": 1
+    },
     "timing_action_score_objective": {
         "description": "objective differentiated for the local LUT action score; loss uses diff_sizing_coefficients, tns/wns select a single timing metric",
         "default": "loss"

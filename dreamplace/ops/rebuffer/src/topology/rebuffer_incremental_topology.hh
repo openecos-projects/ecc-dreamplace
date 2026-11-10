@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
+#pragma once
+
 // Mutable per-net topology state for native rebuffer transactions.
 
-#pragma once
 
 #include <memory>
 #include <array>
@@ -10,6 +11,7 @@
 #include <vector>
 
 #include "pybind11/pybind11.h"
+
 
 namespace rebuffer {
 
@@ -188,5 +190,91 @@ bool validateIncrementalTopology(
     std::string& reason);
 
 pybind11::dict incrementalTopologyView(const IncrementalTopologyState& state);
+
+}  // namespace rebuffer
+
+// --- rebuffer_topology_partitions.hh ---
+#include <unordered_map>
+#include <vector>
+
+
+namespace rebuffer {
+
+struct ElectricalPartitions
+{
+  std::unordered_map<int, int> node_partition;
+  std::vector<std::vector<int>> loads;
+  std::vector<int> input_partition;
+};
+
+ElectricalPartitions topologyPartitions(const IncrementalTopologyState& state);
+
+}  // namespace rebuffer
+
+// --- rebuffer_topology_history.hh ---
+
+namespace rebuffer {
+
+void invalidateIncrementalTopologyCaches(IncrementalTopologyState& state);
+bool undoLastTopologySplit(IncrementalTopologyState& state,
+                           const IncrementalBuffer& buffer, std::string& reason);
+bool redoTopologySplit(IncrementalTopologyState& state,
+                       const IncrementalBuffer& buffer, std::string& reason);
+
+}  // namespace rebuffer
+
+// --- rebuffer_incremental_rc.hh ---
+// Compact RC storage and the shared Elmore/second-moment evaluator.
+
+#include <array>
+#include <vector>
+
+namespace rebuffer {
+struct IncrementalTopologyState;
+
+struct CompactRcForest
+{
+  // External identities are labels only; every other index is local to this forest.
+  std::vector<int> node_ids, parent, child_start, children, topo_start, topo;
+  std::vector<double> resistance, edge_capacitance;
+};
+
+CompactRcForest compactRcForest(const IncrementalTopologyState& topology,
+                                int original_pin_count);
+std::vector<double> compactRcWireCaps(const CompactRcForest& forest);
+// Input caps include the wire half-caps. Results: subtree load, delay, impulse.
+std::array<std::vector<double>, 3> evaluateCompactRc(
+    const CompactRcForest& forest, const std::vector<double>& caps);
+}  // namespace rebuffer
+
+// --- rebuffer_incremental_patch.hh ---
+// Export one session-owned timing graph patch without rebuilding a carrier.
+
+#include <memory>
+
+#include "pybind11/numpy.h"
+
+
+
+namespace rebuffer {
+
+// Build the fixed one-buffer timing slot used by the Python
+// TimingPropagation incremental evaluator.  Graph traversal, partition
+// resolution, RC edge selection, and scheduled arc placement stay native;
+// the caller only applies the returned arrays to an existing operator.
+pybind11::dict buildIncrementalTimingPatch(
+    const pybind11::object& base,
+    const std::shared_ptr<IncrementalTopologyState>& state,
+    const pybind11::dict& action,
+    int base_vertex_count,
+    int slot);
+
+pybind11::dict evaluateIncrementalRc(
+    const pybind11::dict& rc,
+    const pybind11::array_t<double, pybind11::array::c_style | pybind11::array::forcecast>& generic_caps,
+    const pybind11::array_t<double, pybind11::array::c_style | pybind11::array::forcecast>& rise_caps,
+    const pybind11::array_t<double, pybind11::array::c_style | pybind11::array::forcecast>& fall_caps,
+    const pybind11::dict& buffer_caps,
+    int pin_count);
 
 }  // namespace rebuffer

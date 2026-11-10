@@ -2,13 +2,14 @@
 // Canonical Python TP state import and atomic journal updates.
 
 #include "rebuffer_timing_graph.hh"
-#include "rebuffer_timing_state.hh"
+
 
 #include <algorithm>
 #include <array>
 #include <utility>
 
 #include "pybind11/stl.h"
+
 
 namespace py = pybind11;
 
@@ -232,6 +233,198 @@ py::dict PersistentTimingGraph::initializeTimingState(const py::dict& values)
   applyStateValues(std::move(parsed));
   timing_state_initialized_ = true;
   return summary();
+}
+
+}  // namespace rebuffer
+
+// --- rebuffer_timing_state_view.cc ---
+// Read-only zero-copy snapshots retain their storage across graph mutations.
+
+#include <utility>
+
+namespace py = pybind11;
+namespace rebuffer {
+
+struct TimingStateViewStorage
+{
+  // The graph owns current storage until the next write. On detach, retained
+  // takes that exact allocation and the graph reference is released.
+  std::shared_ptr<const PersistentTimingGraph> graph;
+  std::vector<double> retained;
+  double empty = 0;
+};
+
+py::dict PersistentTimingGraph::stateView(bool copy) const
+{
+  py::dict result;
+  result["status"] = "ok";
+  result["epoch"] = epoch_;
+  for (const auto& [name, value] : state_) {
+    if (copy) {
+      result[py::str(name)] = writeState(value);
+      continue;
+    }
+    auto& cached = state_views_[name];
+    auto storage = cached.lock();
+    if (!storage) {
+      storage = std::make_shared<TimingStateViewStorage>();
+      storage->graph = shared_from_this();
+      cached = storage;
+    }
+    auto* holder = new std::shared_ptr<TimingStateViewStorage>(storage);
+    py::capsule base(holder, [](void* pointer) {
+      delete static_cast<std::shared_ptr<TimingStateViewStorage>*>(pointer);
+    });
+    const double* data = value.empty() ? &storage->empty : value.data();
+    py::array_t<double> array({static_cast<py::ssize_t>(value.size())},
+                              {static_cast<py::ssize_t>(sizeof(double))}, data, base);
+    array.attr("setflags")(py::arg("write") = false);
+    result[py::str(name)] = std::move(array);
+    ++state_view_counters_.exports;
+  }
+  return result;
+}
+
+void PersistentTimingGraph::detachStateViews()
+{
+  cached_endpoint_slacks_valid_ = false;
+  if (state_views_.empty()) return;
+  // Ownership transfer below may release references from every view holder.
+  // Keep this graph alive until the complete transfer has finished.
+  const auto owner = shared_from_this();
+  for (auto it = state_views_.begin(); it != state_views_.end();) {
+    if (auto storage = it->second.lock()) {
+      auto& current = state_.at(it->first);
+      auto replacement = current;  // Allocate before changing either owner.
+      storage->retained = std::move(current);
+      current = std::move(replacement);
+      ++state_view_counters_.detached_fields;
+      state_view_counters_.detached_values += storage->retained.size();
+      storage->graph.reset();
+    }
+    it = state_views_.erase(it);
+  }
+}
+
+py::dict PersistentTimingGraph::stateViewStatistics() const
+{
+  py::dict result;
+  result["exports"] = state_view_counters_.exports;
+  result["detached_fields"] = state_view_counters_.detached_fields;
+  result["detached_values"] = state_view_counters_.detached_values;
+  std::size_t current = 0;
+  for (const auto& [_, storage] : state_views_) if (!storage.expired()) ++current;
+  result["current_view_fields"] = current;
+  return result;
+}
+
+}  // namespace rebuffer
+
+// --- rebuffer_timing_state_undo.cc ---
+#include "rebuffer_timing_mutation.hh"
+
+
+#include <algorithm>
+#include <cstring>
+
+namespace rebuffer {
+
+void captureTimingValue(TimingStateUndo& undo, const char* field,
+                         const std::vector<double>& values, std::size_t index)
+{
+  auto& saved = undo.fields.try_emplace(field, TimingFieldUndo{values.size(), {}}).first->second;
+  // Newly appended slots are restored by truncating to previous_size.
+  if (index < saved.previous_size) {
+    saved.previous.push_back({index, values.at(index)});
+    ++undo.value_count;
+  }
+}
+
+void patchTimingValue(TimingStateUndo& undo, const char* field,
+                       std::vector<double>& values, std::size_t index, double value)
+{
+  auto& current = values.at(index);
+  if (std::memcmp(&current, &value, sizeof(double)) == 0) return;
+  captureTimingValue(undo, field, values, index);
+  current = value;
+}
+
+void compactTimingUndo(TimingStateUndo& undo,
+    const std::map<std::string, std::vector<double>>& state,
+    bool indices_are_unique)
+{
+  undo.value_count = 0;
+  for (auto& [name, field] : undo.fields) {
+    auto& values = field.previous;
+    if (!indices_are_unique) {
+      // Keep the first old value if an RC batch writes the same slot twice.
+      std::stable_sort(values.begin(), values.end(),
+                       [](const auto& a, const auto& b) { return a.index < b.index; });
+      values.erase(std::unique(values.begin(), values.end(),
+          [](const auto& a, const auto& b) { return a.index == b.index; }), values.end());
+    }
+    const auto& current = state.at(name);
+    values.erase(std::remove_if(values.begin(), values.end(), [&](const auto& old) {
+      return std::memcmp(&current.at(old.index), &old.value, sizeof(double)) == 0;
+    }), values.end());
+    undo.value_count += values.size();
+  }
+}
+
+void restoreTimingState(std::map<std::string, std::vector<double>>& state,
+                         const TimingStateUndo& undo)
+{
+  for (const auto& [name, field] : undo.fields) {
+    auto& current = state.at(name);
+    // Before compaction, repeated writes must unwind in reverse order.
+    for (auto it = field.previous.rbegin(); it != field.previous.rend(); ++it) {
+      current.at(it->index) = it->value;
+    }
+    current.resize(field.previous_size);
+  }
+}
+
+std::shared_ptr<TimingStateUndo> PersistentTimingGraph::beginStateUpdate()
+{
+  auto undo = std::make_shared<TimingStateUndo>();
+  detachStateViews();
+  JournalEntry entry;
+  entry.previous_epoch = epoch_;
+  entry.sequence = next_journal_sequence_++;
+  entry.state_undo = undo;
+  journal_.push_back(std::move(entry));
+  ++epoch_;
+  return undo;
+}
+
+void PersistentTimingGraph::applyTimingRc(const std::vector<TimingNetRcValues>& changes,
+                                          const std::vector<int>& inactive_pins)
+{
+  auto undo = beginStateUpdate();
+  for (const auto& field : timingStateFields()) {
+    auto& values = state_.at(field.name);
+    const auto size = field.pin_indexed ? timing_index_->pins.size() : timing_index_->cells.size();
+    if (values.size() == size) continue;
+    undo->fields.emplace(field.name, TimingFieldUndo{values.size(), {}});
+    values.resize(size, field.initial);
+  }
+  constexpr std::array<const char*, 6> names{
+      "pin_net_cap_rise", "pin_net_cap_fall", "pin_net_delay_rise", "pin_net_delay_fall",
+      "pin_net_impulse_rise", "pin_net_impulse_fall"};
+  for (const auto& rc : changes) {
+    for (int pin : rc.pins) markElectricalDirtyPin(pin);
+    for (std::size_t lane = 0; lane < names.size(); ++lane) {
+      auto& target = state_.at(names[lane]);
+      for (std::size_t row = 0; row < rc.pins.size(); ++row) {
+        patchTimingValue(*undo, names[lane], target, rc.pins[row], rc.values[lane].at(row));
+      }
+    }
+  }
+  for (int pin : inactive_pins) markElectricalDirtyPin(pin);
+  for (const auto* name : names) {
+    for (int pin : inactive_pins) patchTimingValue(*undo, name, state_.at(name), pin, 0);
+  }
+  compactTimingUndo(*undo, state_);
 }
 
 }  // namespace rebuffer

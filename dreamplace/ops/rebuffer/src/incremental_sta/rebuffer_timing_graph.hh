@@ -1,7 +1,132 @@
 // SPDX-License-Identifier: BSD-3-Clause
+#pragma once
+
+// Sparse undo for graph-owned canonical pin and cell-arc arrays.
+
+#include <array>
+#include <cstddef>
+#include <map>
+#include <string>
+#include <vector>
+
+namespace rebuffer {
+
+struct TimingStateField
+{
+  const char* name;
+  const char* source;
+  bool pin_indexed;
+  const char* unit;
+  double initial = 0;
+};
+
+const std::array<TimingStateField, 16>& timingStateFields();
+
+struct TimingIndexedValue
+{
+  std::size_t index;
+  double value;
+};
+
+struct TimingFieldUndo
+{
+  std::size_t previous_size;
+  std::vector<TimingIndexedValue> previous;
+};
+
+struct TimingStateUndo
+{
+  std::map<std::string, TimingFieldUndo> fields;
+  std::size_t value_count = 0;
+};
+
+void captureTimingValue(TimingStateUndo& undo, const char* field,
+                         const std::vector<double>& values, std::size_t index);
+void patchTimingValue(TimingStateUndo& undo, const char* field,
+                       std::vector<double>& values, std::size_t index, double value);
+void compactTimingUndo(TimingStateUndo& undo,
+    const std::map<std::string, std::vector<double>>& state,
+    bool indices_are_unique = false);
+void restoreTimingState(std::map<std::string, std::vector<double>>& state,
+                         const TimingStateUndo& undo);
+
+}  // namespace rebuffer
+
+// --- rebuffer_timing_paths.hh ---
+#include <cstddef>
+#include "rebuffer_incremental_timing.hh"
+
+#include "timing_setup_paths.h"
+
+
+namespace rebuffer {
+
+struct TimingSetupPaths
+{
+  dreamplace::timing::SetupPathBatch batch;
+  std::size_t endpoint_record_count = 0;
+};
+
+struct TimingPathPredecessors
+{
+  const TimingGraphIndex& index;
+  bool reordered;
+
+  template <typename Visit>
+  void operator()(int64_t pin, const Visit& visit) const
+  {
+    auto order = [&](int id) {
+      return std::pair<int64_t, int64_t>{reordered ? index.path_level[index.source(id)] : 0, id};
+    };
+    auto cell = [&](int id) {
+      if (id >= index.clock_end) {
+        visit(dreamplace::timing::SetupPathPredecessor{
+            index.source(id), id, index.cells[id][4], order(id)});
+      }
+    };
+    const auto& incoming = index.cell_in[pin];
+    if (reordered && incoming.size() > 1) {
+      auto sorted = incoming;
+      std::sort(sorted.begin(), sorted.end(), [&](int a, int b) { return order(a) < order(b); });
+      for (int id : sorted) cell(id);
+    } else {
+      for (int id : incoming) cell(id);
+    }
+    for (int id : index.net_in[pin]) {
+      visit(dreamplace::timing::SetupPathPredecessor{index.nets[id][0], -1, 0, {-1, -1}});
+    }
+  }
+};
+
+}  // namespace rebuffer
+
+// --- rebuffer_electrical_observation.hh ---
+#include <string_view>
+#include <vector>
+
+#include "pybind11/pybind11.h"
+
+
+namespace rebuffer {
+struct ElectricalPinObservation
+{
+  std::string_view name;
+  double slew_rise, slew_fall, load_rise, load_fall, max_slew, max_cap;
+  int fanout;
+  bool driver, clock;
+};
+
+pybind11::dict observeElectricalPins(const std::vector<ElectricalPinObservation>& pins,
+                                    int max_fanout, double cap_margin, double slew_margin);
+bool electricalNonRegressing(const pybind11::dict& before, const pybind11::dict& after);
+pybind11::dict compareElectricalObservations(const pybind11::dict& before,
+                                            const pybind11::dict& after);
+void registerElectricalObservationBindings(pybind11::module_& module);
+}
+
+// --- rebuffer_timing_graph.hh ---
 // Persistent native timing-graph handle, stage 3a of the incremental TP plan.
 
-#pragma once
 
 #include <cstddef>
 #include <cstdint>
@@ -12,11 +137,10 @@
 #include <vector>
 
 #include "pybind11/numpy.h"
-#include "pybind11/pybind11.h"
 
-#include "rebuffer_incremental_patch.hh"
+
 #include "rebuffer_incremental_topology.hh"
-#include "rebuffer_incremental_timing.hh"
+
 
 namespace rebuffer {
 

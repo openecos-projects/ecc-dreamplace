@@ -3,6 +3,7 @@
 
 #include "rebuffer_repair.hh"
 
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -644,6 +645,499 @@ bool repairNetTree(const DesignView& design,
                        max_cap,
                        children);
   return repair.run(actions, reason, root_cap_out);
+}
+
+}  // namespace rebuffer
+
+// --- rebuffer_repair_buffer.cc ---
+// repair_design buffer scoring; the legacy candidate domain stays explicit.
+
+#include "rebuffer_liberty.hh"
+
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <stdexcept>
+#include <vector>
+
+namespace rebuffer {
+namespace {
+
+
+double legacyTargetLoadForCell(const LibertyCellView& cell,
+                               double target_slew_rise,
+                               double target_slew_fall)
+{
+  const double target_slew = std::max(target_slew_rise, target_slew_fall);
+  if (cell.max_cap <= 0.0 || target_slew <= 0.0) {
+    return 0.0;
+  }
+  if (rebufferCellOutputSlew(cell, target_slew_rise, target_slew_fall, 0.0)
+      >= target_slew) {
+    return 0.0;
+  }
+  double low = 0.0;
+  double high = cell.max_cap * 2.0;
+  for (int iteration = 0; iteration < 48; ++iteration) {
+    const double middle = 0.5 * (low + high);
+    if (rebufferCellOutputSlew(cell, target_slew_rise, target_slew_fall, middle)
+        < target_slew) {
+      low = middle;
+    } else {
+      high = middle;
+    }
+  }
+  return 0.5 * (low + high);
+}
+
+}  // namespace
+
+double rebufferTargetLoadForCell(const LibertyCellView& cell,
+                                 double target_slew_rise,
+                                 double target_slew_fall,
+                                 bool target_cell_math)
+{
+  return target_cell_math
+      ? cellTargetLoad(cell, {target_slew_rise, target_slew_fall})
+      : legacyTargetLoadForCell(cell, target_slew_rise, target_slew_fall);
+}
+
+int rebufferChooseBufferCell(const LibertyView& liberty,
+                             const CharacterizationResult& characterization,
+                             double input_slew_rise,
+                             double input_slew_fall,
+                             double downstream_load,
+                             bool target_cell_math,
+                             bool target_cell_selection,
+                             int initial_cell,
+                             double sizing_area_limit,
+                             double sizing_leakage_limit)
+{
+  if (target_cell_selection) {
+    if (!target_cell_math) throw std::invalid_argument("target-cell selection requires canonical target-cell math");
+    if (initial_cell < 0) {
+      const int lowest = characterization.lowest_drive_index;
+      if (lowest < 0 || lowest >= static_cast<int>(characterization.filtered_buffers.size())) {
+        return -1;
+      }
+      initial_cell = characterization.filtered_buffers[lowest].cell_index;
+    }
+    return findBufferTargetCell(liberty,
+                                characterization,
+                                initial_cell,
+                                downstream_load,
+                                sizing_area_limit,
+                                sizing_leakage_limit);
+  }
+  const auto& candidates = characterization.filtered_buffers.empty()
+                               ? characterization.fast_buffers
+                               : characterization.filtered_buffers;
+  if (candidates.empty()) {
+    return -1;
+  }
+
+  int lowest_main_id = -1;
+  int lowest_vt = -1;
+  if (characterization.lowest_drive_index >= 0
+      && characterization.lowest_drive_index
+             < static_cast<int>(characterization.filtered_buffers.size())) {
+    const int cell_index = characterization.filtered_buffers[
+        characterization.lowest_drive_index].cell_index;
+    if (cell_index >= 0 && cell_index < static_cast<int>(liberty.cells.size())) {
+      lowest_main_id = liberty.cells[cell_index].main_id;
+      lowest_vt = liberty.cells[cell_index].vt;
+    }
+  }
+
+  auto select = [&](auto&& candidate_cells) {
+    int best = -1;
+    double best_dist = kInf;
+    double best_delay = kInf;
+    int fallback = -1;
+    double fallback_cap = -1.0;
+    for (const auto* cell : candidate_cells) {
+      if (cell == nullptr || !cell->is_buffer) {
+        continue;
+      }
+      if (cell->max_cap > 0.0 && downstream_load > cell->max_cap) {
+        continue;
+      }
+      const double output_slew = rebufferCellOutputSlew(
+          *cell, input_slew_rise, input_slew_fall, downstream_load);
+      if (cell->max_slew > 0.0 && output_slew > cell->max_slew) {
+        continue;
+      }
+      if (cell->max_cap > fallback_cap) {
+        fallback_cap = cell->max_cap;
+        fallback = static_cast<int>(cell - liberty.cells.data());
+      }
+      const double target_load = rebufferTargetLoadForCell(
+          *cell, characterization.target_slew[0], characterization.target_slew[1],
+          target_cell_math);
+      const double distance = std::abs(downstream_load - target_load);
+      const double delay = target_cell_math
+          ? cellTargetSlewDelay(*cell, characterization.target_slew, downstream_load)
+          : rebufferCellOutputDelay(
+                *cell, input_slew_rise, input_slew_fall, downstream_load);
+      if (best < 0
+          || (delay < best_delay && distance < best_dist * 1.1)
+          || (distance < best_dist && delay < best_delay * 1.1)) {
+        best = static_cast<int>(cell - liberty.cells.data());
+        best_dist = distance;
+        best_delay = delay;
+      }
+    }
+    return best >= 0 ? best : fallback;
+  };
+
+  if (lowest_main_id >= 0) {
+    std::vector<const LibertyCellView*> family;
+    family.reserve(liberty.cells.size());
+    for (const auto& cell : liberty.cells) {
+      if (cell.main_id == lowest_main_id
+          && (lowest_vt < 0 || cell.vt == lowest_vt)) {
+        family.push_back(&cell);
+      }
+    }
+    const int selected = select(family);
+    if (selected >= 0) {
+      return selected;
+    }
+  }
+
+  std::vector<const LibertyCellView*> filtered;
+  filtered.reserve(candidates.size());
+  for (const auto& buffer : candidates) {
+    if (buffer.cell_index >= 0
+        && buffer.cell_index < static_cast<int>(liberty.cells.size())) {
+      filtered.push_back(&liberty.cells[buffer.cell_index]);
+    }
+  }
+  return select(filtered);
+}
+
+RepeaterCellSelection rebufferChooseRepeaterCell(const LibertyView& liberty,
+                               const CharacterizationResult& characterization,
+                               double input_slew_rise, double input_slew_fall,
+                               double initial_load, double repeater_load,
+                               const RepairConfig& config,
+                               bool resize)
+{
+  const bool do_resize
+      = resize && config.repair_design_openroad_repeater_resize;
+  if (!config.repair_design_target_cell_selection) {
+    return {rebufferChooseBufferCell(liberty, characterization,
+        input_slew_rise, input_slew_fall,
+        do_resize ? repeater_load : initial_load,
+        config.repair_design_target_cell_math), -1};
+  }
+  // findTargetCell first starts from the lowest-drive buffer. The insertion
+  // resize then starts from that selected cell, whose eligibility may differ.
+  const int initial = rebufferChooseBufferCell(liberty,
+                                               characterization,
+                                               input_slew_rise,
+                                               input_slew_fall,
+                                               initial_load,
+                                               true,
+                                               true,
+                                               -1,
+                                               config.sizing_area_limit,
+                                               config.sizing_leakage_limit);
+  if (initial < 0 || !do_resize) {
+    return {initial, initial};
+  }
+  return {rebufferChooseBufferCell(liberty,
+                                   characterization,
+                                   input_slew_rise,
+                                   input_slew_fall,
+                                   repeater_load,
+                                   true,
+                                   true,
+                                   initial,
+                                   config.sizing_area_limit,
+                                   config.sizing_leakage_limit),
+          initial};
+}
+
+}  // namespace rebuffer
+
+// --- rebuffer_path_policy.cc ---
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <utility>
+
+namespace rebuffer {
+
+namespace {
+
+struct RankedDriver
+{
+  int pin = -1;
+  int path_index = -1;
+  double delay = 0.0;
+};
+
+const TimingArcView* pathArc(const LibertyCellView& cell, int local_id)
+{
+  for (const TimingArcView& arc : cell.arcs) {
+    if (arc.local_id == local_id) {
+      return &arc;
+    }
+  }
+  // Older payloads did not preserve local arc ids.  Keep the compact-index
+  // fallback for those fixtures, but prefer the identity-bearing lookup.
+  if (local_id >= 0 && local_id < static_cast<int>(cell.arcs.size())) {
+    return &cell.arcs[local_id];
+  }
+  return nullptr;
+}
+
+double loadDependentPathDelay(const TimingView& timing,
+                              const LibertyCellView& cell,
+                              int path_index,
+                              int input_pin,
+                              const PathDriverAccess& access,
+                              bool openroad_intrinsic)
+{
+  const int edge = path_index - 1;
+  if (edge < 0 || edge >= static_cast<int>(timing.path_arc_delays.size())
+      || edge >= static_cast<int>(timing.path_arc_local_ids.size())
+      || path_index >= static_cast<int>(timing.path_transitions.size())
+      || edge >= static_cast<int>(timing.path_transitions.size())) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  const double actual_delay = timing.path_arc_delays[edge];
+  if (!std::isfinite(actual_delay)) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  const TimingArcView* arc
+      = pathArc(cell, timing.path_arc_local_ids[edge]);
+  if (arc == nullptr || input_pin < 0
+      || input_pin >= static_cast<int>(access.rise_slew.size())
+      || input_pin >= static_cast<int>(access.fall_slew.size())) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  const bool input_rise = timing.path_transitions[edge] == 0;
+  const bool output_rise = timing.path_transitions[path_index] == 0;
+  const double input_slew = input_rise
+                                ? access.rise_slew[input_pin]
+                                : access.fall_slew[input_pin];
+  const LutTable& delay_table
+      = output_rise ? arc->rise_delay : arc->fall_delay;
+  // OpenSTA TimingArc::intrinsicDelay evaluates at slew=0 and load=0.
+  const double intrinsic = lutFindValue(
+      delay_table, openroad_intrinsic ? 0.0 : input_slew, 0.0);
+  return actual_delay - intrinsic;
+}
+
+int cellIndexForNode(const DesignView& design, int node)
+{
+  if (node < 0 || node >= static_cast<int>(design.inst_main_id.size())) {
+    return -1;
+  }
+  const int main_id = design.inst_main_id[node];
+  if (main_id < 0
+      || main_id + 1
+             >= static_cast<int>(design.main_id_2_cell_id_start.size())) {
+    return -1;
+  }
+  return design.main_id_2_cell_id_start[main_id]
+         + design.inst_libcell_offset[node];
+}
+
+}  // namespace
+
+std::vector<int> rankPathDriverPins(const PathDriverAccess& access,
+    const LibertyView& liberty, const std::vector<int>& path,
+    const TimingView* path_context, bool openroad_intrinsic, std::vector<double>* scores)
+{
+  std::vector<RankedDriver> ranked;
+  ranked.reserve(path.size());
+  auto cell_for_driver = [&](int driver) {
+    if (driver < 0 || driver >= access.num_pins
+        || driver >= static_cast<int>(access.pin_net.size())
+        || driver >= static_cast<int>(access.load.size())
+        || driver >= static_cast<int>(access.pin_owner.size())) return -1;
+    const int net = access.pin_net[driver];
+    if (net < 0 || net >= static_cast<int>(access.net_drivers.size())
+        || access.net_drivers[net] != driver || access.is_clock(driver)) return -1;
+    const int cell = access.cell_for_node(access.pin_owner[driver]);
+    return cell >= 0 && cell < static_cast<int>(liberty.cells.size()) ? cell : -1;
+  };
+  // The launching register output is ranked from its cell's input slews.
+  if (!path.empty()) {
+    const int driver = path.front();
+    const int cell_index = cell_for_driver(driver);
+    double rise = 0.0, fall = 0.0;
+    if (cell_index >= 0 && access.input_slew(driver, rise, fall)) {
+      const auto& cell = liberty.cells[cell_index];
+      const double delay = rebufferCellOutputDelay(cell, rise, fall, access.load[driver])
+                           - rebufferCellOutputDelay(cell, rise, fall, 0.0);
+      ranked.push_back({driver, 0, delay});
+    }
+  }
+  for (int index = 1; index < static_cast<int>(path.size()); ++index) {
+    const int driver = path[index];
+    const int cell = cell_for_driver(driver);
+    if (cell < 0) continue;
+    const int input = path[index - 1];
+    if (input < 0 || input >= static_cast<int>(access.rise_slew.size())
+        || input >= static_cast<int>(access.fall_slew.size())) continue;
+    double delay = path_context == nullptr ? std::numeric_limits<double>::quiet_NaN()
+        : loadDependentPathDelay(
+              *path_context, liberty.cells[cell], index, input, access, openroad_intrinsic);
+    if (!std::isfinite(delay)) {
+      delay = rebufferCellOutputDelay(liberty.cells[cell], access.rise_slew[input],
+                                     access.fall_slew[input], access.load[driver]);
+    }
+    ranked.push_back({driver, index, delay});
+  }
+
+  std::stable_sort(
+      ranked.begin(),
+      ranked.end(),
+      [openroad_intrinsic](const RankedDriver& lhs, const RankedDriver& rhs) {
+        if (openroad_intrinsic ? lhs.delay != rhs.delay
+                               : std::abs(lhs.delay - rhs.delay) > 1.0e-12) {
+          return lhs.delay > rhs.delay;
+        }
+        return lhs.path_index > rhs.path_index;
+      });
+
+  std::vector<int> result;
+  result.reserve(ranked.size());
+  if (scores) scores->clear();
+  for (const auto& item : ranked) {
+    result.push_back(item.pin);
+    if (scores) scores->push_back(item.delay);
+  }
+  return result;
+}
+
+std::vector<int> rankPathDriverPins(const DesignView& design,
+    const TimingView& timing, const LibertyView& liberty, const std::vector<int>& path,
+    bool openroad_intrinsic)
+{
+  const PathDriverAccess access{design.num_pins, design.pin2net_map,
+      design.net2driver_pin_map, design.pin2node_map, timing.pin_slew_rise,
+      timing.pin_slew_fall, timing.pin_load,
+      [&](int node) { return cellIndexForNode(design, node); },
+      [&](int pin) { return rebufferIsClockPin(timing, pin); },
+      [&](int pin, double& rise, double& fall) {
+        return rebufferDriverInputSlew(design, timing, liberty, pin, rise, fall);
+      }};
+  return rankPathDriverPins(access, liberty, path, &timing, openroad_intrinsic);
+}
+
+}  // namespace rebuffer
+
+// --- rebuffer_design.cc ---
+#include "rebuffer_types.hh"
+
+
+#include <algorithm>
+#include <cstddef>
+
+namespace rebuffer {
+
+namespace {
+
+bool valid_csr(const std::vector<int>& start,
+               std::size_t element_count,
+               std::string& reason,
+               const char* name)
+{
+  if (start.size() < 2 || start.front() != 0
+      || start.back() != static_cast<int>(element_count)) {
+    reason = std::string(name) + "_invalid_csr_bounds";
+    return false;
+  }
+  for (std::size_t index = 1; index < start.size(); ++index) {
+    if (start[index] < start[index - 1]) {
+      reason = std::string(name) + "_not_monotonic";
+      return false;
+    }
+  }
+  return true;
+}
+
+bool all_in_range(const std::vector<int>& values,
+                  int upper_bound,
+                  std::string& reason,
+                  const char* name,
+                  bool allow_negative_one = false)
+{
+  const int lower = allow_negative_one ? -1 : 0;
+  for (const int value : values) {
+    if (value < lower || value >= upper_bound) {
+      reason = std::string(name) + "_out_of_range";
+      return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
+bool validate_design(const DesignView& design, std::string& reason)
+{
+  if (design.dbu <= 0) {
+    reason = "invalid_dbu";
+    return false;
+  }
+  if (design.num_nets <= 0 || design.num_pins <= 0 || design.num_nodes <= 0) {
+    reason = "empty_design";
+    return false;
+  }
+  if (!valid_csr(
+          design.flat_net2pin_start_map, design.flat_net2pin_map.size(),
+          reason, "flat_net2pin_start_map")) {
+    return false;
+  }
+  if (static_cast<int>(design.flat_net2pin_start_map.size()) - 1
+      != design.num_nets) {
+    reason = "net_count_mismatch";
+    return false;
+  }
+  if (static_cast<int>(design.net2driver_pin_map.size()) != design.num_nets
+      || static_cast<int>(design.pin2node_map.size()) != design.num_pins
+      || static_cast<int>(design.pin2net_map.size()) != design.num_pins
+      || static_cast<int>(design.pin_offset_x.size()) != design.num_pins
+      || static_cast<int>(design.pin_offset_y.size()) != design.num_pins
+      || static_cast<int>(design.node_x.size()) != design.num_nodes
+      || static_cast<int>(design.node_y.size()) != design.num_nodes) {
+    reason = "array_length_mismatch";
+    return false;
+  }
+  if (!all_in_range(
+          design.flat_net2pin_map, design.num_pins, reason, "flat_net2pin_map")
+      || !all_in_range(
+          design.pin2node_map, design.num_nodes, reason, "pin2node_map")
+      || !all_in_range(design.pin2net_map, design.num_nets, reason, "pin2net_map")
+      || !all_in_range(design.net2driver_pin_map,
+                       design.num_pins,
+                       reason,
+                       "net2driver_pin_map",
+                       true)) {
+    return false;
+  }
+  for (int net_id = 0; net_id < design.num_nets; ++net_id) {
+    const int begin = design.flat_net2pin_start_map[net_id];
+    const int end = design.flat_net2pin_start_map[net_id + 1];
+    const int driver = design.net2driver_pin_map[net_id];
+    if (driver >= 0
+        && std::find(design.flat_net2pin_map.begin() + begin,
+                     design.flat_net2pin_map.begin() + end,
+                     driver)
+               == design.flat_net2pin_map.begin() + end) {
+      reason = "net_driver_not_in_net";
+      return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace rebuffer

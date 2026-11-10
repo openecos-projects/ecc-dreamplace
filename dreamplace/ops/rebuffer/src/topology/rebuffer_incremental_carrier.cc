@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Incremental graph carrier rebuild. Timing evaluation remains Python
 // TimingPropagation; this file only owns graph/index/CSR transport.
-#include "rebuffer_incremental_carrier.hh"
 #include "rebuffer_carrier.hh"
+
 #include "rebuffer_incremental_timing.hh"
+
 
 #include <algorithm>
 #include <array>
@@ -18,6 +19,7 @@
 #include <vector>
 
 #include "pybind11/stl.h"
+
 
 namespace py = pybind11;
 namespace rebuffer {
@@ -368,6 +370,253 @@ py::dict rebuildTimingCarrierIncremental(
   out["timing_carrier_source"] = "incremental_native_graph_patch";
   out["ecc_sta_run"] = false;
   return out;
+}
+
+}  // namespace rebuffer
+
+// --- rebuffer_incremental_rc.cc ---
+#include "rebuffer_incremental_topology.hh"
+
+
+#include <algorithm>
+#include <cstdint>
+#include <stdexcept>
+#include <unordered_map>
+#include <utility>
+
+namespace rebuffer {
+
+CompactRcForest compactRcForest(const IncrementalTopologyState& state,
+                                int original_pin_count)
+{
+  CompactRcForest result;
+  auto& ids = result.node_ids;
+  ids.push_back(state.driver_pin_id);
+  for (const auto& edge : state.edges) {
+    ids.push_back(edge.parent); ids.push_back(edge.child);
+  }
+  for (const auto& [node, _] : state.node_loads) ids.push_back(node);
+  std::unordered_map<int, int> buffer_slots, buffer_outputs;
+  for (int slot = 0; slot < static_cast<int>(state.buffers.size()); ++slot) {
+    const auto& buffer = state.buffers[slot];
+    ids.push_back(buffer.input_node); ids.push_back(buffer.output_node);
+    if (!buffer_slots.emplace(buffer.input_node, 2 * slot).second
+        || !buffer_slots.emplace(buffer.output_node, 2 * slot + 1).second) {
+      throw std::invalid_argument("native timing RC node namespace collides");
+    }
+    buffer_outputs.emplace(buffer.input_node, buffer.output_node);
+  }
+  std::sort(ids.begin(), ids.end());
+  ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+  if (ids.front() < 0) throw std::invalid_argument("persistent timing graph RC node is negative");
+  // Preserve the former dense adapter's wire-cap accumulation order: original
+  // physical pins, current buffer slots, then shifted Steiner identities.
+  auto key = [&](int node) -> std::int64_t {
+    const auto slot = buffer_slots.find(node);
+    if (slot != buffer_slots.end()) return static_cast<std::int64_t>(original_pin_count) + slot->second;
+    return node < original_pin_count ? node
+        : static_cast<std::int64_t>(node) + 2 * state.buffers.size();
+  };
+  std::sort(ids.begin(), ids.end(), [&](int a, int b) { return key(a) < key(b); });
+  for (std::size_t i = 1; i < ids.size(); ++i) {
+    if (key(ids[i - 1]) == key(ids[i])) {
+      throw std::invalid_argument("native timing RC node namespace collides");
+    }
+  }
+  std::unordered_map<int, int> local;
+  for (int i = 0; i < static_cast<int>(ids.size()); ++i) local.emplace(ids[i], i);
+  result.parent.assign(ids.size(), -1);
+  result.resistance.assign(ids.size(), 0);
+  result.edge_capacitance.assign(ids.size(), 0);
+  std::vector<std::vector<int>> children(ids.size());
+  for (const auto& edge : state.edges) {
+    const auto output = buffer_outputs.find(edge.parent);
+    if (output != buffer_outputs.end() && output->second == edge.child) continue;
+    const int source = local.at(edge.parent), sink = local.at(edge.child);
+    if (result.parent[sink] >= 0 && result.parent[sink] != source) {
+      throw std::invalid_argument("persistent timing graph RC node has multiple parents");
+    }
+    result.parent[sink] = source;
+    children[source].push_back(sink);
+    result.resistance[sink] = edge.resistance;
+    result.edge_capacitance[sink] = edge.capacitance;
+  }
+  std::vector<int> roots{state.driver_pin_id};
+  for (const auto& buffer : state.buffers) roots.push_back(buffer.output_node);
+  std::vector<unsigned char> visited(ids.size(), 0);
+  result.topo_start.push_back(0);
+  for (int root_id : roots) {
+    const int root = local.at(root_id);
+    if (result.parent[root] >= 0 && result.parent[root] != root) {
+      throw std::invalid_argument("persistent timing graph RC root has a parent");
+    }
+    result.parent[root] = root;
+    if (visited[root] == 2) continue;
+    std::vector<std::pair<int, bool>> pending{{root, false}};
+    while (!pending.empty()) {
+      const auto [node, leaving] = pending.back(); pending.pop_back();
+      if (leaving) { visited[node] = 2; continue; }
+      if (visited[node] == 2) continue;
+      if (visited[node] == 1) throw std::invalid_argument("persistent timing graph RC forest has a cycle");
+      visited[node] = 1;
+      result.topo.push_back(node);
+      pending.emplace_back(node, true);
+      for (auto it = children[node].rbegin(); it != children[node].rend(); ++it) {
+        if (visited[*it] == 1) throw std::invalid_argument("persistent timing graph RC forest has a cycle");
+        pending.emplace_back(*it, false);
+      }
+    }
+    result.topo_start.push_back(result.topo.size());
+  }
+  if (std::find(visited.begin(), visited.end(), 0) != visited.end()) {
+    throw std::invalid_argument("persistent timing graph RC forest is disconnected");
+  }
+  result.child_start.push_back(0);
+  for (const auto& row : children) {
+    result.children.insert(result.children.end(), row.begin(), row.end());
+    result.child_start.push_back(result.children.size());
+  }
+  return result;
+}
+
+std::vector<double> compactRcWireCaps(const CompactRcForest& forest)
+{
+  std::vector<double> caps(forest.parent.size(), 0);
+  for (int node = 0; node < static_cast<int>(caps.size()); ++node) {
+    if (forest.parent[node] == node) continue;
+    const double half = forest.edge_capacitance[node] * 0.5;
+    caps[node] += half;
+    caps[forest.parent[node]] += half;
+  }
+  return caps;
+}
+
+std::array<std::vector<double>, 3> evaluateCompactRc(
+    const CompactRcForest& forest, const std::vector<double>& caps)
+{
+  const int count = forest.parent.size();
+  std::vector<double> load(count), delay(count), ldelay(count), beta(count), impulse(count);
+  for (std::size_t tree = 0; tree + 1 < forest.topo_start.size(); ++tree) {
+    const int first = forest.topo_start[tree], last = forest.topo_start[tree + 1];
+    for (int row = last; row-- > first;) {
+      const int node = forest.topo[row];
+      double value = caps[node];
+      for (int edge = forest.child_start[node]; edge < forest.child_start[node + 1]; ++edge) {
+        value += load[forest.children[edge]];
+      }
+      load[node] = value;
+    }
+    for (int row = first; row < last; ++row) {
+      const int node = forest.topo[row], parent = forest.parent[node];
+      delay[node] = parent == node ? 0.0 : delay[parent] + forest.resistance[node] * load[node];
+    }
+    for (int row = last; row-- > first;) {
+      const int node = forest.topo[row];
+      double value = caps[node] * delay[node];
+      for (int edge = forest.child_start[node]; edge < forest.child_start[node + 1]; ++edge) {
+        value += ldelay[forest.children[edge]];
+      }
+      ldelay[node] = value;
+    }
+    for (int row = first; row < last; ++row) {
+      const int node = forest.topo[row], parent = forest.parent[node];
+      beta[node] = parent == node ? 0.0 : beta[parent] + forest.resistance[node] * ldelay[node];
+      impulse[node] = 2.0 * beta[node] - delay[node] * delay[node];
+    }
+  }
+  return {std::move(load), std::move(delay), std::move(impulse)};
+}
+
+}  // namespace rebuffer
+
+// --- rebuffer_incremental_rc_python.cc ---
+// Legacy dense dictionary/NumPy boundary for the shared compact native RC math.
+
+#include <algorithm>
+#include <cstdint>
+#include <string>
+#include <unordered_map>
+
+
+namespace py = pybind11;
+namespace rebuffer {
+
+py::dict evaluateIncrementalRc(
+    const py::dict& rc,
+    const py::array_t<double, py::array::c_style | py::array::forcecast>& generic_caps,
+    const py::array_t<double, py::array::c_style | py::array::forcecast>& rise_caps,
+    const py::array_t<double, py::array::c_style | py::array::forcecast>& fall_caps,
+    const py::dict& buffer_caps, const int pin_count)
+{
+  const auto global_parent = rc["parent"].cast<std::vector<int>>();
+  const auto global_child_start = rc["child_start"].cast<std::vector<int>>();
+  const auto global_children = rc["child"].cast<std::vector<int>>();
+  const auto global_topo_start = rc["topo_start"].cast<std::vector<int>>();
+  const auto global_topo = rc["topo"].cast<std::vector<int>>();
+  const auto global_resistance = rc["edge_resistance"].cast<std::vector<double>>();
+  const auto global_edge_cap = rc["edge_capacitance"].cast<std::vector<double>>();
+  CompactRcForest forest;
+  auto& affected = forest.node_ids;
+  affected = rc["affected_nodes"].cast<std::vector<int>>();
+  std::unordered_map<int, int> local;
+  local.reserve(affected.size());
+  for (int i = 0; i < static_cast<int>(affected.size()); ++i) local.emplace(affected[i], i);
+  forest.child_start.push_back(0);
+  for (int node : affected) {
+    forest.parent.push_back(local.at(global_parent[node]));
+    forest.resistance.push_back(global_resistance[node]);
+    forest.edge_capacitance.push_back(global_edge_cap[node]);
+    for (int offset = global_child_start[node]; offset < global_child_start[node + 1]; ++offset) {
+      forest.children.push_back(local.at(global_children[offset]));
+    }
+    forest.child_start.push_back(forest.children.size());
+  }
+  forest.topo_start = global_topo_start;
+  for (int node : global_topo) forest.topo.push_back(local.at(node));
+  const auto wire_cap = compactRcWireCaps(forest);
+  auto modeCaps = [&](const auto& base, int mode) {
+    std::vector<double> caps(affected.size(), 0);
+    const auto values = base.template unchecked<1>();
+    std::vector<std::vector<double>> slot_inputs, slot_outputs;
+    if (buffer_caps.contains("slots")) {
+      for (const auto& item : buffer_caps["slots"].cast<py::sequence>()) {
+        const auto slot = item.cast<py::dict>();
+        slot_inputs.push_back(slot["input"].cast<std::vector<double>>());
+        slot_outputs.push_back(slot["output"].cast<std::vector<double>>());
+      }
+    } else {
+      slot_inputs.push_back(buffer_caps["input"].cast<std::vector<double>>());
+      slot_outputs.push_back(buffer_caps["output"].cast<std::vector<double>>());
+    }
+    for (int i = 0; i < static_cast<int>(affected.size()); ++i) {
+      const int node = affected[i];
+      if (node < pin_count && node < values.shape(0)) caps[i] = values(node);
+      else if (node >= pin_count) {
+        const int offset = node - pin_count, slot = offset / 2;
+        if (slot >= 0 && slot < static_cast<int>(slot_inputs.size())) {
+          caps[i] = (offset % 2 == 0 ? slot_inputs[slot] : slot_outputs[slot]).at(mode);
+        }
+      }
+      caps[i] += wire_cap[i];
+    }
+    return caps;
+  };
+  py::dict result;
+  py::array_t<int64_t> nodes({static_cast<py::ssize_t>(affected.size())},
+                            {static_cast<py::ssize_t>(sizeof(int64_t))});
+  std::copy(affected.begin(), affected.end(), nodes.mutable_data());
+  result["affected_nodes"] = std::move(nodes);
+  const std::array<const char*, 3> modes{"generic", "rise", "fall"};
+  const std::array<const char*, 3> fields{"loads_", "delays_", "impulses_"};
+  const std::array<const py::array_t<double, py::array::c_style | py::array::forcecast>*, 3>
+      caps{&generic_caps, &rise_caps, &fall_caps};
+  for (int mode = 0; mode < 3; ++mode) {
+    const auto values = evaluateCompactRc(forest, modeCaps(*caps[mode], mode));
+    for (int field = 0; field < 3; ++field) {
+      result[(std::string(fields[field]) + modes[mode]).c_str()] = values[field];
+    }
+  }
+  return result;
 }
 
 }  // namespace rebuffer

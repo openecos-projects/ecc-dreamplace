@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Validate and own the original Python TP constraints, tables and schedule.
-#include "rebuffer_timing_program.hh"
-#include "rebuffer_timing_events.hh"
+#include "rebuffer_timing_mutation.hh"
+
 
 #include <algorithm>
 #include <cmath>
@@ -11,7 +11,9 @@
 #include <string>
 
 #include "pybind11/numpy.h"
+
 #include "pybind11/stl.h"
+
 
 namespace py = pybind11;
 namespace rebuffer {
@@ -411,6 +413,392 @@ std::shared_ptr<const TimingPropagationProgram> timingProgramFromPython(
     p.recovery_rows_by_pin[p.recovery_arcs[row][1]].push_back(row);
   }
   buildTimingEventSchedule(p.schedule, graph);
+  return result;
+}
+
+}  // namespace rebuffer
+
+// --- rebuffer_timing_graph_propagate.cc ---
+// Full-seed sweep on the immutable carrier graph, using shared timing math.
+#include "rebuffer_timing_graph.hh"
+
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <cstring>
+#include <limits>
+#include <numeric>
+
+#include "net_aat_math.h"
+
+#include "timing_hard_math.h"
+
+
+namespace py = pybind11;
+namespace rebuffer {
+namespace {
+
+template <std::size_t Width>
+const int64_t* flat(const std::vector<std::array<int64_t, Width>>& rows)
+{
+  return rows.empty() ? nullptr : rows.front().data();
+}
+
+}  // namespace
+
+py::dict PersistentTimingGraph::initializePropagation(const py::dict& values)
+{
+  if (propagation_program_ != nullptr) {
+    throw py::value_error("propagation inputs are immutable; create a new graph to reconfigure");
+  }
+  // Parse into a separate owner: malformed inputs cannot change graph state.
+  propagation_program_ = timingProgramFromPython(values, *timing_index_);
+  return summary();
+}
+
+py::dict PersistentTimingGraph::propagate()
+{
+  if (!timing_state_initialized_ || propagation_program_ == nullptr) {
+    throw py::value_error("propagation requires initialized timing state and inputs");
+  }
+  if (!net_states_.empty()) {
+    if (mutation_state_ == nullptr) {
+      throw py::value_error("full-seed propagation requires synchronized buffer timing records");
+    }
+    requireSynchronizedTimingTopologies(*mutation_state_, net_states_);
+  }
+  const auto& p = *propagation_program_;
+  std::shared_ptr<TimingPropagationSchedule> generated;
+  if (mutation_state_ && mutation_state_->canonical_schedule) {
+    const auto started = std::chrono::steady_clock::now();
+    TimingGraphIndex rebuilt;
+    rebuilt.pins = timing_index_->pins; rebuilt.clocks = timing_index_->clocks;
+    rebuilt.clock_end = timing_index_->clock_end;
+    buildTimingMutationIndex(*mutation_state_, rebuilt);
+    const auto indexed = std::chrono::steady_clock::now();
+    ++mutation_state_->statistics.index_builds;
+    mutation_state_->statistics.index_ms += std::chrono::duration<double, std::milli>(indexed - started).count();
+    generated = makeTimingMutationSchedule(*mutation_state_, rebuilt, p);
+    ++mutation_state_->statistics.schedule_builds;
+    mutation_state_->statistics.schedule_ms += std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - indexed).count();
+  }
+  const auto& schedule = generated ? *generated : p.schedule;
+  const auto& cells = mutation_state_ != nullptr && !generated
+                          ? mutation_state_->cells : schedule.cells;
+  const int pins = timing_index_->pins.size();
+  const auto arcs = timing_index_->cells.size();
+  std::map<std::string, std::vector<double>> output;
+  auto& ra = output["pin_rAAT"] = std::vector<double>(pins, -2e8);
+  auto& fa = output["pin_fAAT"] = std::vector<double>(pins, -2e8);
+  auto& rs = output["pin_rtran"] = std::vector<double>(pins, 0);
+  auto& fs = output["pin_ftran"] = std::vector<double>(pins, 0);
+  auto& rr = output["pin_rRAT"] = std::vector<double>(pins, 2e8);
+  auto& fr = output["pin_fRAT"] = std::vector<double>(pins, 2e8);
+  auto& drr = output["cell_arc_rr_delays"] = std::vector<double>(arcs, 0);
+  auto& dfr = output["cell_arc_fr_delays"] = std::vector<double>(arcs, 0);
+  auto& drf = output["cell_arc_rf_delays"] = std::vector<double>(arcs, 0);
+  auto& dff = output["cell_arc_ff_delays"] = std::vector<double>(arcs, 0);
+  const auto& cap_r = state_.at("pin_net_cap_rise");
+  const auto& cap_f = state_.at("pin_net_cap_fall");
+  const auto& delay_r = state_.at("pin_net_delay_rise");
+  const auto& delay_f = state_.at("pin_net_delay_fall");
+  const auto& impulse_r = state_.at("pin_net_impulse_rise");
+  const auto& impulse_f = state_.at("pin_net_impulse_fall");
+  const auto rd = p.luts[0].view(), fd = p.luts[1].view();
+  const auto rt = p.luts[2].view(), ft = p.luts[3].view();
+  for (std::size_t i = 0; i < p.start_pins.size(); ++i) {
+    const auto id = p.start_pins[i];
+    ra[id] = p.start_rAAT[i]; fa[id] = p.start_fAAT[i];
+    rs[id] = p.start_rtran[i]; fs[id] = p.start_ftran[i];
+  }
+  for (std::size_t i = 0; i < p.endpoint_pins.size(); ++i) {
+    const auto id = p.endpoint_pins[i];
+    rr[id] = p.endpoint_rRAT[i]; fr[id] = p.endpoint_fRAT[i];
+  }
+
+  dreamplace::timing::clk2qRows(
+      flat(cells), schedule.level_start[1], 8, pins, cap_r.data(), cap_f.data(),
+      p.clock_rtran.data(), p.clock_ftran.data(), rd, fd, rt, ft,
+      p.pairwise_smooth, p.pairwise_alpha, ra.data(), fa.data(), rs.data(), fs.data());
+  // Clock slots deliberately retain zero delays, matching the Python cache.
+  std::vector<double> updates;
+  std::size_t net_forward_rows = 0, net_reverse_rows = 0;
+  auto forward_net = [&](const ProgramNetGroup& group) {
+    updates.resize(group.arcs.size() * 4);
+    for (std::size_t i = 0; i < group.arcs.size(); ++i) {
+      double jacobian[6];
+      netForwardRow(0, group.arcs[i].data(), 2, 1, pins,
+                    ra.data(), fa.data(), rs.data(), fs.data(),
+                    delay_r.data(), delay_f.data(), impulse_r.data(), impulse_f.data(),
+                    updates.data() + i * 4, jacobian, p.slew_epsilon);
+    }
+    dreamplace::timing::aggregateNetRows(flat(group.arcs), updates.data(),
+        group.arcs.size(), 2, ra.data(), fa.data(), rs.data(), fs.data());
+    net_forward_rows += group.arcs.size();
+  };
+  forward_net(schedule.forward_nets[0]);
+  for (std::size_t level = 1; level + 1 < schedule.level_start.size(); ++level) {
+    const auto first = schedule.level_start[level], last = schedule.level_start[level + 1];
+    updates.resize((last - first) * 8);
+    for (auto i = first; i < last; ++i) {
+      double jacobian[48];
+      auto* row = updates.data() + (i - first) * 8;
+      cellForwardRow(0, cells[i].data(), 8, 1, pins, ra.data(), fa.data(),
+                     rs.data(), fs.data(), cap_r.data(), cap_f.data(), rd, fd, rt, ft,
+                     row, jacobian, p.pairwise_smooth, p.pairwise_alpha);
+      const auto slot = schedule.arc_ids[i];
+      drr[slot] = row[4]; dfr[slot] = row[5]; drf[slot] = row[6]; dff[slot] = row[7];
+    }
+    if (first != last) {
+      dreamplace::timing::aggregateCellRows(cells[first].data(), updates.data(),
+          last - first, 8, ra.data(), fa.data(), rs.data(), fs.data());
+    }
+    forward_net(schedule.forward_nets[level]);
+  }
+
+  // Keep each batch's RAT input unchanged. Several rows can write one pin,
+  // and self net arcs can read the same pin that they update.
+  std::vector<double> scratch_r(pins), scratch_f(pins);
+  auto prepare = [&](const std::vector<int64_t>& touched) {
+    for (auto id : touched) { scratch_r[id] = rr[id]; scratch_f[id] = fr[id]; }
+  };
+  auto finish = [&](const std::vector<int64_t>& touched) {
+    for (auto id : touched) { rr[id] = scratch_r[id]; fr[id] = scratch_f[id]; }
+  };
+  prepare(p.setup_pins);
+  dreamplace::timing::setupRatRows(flat(p.setup_arcs), p.setup_arcs.size(), 8,
+      rr.data(), fr.data(), p.clock_rtran.data(), p.clock_ftran.data(), rs.data(),
+      fs.data(), rd, fd, p.setup_valid.get(), p.pairwise_smooth, p.pairwise_alpha,
+      scratch_r.data(), scratch_f.data());
+  finish(p.setup_pins);
+
+  auto reference_r = p.recovery_reference_rtran;
+  auto reference_f = p.recovery_reference_ftran;
+  if (p.recovery_uses_live_slew) {
+    for (std::size_t i = 0; i < p.recovery_arcs.size(); ++i) {
+      reference_r[i] = rs[p.recovery_arcs[i][1]];
+      reference_f[i] = fs[p.recovery_arcs[i][1]];
+    }
+  }
+  dreamplace::timing::recoveryRatRows(flat(p.recovery_arcs), p.recovery_arcs.size(),
+      8, pins, rr.data(), fr.data(), rs.data(), fs.data(),
+      p.recovery_clock_rtran.data(), p.recovery_clock_ftran.data(),
+      reference_r.data(), reference_f.data(), p.luts[4].view(), p.luts[5].view(),
+      p.recovery_valid.get(), scratch_r.data(), scratch_f.data(),
+      p.recovery_rat_is_capture_deadline, p.recovery_deadline_r.data(),
+      p.recovery_deadline_f.data(), p.recovery_keep_setup.get());
+  for (auto id : p.recovery_r_pins) rr[id] = scratch_r[id];
+  for (auto id : p.recovery_f_pins) fr[id] = scratch_f[id];
+
+  auto reverse_net = [&](const ProgramNetGroup& group) {
+    prepare(group.drivers);
+    dreamplace::timing::netRatRows(flat(group.arcs), group.arcs.size(), 2,
+        rr.data(), fr.data(), delay_r.data(), delay_f.data(),
+        scratch_r.data(), scratch_f.data());
+    finish(group.drivers);
+    net_reverse_rows += group.arcs.size();
+  };
+  reverse_net(schedule.endpoint_nets);
+  for (int level = static_cast<int>(schedule.level_start.size()) - 2; level >= 1; --level) {
+    const auto first = schedule.level_start[level], last = schedule.level_start[level + 1];
+    prepare(schedule.level_inputs[level]);
+    if (first != last) {
+      for (auto row = first; row < last; ++row) {
+        const auto slot = schedule.arc_ids[row];
+        dreamplace::timing::cellRatRows(cells[row].data(), 1, 8,
+            rr.data(), fr.data(), drr.data() + slot, dfr.data() + slot,
+            drf.data() + slot, dff.data() + slot, scratch_r.data(), scratch_f.data());
+      }
+    }
+    finish(schedule.level_inputs[level]);
+    reverse_net(schedule.reverse_nets[level]);
+  }
+
+  py::dict coverage;
+  coverage["clk2q_rows"] = schedule.level_start[1];
+  coverage["cell_forward_rows"] = cells.size() - schedule.level_start[1];
+  coverage["cell_reverse_rows"] = cells.size() - schedule.level_start[1];
+  coverage["net_forward_rows"] = net_forward_rows;
+  coverage["net_reverse_rows"] = net_reverse_rows;
+  coverage["setup_rows"] = p.setup_arcs.size();
+  coverage["recovery_rows"] = p.recovery_arcs.size();
+  return finishPropagation(std::move(output), std::move(coverage), "full_seed");
+}
+
+}  // namespace rebuffer
+
+// --- rebuffer_timing_compact.cc ---
+// Compact native timing slots at a committed boundary; preserve original ids.
+
+#include <algorithm>
+#include <map>
+
+
+namespace py = pybind11;
+namespace rebuffer {
+namespace {
+
+std::vector<int> liveMap(const std::vector<unsigned char>& live, std::size_t prefix)
+{
+  if (prefix > live.size()
+      || !std::all_of(live.begin(), live.begin() + prefix, [](auto value) { return value != 0; })) {
+    throw py::value_error("compact cannot remove original timing records");
+  }
+  std::vector<int> result(live.size(), -1);
+  int next = 0;
+  for (std::size_t id = 0; id < live.size(); ++id) if (live[id]) result[id] = next++;
+  return result;
+}
+
+template <typename T>
+std::vector<T> gather(const std::vector<T>& old, const std::vector<int>& mapping)
+{
+  if (old.size() != mapping.size()) throw py::value_error("compact metadata lengths do not align");
+  std::vector<T> result(std::count_if(mapping.begin(), mapping.end(), [](int id) { return id >= 0; }));
+  for (std::size_t id = 0; id < old.size(); ++id) {
+    if (mapping[id] >= 0) result.at(mapping[id]) = old[id];
+  }
+  return result;
+}
+
+int mapped(int id, const std::vector<int>& mapping)
+{
+  if (id < 0 || id >= static_cast<int>(mapping.size()) || mapping[id] < 0) {
+    throw py::value_error("compact active record references a removed slot");
+  }
+  return mapping[id];
+}
+
+py::array_t<int64_t> array(const std::vector<int>& values)
+{
+  py::array_t<int64_t> result({static_cast<py::ssize_t>(values.size())},
+                              {static_cast<py::ssize_t>(sizeof(int64_t))});
+  std::copy(values.begin(), values.end(), result.mutable_data());
+  return result;
+}
+
+}  // namespace
+
+py::dict PersistentTimingGraph::compact()
+{
+  if (!mutation_state_ || !propagation_program_ || !timing_state_initialized_) {
+    throw py::value_error("compact requires initialized native mutation and timing state");
+  }
+  if (!journal_.empty()) {
+    throw py::value_error("compact requires a committed journal boundary");
+  }
+  requireSynchronizedTimingTopologies(*mutation_state_, net_states_);
+  const auto& old = *mutation_state_;
+  const auto pins = liveMap(old.pin_active, propagation_program_->pin_count);
+  const auto arcs = liveMap(old.cell_active, propagation_program_->schedule.cells.size());
+  std::vector<unsigned char> node_live(old.node_names.size(), 0), net_live(old.net_names.size(), 0);
+  for (std::size_t id = 0; id < node_live.size(); ++id) {
+    node_live[id] = id < static_cast<std::size_t>(old.original_node_count) || old.node_cells[id] >= 0;
+  }
+  for (std::size_t id = 0; id < net_live.size(); ++id) {
+    net_live[id] = id < old.base_net_pins.size() || old.net_drivers[id] >= 0;
+  }
+  const auto nodes = liveMap(node_live, old.original_node_count);
+  const auto nets = liveMap(net_live, old.base_net_pins.size());
+  const bool changed = std::find(pins.begin(), pins.end(), -1) != pins.end()
+      || std::find(arcs.begin(), arcs.end(), -1) != arcs.end()
+      || std::find(nodes.begin(), nodes.end(), -1) != nodes.end()
+      || std::find(nets.begin(), nets.end(), -1) != nets.end()
+      || std::find(timing_index_->net_active.begin(), timing_index_->net_active.end(), 0)
+             != timing_index_->net_active.end();
+  py::dict result;
+  result["status"] = "ok";
+  result["changed"] = changed;
+  result["pin_old_to_new"] = array(pins);
+  result["cell_arc_old_to_new"] = array(arcs);
+  result["node_old_to_new"] = array(nodes);
+  result["net_old_to_new"] = array(nets);
+  if (!changed) {
+    std::vector<int> net_arcs(timing_index_->nets.size());
+    for (std::size_t id = 0; id < net_arcs.size(); ++id) net_arcs[id] = id;
+    result["net_arc_old_to_new"] = array(net_arcs);
+    result["state"] = summary();
+    return result;
+  }
+  // Prepare and validate a complete candidate before changing the owner.
+  // Compaction is infrequent; per-candidate mutation retains sparse metadata undo.
+  auto next = std::make_shared<TimingMutationState>(old);
+  auto& m = *next;
+  auto index = std::make_shared<TimingGraphIndex>();
+  index->pins = gather(timing_index_->pins, pins);
+  index->clocks = timing_index_->clocks;
+  index->clock_end = timing_index_->clock_end;
+  m.cells = gather(old.cells, arcs);
+  for (std::size_t slot = 0; slot < m.cells.size(); ++slot) {
+    auto& row = m.cells[slot];
+    if (slot >= static_cast<std::size_t>(index->clock_end)) row[0] = mapped(row[0], pins);
+    row[1] = mapped(row[1], pins);
+    row[7] = mapped(row[7], nodes);
+  }
+  m.cell_active.assign(m.cells.size(), 1);
+  m.pin_active.assign(index->pins.size(), 1);
+  m.pin_owner = gather(old.pin_owner, pins);
+  m.pin_net = gather(old.pin_net, pins);
+  m.pin_ports = gather(old.pin_ports, pins);
+  for (int& node : m.pin_owner) node = mapped(node, nodes);
+  for (int& net : m.pin_net) if (net >= 0) net = mapped(net, nets);
+  for (int lane = 0; lane < 5; ++lane) m.pin_values[lane] = gather(old.pin_values[lane], pins);
+  m.node_names = gather(old.node_names, nodes);
+  m.node_cells = gather(old.node_cells, nodes);
+  m.node_pins = gather(old.node_pins, nodes);
+  m.node_arcs = gather(old.node_arcs, nodes);
+  for (auto& row : m.node_pins) for (int& pin : row) pin = mapped(pin, pins);
+  for (auto& row : m.node_arcs) for (int& arc : row) arc = mapped(arc, arcs);
+  m.net_names = gather(old.net_names, nets);
+  m.net_drivers = gather(old.net_drivers, nets);
+  m.net_pins = gather(old.net_pins, nets);
+  for (int& driver : m.net_drivers) if (driver >= 0) driver = mapped(driver, pins);
+  for (auto& row : m.net_pins) for (int& pin : row) pin = mapped(pin, pins);
+  m.buffers.clear();
+  for (auto& vec : m.buffers_by_source_net) vec.clear();
+  m.buffer_id_by_action_id.clear();
+  for (const auto& previous : old.buffers) {
+    if (!previous.active) continue;
+    auto row = previous;
+    row.node = mapped(row.node, nodes);
+    row.input_pin = mapped(row.input_pin, pins); row.output_pin = mapped(row.output_pin, pins);
+    row.output_net = mapped(row.output_net, nets);
+    for (int& arc : row.arcs) arc = mapped(arc, arcs);
+    const int new_id = static_cast<int>(m.buffers.size());
+    m.buffers_by_source_net.at(row.source_net).push_back(new_id);
+    m.buffer_id_by_action_id.emplace(row.action_id, new_id);
+    m.buffers.push_back(std::move(row));
+  }
+  auto values = remappedTimingState(pins, arcs);
+  rebuildTimingMutationIndex(m, *index, *propagation_program_);
+  std::map<TimingNetArc, int> net_arc_ids;
+  for (int id = 0; id < static_cast<int>(index->nets.size()); ++id) net_arc_ids.emplace(index->nets[id], id);
+  std::vector<int> net_arc_map;
+  for (std::size_t id = 0; id < timing_index_->nets.size(); ++id) {
+    if (!timing_index_->net_active.empty() && !timing_index_->net_active[id]) {
+      net_arc_map.push_back(-1);
+      continue;
+    }
+    const auto& edge = timing_index_->nets[id];
+    const TimingNetArc mapped_edge{mapped(edge[0], pins), mapped(edge[1], pins)};
+    net_arc_map.push_back(net_arc_ids.at(mapped_edge));
+  }
+  result["net_arc_old_to_new"] = array(net_arc_map);
+  detachStateViews();
+  mutation_state_ = std::move(next);
+  timing_index_ = std::move(index);
+  state_ = std::move(values);
+  cached_active_counts_valid_ = false;
+  ++topology_revision_;
+  markElectricalFullDirty();
+  cached_endpoint_pin_names_.clear();
+  cached_endpoint_slacks_by_name_values_.clear();
+  ++epoch_;
+  ++journal_generation_;
+  result["state"] = summary();
   return result;
 }
 

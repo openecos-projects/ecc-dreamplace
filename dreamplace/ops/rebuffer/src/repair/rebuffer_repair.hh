@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: BSD-3-Clause
+#pragma once
+
 // Native repair_design planner data contracts.
 
-#pragma once
 
 #include <string>
 #include <vector>
 
 #include "rebuffer_liberty.hh"
+
 #include "rebuffer_types.hh"
+
 
 namespace rebuffer {
 
@@ -290,3 +293,68 @@ bool planRepairDesign(const DesignView& design,
                       std::string& reason);
 
 }  // namespace rebuffer
+
+// --- rebuffer_path_policy.hh ---
+#include <vector>
+#include <functional>
+
+
+namespace rebuffer {
+
+// Both materialized payloads and the persistent graph borrow the same ranking
+// inputs. Accessors resolve their different node/cell and storage ownership.
+struct PathDriverAccess
+{
+  int num_pins;
+  const std::vector<int>& pin_net;
+  const std::vector<int>& net_drivers;
+  const std::vector<int>& pin_owner;
+  const std::vector<double>& rise_slew;
+  const std::vector<double>& fall_slew;
+  const std::vector<double>& load;
+  std::function<int(int)> cell_for_node;
+  std::function<bool(int)> is_clock;
+  std::function<bool(int, double&, double&)> input_slew;
+};
+
+std::vector<int> rankPathDriverPins(const PathDriverAccess& access,
+    const LibertyView& liberty, const std::vector<int>& path,
+    const TimingView* path_context = nullptr, bool openroad_intrinsic = false,
+    std::vector<double>* scores = nullptr);
+
+// Return driver pins on one timing path in descending load-dependent delay.
+// This is the native counterpart of OpenROAD SetupLegacyBase::rankPathDrivers.
+std::vector<int> rankPathDriverPins(const DesignView& design,
+                                    const TimingView& timing,
+                                    const LibertyView& liberty,
+                                    const std::vector<int>& path,
+                                    bool openroad_intrinsic = false);
+
+}  // namespace rebuffer
+
+// --- rebuffer_python_views.hh ---
+// Declarations for the rebuffer Python dict -> native view conversions.
+
+
+#include <string>
+#include <vector>
+
+#include "pybind11/pybind11.h"
+
+
+namespace py = pybind11;
+
+namespace rebuffer_python {
+
+rebuffer::DesignView designFromDict(const py::dict& values);
+rebuffer::TopologyView topologyFromDict(const py::dict& values);
+rebuffer::LibertyView libertyFromDict(const py::dict& values);
+py::dict characterizationResult(const rebuffer::CharacterizationResult& result);
+rebuffer::TimingView timingFromDict(const py::dict& values);
+rebuffer::SteinerView steinerFromDict(const py::dict& values);
+rebuffer::RepairConfig configFromDict(const py::dict& values);
+rebuffer::CharacterizationResult characterizationFromDict(const py::dict& values);
+py::list netSummaries(const rebuffer::ForestResult& forest);
+py::dict bufferActionDict(const rebuffer::BufferAction& action);
+
+}  // namespace rebuffer_python

@@ -19,8 +19,9 @@
 #include <vector>
 
 #include "boost/heap/d_ary_heap.hpp"
-#include "openroad_graph.hh"
+
 #include "openroad_steiner.hh"
+
 
 namespace rebuffer::openroad::pdr {
 
@@ -489,3 +490,266 @@ Tree primDijkstra(const vector<int>& x,
 }
 
 }  // namespace rebuffer::openroad::pdr
+
+// --- openroad_check_tree.cc ---
+// Derived from OpenROAD src/stt/src/SteinerTreeBuilder.cpp
+// Copyright (c) 2019-2025, The OpenROAD Authors.
+
+#include <algorithm>
+#include <vector>
+
+
+namespace rebuffer::openroad {
+
+namespace {
+
+struct Rect
+{
+  int x_min;
+  int y_min;
+  int x_max;
+  int y_max;
+
+  Rect(int x1, int y1, int x2, int y2)
+      : x_min(std::min(x1, x2)),
+        y_min(std::min(y1, y2)),
+        x_max(std::max(x1, x2)),
+        y_max(std::max(y1, y2))
+  {
+  }
+
+  bool areaZero() const { return x_min == x_max && y_min == y_max; }
+
+  bool intersects(const Rect& other) const
+  {
+    return x_min <= other.x_max && other.x_min <= x_max && y_min <= other.y_max
+           && other.y_min <= y_max;
+  }
+
+  bool containsPoint(int x, int y) const
+  {
+    return x >= x_min && x <= x_max && y >= y_min && y <= y_max;
+  }
+};
+
+bool isCorner(const Rect& rect, int x, int y)
+{
+  return (rect.x_min == x && rect.y_min == y)
+         || (rect.x_min == x && rect.y_max == y)
+         || (rect.x_max == x && rect.y_min == y)
+         || (rect.x_max == x && rect.y_max == y);
+}
+
+bool shareCorner(const Rect& lhs, const Rect& rhs)
+{
+  return isCorner(lhs, rhs.x_min, rhs.y_min)
+         || isCorner(lhs, rhs.x_min, rhs.y_max)
+         || isCorner(lhs, rhs.x_max, rhs.y_min)
+         || isCorner(lhs, rhs.x_max, rhs.y_max);
+}
+
+}  // namespace
+
+bool checkTree(const Tree& tree)
+{
+  // Such high fanout nets are going to get buffered so we do not need to
+  // worry about them.
+  if (tree.deg > 100) {
+    return true;
+  }
+
+  std::vector<Rect> rects;
+  rects.reserve(tree.branchCount());
+  for (int i = 0; i < tree.branchCount(); ++i) {
+    const Branch& branch = tree.branch[i];
+    const Branch& neighbor = tree.branch[branch.n];
+    rects.emplace_back(branch.x, branch.y, neighbor.x, neighbor.y);
+  }
+
+  for (size_t i = 0; i < rects.size(); ++i) {
+    for (size_t j = i + 1; j < rects.size(); ++j) {
+      if (!rects[i].areaZero() && !rects[j].areaZero()
+          && rects[i].intersects(rects[j])
+          && !shareCorner(rects[i], rects[j])) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+}  // namespace rebuffer::openroad
+
+// --- openroad_steiner_bindings.cc ---
+// Python boundary for the OpenROAD-compatible placement Steiner provider.
+
+#include <stdexcept>
+#include <string>
+#include <memory>
+#include <mutex>
+#include <vector>
+
+#include "pybind11/pybind11.h"
+
+#include "pybind11/stl.h"
+
+
+namespace py = pybind11;
+
+namespace {
+
+std::mutex& fluteMutex()
+{
+  static std::mutex mutex;
+  return mutex;
+}
+
+std::unique_ptr<rebuffer::openroad::flt::Flute>& cachedFlute()
+{
+  static std::unique_ptr<rebuffer::openroad::flt::Flute> flute;
+  return flute;
+}
+
+std::string& cachedPostLut()
+{
+  static std::string path;
+  return path;
+}
+
+std::string& cachedPowvLut()
+{
+  static std::string path;
+  return path;
+}
+
+rebuffer::openroad::Tree fluteTree(const std::vector<int>& x,
+                                   const std::vector<int>& y,
+                                   int accuracy,
+                                   const std::string& post_lut,
+                                   const std::string& powv_lut)
+{
+  std::lock_guard<std::mutex> lock(fluteMutex());
+  auto& flute = cachedFlute();
+  if (!flute || cachedPostLut() != post_lut || cachedPowvLut() != powv_lut) {
+    flute = std::make_unique<rebuffer::openroad::flt::Flute>();
+    flute->setLutPaths(post_lut, powv_lut);
+    cachedPostLut() = post_lut;
+    cachedPowvLut() = powv_lut;
+  }
+  return flute->flute(x, y, accuracy);
+}
+
+py::dict treeToDict(const rebuffer::openroad::Tree& tree,
+                    const std::string& provider)
+{
+  py::list branch_x;
+  py::list branch_y;
+  py::list branch_n;
+  py::list edges;
+  for (int index = 0; index < tree.branchCount(); ++index) {
+    const auto& branch = tree.branch[index];
+    branch_x.append(branch.x);
+    branch_y.append(branch.y);
+    branch_n.append(branch.n);
+    if (branch.n >= 0 && branch.n < tree.branchCount()) {
+      const auto& neighbor = tree.branch[branch.n];
+      if (branch.x != neighbor.x || branch.y != neighbor.y) {
+        edges.append(py::make_tuple(branch.x, branch.y, neighbor.x, neighbor.y));
+      }
+    }
+  }
+
+  py::dict result;
+  result["status"] = "ok";
+  result["provider"] = provider;
+  result["deg"] = tree.deg;
+  result["wirelength"] = tree.length;
+  result["branch_x"] = std::move(branch_x);
+  result["branch_y"] = std::move(branch_y);
+  result["branch_n"] = std::move(branch_n);
+  result["edges"] = std::move(edges);
+  result["branch_count"] = tree.branchCount();
+  return result;
+}
+
+rebuffer::openroad::Tree makeSttTree(const std::vector<int>& x,
+                                     const std::vector<int>& y,
+                                     int driver_index,
+                                     float alpha,
+                                     const std::string& post_lut,
+                                     const std::string& powv_lut,
+                                     bool& used_pd)
+{
+  used_pd = false;
+  if (alpha > 0.0f) {
+    auto tree
+        = rebuffer::openroad::pdr::primDijkstra(x, y, driver_index, alpha);
+    if (rebuffer::openroad::checkTree(tree)) {
+      used_pd = true;
+      return tree;
+    }
+  }
+
+  return fluteTree(x, y, 3, post_lut, powv_lut);
+}
+
+}  // namespace
+
+PYBIND11_MODULE(rebuffer_steiner_cpp, module)
+{
+  module.doc()
+      = "OpenROAD-compatible Prim-Dijkstra and FLUTE placement Steiner provider";
+
+  module.def(
+      "prim_dijkstra",
+      [](const std::vector<int>& x,
+         const std::vector<int>& y,
+         int driver_index,
+         float alpha) {
+        return treeToDict(
+            rebuffer::openroad::pdr::primDijkstra(
+                x, y, driver_index, alpha),
+            "openroad_prim_dijkstra");
+      },
+      py::arg("x"),
+      py::arg("y"),
+      py::arg("driver_index"),
+      py::arg("alpha") = 0.3f);
+
+  module.def(
+      "flute",
+      [](const std::vector<int>& x,
+         const std::vector<int>& y,
+         int accuracy,
+         const std::string& post_lut,
+         const std::string& powv_lut) {
+        return treeToDict(
+            fluteTree(x, y, accuracy, post_lut, powv_lut), "openroad_flute");
+      },
+      py::arg("x"),
+      py::arg("y"),
+      py::arg("accuracy") = 3,
+      py::arg("post_lut"),
+      py::arg("powv_lut"));
+
+  module.def(
+      "stt",
+      [](const std::vector<int>& x,
+         const std::vector<int>& y,
+         int driver_index,
+         float alpha,
+         const std::string& post_lut,
+         const std::string& powv_lut) {
+        bool used_pd = false;
+        auto tree = makeSttTree(
+            x, y, driver_index, alpha, post_lut, powv_lut, used_pd);
+        return treeToDict(
+            tree, used_pd ? "openroad_prim_dijkstra" : "openroad_flute");
+      },
+      py::arg("x"),
+      py::arg("y"),
+      py::arg("driver_index"),
+      py::arg("alpha") = 0.3f,
+      py::arg("post_lut"),
+      py::arg("powv_lut"));
+}

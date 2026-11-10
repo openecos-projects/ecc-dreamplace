@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
+#pragma once
+
 // Snapshot identity and endpoint-window selection for the native timing queue.
 
-#pragma once
 
 #include <memory>
 #include <functional>
@@ -11,8 +12,11 @@
 #include <vector>
 
 #include "pybind11/pybind11.h"
+
 #include "rebuffer_liberty.hh"
+
 #include "rebuffer_types.hh"
+
 
 namespace rebuffer {
 
@@ -126,5 +130,104 @@ pybind11::dict updateNativeTimingQueueState(
 void updateNativeTimingQueueFocus(
     const pybind11::dict& snapshot,
     const pybind11::list& focus_updates);
+
+}  // namespace rebuffer
+
+// --- rebuffer_candidate_frontier.hh ---
+
+namespace rebuffer {
+
+struct TimingFrontierEvaluation
+{
+  pybind11::dict candidate;
+  pybind11::dict observation;
+  pybind11::list trials;
+  int evaluation_calls = 0;
+  int selected_rank = -1;
+};
+
+// All alternatives are complete tree bundles from one source snapshot. Each
+// trial starts at the same checkpoint; return with the selected bundle active.
+// Python callbacks supply mutations and TP observations, never the selection.
+void evaluateTimingFrontier(
+    const pybind11::dict& candidate,
+    const pybind11::dict& current,
+    const pybind11::dict& request,
+    const TimingQueueItem& item,
+    const pybind11::object& anchor,
+    const pybind11::object& apply,
+    const pybind11::object& evaluate,
+    const pybind11::object& restore,
+    const pybind11::dict& config,
+    int evaluation_budget,
+    TimingFrontierEvaluation& result);
+
+}  // namespace rebuffer
+
+// --- rebuffer_verified_commit.hh ---
+
+namespace rebuffer {
+void registerVerifiedCommitBindings(pybind11::module_& module);
+}
+
+// --- rebuffer_native_queue.hh ---
+// Native outer repair_timing queue for placement-RC buffering.
+
+
+
+namespace rebuffer {
+
+// The snapshot callback exposes only timing data and native path records.  It
+// does not select an endpoint or a net.  The C++ operator sorts and walks the
+// queue, asks the bridge for a candidate for the selected net, and owns the
+// complete accept/restore lifecycle.
+pybind11::dict runRepairTimingQueueOperator(
+    const pybind11::object& timing_snapshot,
+    const pybind11::object& candidate_provider,
+    const pybind11::object& checkpoint,
+    const pybind11::object& apply,
+    const pybind11::object& evaluate,
+    const pybind11::object& restore,
+    const pybind11::dict& config,
+    const pybind11::object& release_checkpoint = pybind11::none());
+
+}  // namespace rebuffer
+
+// --- rebuffer_legacy_queue.hh ---
+// Endpoint observations and the LEGACY two-stage native repair scheduler.
+
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace rebuffer {
+
+struct TimingEndpoint
+{
+  int pin;
+  std::string name;
+  double slack;
+};
+
+struct TimingEndpointState
+{
+  TimingEndpointState() = default;
+  TimingEndpointState(const std::vector<int>& pins,
+      const std::vector<std::string>& names, const std::vector<double>& slacks);
+  std::vector<TimingEndpoint> endpoints;
+};
+
+pybind11::dict runRepairTimingLegacyQueueOperator(
+    const pybind11::object& endpoint_state,
+    const pybind11::object& timing_snapshot,
+    const pybind11::object& candidate_provider,
+    const pybind11::object& checkpoint,
+    const pybind11::object& apply,
+    const pybind11::object& evaluate,
+    const pybind11::object& restore,
+    const pybind11::dict& config,
+    const pybind11::object& release_checkpoint = pybind11::none());
+
+void registerLegacyQueueBindings(pybind11::module_& module);
 
 }  // namespace rebuffer

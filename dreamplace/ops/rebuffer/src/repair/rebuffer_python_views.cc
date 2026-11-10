@@ -8,14 +8,17 @@
 #include <vector>
 
 #include "pybind11/numpy.h"
+
 #include "pybind11/pybind11.h"
+
 #include "pybind11/stl.h"
+
 #include "rebuffer_liberty.hh"
-#include "rebuffer_library_metadata.hh"
-#include "rebuffer_cell_selection.hh"
+
 #include "rebuffer_repair.hh"
+
 #include "rebuffer_types.hh"
-#include "rebuffer_python_views.hh"
+
 
 namespace py = pybind11;
 

@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "rebuffer_timing_graph.hh"
+
 #include "rebuffer_timing_mutation.hh"
-#include "rebuffer_timing_buffer_state.hh"
-#include "rebuffer_timing_local_index.hh"
-#include "rebuffer_timing_state.hh"
+
+#include "rebuffer_timing_local.hh"
+
 
 #include <algorithm>
 #include <array>
@@ -14,10 +15,13 @@
 #include <utility>
 
 #include "pybind11/stl.h"
-#include "rebuffer_overlay_carrier.hh"
-#include "rebuffer_overlay_actions.hh"
-#include "rebuffer_python_views.hh"
-#include "rebuffer_topology_history.hh"
+
+#include "rebuffer_carrier.hh"
+
+#include "rebuffer_repair.hh"
+
+#include "rebuffer_incremental_topology.hh"
+
 
 namespace py = pybind11;
 

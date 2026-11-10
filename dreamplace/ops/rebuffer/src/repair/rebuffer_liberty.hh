@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
+#pragma once
+
 // Liberty timing tables and OpenROAD-compatible buffer characterization.
 
-#pragma once
 
 #include <array>
 #include <memory>
@@ -103,5 +104,73 @@ bool characterizeBuffers(const LibertyView& liberty,
                          CharacterizationResult& result,
                          std::string& reason,
                          bool canonical_target_load = false);
+
+}  // namespace rebuffer
+
+// --- rebuffer_library_metadata.hh ---
+// Immutable source-library attributes missing from the physical PyPlaceDB.
+
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "pybind11/pybind11.h"
+
+
+namespace rebuffer {
+
+struct LibraryCellMetadata
+{
+  std::string name, library, footprint, function_class, site, buffer_signature;
+  int source_order = -1;
+  bool dont_use = false;
+  bool has_master = false;
+  bool master_is_core = false;
+  bool has_leakage = false;
+  double leakage = 0;
+};
+
+struct RepairLibraryMetadata
+{
+  std::vector<LibraryCellMetadata> cells;
+  std::vector<std::string> liberty_paths, lef_paths;
+  pybind11::dict summary() const;
+  pybind11::list records() const;
+};
+
+std::shared_ptr<RepairLibraryMetadata> readRepairLibraryMetadata(
+    const std::vector<std::string>& liberty_paths,
+    const std::vector<std::string>& lef_paths,
+    const std::vector<std::string>& cell_names);
+void registerRepairLibraryMetadata(pybind11::module_& module);
+
+}  // namespace rebuffer
+
+// --- rebuffer_cell_selection.hh ---
+
+namespace pybind11 { class module_; }
+
+namespace rebuffer {
+
+void initializeBufferCellSelection(LibertyView& liberty);
+std::vector<int> swappableBufferCells(const LibertyView& liberty,
+                                      int source,
+                                      double sizing_area_limit = 4.0,
+                                      double sizing_leakage_limit = 4.0);
+int findBufferTargetCell(const LibertyView& liberty,
+                         const CharacterizationResult& characterization,
+                         int source,
+                         double load,
+                         double sizing_area_limit = 4.0,
+                         double sizing_leakage_limit = 4.0);
+int findBufferSlewRepairCell(const LibertyView& liberty,
+                             int source,
+                             double input_slew_rise,
+                             double input_slew_fall,
+                             double load,
+                             double slew_margin,
+                             double sizing_area_limit = 4.0,
+                             double sizing_leakage_limit = 4.0);
+void registerCellSelectionBindings(pybind11::module_& module);
 
 }  // namespace rebuffer

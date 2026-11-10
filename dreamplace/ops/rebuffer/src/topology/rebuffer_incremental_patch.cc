@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Session-owned cumulative timing graph and RC patch.
 
-#include "rebuffer_incremental_patch.hh"
+#include "rebuffer_incremental_topology.hh"
+
 
 #include "rebuffer_carrier.hh"
+
 #include "rebuffer_incremental_timing.hh"
-#include "rebuffer_topology_partitions.hh"
+
 
 #include <algorithm>
 #include <array>
@@ -22,7 +24,9 @@
 #include <vector>
 
 #include "pybind11/stl.h"
+
 #include "pybind11/numpy.h"
+
 
 namespace py = pybind11;
 

@@ -1,17 +1,22 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Native existing-cell resize, local RC write-back and sparse metadata undo.
 #include "rebuffer_timing_mutation.hh"
+
 #include "rebuffer_timing_graph.hh"
+
 #include "rebuffer_carrier.hh"
-#include "rebuffer_timing_payload.hh"
-#include "rebuffer_timing_buffer_state.hh"
-#include "rebuffer_timing_local_index.hh"
+
+#include "rebuffer_incremental_timing.hh"
+
+#include "rebuffer_timing_local.hh"
+
 
 #include <algorithm>
 #include <cmath>
 #include <set>
 
 #include "pybind11/stl.h"
+
 
 namespace py = pybind11;
 namespace rebuffer {
@@ -393,6 +398,529 @@ py::dict PersistentTimingGraph::resizeCell(const std::string& instance_name,
   } catch (...) {
     restoreTo(checkpoint_size);
     throw;
+  }
+}
+
+}  // namespace rebuffer
+
+// --- rebuffer_timing_buffer_state.cc ---
+// Native buffer records and reversible electrical partition materialization.
+#include "rebuffer_incremental_topology.hh"
+
+
+#include <algorithm>
+#include <cmath>
+#include <set>
+#include <unordered_map>
+
+namespace rebuffer {
+namespace {
+
+void require(bool condition, const char* message)
+{
+  if (!condition) throw pybind11::value_error(message);
+}
+
+std::array<double, 5> values(const TimingMutationState& m, int pin)
+{
+  std::array<double, 5> result;
+  for (int lane = 0; lane < 5; ++lane) result[lane] = m.pin_values[lane].at(pin);
+  return result;
+}
+
+int libraryPin(const TimingMutationState& m, int cell, const std::string& port)
+{
+  const auto begin = m.library_pin_names.begin() + m.cell_pin_start.at(cell);
+  const auto end = m.library_pin_names.begin() + m.cell_pin_start.at(cell + 1);
+  const auto found = std::find(begin, end, port);
+  require(found != end && std::find(found + 1, end, port) == end,
+          "buffer Liberty pin schema is missing or ambiguous");
+  return found - m.library_pin_names.begin();
+}
+
+}  // namespace
+
+void requireSynchronizedTimingTopology(const TimingMutationState& m,
+                                       const IncrementalTopologyState& topology)
+{
+  const int source = topology.net_id;
+  require(source >= 0 && source < static_cast<int>(m.base_net_pins.size())
+              && topology.driver_pin_id == m.net_drivers[source],
+          "timing RC topology driver does not match source net");
+  require(topology.buffers.empty() || m.canonical_schedule,
+          "native topology buffer records are not synchronized");
+  const auto epoch = m.topology_epochs.find(source);
+  require(epoch == m.topology_epochs.end() || epoch->second == topology.epoch,
+          "native topology changed outside graph timing mutation");
+  const auto& source_buffers = m.buffers_by_source_net.at(source);
+  std::size_t active = 0;
+  for (int id : source_buffers) {
+    if (m.buffers[id].active) ++active;
+  }
+  require(active == topology.buffers.size(), "native topology buffer records are not synchronized");
+  for (const auto& buffer : topology.buffers) {
+    int found_id = -1;
+    for (int id : source_buffers) {
+      const auto& row = m.buffers[id];
+      if (row.action_id == buffer.action_id && row.active) {
+        found_id = id;
+        break;
+      }
+    }
+    require(found_id >= 0 && m.buffers[found_id].logical_input == buffer.input_node
+                && m.buffers[found_id].logical_output == buffer.output_node
+                && m.buffers[found_id].split_ratio == buffer.split_ratio
+                && m.cell_names.at(m.node_cells.at(m.buffers[found_id].node)) == buffer.master_name,
+            "native topology buffer identity is not synchronized");
+  }
+}
+
+void requireSynchronizedTimingTopologies(
+    const TimingMutationState& m,
+    const std::map<int, std::shared_ptr<IncrementalTopologyState>>& topologies)
+{
+  for (const auto& [_, state_ptr] : topologies) {
+    requireSynchronizedTimingTopology(m, *state_ptr);
+  }
+}
+
+std::shared_ptr<TimingTopologyUndo> captureTimingTopology(
+    const TimingMutationState& m, const TimingGraphIndex& index, int source_net)
+{
+  auto undo = std::make_shared<TimingTopologyUndo>();
+  undo->pins = m.pin_owner.size(); undo->nodes = m.node_names.size();
+  undo->nets = m.net_drivers.size(); undo->arcs = m.cells.size();
+  undo->buffers = m.buffers.size(); undo->index_undo = captureTimingIndex(m, index);
+  undo->source_net = source_net;
+  const auto epoch = m.topology_epochs.find(source_net);
+  if (epoch != m.topology_epochs.end()) undo->previous_topology_epoch = epoch->second;
+  std::set<int> pins(m.base_net_pins.at(source_net).begin(),
+                      m.base_net_pins.at(source_net).end());
+  std::set<int> nets{source_net};
+  for (int id : m.buffers_by_source_net.at(source_net)) {
+    const auto& buffer = m.buffers[id];
+    undo->previous_buffers.emplace_back(id, buffer);
+    undo->previous_cells.emplace_back(buffer.node, m.node_cells[buffer.node]);
+    pins.insert(buffer.input_pin); pins.insert(buffer.output_pin);
+    nets.insert(buffer.output_net);
+    for (int arc : buffer.arcs) {
+      undo->previous_arcs.push_back({arc, m.cells[arc], m.cell_active[arc]});
+    }
+  }
+  for (int pin : pins) {
+    undo->previous_pins.push_back({pin, m.pin_net[pin], m.pin_active[pin], values(m, pin)});
+  }
+  for (int net : nets) undo->previous_nets.push_back({net, m.net_drivers[net], m.net_pins[net]});
+  return undo;
+}
+
+void restoreTimingTopology(TimingMutationState& m, TimingGraphIndex& index,
+                           const TimingTopologyUndo& undo)
+{
+  restoreTimingLocalIndex(m, index, *undo.index_undo);
+  index.pins.resize(undo.pins);
+  m.pin_owner.resize(undo.pins); m.pin_net.resize(undo.pins);
+  m.pin_ports.resize(undo.pins); m.pin_active.resize(undo.pins);
+  for (auto& lane : m.pin_values) lane.resize(undo.pins);
+  m.node_names.resize(undo.nodes); m.node_cells.resize(undo.nodes);
+  m.node_pins.resize(undo.nodes); m.node_arcs.resize(undo.nodes);
+  m.net_names.resize(undo.nets); m.net_drivers.resize(undo.nets);
+  m.net_pins.resize(undo.nets);
+  m.cells.resize(undo.arcs); m.cell_active.resize(undo.arcs);
+  for (std::size_t id = undo.buffers; id < m.buffers.size(); ++id) {
+    const auto& buf = m.buffers[id];
+    m.buffer_id_by_action_id.erase(buf.action_id);
+    if (buf.source_net >= 0 && buf.source_net < static_cast<int>(m.buffers_by_source_net.size())) {
+      auto& vec = m.buffers_by_source_net[buf.source_net];
+      vec.erase(std::remove(vec.begin(), vec.end(), static_cast<int>(id)), vec.end());
+    }
+  }
+  m.buffers.resize(undo.buffers);
+  for (const auto& [id, buffer] : undo.previous_buffers) {
+    m.buffers[id] = buffer;
+    m.node_arcs[buffer.node] = buffer.arcs;
+  }
+  for (const auto& [node, cell] : undo.previous_cells) m.node_cells[node] = cell;
+  for (const auto& pin : undo.previous_pins) {
+    m.pin_net[pin.id] = pin.net; m.pin_active[pin.id] = pin.active;
+    for (int lane = 0; lane < 5; ++lane) m.pin_values[lane][pin.id] = pin.values[lane];
+  }
+  for (const auto& arc : undo.previous_arcs) {
+    m.cells[arc.id] = arc.row; m.cell_active[arc.id] = arc.active;
+  }
+  for (const auto& net : undo.previous_nets) {
+    m.net_drivers[net.id] = net.driver; m.net_pins[net.id] = net.pins;
+  }
+  if (undo.previous_topology_epoch < 0) m.topology_epochs.erase(undo.source_net);
+  else m.topology_epochs[undo.source_net] = undo.previous_topology_epoch;
+}
+
+void synchronizeTimingBuffers(TimingMutationState& m, TimingGraphIndex& index,
+                               const TimingPropagationProgram& program,
+                               const IncrementalTopologyState& topology)
+{
+  const int source = topology.net_id;
+  require(source >= 0 && source < static_cast<int>(m.base_net_pins.size()),
+          "buffer mutation requires an original source net");
+  require(topology.driver_pin_id == m.net_drivers[source],
+          "buffer source driver does not match timing graph");
+  std::vector<int> records;
+  std::set<int> active_actions;
+  for (const auto& physical : topology.buffers) {
+    require(active_actions.insert(physical.action_id).second, "duplicate buffer action");
+    const auto master_it = m.cell_ids_by_name.find(physical.master_name);
+    require(master_it != m.cell_ids_by_name.end(), "buffer master is absent from Liberty");
+    const int cell = master_it->second;
+    const int first = m.cell_arc_start[cell], last = m.cell_arc_start[cell + 1];
+    require(first < last, "buffer master has no timing arcs");
+    const auto& signature = m.library_arcs.at(first);
+    for (int lut = first; lut < last; ++lut) {
+      const auto& arc = m.library_arcs.at(lut);
+      require(arc.source == signature.source && arc.sink == signature.sink
+                  && arc.sense == 1 && arc.trigger == 0,
+              "buffer mutation requires a noninverting combinational master");
+      for (int table = 0; table < 4; ++table) {
+        require(lut < program.luts[table].rows, "buffer LUT row is out of range");
+      }
+    }
+    const int input_lib = libraryPin(m, cell, signature.source);
+    const int output_lib = libraryPin(m, cell, signature.sink);
+    for (const auto& lane : m.library_pin_values) {
+      require(std::isfinite(lane[input_lib]) && lane[input_lib] >= 0
+                  && std::isfinite(lane[output_lib]) && lane[output_lib] >= 0,
+              "buffer Liberty pin values must be finite and nonnegative");
+    }
+    const auto action_it = m.buffer_id_by_action_id.find(physical.action_id);
+    int id;
+    if (action_it == m.buffer_id_by_action_id.end()) {
+      const std::string name = "__dreamplace_rebuffer_" + std::to_string(physical.action_id);
+      require(!m.has_rebuffer_prefix_in_base_nodes || m.base_node_ids_by_name.count(name) == 0,
+              "buffer instance identity collides with the base graph");
+      id = m.buffers.size();
+      TimingBufferRecord buffer;
+      buffer.source_net = source; buffer.action_id = physical.action_id;
+      buffer.node = m.node_names.size(); buffer.input_pin = m.pin_owner.size();
+      buffer.output_pin = buffer.input_pin + 1; buffer.output_net = m.net_drivers.size();
+      m.node_names.push_back(name); m.node_cells.push_back(cell);
+      m.node_pins.push_back({buffer.input_pin, buffer.output_pin});
+      m.node_arcs.emplace_back();
+      for (const auto& port : {signature.source, signature.sink}) {
+        const std::string pin_name = name + ":" + port;
+        require(!index.pin_ids.count(pin_name), "buffer pin identity collides with graph");
+        index.pins.push_back(pin_name);
+        m.pin_owner.push_back(buffer.node); m.pin_ports.push_back(port);
+        m.pin_net.push_back(-1); m.pin_active.push_back(1);
+        for (auto& lane : m.pin_values) lane.push_back(0);
+      }
+      m.net_names.push_back(name + "_out");
+      m.net_drivers.push_back(buffer.output_pin); m.net_pins.emplace_back();
+      m.buffers.push_back(buffer);
+      m.buffers_by_source_net.at(source).push_back(id);
+      m.buffer_id_by_action_id.emplace(buffer.action_id, id);
+    } else {
+      id = action_it->second;
+      const auto* found = &m.buffers[id];
+      require(found->source_net == source, "buffer action identity belongs to another source net");
+      require(m.pin_ports[found->input_pin] == signature.source
+                  && m.pin_ports[found->output_pin] == signature.sink,
+              "buffer resize changes pin port identities");
+      const int previous = m.node_cells[found->node];
+      require(previous < 0 || m.cell_mains[previous] == m.cell_mains[cell],
+              "buffer resize requires an equivalent master");
+    }
+    auto& buffer = m.buffers[id];
+    buffer.active = true;
+    buffer.logical_input = physical.input_node; buffer.logical_output = physical.output_node;
+    buffer.split_ratio = physical.split_ratio;
+    m.node_cells[buffer.node] = cell;
+    m.pin_active[buffer.input_pin] = m.pin_active[buffer.output_pin] = 1;
+    for (int lane = 0; lane < 5; ++lane) {
+      m.pin_values[lane][buffer.input_pin] = m.library_pin_values[lane].at(input_lib);
+      m.pin_values[lane][buffer.output_pin] = m.library_pin_values[lane].at(output_lib);
+    }
+    if (buffer.arcs.size() != static_cast<std::size_t>(last - first)) {
+      for (int arc : buffer.arcs) m.cell_active[arc] = 0;
+      buffer.arcs.clear();
+      for (int lut = first; lut < last; ++lut) {
+        buffer.arcs.push_back(m.cells.size());
+        m.cells.push_back({}); m.cell_active.push_back(1);
+      }
+    }
+    for (int offset = 0; offset < last - first; ++offset) {
+      const int slot = buffer.arcs[offset];
+      m.cells[slot] = {buffer.input_pin, buffer.output_pin, cell, first + offset,
+                       1, 0, offset, buffer.node};
+      m.cell_active[slot] = 1;
+    }
+    m.node_arcs[buffer.node] = buffer.arcs;
+    records.push_back(id);
+  }
+  for (int id : m.buffers_by_source_net.at(source)) {
+    auto& buffer = m.buffers[id];
+    if (active_actions.count(buffer.action_id)) continue;
+    buffer.active = false;
+    m.node_cells[buffer.node] = -1;
+    m.pin_active[buffer.input_pin] = m.pin_active[buffer.output_pin] = 0;
+    m.pin_net[buffer.input_pin] = m.pin_net[buffer.output_pin] = -1;
+    for (auto& lane : m.pin_values) lane[buffer.input_pin] = lane[buffer.output_pin] = 0;
+    for (int arc : buffer.arcs) m.cell_active[arc] = 0;
+    m.net_drivers[buffer.output_net] = -1; m.net_pins[buffer.output_net].clear();
+  }
+  const auto partitions = topologyPartitions(topology);
+  std::vector<int> nets{source};
+  m.net_pins[source] = {topology.driver_pin_id};
+  m.pin_net[topology.driver_pin_id] = source;
+  for (int id : records) {
+    const auto& buffer = m.buffers[id];
+    nets.push_back(buffer.output_net);
+    m.net_pins[buffer.output_net] = {buffer.output_pin};
+    m.net_drivers[buffer.output_net] = buffer.output_pin;
+    m.pin_net[buffer.output_pin] = buffer.output_net;
+  }
+  std::set<int> physical_pins{topology.driver_pin_id};
+  for (std::size_t part = 0; part < partitions.loads.size(); ++part) {
+    const int net = nets[part];
+    for (int pin : partitions.loads[part]) {
+      require(pin >= 0 && pin < program.pin_count && physical_pins.insert(pin).second,
+              "buffer topology has invalid or duplicate physical loads");
+      m.net_pins[net].push_back(pin); m.pin_net[pin] = net;
+    }
+  }
+  require(std::vector<int>(physical_pins.begin(), physical_pins.end()) == m.base_net_pins[source],
+          "buffer topology physical pins do not match source net");
+  for (std::size_t slot = 0; slot < records.size(); ++slot) {
+    const auto& buffer = m.buffers[records[slot]];
+    const int net = nets[partitions.input_partition[slot]];
+    m.net_pins[net].push_back(buffer.input_pin); m.pin_net[buffer.input_pin] = net;
+  }
+  for (int net : nets) std::sort(m.net_pins[net].begin(), m.net_pins[net].end());
+  m.topology_epochs[source] = topology.epoch;
+}
+
+}  // namespace rebuffer
+
+// --- rebuffer_timing_buffer_rc.cc ---
+// Evaluate source-local RC directly, without dense namespaces or Python arrays.
+
+#include <algorithm>
+#include <chrono>
+#include <unordered_map>
+
+namespace rebuffer {
+namespace {
+
+TimingNetRcValues timingNetRcValues(const TimingMutationState& m,
+    const IncrementalTopologyState& topology, const CompactRcForest& forest,
+    const std::array<std::vector<double>, 5>& pin_values, int original_pin_count)
+{
+  requireSynchronizedTimingTopology(m, topology);
+  std::unordered_map<int, int> buffer_pins;
+  for (const auto& buffer : topology.buffers) {
+    const auto found = std::find_if(m.buffers.begin(), m.buffers.end(), [&](const auto& row) {
+      return row.source_net == topology.net_id && row.action_id == buffer.action_id && row.active;
+    });
+    if (found == m.buffers.end()) throw pybind11::value_error("RC buffer has no active timing record");
+    buffer_pins.emplace(buffer.input_node, found->input_pin);
+    buffer_pins.emplace(buffer.output_node, found->output_pin);
+  }
+  for (const auto& [node, loads] : topology.node_loads) {
+    if (loads.size() != 1 || loads.front() != node) {
+      throw pybind11::value_error("native timing RC requires explicit physical pin vertices");
+    }
+  }
+  TimingNetRcValues result;
+  std::vector<int> original_physical, physical_pins(forest.node_ids.size(), -1), selected;
+  for (int i = 0; i < static_cast<int>(forest.node_ids.size()); ++i) {
+    const int node = forest.node_ids[i];
+    const auto buffer = buffer_pins.find(node);
+    if (buffer != buffer_pins.end()) physical_pins[i] = buffer->second;
+    else if (node < original_pin_count) {
+      original_physical.push_back(node);
+      physical_pins[i] = node;
+    }
+    if (physical_pins[i] >= 0) {
+      result.pins.push_back(physical_pins[i]);
+      selected.push_back(i);
+    }
+  }
+  if (original_physical != m.base_net_pins.at(topology.net_id)) {
+    throw pybind11::value_error("timing RC topology physical pins do not match source net");
+  }
+  const auto wire_cap = compactRcWireCaps(forest);
+  // Canonical timing state consumes rise/fall RC only. The public adapter
+  // still computes generic mode for callers that request it.
+  for (int mode = 0; mode < 2; ++mode) {
+    std::vector<double> caps(forest.node_ids.size(), 0);
+    for (int i = 0; i < static_cast<int>(caps.size()); ++i) {
+      if (physical_pins[i] >= 0) caps[i] = pin_values[mode + 1].at(physical_pins[i]);
+      caps[i] += wire_cap[i];
+    }
+    const auto values = evaluateCompactRc(forest, caps);
+    for (int field = 0; field < 3; ++field) {
+      auto& output = result.values[2 * field + mode];
+      output.reserve(selected.size());
+      for (int i : selected) output.push_back(values[field][i]);
+    }
+  }
+  return result;
+}
+
+}  // namespace
+
+TimingNetRcValues PersistentTimingGraph::recomputeTimingNetRc(
+    const IncrementalTopologyState& topology,
+    const std::array<std::vector<double>, 5>& pin_values)
+{
+  const auto started = std::chrono::steady_clock::now();
+  const auto forest = compactRcForest(topology, propagation_program_->pin_count);
+  const auto built = std::chrono::steady_clock::now();
+  auto result = timingNetRcValues(*mutation_state_, topology, forest, pin_values,
+                                  propagation_program_->pin_count);
+  auto& stats = mutation_state_->statistics;
+  ++stats.rc_builds;
+  stats.rc_nodes += forest.node_ids.size();
+  stats.rc_pin_reads += 2 * result.pins.size();
+  stats.rc_build_ms += std::chrono::duration<double, std::milli>(built - started).count();
+  stats.rc_evaluate_ms += std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - built).count();
+  return result;
+}
+
+}  // namespace rebuffer
+
+// --- rebuffer_timing_graph_buffer.cc ---
+// Atomically connect native split/remove/resize to graph-owned timing state.
+
+#include <algorithm>
+#include <exception>
+
+
+namespace py = pybind11;
+namespace rebuffer {
+
+void PersistentTimingGraph::requireTimingMutationOwner() const
+{
+  if (!timing_state_initialized_ || propagation_program_ == nullptr || mutation_state_ == nullptr) {
+    throw py::value_error("buffer timing mutation requires initialized graph state and inputs");
+  }
+}
+
+py::dict PersistentTimingGraph::mutateTimingTopology(int net_id, const py::dict& action,
+                                                    TimingTopologyOperation operation)
+{
+  requireTimingMutationOwner();
+  if (net_id < 0 || net_id >= static_cast<int>(mutation_state_->base_net_pins.size())
+      || mutation_state_->base_net_is_clock.at(net_id)) {
+    throw py::value_error("buffer timing mutation requires an original signal source net");
+  }
+  const auto topology = topologyState(net_id);
+  requireSynchronizedTimingTopology(*mutation_state_, *topology);
+  // Only this source topology can be changed by one mutation.  The previous
+  // guard called checkpoint(), which copied every attached net topology for
+  // every candidate action.  That made apply grow with campaign history even
+  // though the journal already contains sparse timing undo for the mutation.
+  const auto topology_before = checkpointIncrementalTopology(*topology);
+  const std::size_t journal_size_before = journal_.size();
+  const std::uint64_t epoch_before = epoch_;
+  const std::uint64_t topology_revision_before = topology_revision_;
+  const auto propagation_mark_before = propagation_mark_;
+  try {
+    std::string reason;
+    py::dict result;
+    bool valid = false;
+    if (operation == TimingTopologyOperation::insert) {
+      valid = applyIncrementalBufferSplit(*topology, action, reason, result);
+    } else if (operation == TimingTopologyOperation::remove) {
+      const int id = action["action_id"].cast<int>();
+      valid = !topology->general_removal && !topology->buffers.empty()
+                      && topology->buffers.back().action_id == id
+                  ? removeIncrementalBuffer(*topology, id, reason, result)
+                  : removeIncrementalBufferAnywhere(*topology, id, reason, result);
+    } else {
+      valid = resizeIncrementalBuffer(*topology, action, reason, result);
+    }
+    if (!valid) throw py::value_error(reason);
+    if (result["status"].cast<std::string>() == "noop") return result;
+    auto undo = captureTimingTopology(*mutation_state_, *timing_index_, net_id);
+    JournalEntry entry;
+    entry.previous_epoch = epoch_;
+    entry.previous_topology_revision = topology_revision_;
+    entry.sequence = next_journal_sequence_++;
+    entry.topology_undo = undo;
+    journal_.push_back(std::move(entry));
+    ++epoch_;
+    synchronizeTimingBuffers(*mutation_state_, *timing_index_, *propagation_program_, *topology);
+    updateTimingLocalIndex(*mutation_state_, *timing_index_, *propagation_program_, *undo);
+    if (cached_active_counts_valid_) {
+      for (const auto& pin : undo->previous_pins) {
+        cached_active_pins_ += static_cast<int>(mutation_state_->pin_active[pin.id])
+                             - static_cast<int>(pin.active);
+      }
+      for (std::size_t p = undo->pins; p < mutation_state_->pin_active.size(); ++p) {
+        cached_active_pins_ += static_cast<std::size_t>(mutation_state_->pin_active[p]);
+      }
+      for (const auto& arc : undo->previous_arcs) {
+        cached_active_cell_arcs_ += static_cast<int>(mutation_state_->cell_active[arc.id])
+                                  - static_cast<int>(arc.active);
+      }
+      for (std::size_t a = undo->arcs; a < mutation_state_->cell_active.size(); ++a) {
+        cached_active_cell_arcs_ += static_cast<std::size_t>(mutation_state_->cell_active[a]);
+      }
+      for (const auto& row : undo->index_undo->net_rows) {
+        cached_active_net_arcs_ += static_cast<int>(timing_index_->net_active[row.id])
+                                 - static_cast<int>(row.active);
+      }
+      for (std::size_t n = undo->index_undo->nets; n < timing_index_->net_active.size(); ++n) {
+        cached_active_net_arcs_ += static_cast<std::size_t>(timing_index_->net_active[n]);
+      }
+    }
+    topology_revision_ = ++next_topology_revision_;
+    for (const auto& pin : undo->previous_pins) markElectricalDirtyPin(pin.id);
+    for (const auto& net : undo->previous_nets) {
+      for (const int pin : net.pins) markElectricalDirtyPin(pin);
+    }
+    for (const int pin : mutation_state_->net_pins.at(net_id)) markElectricalDirtyPin(pin);
+    for (int buf_id : mutation_state_->buffers_by_source_net.at(net_id)) {
+      const auto& row = mutation_state_->buffers[buf_id];
+      markElectricalDirtyPin(row.input_pin);
+      markElectricalDirtyPin(row.output_pin);
+      if (row.output_net >= 0
+          && row.output_net < static_cast<int>(mutation_state_->net_pins.size())) {
+        for (const int pin : mutation_state_->net_pins[row.output_net]) {
+          markElectricalDirtyPin(pin);
+        }
+      }
+    }
+    const auto rc = recomputeTimingNetRc(*topology, mutation_state_->pin_values);
+    std::vector<int> inactive;
+    for (const auto& pin : undo->previous_pins) {
+      if (pin.active && !mutation_state_->pin_active.at(pin.id)) inactive.push_back(pin.id);
+    }
+    applyTimingRc({rc}, inactive);
+    const int action_id = result["action_id"].cast<int>();
+    for (int buf_id : mutation_state_->buffers_by_source_net.at(net_id)) {
+      const auto& record = mutation_state_->buffers[buf_id];
+      if (record.action_id == action_id) {
+        result["timing_pin_ids"] = std::vector<int>{record.input_pin, record.output_pin};
+        result["timing_arc_ids"] = record.arcs;
+        result["timing_net_id"] = record.output_net;
+        break;
+      }
+    }
+    result["state"] = summary();
+    return result;
+  } catch (...) {
+    const auto failure = std::current_exception();
+    std::string restore_reason;
+    cached_active_counts_valid_ = false;
+    restoreTo(journal_size_before);
+    epoch_ = epoch_before;
+    topology_revision_ = topology_revision_before;
+    propagation_mark_ = propagation_mark_before;
+    if (!restoreIncrementalTopology(*topology, *topology_before, restore_reason)) {
+      throw py::value_error("native topology mutation rollback failed: " + restore_reason);
+    }
+    std::rethrow_exception(failure);
   }
 }
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
-// Immutable C++ DP inputs for one qualified timing/placement snapshot.
 #pragma once
+
+// Immutable C++ DP inputs for one qualified timing/placement snapshot.
 
 #include <cstdint>
 #include <map>
@@ -8,11 +9,12 @@
 #include <utility>
 #include <vector>
 
-#include "rebuffer_carrier_projection.hh"
+#include "rebuffer_carrier.hh"
+
 #include "rebuffer_driver_tree.hh"
+
 #include "rebuffer_queue_snapshot.hh"
-#include "rebuffer_overlay_inputs.hh"
-#include "rebuffer_driver_tree_links.hh"
+
 
 namespace rebuffer {
 
@@ -115,5 +117,41 @@ pybind11::list projectPlanningActions(const OverlayActionInputs& base,
     const pybind11::list& actions);
 pybind11::dict planNativeCurrentTree(const pybind11::dict& request,
     const NativeTreePlannerViews& input, const pybind11::dict& config);
+
+}  // namespace rebuffer
+
+// --- rebuffer_timing_policy.hh ---
+#include "pybind11/pybind11.h"
+
+
+namespace rebuffer {
+
+bool acceptsTimingCandidate(const pybind11::dict& current,
+                            const pybind11::dict& candidate,
+                            const pybind11::dict& request,
+                            const pybind11::dict& config);
+
+}  // namespace rebuffer
+
+// --- rebuffer_native_planner.hh ---
+// Native repair_timing candidate dispatch over Python data payloads.
+
+
+
+namespace rebuffer {
+
+// ``timing_snapshot`` returns both queue items and a
+// per-epoch ``planner_payloads`` list.  C++ looks up the payload for each
+// request and invokes the native planner directly; there is no Python
+// candidate/payload callback in this path.
+pybind11::dict runRepairTimingNativeSnapshotOperator(
+    const pybind11::object& timing_snapshot,
+    const pybind11::object& checkpoint,
+    const pybind11::object& apply,
+    const pybind11::object& evaluate,
+    const pybind11::object& restore,
+    const pybind11::dict& config,
+    const pybind11::object& endpoint_state = pybind11::none(),
+    const pybind11::object& release_checkpoint = pybind11::none());
 
 }  // namespace rebuffer

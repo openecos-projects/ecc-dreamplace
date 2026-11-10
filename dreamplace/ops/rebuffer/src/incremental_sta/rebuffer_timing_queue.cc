@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Build scheduler-ready native queue state directly from the timing owner.
 #include "rebuffer_timing_graph.hh"
+
 #include "rebuffer_timing_mutation.hh"
-#include "rebuffer_timing_paths.hh"
-#include "rebuffer_driver_input_slew.hh"
-#include "rebuffer_path_policy.hh"
-#include "rebuffer_python_views.hh"
+
+#include "rebuffer_driver_tree.hh"
+
+#include "rebuffer_repair.hh"
+
 #include "rebuffer_queue_snapshot.hh"
+
 
 #include <algorithm>
 #include <chrono>
@@ -14,7 +17,9 @@
 #include <map>
 
 #include "timing_legacy_paths.h"
+
 #include "pybind11/stl.h"
+
 
 namespace py = pybind11;
 namespace rebuffer {
@@ -275,6 +280,382 @@ void PersistentTimingGraph::applyQueueGradientScores(py::dict& snapshot,
   snapshot["gradient_score_epoch"] = epoch_;
   snapshot["gradient_scored_item_count"] = matched;
   snapshot["gradient_slack_window_ps"] = slack_window_ps;
+}
+
+}  // namespace rebuffer
+
+// --- rebuffer_timing_queue_projection.cc ---
+// Project graph-owned queue identities onto one current physical carrier.
+
+#include <algorithm>
+#include <chrono>
+#include <unordered_map>
+
+
+namespace py = pybind11;
+namespace rebuffer {
+namespace {
+std::unordered_map<std::string, int> nameMap(
+    const std::vector<std::string>& names, const char* kind)
+{
+  std::unordered_map<std::string, int> result;
+  result.reserve(names.size());
+  for (std::size_t id = 0; id < names.size(); ++id) {
+    if (!result.emplace(names[id], id).second) {
+      throw py::value_error(std::string("queue carrier has duplicate ") + kind);
+    }
+  }
+  return result;
+}
+}  // namespace
+
+py::dict PersistentTimingGraph::timingQueueStateForCarrier(
+    const std::vector<int>& original_net_by_net, const py::object& carrier,
+    bool use_path_context) const
+{
+  if (!mutation_state_) {
+    throw py::value_error("queue projection requires native mutation inputs");
+  }
+  const auto started = std::chrono::steady_clock::now();
+  const auto& m = *mutation_state_;
+  const auto pins = carrier.attr("pin_names").cast<std::vector<std::string>>();
+  const auto nets = carrier.attr("net_names").cast<std::vector<std::string>>();
+  const auto pin_net = carrier.attr("pin2net_map").cast<std::vector<int>>();
+  const auto drivers = carrier.attr("net2driver_pin_map").cast<std::vector<int>>();
+  const auto nodes = carrier.attr("node_names").cast<std::vector<std::string>>();
+  const auto masters = carrier.attr("node_master_names").cast<std::vector<std::string>>();
+  const auto pin_owner = carrier.attr("pin2node_map").cast<std::vector<int>>();
+  if (pin_net.size() != pins.size() || pin_owner.size() != pins.size()
+      || drivers.size() != nets.size() || masters.size() != nodes.size()) {
+    throw py::value_error("queue carrier identity arrays do not align");
+  }
+  const auto pin_lookup = nameMap(pins, "pin names");
+  const auto net_lookup = nameMap(nets, "net names");
+  std::vector<int> pin_map(timing_index_->pins.size(), -1);
+  std::vector<int> net_map(m.net_names.size(), -1);
+  std::unordered_map<int, int> node_aliases;
+  if (py::hasattr(carrier, "session_buffer_pin_ids")) {
+    const auto aliases = carrier.attr("session_buffer_pin_ids")
+        .cast<std::map<int, std::array<int, 2>>>();
+    for (const auto& [action, target] : aliases) {
+      const auto found = std::find_if(m.buffers.begin(), m.buffers.end(),
+          [&](const auto& buffer) { return buffer.active && buffer.action_id == action; });
+      if (found == m.buffers.end()
+          || std::count_if(m.buffers.begin(), m.buffers.end(),
+               [&](const auto& buffer) { return buffer.active && buffer.action_id == action; }) != 1
+          || target[0] < 0 || target[1] < 0 || target[0] == target[1]
+          || target[0] >= static_cast<int>(pins.size()) || target[1] >= static_cast<int>(pins.size())
+          || pin_owner[target[0]] != pin_owner[target[1]]) {
+        throw py::value_error("queue carrier has invalid session pin identities");
+      }
+      pin_map[found->input_pin] = target[0];
+      pin_map[found->output_pin] = target[1];
+      net_map[found->output_net] = pin_net[target[1]];
+      node_aliases.emplace(found->node, pin_owner[target[0]]);
+    }
+  }
+  std::vector<unsigned char> used_pins(pins.size(), 0), used_nets(nets.size(), 0);
+  std::size_t live_pins = 0, live_nets = 0;
+  std::size_t remapped_pins = 0, remapped_nets = 0;
+  for (std::size_t id = 0; id < pin_map.size(); ++id) {
+    if (!m.pin_active[id]) continue;
+    ++live_pins;
+    if (pin_map[id] < 0) {
+      const auto found = pin_lookup.find(timing_index_->pins[id]);
+      if (found == pin_lookup.end()) {
+        throw py::value_error("queue carrier is missing an active timing pin");
+      }
+      pin_map[id] = found->second;
+    }
+    if (used_pins.at(pin_map[id])++) {
+      throw py::value_error("queue carrier session pin identities overlap");
+    }
+    remapped_pins += pin_map[id] != static_cast<int>(id);
+  }
+  for (std::size_t id = 0; id < net_map.size(); ++id) {
+    // Original dangling nets still exist in the physical carrier; retired
+    // synthetic output nets have neither a driver nor any active pins.
+    if (id >= m.base_net_pins.size() && m.net_drivers[id] < 0) continue;
+    ++live_nets;
+    if (net_map[id] < 0) {
+      const auto found = net_lookup.find(m.net_names[id]);
+      if (found == net_lookup.end()) {
+        throw py::value_error("queue carrier is missing an active timing net");
+      }
+      net_map[id] = found->second;
+    }
+    if (net_map[id] >= static_cast<int>(nets.size()) || used_nets.at(net_map[id])++) {
+      throw py::value_error("queue carrier session net identities overlap");
+    }
+    remapped_nets += net_map[id] != static_cast<int>(id);
+  }
+  if (live_pins != pins.size() || live_nets != nets.size()) {
+    throw py::value_error("queue carrier has different active timing identities");
+  }
+  for (std::size_t pin = 0; pin < pin_map.size(); ++pin) {
+    if (pin_map[pin] < 0) continue;
+    const int target = pin_map[pin], source_net = m.pin_net[pin];
+    if ((source_net < 0 ? -1 : net_map.at(source_net)) != pin_net[target]) {
+      throw py::value_error("queue carrier has different pin net partitions");
+    }
+    const int source_node = m.pin_owner[pin], target_node = pin_owner[target];
+    const auto alias = node_aliases.find(source_node);
+    if (source_node < 0 || target_node < 0 || target_node >= static_cast<int>(nodes.size())
+        || (alias != node_aliases.end() ? alias->second != target_node
+                                      : nodes[target_node] != m.node_names.at(source_node))) {
+      throw py::value_error("queue carrier has different pin owners");
+    }
+    const int cell = m.node_cells[source_node];
+    if (cell >= 0 && masters[target_node] != m.cell_names.at(cell)) {
+      throw py::value_error("queue carrier has different instance masters");
+    }
+  }
+  for (std::size_t net = 0; net < net_map.size(); ++net) {
+    if (net_map[net] < 0) continue;
+    const int driver = m.net_drivers[net];
+    if ((driver < 0 ? -1 : pin_map.at(driver)) != drivers[net_map[net]]) {
+      throw py::value_error("queue carrier has different net drivers");
+    }
+  }
+  const double projection_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - started).count();
+  auto result = timingQueueState(original_net_by_net, use_path_context);
+  auto snapshot = result["_native_queue_state"]
+      .cast<std::shared_ptr<NativeTimingQueueSnapshot>>();
+  projectTimingQueueItems(snapshot->items, pin_map, net_map);
+  auto statistics = result["graph_queue_statistics"].cast<py::dict>();
+  statistics["projection_ms"] = projection_ms;
+  statistics["remapped_pin_count"] = remapped_pins;
+  statistics["remapped_net_count"] = remapped_nets;
+  result["timing_source"] = "persistent_graph_in_carrier_ids";
+  return result;
+}
+}  // namespace rebuffer
+
+// --- rebuffer_timing_paths.cc ---
+// Read current graph-owned timing directly; no carrier or state materialization.
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <limits>
+#include <set>
+
+#include "timing_hard_math.h"
+
+
+namespace py = pybind11;
+namespace rebuffer {
+
+TimingSetupPaths PersistentTimingGraph::nativeSetupPaths(
+    const std::optional<std::vector<int64_t>>& endpoint_pins,
+    int64_t global_k, int64_t max_depth, double residual_tolerance_ps,
+    bool worst_per_endpoint) const
+{
+  if (global_k < 0) throw py::value_error("global_k must be non-negative");
+  if (!std::isfinite(residual_tolerance_ps) || residual_tolerance_ps <= 0) {
+    throw py::value_error("residual_tolerance_ps must be finite and positive");
+  }
+  if (!timing_state_initialized_ || !propagation_program_) {
+    throw py::value_error("setup paths require initialized timing state and propagation inputs");
+  }
+  const auto seeds = timingEventSeeds();
+  if (seeds.require_full || !seeds.forward.empty() || !seeds.reverse.empty()
+      || !seeds.retired_arcs.empty()) {
+    throw py::value_error("setup paths require current native propagation");
+  }
+  if (!net_states_.empty()) {
+    if (!mutation_state_) throw py::value_error("setup paths require synchronized native topology");
+    requireSynchronizedTimingTopologies(*mutation_state_, net_states_);
+  }
+  const auto& p = *propagation_program_;
+  const auto& index = *timing_index_;
+  std::set<int64_t> requested;
+  const bool filtered = endpoint_pins.has_value();
+  if (filtered) {
+    for (auto pin : *endpoint_pins) {
+      if (pin < 0 || pin >= static_cast<int64_t>(index.pins.size())) {
+        throw py::value_error("requested setup endpoint pin is out of range");
+      }
+      requested.insert(pin);
+    }
+  }
+  auto included = [&](int64_t pin) { return !filtered || requested.count(pin); };
+  const auto& ra = state_.at("pin_rAAT");
+  const auto& fa = state_.at("pin_fAAT");
+  const auto& rs = state_.at("pin_rtran");
+  const auto& fs = state_.at("pin_ftran");
+  const auto& rr = state_.at("pin_rRAT");
+  const auto& fr = state_.at("pin_fRAT");
+  const double inf = std::numeric_limits<double>::infinity();
+  std::vector<dreamplace::timing::SetupPathState> states;
+  std::set<int64_t> constraint_pins;
+  std::size_t endpoint_records = 0;
+  auto append = [&](int64_t pin, int64_t test, double rise, double fall) {
+    if (!included(pin)) return;
+    ++endpoint_records;
+    dreamplace::timing::appendSetupPathStates(states, pin, test,
+        p.endpoint_valid[pin * 2] ? rise : inf,
+        p.endpoint_valid[pin * 2 + 1] ? fall : inf);
+  };
+  for (std::size_t row = 0; row < p.setup_arcs.size(); ++row) {
+    const bool rise_valid = p.setup_valid[row * 2];
+    const bool fall_valid = p.setup_valid[row * 2 + 1];
+    if (!rise_valid && !fall_valid) continue;
+    const auto& arc = p.setup_arcs[row];
+    const auto pin = arc[1];
+    if (!included(pin)) continue;
+    if (p.timing_check_pins.empty()) constraint_pins.insert(pin);
+    const int endpoint_row = p.endpoint_row_by_pin[pin];
+    const auto candidate = dreamplace::timing::setupRatRow(arc.data(),
+        endpoint_row < 0 ? 2e8 : p.endpoint_rRAT[endpoint_row],
+        endpoint_row < 0 ? 2e8 : p.endpoint_fRAT[endpoint_row],
+        p.clock_rtran.data(), p.clock_ftran.data(), rs.data(), fs.data(),
+        p.luts[0].view(), p.luts[1].view(), p.pairwise_smooth, p.pairwise_alpha);
+    append(pin, row, rise_valid ? candidate.first - ra[pin] : inf,
+                     fall_valid ? candidate.second - fa[pin] : inf);
+  }
+  for (auto pin : p.endpoint_pins) {
+    if (!included(pin)) continue;
+    if (!p.endpoint_valid[pin * 2] && !p.endpoint_valid[pin * 2 + 1]) continue;
+    // Match TP's actual no-setup-rows fallback, including recovery-only pins.
+    if (!p.setup_arcs.empty()) {
+      const bool check = p.timing_check_pins.empty() ? constraint_pins.count(pin)
+          : std::binary_search(p.timing_check_pins.begin(), p.timing_check_pins.end(), pin);
+      if (check) continue;
+    }
+    append(pin, -1, rr[pin] - ra[pin], fr[pin] - fa[pin]);
+  }
+  const dreamplace::timing::SetupPathTimingView view{
+      ra.data(), fa.data(), state_.at("pin_net_delay_rise").data(),
+      state_.at("pin_net_delay_fall").data(), state_.at("cell_arc_rr_delays").data(),
+      state_.at("cell_arc_fr_delays").data(), state_.at("cell_arc_rf_delays").data(),
+      state_.at("cell_arc_ff_delays").data()};
+  const bool reordered = mutation_state_ && mutation_state_->canonical_schedule;
+  const TimingPathPredecessors predecessors{index, reordered};
+  auto extracted = dreamplace::timing::extractSetupPaths(std::move(states), view,
+      index.pins.size(), global_k, max_depth, residual_tolerance_ps, predecessors,
+      [&](int64_t pin) {
+        return pin < p.pin_count && p.start_row_by_pin[pin] >= 0;
+      }, worst_per_endpoint);
+  return {std::move(extracted), endpoint_records};
+}
+
+py::dict PersistentTimingGraph::setupPathDetails(const py::object& endpoint_pins,
+    int64_t global_k, int64_t max_depth, double residual_tolerance_ps) const
+{
+  const auto started = std::chrono::steady_clock::now();
+  const auto result_paths = nativeSetupPaths(endpoint_pins.is_none() ? std::nullopt
+      : std::make_optional(endpoint_pins.cast<std::vector<int64_t>>()),
+      global_k, max_depth, residual_tolerance_ps);
+  const auto& extracted = result_paths.batch;
+  const auto& ra = state_.at("pin_rAAT");
+  const auto& fa = state_.at("pin_fAAT");
+  py::dict paths;
+  std::size_t valid_count = 0, path_pins = 0;
+  for (std::size_t id = 0; id < extracted.states.size(); ++id) {
+    const auto& state = extracted.states[id];
+    const auto& trace = extracted.traces[id];
+    valid_count += trace.valid != 0;
+    path_pins += trace.pins.size();
+    const auto key = py::int_(state.pin);
+    // States are sorted by slack/transition/pin/test; strict '<' in the
+    // existing consumer retains the first state for this pin on equal slack.
+    if (paths.contains(key)) continue;
+    py::dict record;
+    record["path"] = trace.pins;
+    record["transitions"] = trace.transitions;
+    record["arc_ids"] = trace.arc_ids;
+    record["endpoint_transition"] = state.transition;
+    record["endpoint_slack"] = state.slack;
+    record["valid"] = trace.valid != 0;
+    record["topology_epoch"] = epoch_;
+    record["endpoint_test_id"] = state.test_id;
+    record["invalid_reason"] = trace.invalid_reason;
+    record["max_residual_ps"] = trace.max_residual_ps;
+    std::vector<double> arrivals;
+    arrivals.reserve(trace.pins.size());
+    for (std::size_t pin = 0; pin < trace.pins.size(); ++pin) {
+      arrivals.push_back((trace.transitions[pin] == 0 ? ra : fa)[trace.pins[pin]]);
+    }
+    record["path_arrivals"] = std::move(arrivals);
+    paths[key] = std::move(record);
+  }
+  py::dict statistics;
+  statistics["backend"] = "graph_owned_cpp_transition_aware";
+  statistics["topology_epoch"] = epoch_;
+  statistics["endpoint_record_count"] = result_paths.endpoint_record_count;
+  statistics["failing_state_count"] = extracted.failing_state_count;
+  statistics["selected_state_count"] = extracted.states.size();
+  statistics["valid_path_count"] = valid_count;
+  statistics["invalid_path_count"] = extracted.states.size() - valid_count;
+  statistics["path_pin_count"] = path_pins;
+  statistics["timing_state_values_copied"] = 0;
+  statistics["extraction_runtime_ms"] = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - started).count();
+  py::dict result;
+  result["paths"] = std::move(paths);
+  result["statistics"] = std::move(statistics);
+  return result;
+}
+
+}  // namespace rebuffer
+
+// --- rebuffer_timing_endpoints.cc ---
+// Copy only endpoint scalars; path selection remains inside the native scheduler.
+
+#include <set>
+
+namespace py = pybind11;
+namespace rebuffer {
+
+TimingEndpointState::TimingEndpointState(const std::vector<int>& pins,
+    const std::vector<std::string>& names, const std::vector<double>& slacks)
+{
+  if (pins.size() != names.size() || pins.size() != slacks.size()) {
+    throw py::value_error("endpoint state arrays do not align");
+  }
+  std::set<int> used_pins;
+  std::set<std::string> used_names;
+  for (std::size_t row = 0; row < pins.size(); ++row) {
+    if (pins[row] < 0 || names[row].empty() || !used_pins.insert(pins[row]).second
+        || !used_names.insert(names[row]).second) {
+      throw py::value_error("endpoint state identities are not unique and valid");
+    }
+    endpoints.push_back({pins[row], names[row], slacks[row]});
+  }
+}
+
+std::shared_ptr<TimingEndpointState> PersistentTimingGraph::timingEndpointState() const
+{
+  if (!timing_state_initialized_ || !propagation_program_) {
+    throw py::value_error("endpoint state requires initialized native propagation");
+  }
+  const auto seeds = timingEventSeeds();
+  if (seeds.require_full || !seeds.forward.empty() || !seeds.reverse.empty()
+      || !seeds.retired_arcs.empty()) {
+    throw py::value_error("endpoint state requires current native propagation");
+  }
+  auto result = std::make_shared<TimingEndpointState>();
+  const auto slacks = endpointSlacks();
+  result->endpoints.reserve(slacks.size());
+  for (std::size_t row = 0; row < slacks.size(); ++row) {
+    const int pin = propagation_program_->metric_pins[row];
+    result->endpoints.push_back({pin, timing_index_->pins.at(pin), slacks[row]});
+  }
+  return result;
+}
+
+void registerLegacyQueueBindings(py::module_& module)
+{
+  py::class_<TimingEndpointState, std::shared_ptr<TimingEndpointState>>(
+      module, "TimingEndpointState")
+      .def(py::init<const std::vector<int>&, const std::vector<std::string>&,
+                    const std::vector<double>&>());
+  module.def("run_repair_timing_legacy_queue_operator", &runRepairTimingLegacyQueueOperator,
+      py::arg("endpoint_state"), py::arg("timing_snapshot"), py::arg("candidate_provider"),
+      py::arg("checkpoint"), py::arg("apply"), py::arg("evaluate"), py::arg("restore"),
+      py::arg("config"), py::arg("release_checkpoint") = py::none());
 }
 
 }  // namespace rebuffer

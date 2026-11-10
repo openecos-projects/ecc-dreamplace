@@ -5,37 +5,35 @@
 #include <vector>
 
 #include "pybind11/numpy.h"
+
 #include "pybind11/pybind11.h"
+
 #include "pybind11/stl.h"
+
 #include "rebuffer_liberty.hh"
-#include "rebuffer_library_metadata.hh"
-#include "rebuffer_cell_selection.hh"
+
 #include "rebuffer_incremental_topology.hh"
+
 #include "rebuffer_incremental_timing.hh"
-#include "rebuffer_incremental_carrier.hh"
-#include "rebuffer_incremental_patch.hh"
-#include "rebuffer_timing_graph.hh"
-#include "rebuffer_timing_planning.hh"
-#include "rebuffer_timing_payload.hh"
-#include "rebuffer_python_views.hh"
-#include "rebuffer_path_policy.hh"
-#include "rebuffer_native_queue.hh"
-#include "rebuffer_legacy_queue.hh"
-#include "rebuffer_timing_local.hh"
-#include "rebuffer_queue_snapshot.hh"
-#include "rebuffer_native_planner.hh"
-#include "rebuffer_verified_commit.hh"
-#include "rebuffer_electrical_observation.hh"
-#include "rebuffer_repair.hh"
-#include "rebuffer_timing_session.hh"
-#include "rebuffer_types.hh"
+
 #include "rebuffer_carrier.hh"
+
+#include "rebuffer_timing_graph.hh"
+
+#include "rebuffer_timing_planning.hh"
+
+#include "rebuffer_repair.hh"
+
+#include "rebuffer_queue_snapshot.hh"
+
+#include "rebuffer_timing_local.hh"
+
+#include "rebuffer_types.hh"
+
 #include "rebuffer_driver_tree.hh"
+
 #include "rebuffer_tree_dp.hh"
-#include "rebuffer_tree_bindings.hh"
-#include "rebuffer_tree_recovery.hh"
-#include "rebuffer_overlay_carrier.hh"
-#include "rebuffer_overlay_actions.hh"
+
 
 namespace py = pybind11;
 
@@ -459,15 +457,6 @@ PYBIND11_MODULE(rebuffer_cpp, module)
           throw py::value_error("topology state is null");
         }
         return rebuffer::incrementalTopologyView(*state);
-      },
-      py::arg("state"));
-  module.def(
-      "clone_incremental_topology",
-      [](const std::shared_ptr<rebuffer::IncrementalTopologyState>& state) {
-        if (state == nullptr) {
-          throw py::value_error("topology state is null");
-        }
-        return std::make_shared<rebuffer::IncrementalTopologyState>(*state);
       },
       py::arg("state"));
   module.def(

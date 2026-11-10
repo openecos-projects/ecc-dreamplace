@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 from dreamplace.Placer import PlacementEngine
 
@@ -249,10 +250,20 @@ def test_run_diff_sizing_commits_refreshes_and_writes_summary(
                 global_place_stages=[{"iteration": 2}],
                 timing_opt_sizing_rounds=10,
                 diff_sizing_terminal_gr_sta_enabled=terminal_gr_sta_enabled,
+                scale_factor=2.0,
                 result_dir=str(tmp_path),
             )
             self.placedb = SimpleNamespace(
-                gr_sizing=gr_session if timing_rc_mode == "gr" else None
+                gr_sizing=gr_session if timing_rc_mode == "gr" else None,
+                pin_offset_x=np.array([0.0, 0.0], dtype=np.float32),
+                pin_offset_y=np.array([0.0, 0.0], dtype=np.float32),
+                rawdb=SimpleNamespace(
+                    pydb=SimpleNamespace(
+                        pin_offset_x=[1.5, 2.5],
+                        pin_offset_y=[3.5, 4.5],
+                        native_state_dirty=True,
+                    )
+                ),
             )
             self.placer = SimpleNamespace(
                 data_collections=SimpleNamespace(pos=[object()]),
@@ -298,10 +309,18 @@ def test_run_diff_sizing_commits_refreshes_and_writes_summary(
     assert len(phases) == 1
     assert phases[0].action == "quad"
     assert phases[0].rounds == 2
-    assert calls[3] == (
-        "refresh",
-        {"refresh_mode": "full_rebuild", "rebuild_mode": "full_rebuild"},
-    )
+    assert len(calls) == 3
+    assert result["diff_sizing"]["refresh"] == {
+        "status": "skipped",
+        "reason": "inplace_sizing_sync",
+        "refresh_mode": "inplace",
+        "rebuild_mode": "none",
+        "accepted_count": 1,
+        "pin_offsets_synced": True,
+    }
+    np.testing.assert_allclose(engine.placedb.pin_offset_x, [3.0, 5.0])
+    np.testing.assert_allclose(engine.placedb.pin_offset_y, [7.0, 9.0])
+    assert engine.placedb.rawdb.pydb.native_state_dirty is False
     assert engine.placedb.gr_sizing is (
         gr_session if timing_rc_mode == "gr" else None
     )

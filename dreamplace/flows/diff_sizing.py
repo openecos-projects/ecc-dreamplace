@@ -281,6 +281,36 @@ class DiffSizingController:
         }
 
 
+def _sync_committed_sizing_inplace(engine, sizing_commit):
+    """Sync oriented pin offsets from native PyPlaceDB without rebuilding STA."""
+    import numpy as np
+
+    placedb = engine.placedb
+    rawdb = getattr(placedb, "rawdb", None)
+    pydb = getattr(rawdb, "pydb", None)
+    pin_offsets_synced = False
+    if pydb is not None:
+        scale = float(getattr(engine.params, "scale_factor", 1.0) or 1.0)
+        for field in ("pin_offset_x", "pin_offset_y"):
+            dst = getattr(placedb, field, None)
+            src = getattr(pydb, field, None)
+            if isinstance(dst, np.ndarray) and src is not None and len(src) == len(dst):
+                dst[:] = np.asarray(src, dtype=dst.dtype) * scale
+                pin_offsets_synced = True
+        try:
+            pydb.native_state_dirty = False
+        except AttributeError:
+            pass
+    return {
+        "status": "skipped",
+        "reason": "inplace_sizing_sync",
+        "refresh_mode": "inplace",
+        "rebuild_mode": "none",
+        "accepted_count": int(sizing_commit.get("accepted_count", 0) or 0),
+        "pin_offsets_synced": pin_offsets_synced,
+    }
+
+
 def _write_summary(params, payload):
     result_dir = Path(params.result_dir)
     result_dir.mkdir(parents=True, exist_ok=True)
@@ -324,19 +354,10 @@ def run_diff_sizing(engine):
             engine.placer._refresh_live_timing_topology,
         )
         operation = controller.run(model, pos, phases)
-
-        refresh = engine._physical_mutation_backend().refresh(
-            refresh_mode="full_rebuild",
-            rebuild_mode="full_rebuild",
+        refresh = _sync_committed_sizing_inplace(
+            engine,
+            operation["sizing_commit"],
         )
-        if str(refresh.get("status") or "") != "ok":
-            raise RuntimeError(f"diff_sizing native refresh failed: {refresh}")
-        if gr_session is not None:
-            # The frozen GR snapshot is the optimization reference.  The
-            # refresh rebuilds the placement DB, but the terminal sizing
-            # finalizer still needs the original pin-name mapping for its
-            # frozen LUT report.
-            engine.placedb.gr_sizing = gr_session
 
         terminal_timing = _legalize_and_measure(engine, params)
         params.timing_action_gradient_mode = "off"

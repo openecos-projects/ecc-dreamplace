@@ -171,7 +171,11 @@ def sync_timing_arc_lut_rows(data, placedb, timing_op, changed_inst_ids):
         data._runtime_timing_arc_row_index_cache = row_index_cache
     total_updated = 0
     with torch.no_grad():
-        for name in ("flat_inst_arcs_by_level", "endpoints_constraint_arcs"):
+        for name in (
+            "flat_inst_arcs_by_level",
+            "endpoints_constraint_arcs",
+            "endpoints_timing_check_arcs",
+        ):
             arcs = getattr(data, name, None)
             table_summary = {
                 "row_count": 0,
@@ -180,7 +184,8 @@ def sync_timing_arc_lut_rows(data, placedb, timing_op, changed_inst_ids):
                 "semantic_remap_row_count": 0,
             }
             if not torch.is_tensor(arcs) or arcs.numel() == 0:
-                table_summaries[name] = table_summary
+                if name != "endpoints_timing_check_arcs" or arcs is not None:
+                    table_summaries[name] = table_summary
                 continue
             if arcs.ndim != 2 or int(arcs.shape[1]) < 4:
                 raise RuntimeError(f"{name} must contain at least four columns")
@@ -327,6 +332,14 @@ def sync_timing_arc_lut_rows(data, placedb, timing_op, changed_inst_ids):
                     device=arcs.device,
                     dtype=arcs.dtype,
                 )
+            offset_col = 6 if name == "flat_inst_arcs_by_level" else 7
+            if int(arcs.shape[1]) > offset_col:
+                arcs[arc_rows_on_table, offset_col] = (
+                    current_arc_id - current_start
+                ).to(
+                    device=arcs.device,
+                    dtype=arcs.dtype,
+                )
 
             placedb_arcs = getattr(placedb, name, None)
             if isinstance(placedb_arcs, np.ndarray) and placedb_arcs.shape == tuple(
@@ -350,6 +363,11 @@ def sync_timing_arc_lut_rows(data, placedb, timing_op, changed_inst_ids):
         timing_op.endpoints_constraint_arcs = data.endpoints_constraint_arcs.to(
             timing_device
         )
+        check_arcs = getattr(data, "endpoints_timing_check_arcs", None)
+        if torch.is_tensor(check_arcs) and hasattr(
+            timing_op, "endpoints_timing_check_arcs"
+        ):
+            timing_op.endpoints_timing_check_arcs = check_arcs.to(timing_device)
         timing_op._cell_aat_static_cache = {}
         if hasattr(timing_op, "_build_device_contract"):
             timing_op.last_device_contract = timing_op._build_device_contract(

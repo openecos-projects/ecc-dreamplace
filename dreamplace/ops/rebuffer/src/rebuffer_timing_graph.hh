@@ -105,6 +105,10 @@ class PersistentTimingGraph : public std::enable_shared_from_this<PersistentTimi
   pybind11::dict compact();
   pybind11::dict resizeCell(const std::string& instance_name,
                            const std::string& master_name);
+  std::pair<int, int> findDriverResizeCandidate(
+      int native_driver_pin,
+      const std::vector<int>& native_path_pins,
+      const pybind11::dict& config) const;
 
   pybind11::dict attachNetTopology(
       int net_id,

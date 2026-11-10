@@ -49,8 +49,8 @@ def resolve_legacy_timing_config(config):
         allow_decreasing_slack=True,
         native_openroad_decreasing_slack_journal=True,
         openroad_journal_keep_nonimproving=True,
-        resize_drivers=False,
     )
+    resolved.setdefault("resize_drivers", False)
     resolved.setdefault("legacy_max_passes_per_endpoint", 50)
     resolved.setdefault("repair_tns_end_percent", 1.0)
     resolved.setdefault("native_metadata_journal", True)

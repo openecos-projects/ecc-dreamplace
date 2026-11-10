@@ -521,17 +521,75 @@ class BufferOverlay(NativeOverlayMetadata):
         self.native_topology_events.append(result)
         return result
 
+    def _apply_native_resize(self, action):
+        bridge = self.native_timing_bridge or getattr(
+            self.timing_model, "_persistent_graph_bridge", None
+        )
+        if bridge is None or not hasattr(bridge, "graph"):
+            raise ValueError("resize_cell requires a native timing graph bridge")
+        if hasattr(bridge, "attach_overlay"):
+            bridge.attach_overlay(self)
+        result = dict(
+            bridge.graph.resize_cell(
+                str(action["instance_name"]),
+                str(action["target_master_name"]),
+            )
+            or {}
+        )
+        result["action_kind"] = "resize_cell"
+        result["net_name"] = action.get("net_name", "")
+        result["node_id"] = int(action["node_id"])
+        self.native_topology_events.append(result)
+        return result
+
+    def _collapse_resize_actions(self, resize_actions):
+        by_node = {}
+        order = []
+        for action in resize_actions:
+            item = _json_safe(dict(action))
+            node_id = int(item["node_id"])
+            if node_id not in by_node:
+                by_node[node_id] = item
+                order.append(node_id)
+            else:
+                prev = by_node[node_id]
+                merged = dict(item)
+                if "previous_cell_index" in prev:
+                    merged["previous_cell_index"] = prev["previous_cell_index"]
+                if "previous_master_name" in prev:
+                    merged["previous_master_name"] = prev["previous_master_name"]
+                by_node[node_id] = merged
+        collapsed = []
+        for node_id in order:
+            item = by_node[node_id]
+            if (
+                "previous_cell_index" in item
+                and int(item["target_cell_index"]) == int(item["previous_cell_index"])
+            ):
+                continue
+            collapsed.append(item)
+        return collapsed
+
     def commit_actions(self):
         """Export final tree depths and physical load sets from native state."""
-        if not self.actions or not hasattr(self.timing_model, "create_net_overlay"):
+        resize_actions = [
+            action for action in self.actions if action.get("action_kind") == "resize_cell"
+        ]
+        buffer_actions = [
+            action for action in self.actions if action.get("action_kind") != "resize_cell"
+        ]
+        collapsed_resizes = self._collapse_resize_actions(resize_actions)
+        if not buffer_actions or not hasattr(self.timing_model, "create_net_overlay"):
+            is_resize_only = bool(resize_actions and not buffer_actions)
             self.projection_audit = {
-                "status": "unsupported",
-                "reason": "native_projection_unavailable",
+                "status": "ok" if is_resize_only else "unsupported",
+                "reason": "resize_only" if is_resize_only else "native_projection_unavailable",
                 "projected_action_ids": [
-                    int(action["session_buffer_id"]) for action in self.actions
+                    int(action["session_buffer_id"]) for action in buffer_actions
                 ],
+                "resized_count": len(collapsed_resizes),
             }
-            return _json_safe(self.actions)
+            return collapsed_resizes + _json_safe(buffer_actions)
         from dreamplace.ops.rebuffer import rebuffer_cpp
 
         states = [self.native_topologies[name] for name in sorted(self.native_topologies)]
@@ -547,11 +605,11 @@ class BufferOverlay(NativeOverlayMetadata):
             and callable(getattr(bridge, "finalize_actions", None))
         )
         if self.native_timing_bridge is not None:
-            projected = list(bridge.finalize_actions(self.actions, overlay=self))
+            projected = list(bridge.finalize_actions(buffer_actions, overlay=self))
             projection_source = "native_timing_graph"
         elif use_graph_bridge:
             try:
-                projected = list(bridge.finalize_actions(self.actions, overlay=self))
+                projected = list(bridge.finalize_actions(buffer_actions, overlay=self))
                 projection_source = "persistent_graph"
             except (
                 AttributeError,
@@ -567,13 +625,13 @@ class BufferOverlay(NativeOverlayMetadata):
                 projection_error = repr(error)
                 projected = list(
                     rebuffer_cpp.finalize_overlay_actions(
-                        self.base_pydb, states, self.actions
+                        self.base_pydb, states, buffer_actions
                     )
                 )
         else:
             projected = list(
                 rebuffer_cpp.finalize_overlay_actions(
-                    self.base_pydb, states, self.actions
+                    self.base_pydb, states, buffer_actions
                 )
             )
         native_action_ids = []
@@ -597,6 +655,7 @@ class BufferOverlay(NativeOverlayMetadata):
             "projected_action_ids": projected_action_ids,
             "native_active_count": len(native_action_ids),
             "projected_count": len(projected_action_ids),
+            "resized_count": len(collapsed_resizes),
             "campaign_ledger_history_count": len(
                 campaign_summary.get("ledger_history", ())
             ),
@@ -608,7 +667,7 @@ class BufferOverlay(NativeOverlayMetadata):
             self.projection_audit = {
                 **self.projection_audit, "persistent_graph_fallback": projection_error
             }
-        return projected
+        return collapsed_resizes + projected
 
     def _remove_native_insert(self, action):
         state = self.native_topologies.get(str(action.get("net_name", "")))
@@ -667,8 +726,29 @@ class BufferOverlay(NativeOverlayMetadata):
                 raise ValueError("buffer_remove requires session_buffer_id")
             normalized["session_buffer_id"] = int(normalized["session_buffer_id"])
             return normalized
+        if kind == "resize_cell":
+            net_name = str(normalized.get("net_name", "") or "")
+            if not net_name or not self._known_net(net_name):
+                raise ValueError(f"unknown net_name {net_name!r}")
+            if normalized.get("node_id") is None or int(normalized["node_id"]) < 0:
+                raise ValueError("resize_cell requires nonnegative node_id")
+            if not str(normalized.get("instance_name", "") or ""):
+                raise ValueError("resize_cell requires instance_name")
+            target_idx = normalized.get("target_cell_index")
+            if target_idx is None or int(target_idx) < 0:
+                raise ValueError("resize_cell requires nonnegative target_cell_index")
+            if not str(normalized.get("target_master_name", "") or ""):
+                raise ValueError("resize_cell requires target_master_name")
+            normalized["node_id"] = int(normalized["node_id"])
+            normalized["target_cell_index"] = int(target_idx)
+            if normalized.get("previous_cell_index") is not None:
+                normalized["previous_cell_index"] = int(normalized["previous_cell_index"])
+            normalized.setdefault("commit_order", len(self.actions))
+            return normalized
         if kind != "buffer_insert":
-            raise ValueError("the shadow buffer session accepts buffer_insert or buffer_remove")
+            raise ValueError(
+                "the shadow buffer session accepts buffer_insert, buffer_remove, or resize_cell"
+            )
         net_name = str(normalized.get("net_name", "") or "")
         if not net_name:
             raise ValueError("buffer action requires net_name")
@@ -746,10 +826,11 @@ class BufferOverlay(NativeOverlayMetadata):
                     "action_count": 0,
                 },
             )
-            patch["inserted_buffer_ids"].append(action["session_buffer_id"])
-            patch["load_pin_names"].extend(
-                str(value) for value in action.get("downstream_pin_names", ()) or ()
-            )
+            if action.get("action_kind") != "resize_cell":
+                patch["inserted_buffer_ids"].append(action["session_buffer_id"])
+                patch["load_pin_names"].extend(
+                    str(value) for value in action.get("downstream_pin_names", ()) or ()
+                )
             patch["action_count"] += 1
         self.net_patches = patches
 
@@ -770,8 +851,9 @@ class BufferOverlay(NativeOverlayMetadata):
         old = current.get(net_name)
         inserted = list(old.get("inserted_buffer_ids", ())) if old is not None else []
         loads = list(old.get("load_pin_names", ())) if old is not None else []
-        inserted.append(action["session_buffer_id"])
-        loads.extend(str(value) for value in action.get("downstream_pin_names", ()) or ())
+        if action.get("action_kind") != "resize_cell":
+            inserted.append(action["session_buffer_id"])
+            loads.extend(str(value) for value in action.get("downstream_pin_names", ()) or ())
         patch = FrozenRecord(
             (
                 ("inserted_buffer_ids", FrozenValues(inserted)),
@@ -822,6 +904,18 @@ class BufferOverlay(NativeOverlayMetadata):
                 removed.append(target)
                 rebuild_patches = True
                 continue
+            if normalized.get("action_kind") == "resize_cell":
+                try:
+                    self._apply_native_resize(normalized)
+                except Exception as error:
+                    raise ValueError(
+                        f"native resize action failed: {normalized}; reason={error}"
+                    ) from error
+                self.actions.append(normalized)
+                added.append(normalized)
+                if not self._append_patch_record(normalized):
+                    rebuild_patches = True
+                continue
             try:
                 self._apply_native_insert(normalized)
             except Exception as error:
@@ -863,7 +957,11 @@ class BufferOverlay(NativeOverlayMetadata):
             "applied_count": len(added),
             "removed_count": len(removed),
             "epoch": self.epoch,
-            "session_buffer_ids": [item["session_buffer_id"] for item in added],
+            "session_buffer_ids": [
+                item["session_buffer_id"]
+                for item in added
+                if "session_buffer_id" in item
+            ],
             "removed_session_buffer_ids": removed,
         }
 

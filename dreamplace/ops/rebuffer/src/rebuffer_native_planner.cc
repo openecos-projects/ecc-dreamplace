@@ -167,6 +167,12 @@ std::string actionKey(const py::dict& action)
     }
     return std::string(fallback);
   };
+  if (action.contains("action_kind")
+      && py::str(action["action_kind"]).cast<std::string>() == "resize_cell") {
+    key << "resize:" << value("net_id") << ':' << value("node_id") << ':'
+        << value("target_cell_index");
+    return key.str();
+  }
   key << value("net_id") << ':' << value("driver_pin") << ':'
       << value("buffer_cell_index") << ':' << value("parent_node_id") << ':'
       << value("child_node_id") << ':' << value("x_dbu") << ':'
@@ -185,6 +191,7 @@ py::dict planNativeCurrentTree(const py::dict& request,
   std::string net_name;
   int plan_count = 0;
   bool replacement_tree = false;
+  bool has_driver_resize = false;
   int focus_net_id = -1;
   std::string source_tree_digest;
 
@@ -203,76 +210,101 @@ py::dict planNativeCurrentTree(const py::dict& request,
       if (isExternalPadNet(design, tree->root_net_id)) {
         return unsupported("timing_buffer_move_external_pad_net");
       }
-      if (planner_config.contains("native_skip_top_level_output_ports")
+      const bool skip_top_output_port =
+          planner_config.contains("native_skip_top_level_output_ports")
           && planner_config["native_skip_top_level_output_ports"].cast<bool>()
-          && hasTopLevelOutputPort(design, tree->root_net_id)) {
+          && hasTopLevelOutputPort(design, tree->root_net_id);
+      focus_net_id = input.focus_net_id;
+      if (config.resize_drivers && input.driver_resize_node_id >= 0
+          && input.driver_resize_cell_index >= 0
+          && input.driver_resize_cell_index < static_cast<int>(liberty.cells.size())
+          && input.candidate_variant == 0
+          && (focus_net_id < 0 || focus_net_id == tree->root_net_id)) {
+        py::list resize_bundle;
+        py::dict resize_action;
+        resize_action["action_kind"] = "resize_cell";
+        resize_action["net_id"] = tree->root_net_id;
+        resize_action["driver_pin"] = tree->driver_pin_id;
+        resize_action["node_id"] = input.driver_resize_node_id;
+        resize_action["target_cell_index"] = input.driver_resize_cell_index;
+        resize_action["target_master_name"] = liberty.cells[input.driver_resize_cell_index].name;
+        resize_bundle.append(std::move(resize_action));
+        candidate_frontier.append(std::move(resize_bundle));
+        has_driver_resize = true;
+      }
+      if (skip_top_output_port && !has_driver_resize) {
         return unsupported("timing_buffer_move_top_level_output_port");
       }
-      if (!timingBufferMoveEligible(design, tree->root_net_id, config)) {
+      const bool buffer_eligible = !skip_top_output_port
+          && timingBufferMoveEligible(design, tree->root_net_id, config);
+      if (!buffer_eligible && !has_driver_resize) {
         return unsupported("timing_buffer_move_fanout");
       }
-      TreeVgdpResult result;
-      std::string reason;
-      const auto vgdp_started = std::chrono::steady_clock::now();
-      const bool optimized = optimizeCurrentDriverTree(design,
-                                 timing,
-                                 liberty,
-                                 characterization,
-                                 config,
-                                 *tree,
-                                 result,
-                                 reason,
-                                 input.phase_timings,
-                                 false,
-                                 request.contains("legacy_phase"));
-      if (input.phase_timings) (*input.phase_timings)["vgdp"] +=
-          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - vgdp_started).count();
-      if (!optimized) {
-        return unsupported(reason.c_str());
-      }
-      const auto pack_started = std::chrono::steady_clock::now();
-      const int requested_variant = input.candidate_variant;
-      focus_net_id = input.focus_net_id;
-      std::vector<const TreeVgdpCandidate*> focused;
-      std::vector<const TreeVgdpCandidate*> unfocused;
-      for (const auto& candidate : result.candidates) {
-        if (candidate.actions.empty()) continue;
-        const bool matches = focus_net_id < 0 || focus_net_id == tree->root_net_id
-            || std::any_of(candidate.actions.begin(), candidate.actions.end(),
-                           [&](const BufferAction& action) { return action.net_id == focus_net_id; });
-        (matches ? focused : unfocused).push_back(&candidate);
-      }
-      const auto& frontier = focused.empty() ? unfocused : focused;
-      const int top_k = planner_config.contains("python_timing_candidate_top_k")
-          ? std::max(1, py::cast<int>(planner_config["python_timing_candidate_top_k"])) : 1;
-      for (int index = std::max(0, requested_variant);
-           index < std::min(static_cast<int>(frontier.size()), requested_variant + top_k);
-           ++index) {
-        py::list bundle;
-        // A branch focus selects complete trees containing that partition.
-        // Dropping other branches would invalidate the DP feasibility/score.
-        for (const auto& action : frontier[index]->actions) {
-          bundle.append(rebuffer_python::bufferActionDict(action));
+      if (buffer_eligible) {
+        TreeVgdpResult result;
+        std::string reason;
+        const auto vgdp_started = std::chrono::steady_clock::now();
+        const bool optimized = optimizeCurrentDriverTree(design,
+                                   timing,
+                                   liberty,
+                                   characterization,
+                                   config,
+                                   *tree,
+                                   result,
+                                   reason,
+                                   input.phase_timings,
+                                   false,
+                                   request.contains("legacy_phase"));
+        if (input.phase_timings) (*input.phase_timings)["vgdp"] +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - vgdp_started).count();
+        if (!optimized && !has_driver_resize) {
+          return unsupported(reason.c_str());
         }
-        candidate_frontier.append(bundle);
+        if (optimized) {
+          const auto pack_started = std::chrono::steady_clock::now();
+          const int requested_variant = input.candidate_variant;
+          std::vector<const TreeVgdpCandidate*> focused;
+          std::vector<const TreeVgdpCandidate*> unfocused;
+          for (const auto& candidate : result.candidates) {
+            if (candidate.actions.empty()) continue;
+            const bool matches = focus_net_id < 0 || focus_net_id == tree->root_net_id
+                || std::any_of(candidate.actions.begin(), candidate.actions.end(),
+                               [&](const BufferAction& action) { return action.net_id == focus_net_id; });
+            (matches ? focused : unfocused).push_back(&candidate);
+          }
+          const auto& frontier = focused.empty() ? unfocused : focused;
+          const int top_k = planner_config.contains("python_timing_candidate_top_k")
+              ? std::max(1, py::cast<int>(planner_config["python_timing_candidate_top_k"])) : 1;
+          for (int index = std::max(0, requested_variant);
+               index < std::min(static_cast<int>(frontier.size()), requested_variant + top_k);
+               ++index) {
+            py::list bundle;
+            // A branch focus selects complete trees containing that partition.
+            // Dropping other branches would invalidate the DP feasibility/score.
+            for (const auto& action : frontier[index]->actions) {
+              bundle.append(rebuffer_python::bufferActionDict(action));
+            }
+            candidate_frontier.append(bundle);
+          }
+          tree_search["generated_option_count"] = result.generated_option_count;
+          tree_search["surviving_option_count"] = result.surviving_option_count;
+          tree_search["pruned_option_count"] = result.pruned_option_count;
+          tree_search["long_wire_edge_count"] = result.long_wire_edge_count;
+          tree_search["wire_site_count"] = result.wire_site_count;
+          tree_search["electrical_rejected_count"] = result.electrical_rejected_count;
+          tree_search["timing_round_count"] = result.timing_round_count;
+          tree_search["recovery_attempt_count"] = result.recovery_attempt_count;
+          tree_search["recovered_buffer_count"] = result.recovered_buffer_count;
+          if (input.phase_timings) (*input.phase_timings)["candidate_pack"] +=
+              std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - pack_started).count();
+        }
       }
       if (candidate_frontier.size() != 0) {
         actions = candidate_frontier[0].cast<py::list>();
         replacement_tree = true;
         ++plan_count;
       }
-      tree_search["generated_option_count"] = result.generated_option_count;
-      tree_search["surviving_option_count"] = result.surviving_option_count;
-      tree_search["pruned_option_count"] = result.pruned_option_count;
-      tree_search["long_wire_edge_count"] = result.long_wire_edge_count;
-      tree_search["wire_site_count"] = result.wire_site_count;
-      tree_search["electrical_rejected_count"] = result.electrical_rejected_count;
-      tree_search["timing_round_count"] = result.timing_round_count;
-      tree_search["recovery_attempt_count"] = result.recovery_attempt_count;
-      tree_search["recovered_buffer_count"] = result.recovered_buffer_count;
       net_name = input.net_name;
-      if (input.phase_timings) (*input.phase_timings)["candidate_pack"] +=
-          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - pack_started).count();
     } catch (const std::exception& error) {
       return unsupported(error.what());
     }
@@ -281,6 +313,9 @@ py::dict planNativeCurrentTree(const py::dict& request,
   py::dict candidate;
   candidate["status"] = py::len(actions) == 0 ? "no_actions" : "ok";
   candidate["actions"] = std::move(actions);
+  if (has_driver_resize) {
+    candidate["has_driver_resize"] = true;
+  }
   if (candidate_frontier.size() != 0) {
     candidate["candidate_frontier"] = candidate_frontier;
     candidate["tree_search"] = tree_search;

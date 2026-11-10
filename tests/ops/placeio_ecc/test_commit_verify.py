@@ -306,3 +306,72 @@ def test_unknown_schema_is_rejected_before_native_mutation(monkeypatch):
 
     assert result["status"] == "unsupported_timing_schema"
     assert backend.calls == []
+
+
+def test_commit_verify_commits_and_reverts_resize_cell_actions(monkeypatch):
+    backend = FakeBackend(
+        {"wns_ps": -100.0, "tns_ps": -1000.0},
+        {
+            0: (5.0, 50.0),
+            "resize_10": (10.0, 100.0),
+            "resize_20": (-50.0, -500.0),
+        },
+    )
+    _install(monkeypatch, backend)
+    sizing_calls = []
+
+    def apply_sparse_sizing(raw_db, resizes):
+        node_ids = [int(item["node_id"]) for item in resizes]
+        cell_indices = [int(item["target_cell_index"]) for item in resizes]
+        sizing_calls.append((node_ids, cell_indices))
+        for nid, cid in zip(node_ids, cell_indices, strict=True):
+            key = f"resize_{nid}"
+            if cid == 0:
+                backend.committed.discard(key)
+            else:
+                backend.committed.add(key)
+        return {"ok": True, "accepted_count": len(resizes)}
+
+    monkeypatch.setattr(
+        PlaceIOFunction,
+        "apply_sparse_sizing",
+        staticmethod(apply_sparse_sizing),
+    )
+
+    actions = [
+        {
+            "action_kind": "resize_cell",
+            "node_id": 10,
+            "instance_name": "u10",
+            "previous_cell_index": 0,
+            "previous_master_name": "BUF1",
+            "target_cell_index": 1,
+            "target_master_name": "BUF2",
+        },
+        {
+            "action_kind": "resize_cell",
+            "node_id": 20,
+            "instance_name": "u20",
+            "previous_cell_index": 0,
+            "previous_master_name": "BUF1",
+            "target_cell_index": 1,
+            "target_master_name": "BUF2",
+        },
+        _action(0),
+    ]
+
+    result = commit_verify.commit_buffer_actions_verified(
+        backend, actions, chunk_size=1, reader=lambda pydb: dict(pydb.timing)
+    )
+
+    assert result["status"] == "ok"
+    assert result["kept_count"] == 2
+    assert result["reverted_count"] == 1
+    assert [a.get("action_kind") for a in result["kept_actions"]] == [
+        "resize_cell",
+        "buffer_insert",
+    ]
+    assert backend.committed == {"resize_10", 0}
+    assert sizing_calls == [([10], [1]), ([20], [1]), ([20], [0])]
+    assert result["timing_after"] == {"wns_ps": -85.0, "tns_ps": -850.0}
+

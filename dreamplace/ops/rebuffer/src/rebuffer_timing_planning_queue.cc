@@ -2,6 +2,7 @@
 // Native queue dispatch and action identities share one owned projection.
 #include "rebuffer_timing_planning.hh"
 #include "rebuffer_timing_graph.hh"
+#include "rebuffer_timing_mutation.hh"
 #include "rebuffer_overlay_actions.hh"
 
 #include <algorithm>
@@ -47,9 +48,25 @@ py::dict NativeTimingPlanningSnapshot::queueState()
 std::vector<int> NativeTimingPlanningSnapshot::sourceNets(const py::list& actions) const
 {
   requireCurrent();
+  const auto& m = *graph_->mutation_state_;
   std::set<int> nets;
   for (const auto& value : actions) {
     const auto action = value.cast<py::dict>();
+    if (action.contains("action_kind")
+        && action["action_kind"].cast<std::string>() == "resize_cell") {
+      const int owner = action["node_id"].cast<int>();
+      if (owner < 0 || owner >= m.original_node_count) {
+        throw py::value_error("resize node is outside original nodes");
+      }
+      for (const int pin : m.node_pins[owner]) {
+        const int net = m.pin_net[pin];
+        if (net < 0) continue;
+        const int source = sourceNetForMutationNet(m, net);
+        if (source < 0) throw py::value_error("resize input has no source net provenance");
+        nets.insert(source);
+      }
+      continue;
+    }
     const int partition = action["net_id"].cast<int>();
     // Every active partition of the imported complete tree participates in
     // source projection, including original nets behind existing buffers.
@@ -72,9 +89,44 @@ std::vector<int> NativeTimingPlanningSnapshot::sourceNets(const py::list& action
 py::list NativeTimingPlanningSnapshot::projectActions(const py::list& actions) const
 {
   requireCurrent();
+  const auto& m = *graph_->mutation_state_;
+  py::list resize_projected;
+  py::list buffer_actions;
+  for (const auto& value : actions) {
+    const auto row = value.cast<py::dict>();
+    if (row.contains("action_kind")
+        && row["action_kind"].cast<std::string>() == "resize_cell") {
+      const int net = row["net_id"].cast<int>();
+      const int owner = row["node_id"].cast<int>();
+      const int target_cell = row["target_cell_index"].cast<int>();
+      if (owner < 0 || owner >= m.original_node_count) {
+        throw py::value_error("resize node is outside original nodes");
+      }
+      const int prev_cell = m.node_cells.at(owner);
+      const int source_net = projection_.actions.original_net_by_net.at(net);
+      py::dict projected = row.attr("copy")().cast<py::dict>();
+      projected["action_kind"] = "resize_cell";
+      projected["net_id"] = source_net;
+      projected["net_name"] = m.net_names.at(source_net);
+      projected["node_id"] = owner;
+      projected["instance_name"] = m.node_names.at(owner);
+      projected["previous_cell_index"] = prev_cell;
+      projected["previous_master_name"] = m.cell_names.at(prev_cell);
+      projected["target_cell_index"] = target_cell;
+      projected["target_master_name"] = m.cell_names.at(target_cell);
+      resize_projected.append(std::move(projected));
+    } else {
+      buffer_actions.append(row);
+    }
+  }
+  if (py::len(buffer_actions) == 0) return resize_projected;
   std::vector<std::shared_ptr<IncrementalTopologyState>> states;
   for (const auto& [_, state] : graph_->net_states_) states.push_back(state);
-  return projectPlanningActions(inputs_->carrier.identity, projection_, *liberty_, states, actions);
+  py::list projected_buffers = projectPlanningActions(
+      inputs_->carrier.identity, projection_, *liberty_, states, buffer_actions);
+  if (py::len(resize_projected) == 0) return projected_buffers;
+  for (const auto& item : projected_buffers) resize_projected.append(item);
+  return resize_projected;
 }
 
 py::list projectPlanningActions(const OverlayActionInputs& base,

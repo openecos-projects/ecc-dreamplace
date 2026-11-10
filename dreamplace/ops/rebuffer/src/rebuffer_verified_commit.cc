@@ -51,18 +51,25 @@ Groups actionGroups(const py::list& actions)
   std::map<std::pair<std::string, std::string>, int> owners;
   for (int i = 0; i < static_cast<int>(actions.size()); ++i) {
     const auto action = actions[i].cast<py::dict>();
-    if (action.contains("action_kind")
-        && py::cast<std::string>(action["action_kind"]) != "buffer_insert") {
-      throw py::value_error("verified insertion requires buffer_insert actions");
+    std::string kind = "buffer_insert";
+    if (action.contains("action_kind")) {
+      kind = py::cast<std::string>(action["action_kind"]);
+      if (kind != "buffer_insert" && kind != "resize_cell") {
+        throw py::value_error("verified insertion requires buffer_insert or resize_cell actions");
+      }
     }
-    for (const char* key : {"net_name", "tree_bundle_id"}) {
+    for (const char* key : {"net_name", "tree_bundle_id", "instance_name"}) {
       if (!action.contains(key) || action[key].is_none()) continue;
       const std::string value = py::cast<std::string>(action[key]);
       if (value.empty()) continue;
       const auto found = owners.emplace(std::make_pair(key, value), i);
       if (!found.second) parents[root(i)] = root(found.first->second);
     }
-    if (!action.contains("net_name")) throw py::value_error("buffer action requires net_name");
+    if (kind == "resize_cell") {
+      if (!action.contains("instance_name")) throw py::value_error("resize_cell action requires instance_name");
+    } else if (!action.contains("net_name")) {
+      throw py::value_error("buffer action requires net_name");
+    }
   }
   std::map<int, int> last_action;
   for (int i = 0; i < static_cast<int>(actions.size()); ++i) {
@@ -201,7 +208,9 @@ class VerifiedCommit
   bool undo(py::dict& record, const py::dict& before)
   {
     const auto names = record["committed_buffer_instance_names"].cast<py::list>();
-    if (names.empty()) {
+    const auto committed_resizes = record.contains("committed_resizes")
+        ? record["committed_resizes"].cast<py::list>() : py::list();
+    if (names.empty() && committed_resizes.empty()) {
       record["revert_status"] = "missing_committed_instance_names";
       return false;
     }
@@ -210,6 +219,16 @@ class VerifiedCommit
       py::dict action;
       action["action_kind"] = "buffer_remove";
       action["instance_name"] = name;
+      removals.append(std::move(action));
+    }
+    for (const auto& item : committed_resizes) {
+      const auto r = item.cast<py::dict>();
+      py::dict action;
+      action["action_kind"] = "resize_revert";
+      action["node_id"] = r["node_id"];
+      action["instance_name"] = r["instance_name"];
+      action["target_cell_index"] = r["previous_cell_index"];
+      action["target_master_name"] = r["previous_master_name"];
       removals.append(std::move(action));
     }
     record["revert_digest"] = digest_(removals);
@@ -225,7 +244,7 @@ class VerifiedCommit
     record["revert_status"] = status(reverted);
     record["removed_count"] = integer(reverted, "removed_count");
     if ((status(reverted) != "accepted" && status(reverted) != "ok")
-        || integer(reverted, "removed_count") != py::len(names)) {
+        || integer(reverted, "removed_count") != py::len(names) + py::len(committed_resizes)) {
       timing_valid_ = false;
       return false;
     }
@@ -253,7 +272,19 @@ class VerifiedCommit
   {
     if (status(result_) != "ok") return;
     py::list batch;
-    for (const auto& group : groups) for (const auto& action : group) batch.append(action);
+    int expected_buffers = 0;
+    int expected_resizes = 0;
+    for (const auto& group : groups) {
+      for (const auto& action : group) {
+        batch.append(action);
+        if (action.contains("action_kind")
+            && py::cast<std::string>(action["action_kind"]) == "resize_cell") {
+          ++expected_resizes;
+        } else {
+          ++expected_buffers;
+        }
+      }
+    }
     const auto before = copy(current_);
     py::dict record;
     record["index"] = py::len(result_["chunks"]);
@@ -283,10 +314,17 @@ class VerifiedCommit
     record["commit_digest"] = digest_(batch);
     const auto names = commit.contains("committed_buffer_instance_names")
         ? commit["committed_buffer_instance_names"].cast<py::list>() : py::list();
+    const auto committed_resizes = commit.contains("committed_resizes")
+        ? commit["committed_resizes"].cast<py::list>() : py::list();
     record["committed_buffer_instance_names"] = names;
+    if (!committed_resizes.empty()) {
+      record["committed_resizes"] = committed_resizes;
+    }
     const int accepted = integer(commit, "accepted_count");
     const bool complete = (status(commit) == "accepted" || status(commit) == "ok")
-        && accepted == py::len(batch) && py::len(names) == py::len(batch)
+        && accepted == py::len(batch)
+        && static_cast<int>(py::len(names)) == expected_buffers
+        && (expected_resizes == 0 || static_cast<int>(py::len(committed_resizes)) > 0)
         && integer(commit, "rejected_count") == 0 && integer(commit, "failed_count") == 0;
     if (!complete) {
       record["status"] = "commit_failed";
@@ -294,7 +332,7 @@ class VerifiedCommit
       if (commit.contains("message")) record["message"] = commit["message"];
       add("commit_failed_count", py::len(batch));
       decisions(batch, "commit_failed");
-      if (accepted || !names.empty()) {
+      if (accepted || !names.empty() || !committed_resizes.empty()) {
         timing_valid_ = false;
         if (!undo(record, before)) {
           result_["status"] = "revert_failed";

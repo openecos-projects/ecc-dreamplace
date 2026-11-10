@@ -62,8 +62,11 @@ void evaluateTimingFrontier(
     const py::dict& config, int evaluation_budget,
     TimingFrontierEvaluation& result)
 {
-  const int limit = config.contains("python_timing_candidate_top_k")
+  const bool has_driver_resize = candidate.contains("has_driver_resize")
+      && py::cast<bool>(candidate["has_driver_resize"]);
+  const int base_limit = config.contains("python_timing_candidate_top_k")
       ? std::max(1, py::cast<int>(config["python_timing_candidate_top_k"])) : 1;
+  const int limit = has_driver_resize ? base_limit + 1 : base_limit;
   py::list frontier;
   if (candidate.contains("candidate_frontier")) {
     frontier = candidate["candidate_frontier"].cast<py::list>();
@@ -116,6 +119,9 @@ void evaluateTimingFrontier(
       result.observation = observation;
       result.candidate = candidate.attr("copy")().cast<py::dict>();
       result.candidate["actions"] = actions;
+    }
+    if (has_driver_resize && rank == 0 && acceptable) {
+      break;
     }
   }
   if (result.selected_rank < 0) {

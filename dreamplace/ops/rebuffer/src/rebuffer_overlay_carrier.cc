@@ -94,6 +94,10 @@ OverlayCarrierProjection buildOverlayCarrierProjection(
   std::map<int, py::dict> action_rows;
   for (const auto& item : actions) {
     const auto action = item.cast<py::dict>();
+    if (action.contains("action_kind")
+        && py::cast<std::string>(action["action_kind"]) == "resize_cell") {
+      continue;
+    }
     const int id = py::cast<int>(action["session_buffer_id"]);
     if (!action_rows.emplace(id, action).second || !by_action.count(id)) {
       throw py::value_error("overlay action has no current native buffer");

@@ -271,9 +271,13 @@ def _run_repair_timing(placedb, *, max_passes, config, profile=None):
     if profile is not None:
         profile.plans["repair_timing"] = plan
     accepted = list(plan.get("accepted_actions", ()) or ())
+    resized_count = sum(1 for a in accepted if a.get("action_kind") == "resize_cell")
+    inserted_count = sum(1 for a in accepted if a.get("action_kind") != "resize_cell")
     summary = {
         "status": plan.get("status"),
         "accepted_count": len(accepted),
+        "inserted_count": inserted_count,
+        "resized_count": resized_count,
         "timing_before": plan.get("baseline"),
         "timing_overlay_final": plan.get("final"),
         "buffer_histogram": buffer_histogram(accepted),

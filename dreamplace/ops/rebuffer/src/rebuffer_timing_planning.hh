@@ -60,6 +60,8 @@ struct NativeTreePlannerViews
   int focus_net_id = -1;
   int candidate_variant = 0;
   std::map<std::string, double>* phase_timings = nullptr;
+  int driver_resize_node_id = -1;
+  int driver_resize_cell_index = -1;
 };
 
 class NativeTimingPlanningSnapshot

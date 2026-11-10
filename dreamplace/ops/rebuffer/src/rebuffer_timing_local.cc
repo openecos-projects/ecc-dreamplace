@@ -33,6 +33,11 @@ void validateLocalActionsAgainstBuffers(
   for (Py_ssize_t i = 0; i < static_cast<Py_ssize_t>(n); ++i) {
     PyObject* item = PyList_GET_ITEM(actions.ptr(), i);
     if (PyDict_Check(item)) {
+      PyObject* kind_obj = PyDict_GetItemString(item, "action_kind");
+      if (kind_obj && PyUnicode_CheckExact(kind_obj)
+          && PyUnicode_CompareWithASCIIString(kind_obj, "resize_cell") == 0) {
+        continue;
+      }
       PyObject* id_obj = PyDict_GetItemString(item, "session_buffer_id");
       PyObject* master_obj = PyDict_GetItemString(item, "buffer_master_name");
       if (id_obj && master_obj) {
@@ -46,6 +51,10 @@ void validateLocalActionsAgainstBuffers(
       }
     }
     const auto row = py::reinterpret_borrow<py::object>(item).cast<py::dict>();
+    if (row.contains("action_kind")
+        && row["action_kind"].cast<std::string>() == "resize_cell") {
+      continue;
+    }
     const int id = row["session_buffer_id"].cast<int>();
     PyObject* master = row["buffer_master_name"].ptr();
     if (!first && id <= prev_id) sorted = false;
@@ -501,6 +510,22 @@ py::dict NativeTimingLocalPlanningSnapshot::plan(const py::dict& request, const 
   NativeTreePlannerViews input{last_view_->projection.design, last_view_->timing, *graph_->queue_liberty_,
       inputs_->characterization, inputs_->config, last_view_->tree,
       graph_->mutation_state_->net_names.at(graphNet(root)), -1, 0, &timings_};
+  const int base_pins = inputs_->design.num_pins;
+  const int driver_pin = last_view_->tree->driver_pin_id;
+  const int native_driver = driver_pin < base_pins
+      ? driver_pin
+      : identity_->canonical_to_pin.at(driver_pin - base_pins);
+  std::vector<int> native_path;
+  native_path.reserve(item->path_pins.size());
+  for (const int pin : item->path_pins) {
+    if (pin >= 0) {
+      native_path.push_back(pin < base_pins ? pin : identity_->canonical_to_pin.at(pin - base_pins));
+    }
+  }
+  const auto [resize_node, resize_cell] =
+      graph_->findDriverResizeCandidate(native_driver, native_path, config);
+  input.driver_resize_node_id = resize_node;
+  input.driver_resize_cell_index = resize_cell;
   ++planned_;
   return planNativeCurrentTree(request, input, config);
 }
@@ -508,9 +533,25 @@ py::dict NativeTimingLocalPlanningSnapshot::plan(const py::dict& request, const 
 std::vector<int> NativeTimingLocalPlanningSnapshot::sourceNets(const py::list& actions) const
 {
   requireCurrent();
+  const auto& m = *graph_->mutation_state_;
   std::set<int> sources;
   for (const auto& value : actions) {
-    const int net = value.cast<py::dict>()["net_id"].cast<int>();
+    const auto row = value.cast<py::dict>();
+    if (row.contains("action_kind")
+        && row["action_kind"].cast<std::string>() == "resize_cell") {
+      const int owner = row["node_id"].cast<int>();
+      requireLocal(owner >= 0 && owner < m.original_node_count,
+                   "resize node is outside original nodes");
+      for (const int pin : m.node_pins[owner]) {
+        const int net = m.pin_net[pin];
+        if (net < 0) continue;
+        const int source = sourceNetForMutationNet(m, net);
+        requireLocal(source >= 0, "resize input has no source net provenance");
+        sources.insert(source);
+      }
+      continue;
+    }
+    const int net = row["net_id"].cast<int>();
     requireLocal(last_view_ && last_view_->nets.count(net), "action is outside the local planning scope");
     int root = net; std::set<int> seen;
     while (root >= 0 && root < static_cast<int>(identity_->link_by_output.size())
@@ -528,6 +569,37 @@ py::list NativeTimingLocalPlanningSnapshot::projectActions(const py::list& actio
   requireCurrent();
   requireLocal(last_view_ != nullptr || py::len(actions) == 0, "local actions require a planned tree");
   if (py::len(actions) == 0) return py::list();
+  const auto& m = *graph_->mutation_state_;
+  py::list resize_projected;
+  py::list buffer_actions;
+  for (const auto& value : actions) {
+    const auto row = value.cast<py::dict>();
+    if (row.contains("action_kind")
+        && row["action_kind"].cast<std::string>() == "resize_cell") {
+      const int net = row["net_id"].cast<int>();
+      requireLocal(last_view_->nets.count(net), "resize action is outside the local planning scope");
+      const int owner = row["node_id"].cast<int>();
+      const int target_cell = row["target_cell_index"].cast<int>();
+      requireLocal(owner >= 0 && owner < m.original_node_count,
+                   "resize node is outside original nodes");
+      const int prev_cell = m.node_cells.at(owner);
+      const int source_net = originalNet(net);
+      py::dict projected = row.attr("copy")().cast<py::dict>();
+      projected["action_kind"] = "resize_cell";
+      projected["net_id"] = source_net;
+      projected["net_name"] = m.net_names.at(source_net);
+      projected["node_id"] = owner;
+      projected["instance_name"] = m.node_names.at(owner);
+      projected["previous_cell_index"] = prev_cell;
+      projected["previous_master_name"] = m.cell_names.at(prev_cell);
+      projected["target_cell_index"] = target_cell;
+      projected["target_master_name"] = m.cell_names.at(target_cell);
+      resize_projected.append(std::move(projected));
+    } else {
+      buffer_actions.append(row);
+    }
+  }
+  if (py::len(buffer_actions) == 0) return resize_projected;
   auto& p = last_view_->projection;
   if (p.net_names.empty()) {
     p.net_names.resize(net_count_);
@@ -535,7 +607,7 @@ py::list NativeTimingLocalPlanningSnapshot::projectActions(const py::list& actio
       p.net_names[net] = graph_->mutation_state_->net_names.at(graphNet(net));
     }
   }
-  for (const auto& value : actions) {
+  for (const auto& value : buffer_actions) {
     const auto row = value.cast<py::dict>();
     const int net = row["net_id"].cast<int>();
     requireLocal(last_view_->nets.count(net), "action is outside the local planning scope");
@@ -555,8 +627,11 @@ py::list NativeTimingLocalPlanningSnapshot::projectActions(const py::list& actio
     const auto it = graph_->net_states_.find(owner);
     if (it != graph_->net_states_.end()) active_states.push_back(it->second);
   }
-  return projectPlanningActions(
-      inputs_->carrier.identity, p, *graph_->queue_liberty_, active_states, actions);
+  py::list projected_buffers = projectPlanningActions(
+      inputs_->carrier.identity, p, *graph_->queue_liberty_, active_states, buffer_actions);
+  if (py::len(resize_projected) == 0) return projected_buffers;
+  for (const auto& item : projected_buffers) resize_projected.append(item);
+  return resize_projected;
 }
 
 py::dict NativeTimingLocalPlanningSnapshot::summary() const

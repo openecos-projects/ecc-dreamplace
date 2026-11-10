@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Current-tree and endpoint annotation reuse the existing native VGDP inputs.
 #include "rebuffer_timing_planning.hh"
+#include "rebuffer_timing_graph.hh"
 #include "rebuffer_driver_tree_links.hh"
 
 #include <algorithm>
@@ -120,6 +121,20 @@ py::dict NativeTimingPlanningSnapshot::plan(const py::dict& request, const py::d
   views.candidate_variant = request.contains("candidate_variant")
       ? request["candidate_variant"].cast<int>() : 0;
   views.phase_timings = &phase_timings_ms_;
+  const int driver_pin = views.tree->driver_pin_id;
+  if (driver_pin >= 0 && driver_pin < static_cast<int>(graph_pin_by_pin_.size())) {
+    std::vector<int> native_path;
+    native_path.reserve(item.path_pins.size());
+    for (const int pin : item.path_pins) {
+      if (pin >= 0 && pin < static_cast<int>(graph_pin_by_pin_.size())) {
+        native_path.push_back(graph_pin_by_pin_[pin]);
+      }
+    }
+    const auto [resize_node, resize_cell] =
+        graph_->findDriverResizeCandidate(graph_pin_by_pin_[driver_pin], native_path, config);
+    views.driver_resize_node_id = resize_node;
+    views.driver_resize_cell_index = resize_cell;
+  }
   ++planned_requests_;
   return planNativeCurrentTree(request, views, config);
 }

@@ -38,6 +38,7 @@ add_pytorch_extension(${OP_NAME}_cpp
   src/rebuffer_timing_events.cc
   src/rebuffer_timing_event_math.cc
   src/rebuffer_timing_mutation.cc
+  src/rebuffer_timing_driver_resize.cc
   src/rebuffer_timing_schedule.cc
   src/rebuffer_timing_local_index.cc
   src/rebuffer_timing_local_events.cc

@@ -161,26 +161,53 @@ class PlaceIOBufferSession:
         from .timing_carrier import refresh_python_timing_carrier, require_carrier_schema
 
         require_carrier_schema(self.raw_db.pydb)
-        summary = dict(
-            PlaceIOFunction.apply_buffer_actions(
-                self.raw_db,
-                actions,
-                digest,
+        resize_actions = [
+            action for action in actions if action.get("action_kind") == "resize_cell"
+        ]
+        buffer_actions = [
+            action for action in actions if action.get("action_kind") != "resize_cell"
+        ]
+        if resize_actions:
+            sizing_summary = dict(
+                PlaceIOFunction.apply_sparse_sizing(self.raw_db, resize_actions) or {}
             )
-            or {}
-        )
-        status = str(summary.get("status") or "")
-        accepted = int(summary.get("accepted_count", 0) or 0)
-        if status not in {"accepted", "ok"} or accepted != len(actions):
-            self.state = "commit_failed"
-            summary.update(
-                {
-                    "status": status or "rejected",
+            if not bool(sizing_summary.get("ok")) or int(
+                sizing_summary.get("accepted_count", 0) or 0
+            ) != len(resize_actions):
+                self.state = "commit_failed"
+                return {
+                    "status": "rejected",
                     "action_digest": digest,
-                    "native_db_mutated": accepted > 0,
+                    "native_db_mutated": int(sizing_summary.get("accepted_count", 0) or 0) > 0,
+                    "sizing": sizing_summary,
                 }
+        if buffer_actions:
+            summary = dict(
+                PlaceIOFunction.apply_buffer_actions(
+                    self.raw_db,
+                    buffer_actions,
+                    action_digest(buffer_actions) if resize_actions else digest,
+                )
+                or {}
             )
-            return summary
+            status = str(summary.get("status") or "")
+            accepted = int(summary.get("accepted_count", 0) or 0) + len(resize_actions)
+            if status not in {"accepted", "ok"} or accepted != len(actions):
+                self.state = "commit_failed"
+                summary.update(
+                    {
+                        "status": status or "rejected",
+                        "action_digest": digest,
+                        "native_db_mutated": accepted > 0,
+                    }
+                )
+                return summary
+        else:
+            summary = {
+                "status": "accepted",
+                "accepted_count": len(resize_actions),
+            }
+            accepted = len(resize_actions)
 
         # The native transaction has already completed. A failed graph
         # refresh must not allow this session to insert the same batch again.

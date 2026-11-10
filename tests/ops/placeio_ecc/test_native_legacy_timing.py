@@ -92,3 +92,48 @@ def test_filtered_path_query_matches_full_queue_and_rejects_nonendpoint():
 def test_legacy_rejects_incompatible_consumer_or_policy(override):
     with pytest.raises(ValueError):
         _config(**override)
+
+
+def test_legacy_resize_drivers_upsizes_driver_and_restores_cleanly():
+    model, session, bridge = _session()
+    root = session.checkpoint()["checkpoint_id"]
+    baseline_obs = session.evaluate()
+
+    result = plan_timing_repair(
+        session,
+        model,
+        max_passes=1,
+        config=_config(resize_drivers=True),
+    )
+
+    assert result["status"] == "ok"
+    assert result["final"]["wns_ps"] > baseline_obs["wns_ps"]
+    commit_actions = session.overlay.commit_actions()
+    resize_actions = [
+        {k: v for k, v in a.items() if k != "tree_bundle_id"}
+        for a in commit_actions
+        if a.get("action_kind") == "resize_cell"
+    ]
+    assert resize_actions == [
+        {
+            "action_kind": "resize_cell",
+            "commit_order": 0,
+            "driver_pin": 2,
+            "net_id": 1,
+            "net_name": "n1",
+            "node_id": 0,
+            "instance_name": "u",
+            "previous_cell_index": 0,
+            "previous_master_name": "BUF1",
+            "target_cell_index": 1,
+            "target_master_name": "BUF2",
+        }
+    ]
+    assert bridge.graph.mutation_view()["node_master_names"][0] == "BUF2"
+
+    session.restore(root)
+    assert session.overlay.commit_actions() == []
+    assert bridge.graph.mutation_view()["node_master_names"][0] == "BUF1"
+    restored_obs = session.evaluate()
+    assert restored_obs["wns_ps"] == pytest.approx(baseline_obs["wns_ps"], abs=1e-6)
+

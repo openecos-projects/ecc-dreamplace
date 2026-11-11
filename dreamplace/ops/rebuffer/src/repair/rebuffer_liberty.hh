@@ -88,6 +88,7 @@ struct CharacterizationResult
   std::vector<CharacterizedBuffer> fast_buffers;
   std::array<double, 2> target_slew{0.0, 0.0};
   int lowest_drive_index = -1;
+  double max_wire_length_um = 0.0;
 };
 
 double lutFindValue(const LutTable& table, double input_slew, double load_cap);
@@ -99,11 +100,22 @@ double cellTargetLoad(const LibertyCellView& cell,
 double cellTargetSlewDelay(const LibertyCellView& cell,
                            const std::array<double, 2>& target_slew,
                            double load_cap);
+double bufferWireDelay(const LibertyCellView& cell,
+                       const std::array<double, 2>& target_slew,
+                       double wire_length_um,
+                       double r_unit,
+                       double c_unit);
+double findMaxWireLength(const LibertyView& liberty,
+                         const CharacterizationResult& characterization,
+                         double r_unit,
+                         double c_unit);
 
 bool characterizeBuffers(const LibertyView& liberty,
                          CharacterizationResult& result,
                          std::string& reason,
-                         bool canonical_target_load = false);
+                         bool canonical_target_load = false,
+                         double r_unit = 0.0,
+                         double c_unit = 0.0);
 
 }  // namespace rebuffer
 

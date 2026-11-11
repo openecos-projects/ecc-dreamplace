@@ -48,8 +48,32 @@ DEFAULT_CONFIG = {
     "slew_rc_factor": 1.39,
     "repair_design_max_transition_load": True,
     "repair_design_max_wire_length_um": 0.0,
+    "repair_design_auto_max_wire_length": False,
     "steiner_provider": "ecc",
 }
+
+
+def _parse_max_wire_length_config(merged_config, raw_config):
+    raw_value = (
+        raw_config["repair_design_max_wire_length_um"]
+        if "repair_design_max_wire_length_um" in raw_config
+        else raw_config.get(
+            "max_wire_length", merged_config["repair_design_max_wire_length_um"]
+        )
+    )
+    if isinstance(raw_value, bool):
+        raise ValueError("repair_design_max_wire_length_um must be a float or 'auto'")
+    if raw_value == "auto":
+        merged_config["repair_design_auto_max_wire_length"] = True
+        length_um = 0.0
+    elif isinstance(raw_value, str):
+        raise ValueError(f"unsupported repair_design max wire length: {raw_value!r}")
+    else:
+        length_um = float(raw_value)
+    if length_um < 0.0:
+        raise ValueError("repair_design_max_wire_length_um must be >= 0.0")
+    merged_config["repair_design_max_wire_length_um"] = length_um
+    return length_um == 0.0 and bool(merged_config["repair_design_auto_max_wire_length"])
 
 
 def map_buffer_actions(result, pydb):
@@ -132,9 +156,25 @@ def plan_repair_design_from_pydb(pydb, timing_model=None, *, config=None):
             "actions": [],
             "resizes": [],
         }
-    explicit_target_math = bool(
-        (config or {}).get("repair_design_target_cell_math", False)
-    )
+    raw_config = config or {}
+    auto_max_wire_length = _parse_max_wire_length_config(merged_config, raw_config)
+    if timing_model is None:
+        for key in ("r_unit", "c_unit"):
+            if key not in raw_config:
+                pydb_val = getattr(pydb, key, None)
+                if pydb_val is not None and float(pydb_val) > 0.0 and float(pydb_val) != 1.0:
+                    merged_config[key] = float(pydb_val)
+    else:
+        if "steiner_provider" not in raw_config:
+            merged_config["steiner_provider"] = getattr(
+                timing_model, "steiner_provider", "ecc"
+            )
+        for key in ("r_unit", "c_unit"):
+            value = float(getattr(timing_model, key))
+            if key in raw_config and float(raw_config[key]) != value:
+                raise ValueError(f"repair_design {key} does not match its timing model")
+            merged_config[key] = value
+    explicit_target_math = bool(raw_config.get("repair_design_target_cell_math", False))
     characterization_options = (
         {"canonical_target_load": True}
         if explicit_target_math
@@ -144,6 +184,9 @@ def plan_repair_design_from_pydb(pydb, timing_model=None, *, config=None):
         )
         else {}
     )
+    if auto_max_wire_length:
+        characterization_options["r_unit"] = merged_config["r_unit"]
+        characterization_options["c_unit"] = merged_config["c_unit"]
     characterization = characterize_buffers_from_pydb(pydb, **characterization_options)
     if characterization.get("status") != "ok":
         return {
@@ -158,12 +201,12 @@ def plan_repair_design_from_pydb(pydb, timing_model=None, *, config=None):
             "actions": [],
             "resizes": [],
         }
+    if auto_max_wire_length:
+        length_um = float(characterization.get("max_wire_length_um", 0.0))
+        merged_config["repair_design_max_wire_length_um"] = length_um
+        if merged_config.get("max_wire_length") == "auto":
+            merged_config["max_wire_length"] = length_um
     if timing_model is None:
-        for key in ("r_unit", "c_unit"):
-            if key not in (config or {}):
-                pydb_val = getattr(pydb, key, None)
-                if pydb_val is not None and float(pydb_val) > 0.0 and float(pydb_val) != 1.0:
-                    merged_config[key] = float(pydb_val)
         provider_options = (
             {"steiner_provider": merged_config["steiner_provider"]}
             if merged_config["steiner_provider"] != "ecc"
@@ -177,19 +220,6 @@ def plan_repair_design_from_pydb(pydb, timing_model=None, *, config=None):
         )
     else:
         model = timing_model
-        if "steiner_provider" not in (config or {}):
-            merged_config["steiner_provider"] = getattr(model, "steiner_provider", "ecc")
-        for key in ("r_unit", "c_unit"):
-            value = float(getattr(model, key))
-            if key in (config or {}) and float(config[key]) != value:
-                raise ValueError(f"repair_design {key} does not match its timing model")
-            merged_config[key] = value
-    if "repair_design_max_wire_length_um" not in (config or {}) and "max_wire_length" in (
-        config or {}
-    ):
-        merged_config["repair_design_max_wire_length_um"] = float(
-            config["max_wire_length"]
-        )
     steiner_values = steiner_payload(
         pydb,
         model,

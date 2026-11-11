@@ -377,11 +377,122 @@ double cellTargetSlewDelay(const LibertyCellView& cell,
   return bufferDelay(cell, target_slew, load_cap);
 }
 
+double bufferWireDelay(const LibertyCellView& cell,
+                       const std::array<double, 2>& target_slew,
+                       double wire_length_um,
+                       double r_unit,
+                       double c_unit)
+{
+  if (cell.arcs.empty()) {
+    return 0.0;
+  }
+  const double wire_res = wire_length_um * r_unit;
+  const double wire_cap = wire_length_um * c_unit;
+  const double load_cap = cell.output_cap + wire_cap + cell.input_cap;
+  const double wire_delay = wire_res * (0.5 * wire_cap + cell.input_cap);
+  double delay = -kInf;
+  for (const auto& arc : cell.arcs) {
+    const double fall_in_slew
+        = arc.sense < 0 ? target_slew[0] : target_slew[1];
+    const double rise_in_slew
+        = arc.sense < 0 ? target_slew[1] : target_slew[0];
+    delay = std::max(
+        delay,
+        gateDelay(arc, false, fall_in_slew, load_cap) + wire_delay);
+    delay = std::max(
+        delay,
+        gateDelay(arc, true, rise_in_slew, load_cap) + wire_delay);
+  }
+  return delay;
+}
+
+double findMaxWireLength(const LibertyView& liberty,
+                         const CharacterizationResult& characterization,
+                         double r_unit,
+                         double c_unit)
+{
+  if (!(r_unit > 0.0) || !std::isfinite(r_unit)
+      || !(c_unit > 0.0) || !std::isfinite(c_unit)) {
+    return 0.0;
+  }
+  const auto& buffers = !characterization.filtered_buffers.empty()
+                            ? characterization.filtered_buffers
+                            : characterization.fast_buffers;
+  if (buffers.empty()) {
+    return 0.0;
+  }
+
+  auto find_buffer_max_wire_length = [&](const CharacterizedBuffer& buffer) {
+    if (buffer.cell_index < 0
+        || buffer.cell_index >= static_cast<int>(liberty.cells.size())) {
+      return kInf;
+    }
+    const auto& cell = liberty.cells[buffer.cell_index];
+    if (cell.arcs.empty()) {
+      return kInf;
+    }
+    const double drvr_r = buffer.drive_resistance > 0.0
+                              ? buffer.drive_resistance
+                              : driveResistance(cell);
+    if (!(drvr_r > 0.0) || !std::isfinite(drvr_r)) {
+      return kInf;
+    }
+    auto split_wire_delay_diff = [&](double wire_length) {
+      return bufferWireDelay(
+                 cell, characterization.target_slew, wire_length, r_unit, c_unit)
+             - 2.0
+                   * bufferWireDelay(cell,
+                                     characterization.target_slew,
+                                     0.5 * wire_length,
+                                     r_unit,
+                                     c_unit);
+    };
+    if (split_wire_delay_diff(0.0) >= 0.0) {
+      return 0.0;
+    }
+    double wire_length_low = 0.0;
+    double wire_length_high = drvr_r / r_unit;
+    const double tolerance = 0.01;
+    double diff_ub = split_wire_delay_diff(wire_length_high);
+    for (int iteration = 0;
+         iteration < 100
+         && std::abs(wire_length_low - wire_length_high)
+                > std::max(wire_length_low, wire_length_high) * tolerance;
+         ++iteration) {
+      if (diff_ub < 0.0) {
+        wire_length_low = wire_length_high;
+        wire_length_high *= 2.0;
+        diff_ub = split_wire_delay_diff(wire_length_high);
+      } else {
+        const double wire_length_mid
+            = 0.5 * (wire_length_low + wire_length_high);
+        const double diff_mid = split_wire_delay_diff(wire_length_mid);
+        if (diff_mid < 0.0) {
+          wire_length_low = wire_length_mid;
+        } else {
+          wire_length_high = wire_length_mid;
+          diff_ub = diff_mid;
+        }
+      }
+    }
+    return diff_ub < 0.0 ? kInf : wire_length_low;
+  };
+
+  double max_length = kInf;
+  for (const auto& buffer : buffers) {
+    max_length = std::min(max_length, find_buffer_max_wire_length(buffer));
+  }
+  return std::isfinite(max_length) ? max_length : 0.0;
+}
+
 bool characterizeBuffers(const LibertyView& liberty,
                          CharacterizationResult& result,
                          std::string& reason,
-                         bool canonical_target_load)
+                         bool canonical_target_load,
+                         double r_unit,
+                         double c_unit)
 {
+  result.max_wire_length_um = 0.0;
   if (liberty.cells.empty()) {
     reason = "empty_liberty";
     return false;
@@ -534,6 +645,8 @@ bool characterizeBuffers(const LibertyView& liberty,
       result.fast_buffers.push_back(buffer);
     }
   }
+  result.max_wire_length_um
+      = findMaxWireLength(liberty, result, r_unit, c_unit);
   return true;
 }
 

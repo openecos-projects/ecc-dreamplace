@@ -133,6 +133,10 @@ double treeWireStep(const LibertyView& liberty,
                     ? config.tree_max_wire_length_um
                     : std::numeric_limits<double>::infinity();
   if (!config.tree_enforce_electrical) return step;
+  if (config.tree_max_wire_length_um <= 0.0
+      && characterization.max_wire_length_um > 0.0) {
+    step = std::min(step, characterization.max_wire_length_um);
+  }
   // OpenROAD derives the shared step from the smallest fast buffer's
   // ability to drive another copy of itself under cap and load-slew limits.
   if (characterization.fast_buffers.empty()) return step;

@@ -91,8 +91,17 @@ class RebufferPlanContext:
         self.config = {**REPAIR_DESIGN_CONFIG, **dict(config or {})}
         self.design = build_rebuffer_design_from_pydb(pydb)
         self.liberty = build_liberty_view_from_pydb(pydb)
+        wire_rc = {
+            key: float(
+                config[key]
+                if config and key in config
+                else getattr(self.model, key, self.config[key])
+            )
+            for key in ("r_unit", "c_unit")
+        }
         self.characterization = _select_buffer_set(
-            characterize_buffers_from_pydb(pydb), self.config
+            characterize_buffers_from_pydb(pydb, **wire_rc),
+            self.config,
         )
         self._current_design = None
         self._current_graph = None

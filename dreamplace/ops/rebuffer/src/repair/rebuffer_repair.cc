@@ -995,6 +995,10 @@ bool planRepairDesign(const DesignView& design,
     return false;
   }
 
+  RepairConfig effective_config = config;
+  effective_config.repair_design_max_wire_length_um
+      = effectiveRepairDesignMaxWireLengthUm(liberty, characterization, config);
+
   std::vector<std::vector<int>> node_pins(design.num_nodes);
   for (int pin = 0; pin < design.num_pins; ++pin) {
     const int node = design.pin2node_map[pin];
@@ -1131,7 +1135,7 @@ bool planRepairDesign(const DesignView& design,
 
   const bool use_repair_net_tree
       = config.repair_net_tree
-        || config.repair_design_max_wire_length_um > 0.0;
+        || effective_config.repair_design_max_wire_length_um > 0.0;
   for (const int net_id : net_order) {
     const int driver = design.net2driver_pin_map[net_id];
     if (driver < 0 || driver >= design.num_pins) {
@@ -1328,7 +1332,7 @@ bool planRepairDesign(const DesignView& design,
     if (!driver_slew_violation && !driver_cap_violation
         && !load_slew_violation && !load_cap_violation
         && !fanout_violation
-        && config.repair_design_max_wire_length_um <= 0.0) {
+        && effective_config.repair_design_max_wire_length_um <= 0.0) {
       continue;
     }
 
@@ -1564,7 +1568,7 @@ bool planRepairDesign(const DesignView& design,
           && (driver_cap_violation || load_slew_violation || load_cap_violation
               || (driver_slew_violation && std::isfinite(max_cap)
                   && max_cap > 0.0)
-              || config.repair_design_max_wire_length_um > 0.0);
+              || effective_config.repair_design_max_wire_length_um > 0.0);
     if (needs_buffer && config.insert_buffers) {
       const auto net_it = net_index_by_id.find(net_id);
       if (net_it == net_index_by_id.end()) {
@@ -1596,7 +1600,7 @@ bool planRepairDesign(const DesignView& design,
                           steiner,
                           liberty,
                           characterization,
-                          config,
+                          effective_config,
                           net_id,
                           max_cap,
                           driver,

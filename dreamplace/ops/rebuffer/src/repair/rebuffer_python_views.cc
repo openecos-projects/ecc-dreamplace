@@ -400,6 +400,7 @@ py::dict characterizationResult(
   output["status"] = "ok";
   output["target_slew_rise"] = result.target_slew[0];
   output["target_slew_fall"] = result.target_slew[1];
+  output["max_wire_length_um"] = result.max_wire_length_um;
   py::list filtered;
   for (const auto& buffer : result.filtered_buffers) {
     filtered.append(bufferDict(buffer));
@@ -554,11 +555,32 @@ rebuffer::RepairConfig configFromDict(const py::dict& values)
   config.sizing_area_limit = number("sizing_area_limit", config.sizing_area_limit);
   config.sizing_leakage_limit
       = number("sizing_leakage_limit", config.sizing_leakage_limit);
+  config.repair_design_auto_max_wire_length = boolean(
+      "repair_design_auto_max_wire_length",
+      config.repair_design_auto_max_wire_length);
+  auto wire_length = [&](const char* key, double fallback) {
+    if (!values.contains(key)) {
+      return fallback;
+    }
+    const py::handle raw = values[key];
+    if (py::isinstance<py::bool_>(raw)) {
+      throw py::value_error("invalid_repair_design_max_wire_length");
+    }
+    if (py::isinstance<py::str>(raw)) {
+      if (py::cast<std::string>(raw) == "auto") {
+        config.repair_design_auto_max_wire_length = true;
+        return 0.0;
+      }
+      throw py::value_error("invalid_repair_design_max_wire_length");
+    }
+    return py::cast<double>(raw);
+  };
   config.repair_design_max_wire_length_um = values.contains(
       "repair_design_max_wire_length_um")
-      ? number("repair_design_max_wire_length_um",
-               config.repair_design_max_wire_length_um)
-      : number("max_wire_length", config.repair_design_max_wire_length_um);
+      ? wire_length("repair_design_max_wire_length_um",
+                    config.repair_design_max_wire_length_um)
+      : wire_length("max_wire_length",
+                    config.repair_design_max_wire_length_um);
   config.repair_net_tree = boolean("repair_net_tree", config.repair_net_tree);
   config.slew_rc_factor = number("slew_rc_factor", config.slew_rc_factor);
   config.slew_shape_factor
@@ -635,6 +657,10 @@ rebuffer::CharacterizationResult characterizationFromDict(
   result.fast_buffers = parse(values["fast_buffers"]);
   result.target_slew[0] = py::cast<double>(values["target_slew_rise"]);
   result.target_slew[1] = py::cast<double>(values["target_slew_fall"]);
+  if (values.contains("max_wire_length_um")
+      && !values["max_wire_length_um"].is_none()) {
+    result.max_wire_length_um = py::cast<double>(values["max_wire_length_um"]);
+  }
   if (values.contains("buffer_lowest_drive")) {
     const auto lowest
         = py::cast<std::string>(values["buffer_lowest_drive"]);

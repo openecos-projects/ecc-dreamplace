@@ -4,7 +4,7 @@ The placement-facing data adapter lives here; the repair search itself is
 implemented by the native ``rebuffer_cpp`` extension.
 """
 
-from .characterization import characterize_buffers_from_pydb
+from .characterization import characterize_buffers_from_pydb, find_max_wire_length
 from .forest import build_rebuffer_forest, build_rebuffer_forest_from_pydb
 from .liberty import build_liberty_view_from_pydb
 from .openroad_steiner import (
@@ -31,6 +31,7 @@ __all__ = [
     "build_rebuffer_forest",
     "build_rebuffer_forest_from_pydb",
     "characterize_buffers_from_pydb",
+    "find_max_wire_length",
     "plan_repair_design_from_pydb",
     "lut_paths",
 ]

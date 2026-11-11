@@ -109,8 +109,11 @@ struct RepairConfig
   bool repair_design_openroad_repeater_resize = false;
   double sizing_area_limit = 4.0;
   double sizing_leakage_limit = 4.0;
-  // Maximum driver-rooted wire length in microns.  Zero disables the check.
+  // Maximum driver-rooted wire length in microns.  Zero disables the check
+  // unless repair_design_auto_max_wire_length derives OpenROAD's split-wire
+  // break-even length from characterized buffers and wire RC.
   double repair_design_max_wire_length_um = 0.0;
+  bool repair_design_auto_max_wire_length = false;
   bool repair_net_tree = false;
   double slew_rc_factor = 1.864;
   // OpenROAD's Elmore transition shape factor.  The legacy repair_design
@@ -267,6 +270,11 @@ RepeaterCellSelection rebufferChooseRepeaterCell(const LibertyView& liberty,
                                double initial_load, double repeater_load,
                                const RepairConfig& config,
                                bool resize = true);
+
+double effectiveRepairDesignMaxWireLengthUm(
+    const LibertyView& liberty,
+    const CharacterizationResult& characterization,
+    const RepairConfig& config);
 
 bool repairNetTree(const DesignView& design,
                    const TimingView& timing,

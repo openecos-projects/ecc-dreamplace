@@ -461,13 +461,20 @@ PYBIND11_MODULE(rebuffer_cpp, module)
       py::arg("state"));
   module.def(
       "characterize_buffers",
-      [](const py::dict& liberty_values, bool canonical_target_load) {
+      [](const py::dict& liberty_values,
+         bool canonical_target_load,
+         double r_unit,
+         double c_unit) {
         rebuffer::CharacterizationResult result;
         std::string reason;
         try {
           const auto liberty = libertyFromDict(liberty_values);
-          if (!rebuffer::characterizeBuffers(liberty, result, reason,
-                                             canonical_target_load)) {
+          if (!rebuffer::characterizeBuffers(liberty,
+                                             result,
+                                             reason,
+                                             canonical_target_load,
+                                             r_unit,
+                                             c_unit)) {
             py::dict output;
             output["status"] = "unsupported";
             py::list reasons;
@@ -485,7 +492,26 @@ PYBIND11_MODULE(rebuffer_cpp, module)
         }
         return characterizationResult(result);
       },
-      py::arg("liberty"), py::arg("canonical_target_load") = false);
+      py::arg("liberty"),
+      py::arg("canonical_target_load") = false,
+      py::arg("r_unit") = 0.0,
+      py::arg("c_unit") = 0.0);
+  module.def(
+      "find_max_wire_length",
+      [](const py::dict& liberty_values,
+         const py::dict& characterization_values,
+         double r_unit,
+         double c_unit) {
+        const auto liberty = libertyFromDict(liberty_values);
+        const auto characterization
+            = characterizationFromDict(characterization_values);
+        return rebuffer::findMaxWireLength(
+            liberty, characterization, r_unit, c_unit);
+      },
+      py::arg("liberty"),
+      py::arg("characterization"),
+      py::arg("r_unit"),
+      py::arg("c_unit"));
   module.def(
       "build_forest",
       [](const py::dict& design_values, const py::dict& topology_values) {

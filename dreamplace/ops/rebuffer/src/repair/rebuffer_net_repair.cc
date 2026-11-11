@@ -67,9 +67,10 @@ class NetTreeRepair
         max_cap_(max_cap > 0.0 ? max_cap : kInf),
         children_(children)
   {
-    if (config_.repair_design_max_wire_length_um > 0.0 && design_.dbu > 0) {
-      const double max_length_dbu
-          = config_.repair_design_max_wire_length_um * design_.dbu;
+    const double max_wire_length_um = effectiveRepairDesignMaxWireLengthUm(
+        liberty_, characterization_, config_);
+    if (max_wire_length_um > 0.0 && design_.dbu > 0) {
+      const double max_length_dbu = max_wire_length_um * design_.dbu;
       max_wire_length_dbu_
           = max_length_dbu >= std::numeric_limits<int>::max()
                 ? std::numeric_limits<int>::max()
@@ -613,6 +614,24 @@ class NetTreeRepair
 };
 
 }  // namespace
+
+double effectiveRepairDesignMaxWireLengthUm(
+    const LibertyView& liberty,
+    const CharacterizationResult& characterization,
+    const RepairConfig& config)
+{
+  if (config.repair_design_max_wire_length_um > 0.0) {
+    return config.repair_design_max_wire_length_um;
+  }
+  if (!config.repair_design_auto_max_wire_length) {
+    return 0.0;
+  }
+  if (characterization.max_wire_length_um > 0.0) {
+    return characterization.max_wire_length_um;
+  }
+  return findMaxWireLength(
+      liberty, characterization, config.r_unit, config.c_unit);
+}
 
 bool repairNetTree(const DesignView& design,
                    const TimingView& timing,

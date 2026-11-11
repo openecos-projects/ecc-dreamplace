@@ -18,7 +18,13 @@ def _extension():
     return native
 
 
-def characterize_buffers_from_pydb(pydb, *, canonical_target_load=False):
+def characterize_buffers_from_pydb(
+    pydb,
+    *,
+    canonical_target_load=False,
+    r_unit=None,
+    c_unit=None,
+):
     """Characterize buffers with the native OpenROAD-compatible search."""
 
     liberty = build_liberty_view_from_pydb(pydb)
@@ -33,6 +39,10 @@ def characterize_buffers_from_pydb(pydb, *, canonical_target_load=False):
             "liberty_summary": dict(liberty.get("summary", {})),
         }
     native_options = {"canonical_target_load": True} if canonical_target_load else {}
+    if r_unit is not None:
+        native_options["r_unit"] = float(r_unit)
+    if c_unit is not None:
+        native_options["c_unit"] = float(c_unit)
     result = dict(_extension().characterize_buffers(liberty, **native_options))
     result.update(
         {
@@ -44,4 +54,17 @@ def characterize_buffers_from_pydb(pydb, *, canonical_target_load=False):
     return result
 
 
-__all__ = ["characterize_buffers_from_pydb"]
+def find_max_wire_length(liberty, characterization, *, r_unit, c_unit):
+    """Return OpenROAD's split-wire break-even length (in um) across characterized buffers."""
+
+    return float(
+        _extension().find_max_wire_length(
+            liberty,
+            characterization,
+            float(r_unit),
+            float(c_unit),
+        )
+    )
+
+
+__all__ = ["characterize_buffers_from_pydb", "find_max_wire_length"]

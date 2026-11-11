@@ -159,6 +159,7 @@ class MidplaceSchedule:
                 "_l_shape_reenable_count",
                 "_l_shape_ratio_guard_disabled",
                 "_l_shape_inflation_guard_disabled",
+                "_l_shape_paused_for_inflation",
             )
             if hasattr(model, key)
         }

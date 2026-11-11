@@ -1472,12 +1472,18 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
     def _freeze_diff_tdp_step_status(self, params, iteration, overflow):
         previous_status = getattr(self, "_diff_tdp_step_status", None) or {}
+        summary = getattr(self, "_diff_tdp_gate_summary", None)
+        already_activated = bool(
+            isinstance(summary, dict)
+            and summary.get("first_timing_active_iteration") is not None
+        )
         status = freeze_diff_tdp_step_status(
             params,
             iteration,
             overflow,
             previous_status,
             getattr(self, "_live_timing_topology_initialized", False),
+            already_activated=already_activated,
         )
         self._diff_tdp_step_status = dict(status)
         self._record_diff_tdp_gate_status(params, status)
@@ -5452,39 +5458,46 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     )
                     model.overflow = restart_metric.overflow.data.clone()
                     midplace.schedule.restore_model_state(self, model, params)
-                    if (
-                        midplace.schedule.use_l_shape_routability
-                        and params.routability_opt_flag
-                        and getattr(params, "l_shape_routability_flag", 0)
-                    ):
-                        model.enable_l_shape_routability = True
-                        model.use_l_shape_routability = False
-                        route_updated = l_shape_iteration.update_iteration(
-                            l_shape_iteration.LShapeIterationContext(
-                                self.data_collections,
-                                self.op_collections,
-                            ),
-                            params,
-                            placedb,
-                            model,
-                            pos,
-                            iteration,
-                            restart_metric,
-                            l_shape_policy,
+                    if params.routability_opt_flag and getattr(params, "l_shape_routability_flag", 0):
+                        pause_on_inflation_restart = (
+                            bool(midplace.schedule.use_restart_density_weight)
+                            and not bool(getattr(params, "l_shape_keep_during_inflation", False))
                         )
-                        if route_updated:
-                            topo = self.op_collections.steiner_topo_op
-                            self._publish_live_timing_topology(
-                                topo.newx,
-                                topo.newy,
-                                update_kind="routing_feedback",
+                        if midplace.schedule.use_l_shape_routability and not pause_on_inflation_restart:
+                            model.enable_l_shape_routability = True
+                            model.use_l_shape_routability = False
+                            route_updated = l_shape_iteration.update_iteration(
+                                l_shape_iteration.LShapeIterationContext(
+                                    self.data_collections,
+                                    self.op_collections,
+                                ),
+                                params,
+                                placedb,
+                                model,
+                                pos,
+                                iteration,
+                                restart_metric,
+                                l_shape_policy,
                             )
+                            if route_updated:
+                                topo = self.op_collections.steiner_topo_op
+                                self._publish_live_timing_topology(
+                                    topo.newx,
+                                    topo.newy,
+                                    update_kind="routing_feedback",
+                                )
                         midplace.schedule.restore_l_shape_state(model, params)
+                        if midplace.schedule.use_l_shape_routability and pause_on_inflation_restart:
+                            l_shape_policy.disable_for_recovery(
+                                model,
+                                iteration,
+                                reason="inflation",
+                                update_threshold=True,
+                                inflation_round=num_area_adjust,
+                                force=True,
+                            )
                     model.refresh_after_geometry_change()
-                    if (
-                        torch.eq(model.density_weight.mean(), 0.0)
-                        and getattr(midplace.schedule, "use_restart_density_weight", False)
-                    ):
+                    if midplace.schedule.use_restart_density_weight:
                         model.initialize_restart_density_weight(params, placedb)
                         if model.density_weight.numel() == 1:
                             density_weight_repr = "%.6E" % (

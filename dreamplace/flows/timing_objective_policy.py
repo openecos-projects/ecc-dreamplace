@@ -133,7 +133,7 @@ def record_diff_tdp_gate_status(summary, status):
     return summary
 
 
-def diff_tdp_gate_status(params, iteration, overflow):
+def diff_tdp_gate_status(params, iteration, overflow, *, already_activated=False):
     interval = int(getattr(params, "timing_topology_refresh_interval", 10) or 0)
     threshold = float(
         getattr(params, "timing_topology_enable_overflow_threshold", 0.2)
@@ -158,7 +158,7 @@ def diff_tdp_gate_status(params, iteration, overflow):
     except (RuntimeError, TypeError, ValueError):
         return {**status, "reason": "invalid_overflow"}
     status["overflow"] = overflow_value
-    if not overflow_value < threshold:
+    if not already_activated and not overflow_value < threshold:
         return {**status, "reason": "overflow_gate"}
     status["timing_objective_active"] = True
     if interval <= 0:
@@ -176,8 +176,22 @@ def freeze_diff_tdp_step_status(
     overflow,
     previous_status,
     live_timing_topology_initialized,
+    *,
+    already_activated=False,
 ):
-    status = diff_tdp_gate_status(params, iteration, overflow)
+    keep_during_inflation = bool(
+        getattr(params, "timing_keep_during_inflation", False)
+    )
+    latched = keep_during_inflation and (
+        bool(already_activated)
+        or bool((previous_status or {}).get("timing_objective_active", False))
+    )
+    status = diff_tdp_gate_status(
+        params,
+        iteration,
+        overflow,
+        already_activated=latched,
+    )
     if status["timing_objective_active"] and (
         not bool((previous_status or {}).get("timing_objective_active", False))
         or not bool(live_timing_topology_initialized)

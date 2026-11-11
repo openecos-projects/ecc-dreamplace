@@ -484,3 +484,56 @@ def test_restart_reset_can_be_disabled():
 
     assert state is None
     assert placer._timing_grad_balance_state is cached_state
+
+
+def test_diff_tdp_step_freeze_latches_after_first_activation_when_configured():
+    placer = _placer()
+    placer._live_timing_topology_initialized = True
+    params = _params(timing_keep_during_inflation=True)
+    placer._reset_diff_tdp_gate_summary(params)
+
+    first = placer._freeze_diff_tdp_step_status(
+        params,
+        iteration=21,
+        overflow=torch.tensor(0.19),
+    )
+    rebound_skip = placer._freeze_diff_tdp_step_status(
+        params,
+        iteration=22,
+        overflow=torch.tensor(0.55),
+    )
+    rebound_refresh = placer._freeze_diff_tdp_step_status(
+        params,
+        iteration=30,
+        overflow=torch.tensor(0.50),
+    )
+
+    assert first["timing_objective_active"]
+    assert rebound_skip["timing_objective_active"]
+    assert not rebound_skip["topology_refresh_due"]
+    assert rebound_skip["reason"] == "interval"
+    assert rebound_refresh["timing_objective_active"]
+    assert rebound_refresh["topology_refresh_due"]
+    assert rebound_refresh["reason"] == "ok"
+
+
+def test_diff_tdp_step_freeze_pauses_on_rebound_by_default():
+    placer = _placer()
+    placer._live_timing_topology_initialized = True
+    params = _params()
+    placer._reset_diff_tdp_gate_summary(params)
+
+    first = placer._freeze_diff_tdp_step_status(
+        params,
+        iteration=21,
+        overflow=torch.tensor(0.19),
+    )
+    rebound = placer._freeze_diff_tdp_step_status(
+        params,
+        iteration=22,
+        overflow=torch.tensor(0.55),
+    )
+
+    assert first["timing_objective_active"]
+    assert not rebound["timing_objective_active"]
+    assert rebound["reason"] == "overflow_gate"

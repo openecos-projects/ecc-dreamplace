@@ -47,10 +47,12 @@ def prepare_flute_topology(context, pos):
     data.flat_pin_from = topo.flat_pin_from
 
 def update_iteration(context, params, placedb, model, pos, iteration, cur_metric, l_shape_policy):
+    current_overflow = float(cur_metric.overflow[-1])
+    l_shape_policy.maybe_pause_for_overflow(model, current_overflow, iteration=iteration)
 
     l_shape_policy.maybe_reenable(
         model,
-        float(cur_metric.overflow[-1]),
+        current_overflow,
     )
 
         # # 条件2: 也可以根据iteration启用

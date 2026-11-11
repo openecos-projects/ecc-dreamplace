@@ -1220,6 +1220,10 @@
         "description": "keep L-shape routability enabled during inflation (normally disabled); enables filler pseudo wire force to work with inflation",
         "default": false
     },
+    "timing_keep_during_inflation": {
+        "description": "keep differentiable timing objective latched on during post-inflation overflow rebound once timing has been activated",
+        "default": false
+    },
     "l_shape_weight_momentum": {
         "description": "EMA momentum used by the adaptive per-iteration L-shape weight controller",
         "default": 0.1

@@ -924,3 +924,66 @@ def test_native_queue_plans_current_tree_vgdp_in_cpp_without_candidate_provider(
     assert result["accepted_count"] == 1
     assert state["actions"]
     assert "source_parent_node_id" in state["actions"][0]
+
+
+def test_native_queue_stops_when_inserted_buffers_reach_or_exceed_max_buffers():
+    state = {"wns": -20.0, "tns": -40.0, "actions": []}
+    checkpoints = []
+    requests = []
+
+    def timing_snapshot():
+        return {
+            "status": "ok",
+            "items": [
+                {"endpoint_pin": 10, "slack_ps": -8.0, "path_pins": [10, 9], "net_ids": [100]},
+                {"endpoint_pin": 20, "slack_ps": -6.0, "path_pins": [20, 19], "net_ids": [200]},
+                {"endpoint_pin": 30, "slack_ps": -4.0, "path_pins": [30, 29], "net_ids": [300]},
+            ],
+        }
+
+    def candidate_provider(request):
+        call_idx = len(requests)
+        requests.append(call_idx)
+        if call_idx == 0:
+            return {"status": "ok", "net_id": 100, "actions": [{"action_id": 101}]}
+        if call_idx == 1:
+            # 2-buffer tree bundle crosses max_buffers=2 from 1 -> 3 (>= 2) and is allowed.
+            return {
+                "status": "ok",
+                "net_id": 200,
+                "actions": [{"action_id": 201}, {"action_id": 202}],
+            }
+        return {"status": "ok", "net_id": 300, "actions": [{"action_id": 301}]}
+
+    def checkpoint(label):
+        token = len(checkpoints)
+        checkpoints.append((label, state["wns"], state["tns"], list(state["actions"])))
+        return {"checkpoint_id": token}
+
+    def apply(actions):
+        state["wns"] += 2.0
+        state["tns"] += 4.0
+        state["actions"].extend(actions)
+
+    def evaluate():
+        return {"status": "ok", "wns_ps": state["wns"], "tns_ps": state["tns"]}
+
+    def restore(checkpoint_id):
+        _label, wns, tns, actions = checkpoints[int(checkpoint_id)]
+        state["wns"], state["tns"], state["actions"] = wns, tns, list(actions)
+
+    result = rebuffer_cpp.run_repair_timing_queue_operator(
+        timing_snapshot,
+        candidate_provider,
+        checkpoint,
+        apply,
+        evaluate,
+        restore,
+        {"max_passes": 10, "max_buffers": 2},
+    )
+
+    assert requests == [0, 1]
+    assert result["stop_reason"] == "max_buffers"
+    assert result["inserted_buffer_count"] == 3
+    assert result["accepted_count"] == 3
+    assert result["max_buffers"] == 2

@@ -6,6 +6,7 @@ current DreamPlace ``TimingPropagation`` state and placeio_ecc overlay into
 the callbacks of ``rebuffer_cpp.run_repair_timing_native_snapshot_operator``.
 """
 
+import math
 import os
 
 import numpy as np
@@ -14,6 +15,40 @@ from .queue_payload import attach_planner_payloads
 
 ARTIFACT = "placeio_ecc_timing_repair"
 ARTIFACT_VERSION = 1
+
+
+def _movable_node_count(pydb=None, placedb=None):
+    for owner in (placedb, pydb):
+        if owner is None:
+            continue
+        movable = getattr(owner, "num_movable_nodes", None)
+        if movable is not None and int(movable) > 0:
+            return int(movable)
+    if pydb is not None:
+        node_x = getattr(pydb, "node_x", None)
+        num_nodes = (
+            len(node_x)
+            if node_x is not None
+            else int(getattr(pydb, "num_nodes", 0) or 0)
+        )
+        terminals = int(getattr(pydb, "num_terminals", 0) or 0)
+        terminal_nis = int(getattr(pydb, "num_terminal_NIs", 0) or 0)
+        return max(0, num_nodes - terminals - terminal_nis)
+    return 0
+
+
+def resolve_max_buffers(config, *, pydb=None, placedb=None):
+    """Resolve ``max_buffers`` from an explicit count or ``max_buffer_fraction``."""
+    max_buffers = int((config or {}).get("max_buffers", 0) or 0)
+    if max_buffers < 0:
+        raise ValueError("repair_timing requires max_buffers >= 0")
+    fraction = float((config or {}).get("max_buffer_fraction", 0.0) or 0.0)
+    if not math.isfinite(fraction) or not 0.0 <= fraction <= 1.0:
+        raise ValueError("repair_timing requires 0.0 <= max_buffer_fraction <= 1.0")
+    if max_buffers > 0 or fraction <= 0.0:
+        return max_buffers
+    movable_count = _movable_node_count(pydb=pydb, placedb=placedb)
+    return max(1, int(math.ceil(movable_count * fraction))) if movable_count > 0 else 0
 
 
 def _slack_vector(timing_model):
@@ -321,6 +356,9 @@ def plan_timing_repair(session, timing_model, *, max_passes, config, context=Non
 
     if session.state != "open":
         raise RuntimeError("session.begin() must be called before planning")
+    max_buffers = resolve_max_buffers(config, pydb=getattr(session, "base_pydb", None))
+    if max_buffers > 0 and int(config.get("max_buffers", 0) or 0) != max_buffers:
+        config = {**config, "max_buffers": max_buffers}
     if config.get("timing_scheduler") == "openroad_legacy":
         from .native_legacy_timing import plan_legacy_timing_repair
 
@@ -1014,4 +1052,4 @@ def plan_timing_repair(session, timing_model, *, max_passes, config, context=Non
     return result
 
 
-__all__ = ["plan_timing_repair"]
+__all__ = ["plan_timing_repair", "resolve_max_buffers"]

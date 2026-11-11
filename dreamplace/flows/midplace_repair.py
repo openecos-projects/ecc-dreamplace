@@ -408,6 +408,13 @@ class MidplaceRepairSession:
                 "use_native_timing_planning",
             ):
                 config.setdefault(flag, True)
+            if (
+                window_index is not None
+                and self.config.max_buffer_fraction > 0.0
+                and int(config.get("max_buffers", 0) or 0) <= 0
+                and float(config.get("max_buffer_fraction", 0.0) or 0.0) <= 0.0
+            ):
+                config["max_buffer_fraction"] = self.config.max_buffer_fraction
         can_inplace_size = _can_sync_size_only_inplace(placer, placedb)
         stage_kwargs = (
             {"skip_size_only_rebuild": True} if can_inplace_size else {}
@@ -458,12 +465,23 @@ class MidplaceRepairSession:
             "incremental_full_fallback"
         ]
         if window_index is not None:
+            timing_plan = (timing or {}).get("plan") or {}
+            max_buffers = int(
+                (timing or {}).get(
+                    "resolved_max_buffers",
+                    timing_plan.get("max_buffers", 0),
+                )
+                or 0
+            )
+            stop_reason = timing_plan.get("stop_reason")
             window_entry = {
                 "window": int(window_index),
                 "mode": repair_mode,
                 "mutation_kind": mutation,
                 "inserted_count": inserted,
                 "resized_count": resized,
+                "max_buffers": max_buffers,
+                "stop_reason": stop_reason,
                 "timing_before": (timing or design).get("timing_before"),
                 "timing_after": (timing or design).get("timing_after"),
                 "artifact_path": stage.get("artifact_path"),
@@ -479,6 +497,8 @@ class MidplaceRepairSession:
                 "mode": repair_mode,
                 "scheduled": int((timing or {}).get("accepted_count", 0) or 0),
                 "accepted": inserted,
+                "max_buffers": max_buffers,
+                "stop_reason": stop_reason,
                 "cumulative_count": cumulative_inserted,
                 "timing_before": (timing or {}).get("timing_before"),
                 "timing_after": (timing or {}).get("timing_after"),

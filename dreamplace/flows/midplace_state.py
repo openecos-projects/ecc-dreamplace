@@ -34,6 +34,7 @@ class MidplaceConfig:
     max_passes: int
     bounded_steps: int
     artifact: str
+    max_buffer_fraction: float = 0.001
 
     @classmethod
     def from_params(cls, params):
@@ -45,9 +46,15 @@ class MidplaceConfig:
             max_passes=int(params.repair_buffering_midplace_max_passes),
             bounded_steps=int(params.repair_buffering_midplace_bounded_steps),
             artifact=str(params.repair_buffering_midplace_artifact),
+            max_buffer_fraction=float(params.repair_buffering_midplace_max_buffer_fraction),
         )
         if not math.isfinite(config.overflow) or config.overflow <= 0:
             raise ValueError("midplace overflow must be finite and positive")
+        if (
+            not math.isfinite(config.max_buffer_fraction)
+            or not 0.0 <= config.max_buffer_fraction <= 1.0
+        ):
+            raise ValueError("midplace requires 0.0 <= max_buffer_fraction <= 1.0")
         if config.mode not in {"repair_design", "repair_design_then_timing"}:
             raise ValueError("midplace supports repair_design or repair_design_then_timing")
         if config.resume_policy not in {"cold", "warm_schedule"}:

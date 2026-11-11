@@ -937,6 +937,7 @@ def test_s5b1_window_runs_repair_timing_and_preserves_inflated_geometry(
     engine, session, old, model, metric, _ = setup
     engine.params.routability_opt_flag = 1
     engine.params.timing_opt_buffering_enabled = 1
+    engine.params.buffering_route_b_selection_fraction = 0.05
     engine.params.node_area_adjust_overflow = 0.15
     schedule = TimingOptWindowSchedule([], 5)
     schedule.inflation_event(iteration=10, stage=0)
@@ -980,9 +981,11 @@ def test_s5b1_window_runs_repair_timing_and_preserves_inflated_geometry(
     model.routability_Lsub_iteration = 5
 
     observed_modes = []
+    observed_configs = []
 
     def stage_fn(db, **kwargs):
         observed_modes.append(kwargs["mode"])
+        observed_configs.append(dict(kwargs.get("config") or {}))
         updated = database(3)
         db.__dict__.update(updated.__dict__)
         db.topology_generation = 2
@@ -993,9 +996,14 @@ def test_s5b1_window_runs_repair_timing_and_preserves_inflated_geometry(
                     "status": "ok",
                     "accepted_count": 1,
                     "verified_kept_count": 1,
+                    "resolved_max_buffers": 1,
                     "timing_before": {"wns_ps": -200.0, "tns_ps": -500.0},
                     "timing_after": {"wns_ps": -100.0, "tns_ps": -250.0},
-                    "plan": {"accepted_actions": [{"buffer_master_name": "BUF"}]},
+                    "plan": {
+                        "accepted_actions": [{"buffer_master_name": "BUF"}],
+                        "max_buffers": 1,
+                        "stop_reason": "max_buffers",
+                    },
                 }
             },
         }
@@ -1013,10 +1021,15 @@ def test_s5b1_window_runs_repair_timing_and_preserves_inflated_geometry(
         )
 
     assert observed_modes == ["repair_timing"]
+    assert observed_configs[0]["max_buffer_fraction"] == pytest.approx(0.001)
     assert session.record["window_repairs"][0]["window"] == 2
     assert session.record["window_repairs"][0]["mode"] == "repair_timing"
     assert session.record["window_repairs"][0]["inserted_count"] == 1
+    assert session.record["window_repairs"][0]["max_buffers"] == 1
+    assert session.record["window_repairs"][0]["stop_reason"] == "max_buffers"
     assert old.inflation_s5b1.summaries[-1]["buffering"]["accepted"] == 1
+    assert old.inflation_s5b1.summaries[-1]["buffering"]["max_buffers"] == 1
+    assert old.inflation_s5b1.summaries[-1]["buffering"]["stop_reason"] == "max_buffers"
     assert old.inflation_s5b1.summaries[-1]["buffering"]["cumulative_count"] == 1
 
     def build_fresh():

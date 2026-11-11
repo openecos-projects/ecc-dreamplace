@@ -63,6 +63,8 @@ REPAIR_TIMING_DEFAULTS = {
     "commit_verify_chunk": 0,
     "commit_verify_wns_margin_ps": 0.0,
     "commit_verify_tns_margin_ps": 0.0,
+    "max_buffers": 0,
+    "max_buffer_fraction": 0.0,
 }
 
 
@@ -74,6 +76,9 @@ def resolve_repair_timing_config(config):
         raise ValueError("repair_timing requires commit_verify_chunk >= 0")
     if int(resolved["python_timing_candidate_top_k"]) < 1:
         raise ValueError("python_timing_candidate_top_k must be a positive integer")
+    from dreamplace.ops.placeio_ecc.repair_timing import resolve_max_buffers
+
+    resolve_max_buffers(resolved)
     scheduler = resolved.get("timing_scheduler", "queue")
     if scheduler not in ("queue", "openroad_legacy"):
         raise ValueError(f"unknown timing scheduler: {scheduler}")
@@ -236,7 +241,10 @@ def _run_repair_timing(placedb, *, max_passes, config, profile=None):
         commit_buffer_actions_verified,
         timing_reader,
     )
-    from dreamplace.ops.placeio_ecc.repair_timing import plan_timing_repair
+    from dreamplace.ops.placeio_ecc.repair_timing import (
+        plan_timing_repair,
+        resolve_max_buffers,
+    )
     from dreamplace.ops.rebuffer.timing_model import RebufferTimingModel
     from dreamplace.ops.rebuffer.timing_profile import placement_timing_kwargs
 
@@ -257,6 +265,9 @@ def _run_repair_timing(placedb, *, max_passes, config, profile=None):
                 raw_db._carrier_positions_synced = True
             except AttributeError:
                 pass
+    resolved_max_buffers = resolve_max_buffers(config, pydb=pydb, placedb=placedb)
+    if resolved_max_buffers > 0:
+        config = {**config, "max_buffers": resolved_max_buffers}
     with measure_phase(profile, "python_timing_model_build_ms"):
         timing_model = RebufferTimingModel(
             pydb,
@@ -279,6 +290,7 @@ def _run_repair_timing(placedb, *, max_passes, config, profile=None):
         "accepted_count": len(accepted),
         "inserted_count": inserted_count,
         "resized_count": resized_count,
+        "resolved_max_buffers": resolved_max_buffers,
         "timing_before": plan.get("baseline"),
         "timing_overlay_final": plan.get("final"),
         "buffer_histogram": buffer_histogram(accepted),

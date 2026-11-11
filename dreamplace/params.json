@@ -649,6 +649,10 @@
         "description": "maximum native timing-repair candidate attempts in the mid-placement lane",
         "default": 20
     },
+    "repair_buffering_midplace_max_buffer_fraction": {
+        "description": "per-window movable-node fraction cap for native timing-repair buffer insertions in the mid-placement lane",
+        "default": 0.001
+    },
     "repair_buffering_midplace_initial_policy": {
         "description": "initial overflow below threshold triggers at the first stable optimizer step",
         "default": "first_stable_step"

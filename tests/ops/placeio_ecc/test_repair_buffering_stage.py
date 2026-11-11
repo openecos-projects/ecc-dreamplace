@@ -417,3 +417,20 @@ def test_reenter_after_repair_buffering_uses_fresh_legalization_placer(tmp_path,
     assert terminal.legalize_flag == 1
     assert terminal.timing_opt_enabled == 0
     assert terminal.result_dir.endswith("_repair_buffering_terminal")
+
+
+def test_repair_timing_resolves_max_buffer_fraction_from_movable_nodes(monkeypatch):
+    _install_common(monkeypatch)
+    planner_configs, _ = _install_timing_plan(monkeypatch, [_ACTION])
+    placedb = _Placedb()
+    placedb.num_movable_nodes = 2500
+
+    result = repair_buffering.run_repair_buffering_stage(
+        placedb,
+        mode="repair_timing",
+        max_passes=20,
+        config={"max_buffer_fraction": 0.001},
+    )
+
+    assert result["status"] == "ok"
+    assert planner_configs[0]["max_buffers"] == 3

@@ -214,6 +214,36 @@ std::string candidateKey(const py::dict& candidate, const py::dict& request)
   return {};
 }
 
+bool isInsertedBufferAction(const py::dict& action)
+{
+  return !action.contains("action_kind")
+         || stringOr(action, "action_kind") != "resize_cell";
+}
+
+int countInsertedBuffers(const py::list& actions)
+{
+  int count = 0;
+  for (const auto& item : actions) {
+    if (isInsertedBufferAction(item.cast<py::dict>())) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+int countInsertedBuffers(const std::vector<py::dict>& actions,
+                         std::size_t limit)
+{
+  int count = 0;
+  const std::size_t end = std::min(limit, actions.size());
+  for (std::size_t i = 0; i < end; ++i) {
+    if (isInsertedBufferAction(actions[i])) {
+      ++count;
+    }
+  }
+  return count;
+}
+
 }  // namespace
 
 py::dict runRepairTimingQueueOperator(const py::object& timing_snapshot,
@@ -227,6 +257,7 @@ py::dict runRepairTimingQueueOperator(const py::object& timing_snapshot,
 {
   const int max_attempts = configInt(config, "max_passes", 50);
   const int max_tp_evaluations = configInt(config, "max_tp_evaluations", 0);
+  const int max_buffers = configInt(config, "max_buffers", 0);
   py::dict current = callDictNoArg(evaluate, "evaluate");
   if (current.contains("status")
       && stringOr(current, "status") != "ok") {
@@ -276,6 +307,10 @@ py::dict runRepairTimingQueueOperator(const py::object& timing_snapshot,
     return max_tp_evaluations > 0 && evaluation_calls >= max_tp_evaluations;
   };
   int accepted_count = 0;
+  int inserted_buffer_count = 0;
+  const auto bufferBudgetExhausted = [&]() {
+    return max_buffers > 0 && inserted_buffer_count >= max_buffers;
+  };
   int attempt_count = 0;
   int snapshot_count = 0;
   int snapshot_item_count = 0;
@@ -309,6 +344,10 @@ py::dict runRepairTimingQueueOperator(const py::object& timing_snapshot,
   py::list journal_actions;
 
   while (attempt_count < max_attempts) {
+    if (bufferBudgetExhausted()) {
+      stop_reason = "max_buffers";
+      break;
+    }
     if (evaluationBudgetExhausted()) {
       stop_reason = "max_tp_evaluations";
       break;
@@ -468,7 +507,8 @@ py::dict runRepairTimingQueueOperator(const py::object& timing_snapshot,
     }
 
     for (const QueueWorkItem& work_item : work) {
-      if (attempt_count >= max_attempts || evaluationBudgetExhausted()) {
+      if (attempt_count >= max_attempts || evaluationBudgetExhausted()
+          || bufferBudgetExhausted()) {
         break;
       }
       const TimingQueueItem& item = items[work_item.item_index];
@@ -659,6 +699,7 @@ py::dict runRepairTimingQueueOperator(const py::object& timing_snapshot,
               accepted_actions.append(copyDict(action.cast<py::dict>()));
             }
             accepted_count += py::len(journal_actions);
+            inserted_buffer_count += countInsertedBuffers(journal_actions);
             row["journal_committed_action_count"] = py::len(journal_actions);
           }
           for (const auto& action : actions) {
@@ -666,6 +707,7 @@ py::dict runRepairTimingQueueOperator(const py::object& timing_snapshot,
                 copyDict(action.cast<py::dict>()));
           }
           accepted_count += py::len(actions);
+          inserted_buffer_count += countInsertedBuffers(actions);
           current = observation;
           accepted_nets.insert(net_id);
           if (round_robin) {
@@ -776,8 +818,9 @@ py::dict runRepairTimingQueueOperator(const py::object& timing_snapshot,
       stop_reason = "gradient_reject_limit";
       continue;
     }
-    stop_reason = evaluationBudgetExhausted() ? "max_tp_evaluations"
-        : (attempt_count >= max_attempts ? "max_passes" : "queue_exhausted");
+    stop_reason = bufferBudgetExhausted() ? "max_buffers"
+        : (evaluationBudgetExhausted() ? "max_tp_evaluations"
+            : (attempt_count >= max_attempts ? "max_passes" : "queue_exhausted"));
     break;
   }
 
@@ -815,6 +858,8 @@ py::dict runRepairTimingQueueOperator(const py::object& timing_snapshot,
   result["passes"] = std::move(history);
   result["accepted_actions"] = std::move(accepted_actions);
   result["accepted_count"] = accepted_count;
+  result["inserted_buffer_count"] = inserted_buffer_count;
+  result["max_buffers"] = max_buffers;
   result["provider_calls"] = provider_calls;
   result["skipped_rejected_in_state"] = skipped_rejected;
   result["evaluation_calls"] = evaluation_calls;
@@ -911,10 +956,12 @@ py::dict runRepairTimingLegacyQueueOperator(
   const int max_attempts = static_cast<int>(number(config, "max_passes", 50));
   const int max_passes = static_cast<int>(number(config, "legacy_max_passes_per_endpoint", 50));
   const int max_evaluations = static_cast<int>(number(config, "max_tp_evaluations", 0));
+  const int max_buffers = static_cast<int>(number(config, "max_buffers", 0));
   const int decreasing_limit = static_cast<int>(number(config, "decreasing_slack_max_passes", 5));
   const double fraction = number(config, "repair_tns_end_percent", 1.0);
   const double margin = number(config, "setup_slack_margin_ps", 0.0);
   if (max_attempts < 0 || max_passes < 1 || decreasing_limit < 0 || max_evaluations < 0
+      || max_buffers < 0
       || !std::isfinite(fraction) || fraction < 0 || fraction > 1
       || !std::isfinite(margin) || margin > 0) {
     throw py::value_error("invalid LEGACY repair budget");
@@ -932,6 +979,7 @@ py::dict runRepairTimingLegacyQueueOperator(
   py::list history;
   std::vector<py::dict> actions;
   int attempts = 0, evaluations = 1, snapshots = 0, pass_count = 0;
+  int committed_buffers = 0;
   int opto_iteration = 0;
   const double initial_tns = number(initial, "tns_ps");
   double prev_tns = initial_tns;
@@ -959,7 +1007,8 @@ py::dict runRepairTimingLegacyQueueOperator(
   std::string stop = "endpoints_exhausted";
   const auto exhausted = [&]() {
     return attempts >= max_attempts
-        || (max_evaluations > 0 && evaluations >= max_evaluations);
+        || (max_evaluations > 0 && evaluations >= max_evaluations)
+        || (max_buffers > 0 && committed_buffers >= max_buffers);
   };
   const py::object root = token(checkpoint, "legacy_root");
   // The bridge and the C++ scheduler share this configuration object. Only
@@ -1106,6 +1155,7 @@ py::dict runRepairTimingLegacyQueueOperator(
           best = copy(current);
           best_endpoint_slack = endpoint.slack;
           best_action_count = actions.size();
+          committed_buffers = countInsertedBuffers(actions, best_action_count);
           const auto previous_best_token = best_token;
           best_token = token(checkpoint, "legacy_best_" + std::to_string(pass_count));
           releaseCheckpoint(release_checkpoint, previous_best_token);
@@ -1151,7 +1201,8 @@ py::dict runRepairTimingLegacyQueueOperator(
   }
   clear_endpoint();
   releaseCheckpoint(release_checkpoint, root);
-  if (attempts >= max_attempts) stop = "max_attempts";
+  if (max_buffers > 0 && committed_buffers >= max_buffers) stop = "max_buffers";
+  else if (attempts >= max_attempts) stop = "max_attempts";
   else if (max_evaluations > 0 && evaluations >= max_evaluations) stop = "max_tp_evaluations";
   py::list accepted;
   for (const auto& action : actions) accepted.append(action);
@@ -1166,6 +1217,8 @@ py::dict runRepairTimingLegacyQueueOperator(
   result["passes"] = std::move(history);
   result["accepted_actions"] = std::move(accepted);
   result["accepted_count"] = actions.size();
+  result["inserted_buffer_count"] = committed_buffers;
+  result["max_buffers"] = max_buffers;
   result["attempt_count"] = attempts;
   result["provider_calls"] = attempts;
   result["pass_count"] = pass_count;

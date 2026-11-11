@@ -3,6 +3,7 @@
 
 // Rebuild timing graph indices from physical PyPlaceDB without running STA.
 
+#include <array>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -43,6 +44,12 @@ inline int carrierIndex(int index, const std::vector<int>& mapping, const char* 
   return mapping[index];
 }
 
+void pruneBidirectionalPadNetArcs(
+    int pin_count,
+    const std::vector<char>& has_cell_arc,
+    const std::vector<int>& net_arc_count,
+    std::vector<std::array<int, 2>>& net_arcs,
+    std::vector<int>& net_starts);
 void compileCarrierGraph(const pybind11::object& base, TimingCarrierView& carrier);
 pybind11::dict rebuildTimingCarrier(const pybind11::object& base,
                                    const pybind11::object& physical);

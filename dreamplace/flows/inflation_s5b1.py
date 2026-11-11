@@ -604,7 +604,6 @@ class InflationS5B1:
     def _sync_native_sizing(self):
         from dreamplace.ops.placeio_ecc.place_io import PlaceIOFunction
         from dreamplace.ops.placeio_ecc.timing_carrier import (
-            CommittedTimingPyDB,
             apply_inplace_carrier_sizing,
         )
         from dreamplace.ops.routability.gpugr_context import invalidate_route_state
@@ -628,12 +627,11 @@ class InflationS5B1:
         )
         if not summary.get("ok") or int(summary.get("accepted_count", 0)) != changed:
             raise RuntimeError(f"S5B1 native sizing transaction failed: {summary}")
-        if isinstance(getattr(self.placedb.rawdb, "pydb", None), CommittedTimingPyDB):
-            resizes = [
-                {"node_id": int(node_id), "target_cell_index": int(targets[node_id])}
-                for node_id in changed_ids
-            ]
-            apply_inplace_carrier_sizing(self.placedb.rawdb, resizes)
+        resizes = [
+            {"node_id": int(node_id), "target_cell_index": int(targets[node_id])}
+            for node_id in changed_ids
+        ]
+        apply_inplace_carrier_sizing(self.placedb.rawdb, resizes)
         self.native_cell_ids.copy_(targets)
         invalidate_route_state(self.placedb)
         return summary

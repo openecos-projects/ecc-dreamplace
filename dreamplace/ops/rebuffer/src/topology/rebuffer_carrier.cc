@@ -212,6 +212,37 @@ std::vector<int> remapField(const py::object& base, const char* name,
 
 }  // namespace
 
+void pruneBidirectionalPadNetArcs(
+    int pin_count,
+    const std::vector<char>& has_cell_arc,
+    const std::vector<int>& net_arc_count,
+    std::vector<std::array<int, 2>>& net_arcs,
+    std::vector<int>& net_starts)
+{
+  std::unordered_set<long long> present;
+  present.reserve(net_arcs.size() * 2);
+  for (const auto& row : net_arcs) {
+    present.insert(static_cast<long long>(row[0]) * pin_count + row[1]);
+  }
+  std::vector<std::array<int, 2>> kept;
+  std::vector<int> rebuilt_start{0};
+  int offset = 0;
+  for (const int count : net_arc_count) {
+    for (int index = 0; index < count; ++index) {
+      const auto row = net_arcs[offset + index];
+      const bool reverse = present.count(static_cast<long long>(row[1]) * pin_count + row[0]) != 0;
+      if (reverse && !has_cell_arc[row[1]]) continue;
+      kept.push_back(row);
+    }
+    offset += count;
+    rebuilt_start.push_back(kept.size());
+  }
+  if (kept.size() != net_arcs.size()) {
+    net_arcs.swap(kept);
+    net_starts.swap(rebuilt_start);
+  }
+}
+
 void compileCarrierGraph(const py::object& base, TimingCarrierView& state)
 {
   auto& out = state.values;
@@ -362,34 +393,13 @@ void compileCarrierGraph(const py::object& base, TimingCarrierView& state)
   // cell pin and drop the arc that only enters the bare port; the pad-output
   // direction stays an endpoint check instead of a forward edge.
   {
-    std::unordered_set<long long> present;
-    present.reserve(net_arcs.size() * 2);
-    for (const auto& row : net_arcs) {
-      present.insert(static_cast<long long>(row[0]) * pin_count + row[1]);
-    }
     std::vector<char> has_cell_arc(pin_count, 0);
     for (int index = 0; index < static_cast<int>(arcs.size()); ++index) {
       if (is_clock[index]) continue;
       has_cell_arc[arcs[index][0]] = 1;
       has_cell_arc[arcs[index][1]] = 1;
     }
-    std::vector<std::array<int, 2>> kept;
-    std::vector<int> rebuilt_start{0};
-    int offset = 0;
-    for (const int count : net_arc_count) {
-      for (int index = 0; index < count; ++index) {
-        const auto row = net_arcs[offset + index];
-        const bool reverse = present.count(static_cast<long long>(row[1]) * pin_count + row[0]) != 0;
-        if (reverse && !has_cell_arc[row[1]]) continue;
-        kept.push_back(row);
-      }
-      offset += count;
-      rebuilt_start.push_back(kept.size());
-    }
-    if (kept.size() != net_arcs.size()) {
-      net_arcs.swap(kept);
-      net_start.swap(rebuilt_start);
-    }
+    pruneBidirectionalPadNetArcs(pin_count, has_cell_arc, net_arc_count, net_arcs, net_start);
   }
   std::vector<std::vector<std::pair<int, int>>> successors(pin_count);
   std::vector<int> indegree(pin_count, 0), levels(pin_count, 0);

@@ -207,36 +207,58 @@ py::dict rebuildTimingCarrierIncremental(
       || physical_start.back() != static_cast<int>(physical_flat.size())) {
     throw py::value_error("current physical net CSR is invalid");
   }
-  std::vector<int> drivers, net_starts{0};
+  const int pin_count = current_pins.size();
+  std::unordered_set<int> driver_pins(starts.begin(), starts.end());
+  for (const auto& row : arcs) driver_pins.insert(row[1]);
+  for (const int pin : carrierArray<int>(previous, "net2driver_pin_map")) {
+    if (pin >= 0 && pin < static_cast<int>(old_to_current.size()) && old_to_current[pin] >= 0) {
+      driver_pins.insert(old_to_current[pin]);
+    }
+  }
+  std::vector<int> drivers, net_starts{0}, net_arc_count;
   std::vector<NetArc> net_arcs;
   for (int net = 0; net < static_cast<int>(current_nets.size()); ++net) {
     const int begin = physical_start[net], end = physical_start[net + 1];
-    const int driver = begin < end ? physical_flat[begin] : -1;
-    drivers.push_back(driver);
-    for (int index = begin + 1; index < end; ++index) {
-      net_arcs.push_back({driver, physical_flat[index]});
+    const int candidate = begin < end ? physical_flat[begin] : -1;
+    if (candidate >= static_cast<int>(current_pins.size())) {
+      throw py::value_error("physical net pin is invalid");
     }
+    const int driver = candidate >= 0 && driver_pins.count(candidate) ? candidate : -1;
+    drivers.push_back(driver);
+    int added = 0;
+    if (driver >= 0) {
+      for (int index = begin + 1; index < end; ++index) {
+        const int sink = physical_flat[index];
+        if (sink < 0 || sink >= pin_count) throw py::value_error("physical net pin is invalid");
+        if (sink == driver) continue;
+        net_arcs.push_back({driver, sink});
+        ++added;
+      }
+    }
+    net_arc_count.push_back(added);
     net_starts.push_back(net_arcs.size());
   }
-  for (auto& row : net_arcs) {
-    row[0] = row[0] < static_cast<int>(current_pins.size()) ? row[0] : -1;
-    row[1] = row[1] < static_cast<int>(current_pins.size()) ? row[1] : -1;
-    if (row[0] < 0 || row[1] < 0) throw py::value_error("physical net pin is invalid");
+  std::vector<unsigned char> is_clock(arcs.size(), 0);
+  std::vector<char> has_cell_arc(pin_count, 0);
+  for (int id = 0; id < static_cast<int>(arcs.size()); ++id) {
+    is_clock[id] = id < clock_end;
+    if (!is_clock[id]) {
+      has_cell_arc[arcs[id][0]] = 1;
+      has_cell_arc[arcs[id][1]] = 1;
+    }
   }
+  pruneBidirectionalPadNetArcs(pin_count, has_cell_arc, net_arc_count, net_arcs, net_starts);
   out["net2driver_pin_map"] = drivers;
   out["net_flat_arcs_start"] = net_starts;
   out["net_flat_arcs"] = net_arcs;
 
-  const int pin_count = current_pins.size();
   std::vector<std::vector<std::pair<int, int>>> successors(pin_count);
   std::vector<int> indegree(pin_count, 0), levels(pin_count, 0);
-  std::vector<unsigned char> is_clock(arcs.size(), 0);
   auto edge = [&](int source, int sink, int weight) {
     successors.at(source).push_back({sink, weight});
     ++indegree.at(sink);
   };
   for (int id = 0; id < static_cast<int>(arcs.size()); ++id) {
-    is_clock[id] = id < clock_end;
     if (!is_clock[id]) edge(arcs[id][0], arcs[id][1], 1);
   }
   for (const auto& row : net_arcs) edge(row[0], row[1], 0);

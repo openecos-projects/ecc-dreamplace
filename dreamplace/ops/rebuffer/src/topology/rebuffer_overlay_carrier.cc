@@ -312,7 +312,13 @@ OverlayCarrierProjection buildOverlayCarrierProjection(
   design.net2driver_pin_map.assign(nets.size(), -1);
   design.flat_net2pin_start_map.push_back(0);
   for (std::size_t net = 0; net < nets.size(); ++net) {
-    if (!topo[net].empty()) design.net2driver_pin_map[net] = topo[net].front();
+    const bool has_driver =
+        net >= static_cast<std::size_t>(net_count) || base.identity.drivers.at(net) >= 0;
+    if (has_driver && !topo[net].empty()) {
+      design.net2driver_pin_map[net] = topo[net].front();
+    } else if (net < static_cast<std::size_t>(net_count)) {
+      design.net2driver_pin_map[net] = base.identity.drivers.at(net);
+    }
     for (const int pin : net_pins[net]) {
       design.pin2net_map.at(pin) = net;
       design.flat_net2pin_map.push_back(pin);

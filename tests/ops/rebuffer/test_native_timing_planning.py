@@ -16,8 +16,8 @@ from tests.ops.rebuffer.test_persistent_timing_buffers import _split
 from tests.ops.rebuffer.test_persistent_timing_resize import _graph
 
 
-def _planning(base=None, config=None):
-    owner, graph = _graph(_base() if base is None else base)
+def _planning(base=None, config=None, *, attach=True):
+    owner, graph = _graph(_base() if base is None else base, attach=attach)
     resolved = resolve_repair_timing_config(config)
     context = RebufferPlanContext(owner.pydb, owner, config=resolved)
     graph.initialize_queue(context.liberty, context.design["node_is_buffer"].tolist())
@@ -269,3 +269,45 @@ def test_planning_metadata_mismatch_rejects_before_publishing_inputs(field):
     )
     graph.propagate()
     assert graph.planning_snapshot([], {}).summary()["pin_count"] == 4
+
+
+def test_native_snapshot_preserves_undriven_net_with_steiner_topology():
+    base = _base()
+    base.num_nodes = 5
+    base.num_terminal_NIs = 4
+    base.node_names.extend(["PAD", "PORT_OUT"])
+    base.node_master_names.extend(["", ""])
+    base.node_x.extend([20000.0, 20000.0])
+    base.node_y.extend([0.0, 1000.0])
+    base.node_size_x.extend([0.0, 0.0])
+    base.node_size_y.extend([0.0, 0.0])
+    base.inst_main_id.extend([-1, -1])
+    base.inst_libcell_offset.extend([0, 0])
+    base.inst_flat_arcs_start.extend([1, 1])
+    base.pin_names.extend(["PORT_OUT", "PAD:PAD"])
+    base.pin2node_map.extend([4, 3])
+    base.pin_to_inst_id.extend([4, 3])
+    base.pin_to_node_id.extend([4, 3])
+    base.pin_offset_x.extend([0.0, 0.0])
+    base.pin_offset_y.extend([0.0, 0.0])
+    base.pin_direct.extend(["R0", "R0"])
+    base.pin_2_libpin_offset.extend([-1, -1])
+    base.pin2net_map.extend([2, 2])
+    base.net_names.append("undriven_pad_net")
+    base.flat_net2pin_map.extend([4, 5])
+    base.flat_net2pin_start_map.append(6)
+    base.net2driver_pin_map.append(-1)
+    base.net_flat_arcs_start.append(2)
+    base.flat_pin_to_graph_start.extend([3, 3])
+    base.flat_pin_to_graph_start_reverse.extend([3, 3])
+    base.pin_pred_start.extend([3, 3])
+    base.pin_succ_start.extend([3, 3])
+
+    owner, graph, _, config = _planning(base=base, attach=False)
+    snapshot, _, _, _ = _compare(owner, graph, [], config)
+    assert snapshot.summary()["net_count"] == 3
+    graph.attach_net_topology_state(1, graph.create_net_topology(1))
+    action, _ = _split(graph, 1, 3, 0, master="BUF2")
+    graph.propagate_incremental()
+    after_split, _, _, _ = _compare(owner, graph, [action], config)
+    assert after_split.summary()["net_count"] == 4

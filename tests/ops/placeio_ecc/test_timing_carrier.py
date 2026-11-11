@@ -626,3 +626,64 @@ def test_refresh_skips_routability_export_when_metadata_owns_static_routability(
     assert carrier.num_routing_grids_x == 4
     assert carrier.unit_horizontal_capacities == [1.0]
 
+
+def test_incremental_carrier_matches_full_rebuild_on_undriven_pad_nets():
+    base = _base()
+    base.num_nodes = 5
+    base.num_terminal_NIs = 4
+    base.node_names.extend(["PAD", "PORT_OUT"])
+    base.node_master_names.extend(["", ""])
+    base.node_x.extend([20000.0, 20000.0])
+    base.node_y.extend([0.0, 1000.0])
+    base.node_size_x.extend([0.0, 0.0])
+    base.node_size_y.extend([0.0, 0.0])
+    base.inst_main_id.extend([-1, -1])
+    base.inst_libcell_offset.extend([0, 0])
+    base.inst_flat_arcs_start.extend([1, 1])
+    base.pin_names.extend(["PORT_OUT", "PAD:PAD"])
+    base.pin2node_map.extend([4, 3])
+    base.pin_to_inst_id.extend([4, 3])
+    base.pin_to_node_id.extend([4, 3])
+    base.pin_offset_x.extend([0.0, 0.0])
+    base.pin_offset_y.extend([0.0, 0.0])
+    base.pin_direct.extend(["R0", "R0"])
+    base.pin_2_libpin_offset.extend([-1, -1])
+    base.pin2net_map.extend([2, 2])
+    base.net_names.append("undriven_pad_net")
+    base.flat_net2pin_map.extend([4, 5])
+    base.flat_net2pin_start_map.append(6)
+    base.net2driver_pin_map.append(-1)
+    base.net_flat_arcs_start.append(2)
+    base.flat_pin_to_graph_start.extend([3, 3])
+    base.flat_pin_to_graph_start_reverse.extend([3, 3])
+    base.pin_pred_start.extend([3, 3])
+    base.pin_succ_start.extend([3, 3])
+
+    initial = CommittedTimingPyDB(base, deepcopy(base))
+    physical = _physical_after()
+    physical.num_nodes = 6
+    physical.num_terminal_NIs = 4
+    physical.node_names.extend(["PAD", "PORT_OUT"])
+    physical.node_master_names.extend(["", ""])
+    physical.node_x.extend([20000.0, 20000.0])
+    physical.node_y.extend([0.0, 1000.0])
+    physical.pin_names.extend(["PORT_OUT", "PAD:PAD"])
+    physical.pin2node_map.extend([5, 4])
+    physical.pin_offset_x.extend([0.0, 0.0])
+    physical.pin_offset_y.extend([0.0, 0.0])
+    physical.pin_direct.extend(["R0", "R0"])
+    physical.net_names.append("undriven_pad_net")
+    physical.flat_net2pin_map.extend([6, 7])
+    physical.flat_net2pin_start_map.append(8)
+
+    full = CommittedTimingPyDB(base, physical)
+    incremental = CommittedTimingPyDB(base, physical, previous_pydb=initial)
+    assert (
+        incremental.net2driver_pin_map,
+        incremental.net_flat_arcs,
+        incremental.net_flat_arcs_start,
+    ) == (
+        full.net2driver_pin_map,
+        full.net_flat_arcs,
+        full.net_flat_arcs_start,
+    )

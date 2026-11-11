@@ -245,8 +245,9 @@ def _run_repair_timing(placedb, *, max_passes, config, profile=None):
     # raw_db.pydb to the dbu database.  When repair_timing runs standalone
     # after a native mutation, refresh the carrier once before opening the session.
     pydb = raw_db.pydb
-    if getattr(raw_db, "module", None) is not None and bool(
-        getattr(pydb, "native_state_dirty", False)
+    if getattr(raw_db, "module", None) is not None and (
+        bool(getattr(pydb, "native_state_dirty", False))
+        or not bool(getattr(raw_db, "_carrier_positions_synced", False))
     ):
         from dreamplace.ops.placeio_ecc.timing_carrier import refresh_python_timing_carrier
 

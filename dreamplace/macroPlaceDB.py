@@ -5384,8 +5384,9 @@ row height = %g, site width = %g
 
         if utilization > MAX_MOVABLE_UTILIZATION:
             raise RuntimeError(
-                "utilization is larger than %g. Please change the core size."
-                % MAX_MOVABLE_UTILIZATION
+                "utilization %.2f%% is larger than the %.2f%% limit. "
+                "Please change the core size."
+                % (utilization * 100.0, MAX_MOVABLE_UTILIZATION * 100.0)
             )
 
         # calculate fence region virtual macro

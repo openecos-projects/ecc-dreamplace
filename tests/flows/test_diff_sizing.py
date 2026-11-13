@@ -392,3 +392,62 @@ def test_legalize_and_measure_preserves_legal_postroute_placement_in_spef_mode(
     assert timing == {"wns": -0.25, "tns": -1.5}
     assert calls == (["legalize", "sta"] if expect_legalizer_call else ["sta"])
     assert engine.hpwl == (20.0 if expect_legalizer_call else 123.5)
+
+
+def test_build_timing_model_forces_lut_only_and_restores_params():
+    from dreamplace.flows import diff_sizing
+
+    seen_modes = []
+
+    class FakeEngine:
+        def __init__(self):
+            self.params = SimpleNamespace(
+                flow_kind="sizing",
+                global_place_flag=1,
+                legalize_flag=1,
+                detailed_place_flag=1,
+                global_place_stages=[{"iteration": 50}],
+                timing_surrogate_mode="surrogate_only",
+                build_model_only=False,
+            )
+            self.placedb = SimpleNamespace(gr_sizing=object())
+            self.placer = None
+
+        def place(self):
+            seen_modes.append(self.params.timing_surrogate_mode)
+            self.placer = SimpleNamespace(last_global_place_model="fake_model")
+
+    engine = FakeEngine()
+    assert diff_sizing._build_timing_model(engine) == "fake_model"
+    assert seen_modes == ["lut_only"]
+    assert engine.params.timing_surrogate_mode == "surrogate_only"
+
+
+@pytest.mark.parametrize(
+    ("action_mode", "expected_surrogate_mode"),
+    [("lut_action", "lut_only"), ("off", "surrogate_only")],
+)
+def test_configure_gr_sizing_sets_surrogate_mode_by_action_mode(
+    action_mode, expected_surrogate_mode
+):
+    from dreamplace.flows.gr_sizing_config import configure_gr_sizing
+
+    params = SimpleNamespace(
+        flow_kind="sizing",
+        timing_rc_mode="gr",
+        place_io_engine="ecc",
+        gpu=0,
+        gpugr_backend="cpu_pr_mt",
+        routability_opt_flag=0,
+        l_shape_routability_flag=0,
+        adjust_gpugr_area_flag=0,
+        gpugr_final_eval_flag=0,
+        enable_net_weighting=0,
+        pin2pin_net_weighting=0,
+        timing_opt_enabled=0,
+        timing_action_gradient_mode=action_mode,
+        diff_sizing_continuous_steps=0,
+        global_place_stages=[{"iteration": 100}],
+    )
+    configure_gr_sizing(params)
+    assert params.timing_surrogate_mode == expected_surrogate_mode

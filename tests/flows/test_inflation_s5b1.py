@@ -1015,3 +1015,26 @@ def test_s5b1_direct_b1_session_skips_zero_accept_and_commits_and_restarts_on_ac
     assert terminal["projected_buffer_count"] == 0
     assert fresh_owner.terminal_request.is_noop is True
     assert fresh_owner.terminal_summary["direct_committed_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("action_mode", "expected_surrogate_mode"),
+    [("lut_action", "lut_only"), ("off", "surrogate_only")],
+)
+def test_s5b1_loss_respects_lut_action_without_triggering_surrogate(
+    action_mode, expected_surrogate_mode
+):
+    from dreamplace.flows.inflation_s5b1 import InflationS5B1
+
+    seen_modes = []
+    owner = object.__new__(InflationS5B1)
+    owner.action_mode = action_mode
+    model = SimpleNamespace(
+        timing_obj=lambda pos, surrogate_mode=None: (
+            seen_modes.append(surrogate_mode),
+            (torch.tensor(0.0),),
+        )[1],
+        _timing_loss=lambda value: value,
+    )
+    assert float(owner._loss(model, torch.tensor([0.0]))) == pytest.approx(0.0)
+    assert seen_modes == [expected_surrogate_mode]

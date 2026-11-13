@@ -87,9 +87,6 @@ def configure_gr_sizing(params):
         params.timing_surrogate_mode = "lut_only"
         return
     params.placement_sizing_mode = "size_only"
-    # The fixed S50 profile needs clock-to-Q size/VT gradients. "mixed"
-    # evaluates those FF arcs with the exact current-master LUT instead.
-    params.timing_surrogate_mode = "surrogate_only"
     continuous_steps = getattr(params, "diff_sizing_continuous_steps", 0)
     if (
         isinstance(continuous_steps, bool)
@@ -106,6 +103,11 @@ def configure_gr_sizing(params):
         raise ValueError(
             "timing_action_gradient_mode must be one of: off, lut_action"
         )
+    # lut_action evaluates candidates directly with Liberty LUT + incremental STA;
+    # only the legacy continuous gradient mode needs surrogate clock-to-Q arcs.
+    params.timing_surrogate_mode = (
+        "lut_only" if action_mode == "lut_action" else "surrogate_only"
+    )
     if action_mode == "lut_action":
         if continuous_steps != 0:
             raise ValueError(

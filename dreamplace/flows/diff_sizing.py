@@ -97,6 +97,7 @@ def _build_timing_model(engine):
         "legalize_flag": params.legalize_flag,
         "detailed_place_flag": params.detailed_place_flag,
         "global_place_stages": copy.deepcopy(params.global_place_stages),
+        "timing_surrogate_mode": getattr(params, "timing_surrogate_mode", None),
         "build_model_only": getattr(params, "build_model_only", False),
     }
     stages = copy.deepcopy(params.global_place_stages)
@@ -107,6 +108,7 @@ def _build_timing_model(engine):
     params.global_place_flag = 1
     params.legalize_flag = 0
     params.detailed_place_flag = 0
+    params.timing_surrogate_mode = "lut_only"
     params.build_model_only = True
     try:
         engine.place()
@@ -139,6 +141,7 @@ def _legalize_and_measure(engine, params):
     terminal_params.diff_timing_driven_placement = 0
     terminal_params.timing_opt_enabled = 0
     terminal_params.timing_action_gradient_mode = "off"
+    terminal_params.timing_surrogate_mode = "lut_only"
     terminal_params.result_dir = str(Path(params.result_dir) / "terminal")
     Path(terminal_params.result_dir).mkdir(parents=True, exist_ok=True)
 

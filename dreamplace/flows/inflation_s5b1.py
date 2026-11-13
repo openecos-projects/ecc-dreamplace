@@ -198,7 +198,8 @@ class InflationS5B1:
 
     def _loss(self, model, pos):
         # Both gradient and acceptance use the same model, lane and weights.
-        result = model.timing_obj(pos.detach(), surrogate_mode="surrogate_only")
+        mode = "lut_only" if self.action_mode == "lut_action" else "surrogate_only"
+        result = model.timing_obj(pos.detach(), surrogate_mode=mode)
         loss = model._timing_loss(*result)
         if not bool(torch.isfinite(loss)):
             raise RuntimeError("S5B1 electrical loss is non-finite")

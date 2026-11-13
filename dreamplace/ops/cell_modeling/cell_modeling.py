@@ -6,6 +6,7 @@ import math
 import time
 from datetime import datetime, timezone
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -1378,60 +1379,97 @@ class CellModeling(nn.Module):
 
     def _build_piecewise_state(self, libcell_main_ids, arc_offsets, sizes, vts, num_main_ids, max_arc_offset, vt_order):
         num_vts = len(vt_order)
-        vt_to_slot = {int(v): idx for idx, v in enumerate(vt_order)}
-        grouped = {}
-        for arc_idx in range(libcell_main_ids.numel()):
-            main_id = int(libcell_main_ids[arc_idx].item())
-            arc_offset = int(arc_offsets[arc_idx].item())
-            vt_slot = vt_to_slot[int(vts[arc_idx].item())]
-            size_value = float(sizes[arc_idx].item())
-            grouped.setdefault((main_id, arc_offset, vt_slot), {})[size_value] = arc_idx
+        device = self.device
+        num_buckets = int(num_main_ids) * int(max_arc_offset) * int(num_vts)
+        num_arcs = int(libcell_main_ids.numel())
+        if num_arcs == 0 or num_buckets == 0:
+            max_sizes = 1
+            return self._finalize_piecewise_state({
+                "size_table": torch.full(
+                    (num_main_ids, max_arc_offset, num_vts, max_sizes),
+                    float("inf"),
+                    device=device,
+                    dtype=torch.float32,
+                ),
+                "arc_index_table": torch.full(
+                    (num_main_ids, max_arc_offset, num_vts, max_sizes),
+                    -1,
+                    device=device,
+                    dtype=torch.long,
+                ),
+                "size_count": torch.zeros(
+                    (num_main_ids, max_arc_offset, num_vts),
+                    device=device,
+                    dtype=torch.long,
+                ),
+                "vt_available": torch.zeros(
+                    (num_main_ids, max_arc_offset, num_vts),
+                    device=device,
+                    dtype=torch.bool,
+                ),
+            })
 
-        max_sizes = max((len(entries) for entries in grouped.values()), default=1)
-        size_table = torch.full(
-            (num_main_ids, max_arc_offset, num_vts, max_sizes),
-            float("inf"),
-            device=self.device,
-            dtype=torch.float32,
+        main_np = libcell_main_ids.detach().to("cpu", dtype=torch.int64).numpy()
+        offset_np = arc_offsets.detach().to("cpu", dtype=torch.int64).numpy()
+        size_np = sizes.detach().to("cpu", dtype=torch.float32).numpy()
+        vt_np = vts.detach().to("cpu", dtype=torch.int64).numpy()
+
+        vt_slots = np.full(num_arcs, -1, dtype=np.int64)
+        for slot, vt_code in enumerate(vt_order):
+            vt_slots[vt_np == int(vt_code)] = slot
+        missing = vt_slots < 0
+        if np.any(missing):
+            raise KeyError(int(vt_np[missing][0]))
+
+        bucket_ids = (main_np * int(max_arc_offset) + offset_np) * int(num_vts) + vt_slots
+        arc_indices = np.arange(num_arcs, dtype=np.int64)
+        # Lexicographically sort by (bucket_id, size_value, arc_idx) so duplicates share adjacency
+        # and the final occurrence in arc_idx order is always kept.
+        order = np.lexsort((arc_indices, size_np, bucket_ids))
+        b_sorted = bucket_ids[order]
+        s_sorted = size_np[order]
+        arc_sorted = arc_indices[order]
+
+        if num_arcs > 1:
+            keep = np.ones(num_arcs, dtype=bool)
+            keep[:-1] = (b_sorted[:-1] != b_sorted[1:]) | (s_sorted[:-1] != s_sorted[1:])
+            b_uniq = b_sorted[keep]
+            s_uniq = s_sorted[keep]
+            arc_uniq = arc_sorted[keep]
+        else:
+            b_uniq = b_sorted
+            s_uniq = s_sorted
+            arc_uniq = arc_sorted
+
+        unique_buckets, group_starts, bucket_counts = np.unique(
+            b_uniq, return_index=True, return_counts=True
         )
-        arc_index_table = torch.full(
-            (num_main_ids, max_arc_offset, num_vts, max_sizes),
-            -1,
-            device=self.device,
-            dtype=torch.long,
-        )
-        size_count = torch.zeros(
-            (num_main_ids, max_arc_offset, num_vts),
-            device=self.device,
-            dtype=torch.long,
-        )
-        vt_available = torch.zeros(
-            (num_main_ids, max_arc_offset, num_vts),
-            device=self.device,
-            dtype=torch.bool,
-        )
-        for (main_id, arc_offset, vt_slot), entries in grouped.items():
-            sorted_items = sorted(entries.items(), key=lambda item: item[0])
-            count = len(sorted_items)
-            if count == 0:
-                continue
-            vt_available[main_id, arc_offset, vt_slot] = True
-            size_count[main_id, arc_offset, vt_slot] = count
-            size_table[main_id, arc_offset, vt_slot, :count] = torch.tensor(
-                [item[0] for item in sorted_items],
-                device=self.device,
-                dtype=torch.float32,
-            )
-            arc_index_table[main_id, arc_offset, vt_slot, :count] = torch.tensor(
-                [item[1] for item in sorted_items],
-                device=self.device,
-                dtype=torch.long,
-            )
+        max_sizes = max(int(bucket_counts.max()), 1)
+        col_indices = np.arange(b_uniq.shape[0], dtype=np.int64) - np.repeat(group_starts, bucket_counts)
+
+        size_table_flat = np.full((num_buckets, max_sizes), np.inf, dtype=np.float32)
+        arc_index_table_flat = np.full((num_buckets, max_sizes), -1, dtype=np.int64)
+        size_count_flat = np.zeros(num_buckets, dtype=np.int64)
+        vt_available_flat = np.zeros(num_buckets, dtype=bool)
+
+        size_table_flat[b_uniq, col_indices] = s_uniq
+        arc_index_table_flat[b_uniq, col_indices] = arc_uniq
+        size_count_flat[unique_buckets] = bucket_counts
+        vt_available_flat[unique_buckets] = True
+
         return self._finalize_piecewise_state({
-            "size_table": size_table,
-            "arc_index_table": arc_index_table,
-            "size_count": size_count,
-            "vt_available": vt_available,
+            "size_table": torch.from_numpy(
+                size_table_flat.reshape(num_main_ids, max_arc_offset, num_vts, max_sizes)
+            ).to(device),
+            "arc_index_table": torch.from_numpy(
+                arc_index_table_flat.reshape(num_main_ids, max_arc_offset, num_vts, max_sizes)
+            ).to(device),
+            "size_count": torch.from_numpy(
+                size_count_flat.reshape(num_main_ids, max_arc_offset, num_vts)
+            ).to(device),
+            "vt_available": torch.from_numpy(
+                vt_available_flat.reshape(num_main_ids, max_arc_offset, num_vts)
+            ).to(device),
         })
 
     @staticmethod

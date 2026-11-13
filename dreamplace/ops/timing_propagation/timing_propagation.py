@@ -723,6 +723,7 @@ class TimingPropagation(nn.Module):
                  inst_topo_start=None,
                  inst_topo_ids=None,
                  cell_modeling_op=None,
+                 cell_modeling_factory=None,
                  lib_arc_offsets=None,
                  pin2node_map=None,
                  inst_main_id=None,
@@ -851,6 +852,7 @@ class TimingPropagation(nn.Module):
         self.inst_topo_start = inst_topo_start
         self.inst_topo_ids = inst_topo_ids
         self.cell_modeling_op = cell_modeling_op
+        self._cell_modeling_factory = cell_modeling_factory
         self.lib_arc_offsets = lib_arc_offsets
         self.pin2node_map = pin2node_map
         self.inst_main_id = inst_main_id
@@ -3071,6 +3073,13 @@ class TimingPropagation(nn.Module):
         )
         return summary
 
+    def _ensure_cell_modeling_op(self):
+        if self.cell_modeling_op is None:
+            factory = getattr(self, "_cell_modeling_factory", None)
+            if callable(factory):
+                self.cell_modeling_op = factory()
+        return self.cell_modeling_op
+
     def _resolve_surrogate_mode(self, surrogate_mode: Optional[str] = None) -> tuple[bool, bool]:
         """
         Resolve per-call timing model mode.
@@ -3085,11 +3094,12 @@ class TimingPropagation(nn.Module):
             - "surrogate_only": force surrogate on all timing arc evaluations when available.
         """
         mode = (surrogate_mode or "mixed").lower()
+        if mode == "lut_only":
+            return False, False
+        self._ensure_cell_modeling_op()
         surrogate_available = self._cell_modeling_enabled()
         if mode in ("mixed", "auto", "default"):
             return False, surrogate_available
-        if mode == "lut_only":
-            return False, False
         if mode == "surrogate_only":
             return surrogate_available, surrogate_available
         raise ValueError(

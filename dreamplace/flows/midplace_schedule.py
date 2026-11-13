@@ -286,41 +286,78 @@ class MidplaceSchedule:
             dc.original_pin_offset_x = dc.pin_offset_x.detach().clone()
         if not hasattr(dc, "original_pin_offset_y") or dc.original_pin_offset_y is None:
             dc.original_pin_offset_y = dc.pin_offset_y.detach().clone()
-        capacity = getattr(cooptimization, "capacity", None)
-        before = capture_area(dc, placedb, 0.0, capacity=capacity)
+
         count = int(placedb.num_movable_nodes)
-        node_names = [
-            name.decode() if isinstance(name, bytes) else str(name)
-            for name in placedb.node_names[:count]
-        ]
+        inflated_sizes = self.inflated_movable_sizes
+        matched_ids = []
+        target_wx = []
+        target_wy = []
+        for node_id, raw_name in enumerate(placedb.node_names[:count]):
+            name = raw_name.decode() if isinstance(raw_name, bytes) else str(raw_name)
+            inflated = inflated_sizes.get(name)
+            if inflated is not None:
+                matched_ids.append(node_id)
+                target_wx.append(float(inflated[0]))
+                target_wy.append(float(inflated[1]))
+        if not matched_ids:
+            return {"restored_inflated_nodes": 0}
+
         pos = placer.pos[0]
         num_nodes = int(placedb.num_nodes)
-        restored = 0
+        device = dc.node_size_x.device
+        capacity = getattr(cooptimization, "capacity", None)
+
         with torch.no_grad():
-            for node_id, name in enumerate(node_names):
-                inflated = self.inflated_movable_sizes.get(name)
-                if inflated is None:
-                    continue
-                ow = float(dc.original_node_size_x[node_id].item())
-                oh = float(dc.original_node_size_y[node_id].item())
-                nw = max(ow, float(inflated[0]))
-                nh = max(oh, float(inflated[1]))
-                if nw <= ow + 1e-12 and nh <= oh + 1e-12:
-                    continue
-                dx = (nw - ow) * 0.5
-                dy = (nh - oh) * 0.5
-                dc.node_size_x[node_id] = nw
-                dc.node_size_y[node_id] = nh
-                pos.data[node_id] -= dx
-                pos.data[num_nodes + node_id] -= dy
-                pin_start = int(placedb.flat_node2pin_start_map[node_id])
-                pin_end = int(placedb.flat_node2pin_start_map[node_id + 1])
-                if pin_end > pin_start:
-                    pins = dc.flat_node2pin_map[pin_start:pin_end].long()
-                    dc.pin_offset_x[pins] = dc.original_pin_offset_x[pins] + dx
-                    dc.pin_offset_y[pins] = dc.original_pin_offset_y[pins] + dy
-                restored += 1
-            if restored > 0:
-                coordinate_area(before, dc, placedb, pos, 0.0)
-                placedb.cooptimization_geometry = dc
+            idx = torch.tensor(matched_ids, device=device, dtype=torch.long)
+            req_w = torch.tensor(target_wx, device=device, dtype=torch.float64)
+            req_h = torch.tensor(target_wy, device=device, dtype=torch.float64)
+            ow = dc.original_node_size_x[idx].double()
+            oh = dc.original_node_size_y[idx].double()
+            nw = torch.maximum(ow, req_w)
+            nh = torch.maximum(oh, req_h)
+            active = (nw > ow + 1e-12) | (nh > oh + 1e-12)
+            restored = int(active.sum().item())
+            if restored == 0:
+                return {"restored_inflated_nodes": 0}
+
+            before = capture_area(dc, placedb, 0.0, capacity=capacity)
+            active_idx = idx[active]
+            nw_active = nw[active]
+            nh_active = nh[active]
+            dx = (nw_active - ow[active]) * 0.5
+            dy = (nh_active - oh[active]) * 0.5
+
+            dc.node_size_x[active_idx] = nw_active.to(dtype=dc.node_size_x.dtype)
+            dc.node_size_y[active_idx] = nh_active.to(dtype=dc.node_size_y.dtype)
+            pos.data[active_idx] -= dx.to(dtype=pos.dtype)
+            pos.data[num_nodes + active_idx] -= dy.to(dtype=pos.dtype)
+
+            raw_starts = getattr(dc, "flat_node2pin_start_map", None)
+            if raw_starts is None:
+                raw_starts = placedb.flat_node2pin_start_map
+            starts_t = torch.as_tensor(raw_starts, device=device, dtype=torch.long)
+            pin_starts = starts_t[active_idx]
+            pin_counts = (starts_t[active_idx + 1] - pin_starts).clamp(min=0)
+            total_pins = int(pin_counts.sum().item())
+            if total_pins > 0:
+                node_offsets = torch.repeat_interleave(
+                    torch.arange(active_idx.numel(), device=device, dtype=torch.long),
+                    pin_counts,
+                )
+                group_starts = torch.cumsum(pin_counts, 0) - pin_counts
+                within = (
+                    torch.arange(total_pins, device=device, dtype=torch.long)
+                    - group_starts[node_offsets]
+                )
+                csr_idx = pin_starts[node_offsets] + within
+                pins = dc.flat_node2pin_map[csr_idx].long()
+                dc.pin_offset_x[pins] = dc.original_pin_offset_x[pins] + dx[
+                    node_offsets
+                ].to(dtype=dc.pin_offset_x.dtype)
+                dc.pin_offset_y[pins] = dc.original_pin_offset_y[pins] + dy[
+                    node_offsets
+                ].to(dtype=dc.pin_offset_y.dtype)
+
+            coordinate_area(before, dc, placedb, pos, 0.0)
+            placedb.cooptimization_geometry = dc
         return {"restored_inflated_nodes": restored}

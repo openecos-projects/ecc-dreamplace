@@ -1084,7 +1084,11 @@ class PlaceObj(nn.Module):
                 if callable(size_parameter_getter)
                 else getattr(self.data_collections, "size_logits", None)
             )
-            if size_parameter is not None:
+            surrogate_mode = str(
+                getattr(params, "timing_surrogate_mode", "auto") or "auto"
+            ).lower()
+            self._cell_modeling_enabled_for_sizing = size_parameter is not None
+            if size_parameter is not None and surrogate_mode != "lut_only":
                 self.op_collections.cell_modeling_op = CellModeling(self.data_collections)
             self.op_collections.timing_propagation_op = (
                 self.build_timing_propagation_op(params, placedb, self.data_collections)
@@ -10258,6 +10262,16 @@ class PlaceObj(nn.Module):
         )
         return rc_timing
 
+    def _ensure_cell_modeling_op(self):
+        existing = getattr(self.op_collections, "cell_modeling_op", None)
+        if existing is not None:
+            return existing
+        if not getattr(self, "_cell_modeling_enabled_for_sizing", False):
+            return None
+        cell_modeling_op = CellModeling(self.data_collections)
+        self.op_collections.cell_modeling_op = cell_modeling_op
+        return cell_modeling_op
+
     def build_timing_propagation_op(self, params, placedb, data_collections):
 
         write_crash_stage_marker(
@@ -10333,6 +10347,11 @@ class PlaceObj(nn.Module):
             inst_topo_start=getattr(data_collections, "inst_topo_start", None),
             inst_topo_ids=getattr(data_collections, "inst_topo_ids", None),
             cell_modeling_op=self.op_collections.cell_modeling_op,
+            cell_modeling_factory=(
+                self._ensure_cell_modeling_op
+                if getattr(self, "_cell_modeling_enabled_for_sizing", False)
+                else None
+            ),
             lib_arc_offsets=(
                 data_collections.flat_libarc_info[:, 3].long()
                 if getattr(data_collections, "flat_libarc_info", None) is not None

@@ -1069,5 +1069,74 @@ def test_s5b1_window_runs_repair_timing_and_preserves_inflated_geometry(
     assert float(fresh.data_collections.original_node_size_y[0]) == pytest.approx(1.0)
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_vectorized_restore_inflated_geometry_handles_pins_zeros_and_tolerance(dtype):
+    node_names = [b"c0", "c1_zero_pins", "c2_below_tol", "c3_uninflated", b"fixed_node"]
+    # Pin counts: c0=2 (pins 0,1), c1_zero_pins=0, c2_below_tol=1 (2), c3=1 (3), fixed=1 (4)
+    flat_node2pin_map = np.array([0, 1, 2, 3, 4], dtype=np.int32)
+    flat_node2pin_start_map = np.array([0, 2, 2, 3, 4, 5], dtype=np.int32)
+    db = SimpleNamespace(
+        node_names=node_names,
+        num_nodes=5,
+        num_movable_nodes=4,
+        num_filler_nodes=0,
+        xl=0.0,
+        yl=0.0,
+        xh=100.0,
+        yh=100.0,
+        area=10000.0,
+        total_fixed_node_area=4.0,
+        total_space_area=9996.0,
+        total_movable_node_area=8.0,
+        node_size_x=np.array([2.0, 2.0, 2.0, 2.0, 2.0]),
+        node_size_y=np.array([1.0, 1.0, 1.0, 1.0, 2.0]),
+        flat_node2pin_start_map=flat_node2pin_start_map,
+    )
+    dc = SimpleNamespace(
+        node_size_x=torch.tensor([2.0, 2.0, 2.0, 2.0, 2.0], dtype=dtype),
+        node_size_y=torch.tensor([1.0, 1.0, 1.0, 1.0, 2.0], dtype=dtype),
+        original_node_size_x=torch.tensor([2.0, 2.0, 2.0, 2.0, 2.0], dtype=dtype),
+        original_node_size_y=torch.tensor([1.0, 1.0, 1.0, 1.0, 2.0], dtype=dtype),
+        pin_offset_x=torch.tensor([0.2, 0.8, 0.3, 0.4, 0.5], dtype=dtype),
+        pin_offset_y=torch.tensor([0.1, 0.6, 0.2, 0.3, 0.5], dtype=dtype),
+        original_pin_offset_x=torch.tensor([0.2, 0.8, 0.3, 0.4, 0.5], dtype=dtype),
+        original_pin_offset_y=torch.tensor([0.1, 0.6, 0.2, 0.3, 0.5], dtype=dtype),
+        flat_node2pin_map=torch.as_tensor(flat_node2pin_map),
+        node_areas=torch.zeros(5, dtype=dtype),
+        target_density=torch.tensor([0.5], dtype=dtype),
+        sorted_node_map=torch.zeros(4, dtype=torch.int32),
+    )
+    placer = SimpleNamespace(
+        data_collections=dc,
+        pos=[
+            torch.tensor(
+                [10.0, 20.0, 30.0, 40.0, 50.0, 11.0, 21.0, 31.0, 41.0, 51.0],
+                dtype=dtype,
+            )
+        ],
+    )
+    schedule = MidplaceSchedule(
+        inflated_movable_sizes={
+            "c0": (6.0, 3.0),
+            "c1_zero_pins": (1.0, 5.0),
+            "c2_below_tol": (2.0 + 1e-13, 1.0),
+            "fixed_node": (9.0, 9.0),
+        }
+    )
+    result = schedule.restore_inflated_geometry(
+        placer, db, SimpleNamespace(capacity=1000.0)
+    )
+    assert result == {"restored_inflated_nodes": 2}
+    # c0 -> (6, 3), dx=2, dy=1; c1 -> (max(2,1)=2, 5), dx=0, dy=2; c2/c3/fixed unchanged
+    assert dc.node_size_x.tolist() == pytest.approx([6.0, 2.0, 2.0, 2.0, 2.0])
+    assert dc.node_size_y.tolist() == pytest.approx([3.0, 5.0, 1.0, 1.0, 2.0])
+    assert placer.pos[0][:5].tolist() == pytest.approx([8.0, 20.0, 30.0, 40.0, 50.0])
+    assert placer.pos[0][5:].tolist() == pytest.approx([10.0, 19.0, 31.0, 41.0, 51.0])
+    assert dc.pin_offset_x.tolist() == pytest.approx([2.2, 2.8, 0.3, 0.4, 0.5])
+    assert dc.pin_offset_y.tolist() == pytest.approx([1.1, 1.6, 0.2, 0.3, 0.5])
+    assert db.cooptimization_geometry is dc
+
+
+
 
 

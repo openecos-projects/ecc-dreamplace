@@ -4160,6 +4160,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 self._refresh_live_timing_topology,
                                 lane=buffering_lane,
                             )
+                            if midplace is not None and callable(
+                                getattr(midplace, "bind_alternating_controller", None)
+                            ):
+                                midplace.bind_alternating_controller(
+                                    self, self.alternating_discrete
+                                )
                         cooptimization = self.alternating_discrete
                         self.last_alternating_discrete_summary = (
                             self.alternating_discrete.summarize()
@@ -4895,6 +4901,22 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             model, pos, optimizer, cur_metric, eval_ops,
                             iteration=iteration, stage=cur_stage,
                         )
+                        if midplace is not None and callable(
+                            getattr(midplace, "after_timing_window_step", None)
+                        ):
+                            midplace.after_timing_window_step(
+                                self,
+                                model,
+                                cooptimization,
+                                cur_metric,
+                                PlacementCursor(
+                                    cur_stage,
+                                    Lgamma_step,
+                                    Llambda_density_weight_step,
+                                    Lsub_step,
+                                    iteration,
+                                ),
+                            )
 
                     self._initialize_timing_grad_balance_if_needed(
                         params,
@@ -6293,6 +6315,23 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                             ),
                                             window_index=num_area_adjust,
                                         )
+                                    if midplace is not None and callable(
+                                        getattr(midplace, "after_inflation_round", None)
+                                    ):
+                                        midplace.after_inflation_round(
+                                            self,
+                                            model,
+                                            cooptimization,
+                                            Llambda_metrics[-1][-1],
+                                            PlacementCursor(
+                                                cur_stage,
+                                                Lgamma_step,
+                                                model.Llambda_density_weight_iteration - 1,
+                                                model.Lsub_iteration - 1,
+                                                iteration - 1,
+                                            ),
+                                            adjust_area_flag=True,
+                                        )
                                     # restart Llambda
                                     model.refresh_after_geometry_change()
                                     model.initialize_restart_density_weight(
@@ -6369,6 +6408,23 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                         if current_inflation_round is not None
                                         else num_area_adjust,
                                     )
+                                    if midplace is not None and callable(
+                                        getattr(midplace, "after_inflation_round", None)
+                                    ):
+                                        midplace.after_inflation_round(
+                                            self,
+                                            model,
+                                            cooptimization,
+                                            Llambda_metrics[-1][-1],
+                                            PlacementCursor(
+                                                cur_stage,
+                                                Lgamma_step,
+                                                Llambda_density_weight_step,
+                                                model.Lsub_iteration - 1,
+                                                iteration - 1,
+                                            ),
+                                            adjust_area_flag=False,
+                                        )
 
                     if pending_joint_topology_commit_result is not None or (
                         stop_placement == 1

@@ -9,12 +9,22 @@ def map_liberty_arc_transition(
     target_cell,
     arc_start,
     flat_arc_info,
+    check_types=None,
 ):
     """Map a fixed source-cell arc row onto a target Liberty cell."""
     source_cell = int(source_cell)
     target_cell = int(target_cell)
     starts = arc_start.detach().to(device="cpu", dtype=torch.long)
     info = flat_arc_info.detach().to(device="cpu", dtype=torch.long)
+    checks = (
+        None
+        if check_types is None
+        else check_types.detach().to(device="cpu", dtype=torch.long)
+    )
+    if checks is not None and checks.shape != (info.shape[0],):
+        raise RuntimeError(
+            "runtime Liberty arc check types do not align with flat_libarc_info"
+        )
     cell_count = int(starts.numel()) - 1
     if not (0 <= source_cell < cell_count and 0 <= target_cell < cell_count):
         raise RuntimeError(
@@ -33,6 +43,7 @@ def map_liberty_arc_transition(
                 int(row[1].item()),
                 int(row[4].item()),
                 int(row[5].item()),
+                0 if checks is None else int(checks[arc_id].item()),
             )
             groups.setdefault(signature, []).append(arc_id)
         return begin, end, groups
@@ -140,6 +151,7 @@ def sync_timing_arc_lut_rows(data, placedb, timing_op, changed_inst_ids):
     inst_cell_id = data.inst_cell_id
     arc_start = data.cell_id_2_arc_id_start
     flat_arc_info = data.flat_libarc_info
+    check_types = getattr(data, "flat_libarc_check_types", None)
     changed = torch.as_tensor(
         changed_inst_ids,
         dtype=torch.long,
@@ -157,7 +169,13 @@ def sync_timing_arc_lut_rows(data, placedb, timing_op, changed_inst_ids):
     if transition_summaries is None:
         transition_summaries = {}
         data._runtime_timing_arc_transition_summary_cache = transition_summaries
-    transition_signature = (id(arc_start), id(flat_arc_info))
+    transition_signature = (
+        id(arc_start),
+        id(flat_arc_info),
+        None
+        if check_types is None
+        else (id(check_types), int(getattr(check_types, "_version", 0))),
+    )
     if (
         getattr(data, "_runtime_timing_arc_transition_cache_signature", None)
         != transition_signature
@@ -270,6 +288,7 @@ def sync_timing_arc_lut_rows(data, placedb, timing_op, changed_inst_ids):
                             pair_target,
                             arc_start,
                             flat_arc_info,
+                            check_types=check_types,
                         )
                     )
                     transition_maps[pair] = mapping

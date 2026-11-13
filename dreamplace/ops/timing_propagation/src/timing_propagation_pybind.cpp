@@ -228,6 +228,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("instance_ids"),
            py::arg("target_cell_ids"),
            py::arg("policy"))
+      .def("evaluate_ranked_buffer_candidates",
+           &dreamplace::IncrementalSizingEngine::evaluateRankedBufferCandidates,
+           py::arg("candidates"),
+           py::arg("policy"))
       .def("current_metrics",
            &dreamplace::IncrementalSizingEngine::currentMetrics);
 }

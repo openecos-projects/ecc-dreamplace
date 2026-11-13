@@ -28,6 +28,8 @@ def prepare_terminal_request(owner, model, pos, *, iteration, refresh_geometry=T
             placedb=owner.placedb,
         )
         projection = None
+    elif cumulative_count == 0 and getattr(owner, "direct_commit_enabled", False):
+        projection = None
     elif candidate_mode:
         # Rebuild the live candidate geometry before final projection so
         # no coordinate from an earlier placement generation is committed.
@@ -104,6 +106,7 @@ def prepare_terminal_request(owner, model, pos, *, iteration, refresh_geometry=T
     model._timing_geometry_cache = None
     owner.terminal_summary = {
         "virtual_count": cumulative_count,
+        "direct_committed_count": int(getattr(owner, "committed_buffer_count", 0) or 0),
         "scale_factor": float(owner.params.scale_factor),
         "dbu": float(owner.placedb.dbu),
         "gp_timing": gp_timing,

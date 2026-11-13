@@ -18,8 +18,13 @@ from dreamplace.flows.candidate_refresh import (
     refresh_owner_candidate_geometry_after_topology,
     refresh_topology_if_needed,
 )
+from dreamplace.flows.direct_buffer_commit import (
+    clear_virtual_buffer_state,
+    project_window_buffer_request,
+)
 from dreamplace.flows.discrete_timing_common import (
     segment_counts,
+    sync_owner_native_sizing,
     timing_area_fits,
     timing_electrical_window,
     timing_sizing_action_mask,
@@ -127,6 +132,10 @@ class InflationS5B1:
         self.topology_refresh_count = 0
         self.topology_refresh_reuse_count = 0
         self.last_topology_refresh_state = {}
+        self.direct_commit_enabled = False
+        self.committed_buffer_count = 0
+        self.committed_buffer_records = []
+        self._pending_window_commit_request = None
         # The native write-back path consumes this geometry even when
         # routability inflation is disabled and no sizing window ran.
         if not hasattr(data, "original_node_size_x"):
@@ -381,7 +390,20 @@ class InflationS5B1:
         self.round_index += len(result.get("rounds", ()) or ())
         return result
 
-    def _buffering(self, model, pos, capacity):
+    def _buffering(self, model, pos, capacity, *, geometry=None):
+        from dreamplace.flows.incremental_buffering_filter import IncrementalBufferingGate
+
+        data = getattr(self, "data", None)
+        placedb = getattr(self, "placedb", None)
+        if (
+            geometry is None
+            and hasattr(data, "node_size_x")
+            and hasattr(placedb, "num_movable_nodes")
+        ):
+            geometry = SizingWindowGeometry(data, placedb, pos)
+        incremental_gate = IncrementalBufferingGate(
+            self, model, pos, geometry, capacity, lane=self.lane
+        )
         state = self.lane._current_state()
         if hasattr(state, "activation_param"):
             from dreamplace.ops.buffer_insertion.discrete_candidate_buffer_runner import (
@@ -389,18 +411,26 @@ class InflationS5B1:
             )
 
             activation_before = state.activation_param.detach().clone()
+            scheduler_kwargs = (
+                {"incremental_gate": incremental_gate}
+                if incremental_gate.check_available() is None
+                else {}
+            )
             try:
                 loop_summary = run_discrete_candidate_buffer_scheduler(
                     lane=self.lane,
                     model=model,
                     rounds=int(getattr(self.lane.config, "continuous_steps", 0)),
                     allow_existing_activation=True,
+                    **scheduler_kwargs,
                 )
             finally:
                 # Candidate timing is a window-local probe.  Leaving its
                 # large expanded provider enabled during ordinary GP makes
                 # every subsequent placement step pay for all candidate rows.
-                self.params.enable_relaxed_buffer_timing = False
+                params = getattr(self, "params", None)
+                if params is not None:
+                    params.enable_relaxed_buffer_timing = False
             count = int(state.activation_param.detach().sum().cpu().item())
             accepted_net_ids = accepted_candidate_net_ids(
                 activation_before,
@@ -410,7 +440,7 @@ class InflationS5B1:
             terminal = dict(loop_summary.terminal_metrics or {})
             from dreamplace.ops.buffer_insertion.buffering_lane import _tensor_digest
 
-            return {
+            result = {
                 "initial_loss": float(terminal.get("loss", 0.0)),
                 "final_loss": float(terminal.get("loss", 0.0)),
                 "scheduled": int(loop_summary.iterations),
@@ -426,6 +456,15 @@ class InflationS5B1:
                 "strategy": "discrete_net_gradient",
                 "best_restore": dict(loop_summary.best_restore or {}),
             }
+            incremental_rounds = [
+                record["incremental_commit"]
+                for record in getattr(loop_summary, "metrics_trace", ()) or ()
+                if record.get("incremental_commit") is not None
+            ]
+            if incremental_rounds:
+                result["incremental_commit"] = incremental_rounds[-1]
+                result["incremental_commit_rounds"] = incremental_rounds
+            return result
         before = state.z_param.detach().clone()
         state.z_param.requires_grad_(requires_grad=True)
         try:
@@ -444,23 +483,30 @@ class InflationS5B1:
             max_count=state.max_repeater_count,
             selection_fraction=float(self.params.buffering_route_b_selection_fraction),
         )
-        accepted, final = 0, initial
-        for count in transition_backtracking_sizes(transition.accepted_count):
-            trial = take_transition_prefix(transition, counts=before, selected_count=count)
+        filtered = incremental_gate.filter_segment_transition(state, before, transition)
+        incremental_report = None
+        if filtered is not None:
+            next_counts, accepted, final, incremental_report = filtered
             with torch.no_grad():
-                state.z_param.copy_(trial.next_counts)
-            if not self._fits(model, capacity):
-                continue
-            with torch.no_grad():
-                actual = float(self._loss(model, pos))
-            if actual < initial:
-                accepted, final = count, actual
-                break
-        if not accepted:
-            with torch.no_grad():
-                state.z_param.copy_(before)
+                state.z_param.copy_(next_counts)
+        else:
+            accepted, final = 0, initial
+            for count in transition_backtracking_sizes(transition.accepted_count):
+                trial = take_transition_prefix(transition, counts=before, selected_count=count)
+                with torch.no_grad():
+                    state.z_param.copy_(trial.next_counts)
+                if not self._fits(model, capacity):
+                    continue
+                with torch.no_grad():
+                    actual = float(self._loss(model, pos))
+                if actual < initial:
+                    accepted, final = count, actual
+                    break
+            if not accepted:
+                with torch.no_grad():
+                    state.z_param.copy_(before)
         model._timing_geometry_cache = None
-        return {
+        result = {
             "initial_loss": initial,
             "final_loss": final,
             "scheduled": transition.accepted_count,
@@ -468,9 +514,12 @@ class InflationS5B1:
             "gradient_norm": float(gradient.norm()),
             "cumulative_count": int(state.z_param.detach().sum()),
         }
+        if incremental_report is not None:
+            result["incremental_commit"] = incremental_report
+        return result
 
-    def run_buffering(self, model, pos, capacity):
-        return self._buffering(model, pos, capacity)
+    def run_buffering(self, model, pos, capacity, *, geometry=None):
+        return self._buffering(model, pos, capacity, geometry=geometry)
 
     def _retain_buffered_nets(self, model):
         """Ordinary GP carries only buffered trees; B gets fresh full candidates."""
@@ -588,7 +637,22 @@ class InflationS5B1:
                 with self.electrical_window():
                     buffering = self.run_buffering(model, pos, entry.capacity)
                 buffering_done = time.perf_counter()
-                self.retain_buffered_nets(model)
+                if getattr(self, "direct_commit_enabled", False):
+                    accepted_count = int(buffering.get("accepted", 0) or 0)
+                    buffering["cumulative_count"] = (
+                        int(getattr(self, "committed_buffer_count", 0)) + accepted_count
+                    )
+                    if accepted_count > 0:
+                        self._pending_window_commit_request = project_window_buffer_request(
+                            self,
+                            model,
+                            pos,
+                            iteration=int(iteration),
+                            reason=f"inflation_s5b1_window_{self.window_count}",
+                        )
+                    clear_virtual_buffer_state(self, model)
+                else:
+                    self.retain_buffered_nets(model)
                 preparation_ms = (prepared - sizing_done) * 1000.0
                 buffering_ms = (buffering_done - prepared) * 1000.0
         return {
@@ -602,39 +666,7 @@ class InflationS5B1:
         }
 
     def _sync_native_sizing(self):
-        from dreamplace.ops.placeio_ecc.place_io import PlaceIOFunction
-        from dreamplace.ops.placeio_ecc.timing_carrier import (
-            apply_inplace_carrier_sizing,
-        )
-        from dreamplace.ops.routability.gpugr_context import invalidate_route_state
-
-        if str(self.params.place_io_engine) != "ecc":
-            raise ValueError("inflation S5B1 requires the ECC native backend")
-        targets = self.data.inst_cell_id.detach().cpu()
-        changed_ids = torch.nonzero(targets != self.native_cell_ids).flatten().tolist()
-        changed = len(changed_ids)
-        if not changed:
-            return {"ok": True, "accepted_count": 0, "requested_count": 0}
-        names = [
-            name.decode() if isinstance(name, bytes) else str(name)
-            for name in self.placedb.flat_libcell_names
-        ]
-        summary = PlaceIOFunction.apply_sizing(
-            self.placedb.rawdb,
-            targets.numpy(),
-            names,
-            current_cell_ids=self.native_cell_ids.numpy(),
-        )
-        if not summary.get("ok") or int(summary.get("accepted_count", 0)) != changed:
-            raise RuntimeError(f"S5B1 native sizing transaction failed: {summary}")
-        resizes = [
-            {"node_id": int(node_id), "target_cell_index": int(targets[node_id])}
-            for node_id in changed_ids
-        ]
-        apply_inplace_carrier_sizing(self.placedb.rawdb, resizes)
-        self.native_cell_ids.copy_(targets)
-        invalidate_route_state(self.placedb)
-        return summary
+        return sync_owner_native_sizing(self)
 
     def sync_native_sizing(self):
         return self._sync_native_sizing()
@@ -659,6 +691,8 @@ class InflationS5B1:
                 build_buffering_config_from_params(self.params, flow_kind="placement"),
                 placedb=self.placedb,
             )
+            projection = None
+        elif cumulative_count == 0 and getattr(self, "direct_commit_enabled", False):
             projection = None
         elif candidate_mode:
             projection = self.lane.last_projection_result
@@ -733,6 +767,7 @@ class InflationS5B1:
         model._timing_geometry_cache = None
         self.terminal_summary = {
             "virtual_count": cumulative_count,
+            "direct_committed_count": int(getattr(self, "committed_buffer_count", 0) or 0),
             "scale_factor": float(self.params.scale_factor),
             "dbu": float(self.placedb.dbu),
             "gp_timing": gp_timing,

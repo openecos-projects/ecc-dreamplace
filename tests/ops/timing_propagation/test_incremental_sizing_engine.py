@@ -344,3 +344,221 @@ def test_sync_state_matches_fresh_engine_under_smooth_aggregation_and_drv():
         + 0.001 * 1000.0 * 2.0
     )
     assert rep_synced["initial_loss"] == pytest.approx(expected_loss)
+
+
+def _build_capture_check_fixture(*, cap_cell_id=1):
+    """Build DRV -> capture-FF fixture with equal pin caps and swapped Setup/Hold check order."""
+    setup_meta = {1: (1, 0), 2: (4, 1), 3: (6, 1)}
+    lut_row, arc_offset = setup_meta[cap_cell_id]
+
+    delay_lut = _lut_bundle(
+        values=[[20.0]] + [[0.0]] * 6,
+        trans=[[0.0]] * 7,
+        caps=[[0.0]] * 7,
+        trans_dims=[1] * 7,
+        cap_dims=[1] * 7,
+    )
+    slew_lut = _lut_bundle(
+        values=[[0.2]] + [[0.0]] * 6,
+        trans=[[0.0]] * 7,
+        caps=[[0.0]] * 7,
+        trans_dims=[1] * 7,
+        cap_dims=[1] * 7,
+    )
+    check_lut = _lut_bundle(
+        values=[
+            [0.0],   # row 0: unused combinational row
+            [5.0],   # row 1: DFF_RVT setup (arc offset 0)
+            [99.0],  # row 2: DFF_RVT hold  (arc offset 1)
+            [88.0],  # row 3: DFF_HVT hold  (arc offset 0, intentionally before setup)
+            [9.0],   # row 4: DFF_HVT setup (arc offset 1, +4 ps slower)
+            [77.0],  # row 5: DFF_LVT hold  (arc offset 0, intentionally before setup)
+            [2.0],   # row 6: DFF_LVT setup (arc offset 1, -3 ps faster)
+        ],
+        trans=[[0.0]] * 7,
+        caps=[[0.0]] * 7,
+        trans_dims=[1] * 7,
+        cap_dims=[1] * 7,
+    )
+    luts = [delay_lut, delay_lut, slew_lut, slew_lut, check_lut, check_lut]
+
+    lib_caps = np.array(
+        [
+            0.001, 0.0,
+            0.002, 0.002, 0.0,
+            0.002, 0.002, 0.0,
+            0.002, 0.002, 0.0,
+        ],
+        dtype=np.float64,
+    )
+    pin_cap_base = np.array(
+        [0.0, 0.0, 0.001, 0.0, 0.002, 0.002, 0.0], dtype=np.float64
+    )
+    cell_arcs = np.array([[2, 3, 0, 0, 1, 0, 0, 0]], dtype=np.int64)
+    check_arcs = np.array(
+        [[4, 5, cap_cell_id, lut_row, 1, 1, 1, arc_offset]], dtype=np.int64
+    )
+    flat_libarc_info = np.array(
+        [
+            [0, 1, 0, 0, 1, 0],
+            [0, 1, 1, 1, 1, 1],
+            [0, 1, 1, 2, 1, 1],
+            [0, 1, 2, 3, 1, 1],
+            [0, 1, 2, 4, 1, 1],
+            [0, 1, 3, 5, 1, 1],
+            [0, 1, 3, 6, 1, 1],
+        ],
+        dtype=np.int64,
+    )
+    flat_libarc_check_types = np.array([0, 1, 2, 2, 1, 2, 1], dtype=np.int64)
+
+    arrays = {
+        "state_pin": np.arange(7, dtype=np.int32),
+        "state_slew_group": np.arange(7, dtype=np.int32),
+        "state_level": np.array([0, 0, 1, 2, 1, 3, 0], dtype=np.int32),
+        "state_valid": np.ones((7, 2), dtype=bool),
+        "state_seed": np.array(
+            [[True, True], [True, True]] + [[False, False]] * 5, dtype=bool
+        ),
+        "state_reference": np.array(
+            [[0.0, 0.0, 0.1, 0.1], [0.0, 0.0, 0.1, 0.1]]
+            + [[-2e8, -2e8, 0.0, 0.0]] * 5,
+            dtype=np.float64,
+        ),
+        "net_edges": np.array([[0, 0, 2], [1, 1, 4], [2, 3, 5]], dtype=np.int64),
+        "net_threshold_adjustments": np.tile(
+            np.array([[0.0, 0.0, 1.0, 1.0]], dtype=np.float64), (3, 1)
+        ),
+        "cell_edges": np.array([[0, 2, 3]], dtype=np.int64),
+        "slew_only_cell_edges": np.empty((0, 3), dtype=np.int64),
+        "check_index": np.array([[5, 0, 0, 0, -1, 0, 1]], dtype=np.int64),
+        "check_values": np.array([[23.0, -1.0, 0.1, 0.0]], dtype=np.float64),
+    }
+    add_transition_masks(arrays, cell_arcs)
+
+    config = {
+        "num_pins": 7,
+        "num_nets": 4,
+        "num_instances": 2,
+        "num_cells": 4,
+        "aggregation_mode": "hard",
+        "aggregation_tau_ps": 2.0,
+        "pairwise_smooth": False,
+        "pairwise_alpha": 20.0,
+        "slew_epsilon": 1e-8,
+        "pin2node_map": np.array([-1, -1, 0, 0, 1, 1, 1], dtype=np.int32),
+        "pin2net_map": np.array([0, 1, 0, 2, 1, 2, 3], dtype=np.int32),
+        "pin_2_libpin_offset": np.array([-1, -1, 0, 1, 0, 1, 2], dtype=np.int32),
+        "inst_cell_id": np.array([0, cap_cell_id], dtype=np.int32),
+        "cell_id_2_arc_id_start": np.array([0, 1, 3, 5, 7], dtype=np.int64),
+        "cell_id_2_libpin_id_start": np.array([0, 2, 5, 8, 11], dtype=np.int64),
+        "flat_libarc_info": flat_libarc_info,
+        "flat_libarc_check_types": flat_libarc_check_types,
+        "flat_lib_pin_cap": lib_caps,
+        "flat_lib_pin_rcap": lib_caps,
+        "flat_lib_pin_fcap": lib_caps,
+        "flat_lib_pin_slew_limit": np.full(11, 10.0, dtype=np.float64),
+        "flat_lib_pin_cap_limit": np.full(11, 0.05, dtype=np.float64),
+        "pin_cap_base": pin_cap_base,
+        "pin_rcap_base": pin_cap_base,
+        "pin_fcap_base": pin_cap_base,
+        "pin_slew_limit": np.full(7, 10.0, dtype=np.float64),
+        "pin_cap_limit": np.full(7, 0.05, dtype=np.float64),
+        "luts": luts,
+        "cell_arcs": cell_arcs,
+        "cell_level_start": np.array([0, 0, 1], dtype=np.int64),
+        "setup_arcs": np.zeros((0, 8), dtype=np.int64),
+        "check_arcs": check_arcs,
+        "rc_forest": {
+            "wire_cap": np.zeros(7, dtype=np.float64),
+            "incoming_resistance": np.zeros(7, dtype=np.float64),
+            "parent": np.array([-1, -1, 0, -1, 1, 3, -1], dtype=np.int32),
+            "child_start": np.array([0, 1, 2, 2, 3, 3, 3, 3], dtype=np.int32),
+            "children": np.array([2, 4, 5], dtype=np.int32),
+            "topo": np.array([0, 2, 1, 4, 3, 5, 6], dtype=np.int32),
+            "topo_start": np.array([0, 2, 4, 6, 7], dtype=np.int32),
+            "tree_by_net": np.array([0, 1, 2, 3], dtype=np.int32),
+            "pin_to_vertex": np.arange(7, dtype=np.int32),
+        },
+        "sparse_mode": True,
+        "sparse": {
+            **arrays,
+            "legal_checks": np.array([1], dtype=np.uint8),
+        },
+    }
+    policy = {
+        "wns_coeff": 0.01,
+        "tns_coeff": 1.0,
+        "timing_weight": 1.0,
+        "slew_weight": 1.0,
+        "cap_weight": 1.0,
+        "leakage_weight": 0.0,
+        "loss_tolerance": 0.0,
+        "slew_pin_mask": np.array([0, 0, 1, 1, 1, 1, 1], dtype=np.uint8),
+        "cap_pin_mask": np.array([0, 0, 0, 1, 0, 0, 1], dtype=np.uint8),
+        "cell_width": np.ones(4, dtype=np.float64),
+        "cell_height": np.ones(4, dtype=np.float64),
+        "cell_leakage": np.zeros(4, dtype=np.float64),
+        "padding_x": 0.0,
+        "num_movable_nodes": 2,
+        "virtual_area": 0.0,
+        "capacity": 20.0,
+        "inflated_mask": np.zeros(2, dtype=np.uint8),
+        "inflated_width": np.zeros(2, dtype=np.float64),
+        "inflated_height": np.zeros(2, dtype=np.float64),
+    }
+    return config, policy
+
+
+def test_capture_register_check_arcs_update_on_vt_swap_and_rollback_cleanly():
+    """Equal-cap VT swaps on capture FFs must update check_arcs_ and recompute endpoint slack."""
+    config, policy = _build_capture_check_fixture(cap_cell_id=1)
+    engine = timing_propagation_cpp.IncrementalSizingEngine(config)
+
+    assert engine.current_metrics() == {
+        "wns_ps": pytest.approx(-2.0),
+        "tns_ps": pytest.approx(-2.0),
+        "endpoint_count": 1,
+    }
+
+    # Candidate #1 slows capture FF to HVT (setup 5 -> 9 ps, slack -2 -> -6 ps, zero arrival/slew
+    # delta): rejected and rolled back. Candidate #2 speeds capture FF to LVT (setup 5 -> 2 ps,
+    # slack -2 -> +1 ps): accepted without cross-mapping onto Hold check arcs.
+    report = dict(engine.evaluate_ranked_candidates([1, 1], [2, 3], policy))
+    assert {
+        key: report[key]
+        for key in (
+            "status",
+            "evaluated_count",
+            "accepted_count",
+            "rejected_loss_count",
+            "accepted_instance_ids",
+            "accepted_cell_ids",
+        )
+    } == {
+        "status": "ok",
+        "evaluated_count": 2,
+        "accepted_count": 1,
+        "rejected_loss_count": 1,
+        "accepted_instance_ids": [1],
+        "accepted_cell_ids": [3],
+    }
+    assert report["initial_loss"] == pytest.approx(2.02)
+    assert report["final_loss"] == pytest.approx(0.0)
+    assert engine.current_metrics() == {
+        "wns_ps": pytest.approx(0.0),
+        "tns_ps": pytest.approx(0.0),
+        "endpoint_count": 1,
+    }
+
+    # Verify sync_state to HVT also remaps check_arcs_ identically to a fresh engine build.
+    engine.sync_state(np.array([0, 2], dtype=np.int64))
+    fresh_hvt_cfg, _ = _build_capture_check_fixture(cap_cell_id=2)
+    fresh_hvt = timing_propagation_cpp.IncrementalSizingEngine(fresh_hvt_cfg)
+    assert engine.current_metrics() == fresh_hvt.current_metrics()
+    assert engine.current_metrics() == {
+        "wns_ps": pytest.approx(-6.0),
+        "tns_ps": pytest.approx(-6.0),
+        "endpoint_count": 1,
+    }
+

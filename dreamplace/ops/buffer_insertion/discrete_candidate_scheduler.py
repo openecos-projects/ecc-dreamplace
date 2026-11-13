@@ -114,6 +114,7 @@ def schedule_candidate_gradient_actions(
     activations,
     raw_grad,
     selection_fraction=1.0 / ROUTE_B_AFFECTED_NETS_PER_ACTION,
+    allowed_candidates=None,
 ):
     """Select one positive inactive candidate per ranked net for one round."""
     _validate_inputs(
@@ -146,6 +147,12 @@ def schedule_candidate_gradient_actions(
 
     predicted_improvement = -raw_grad.detach()
     eligible_candidate = activations.detach() == 0.0
+    if allowed_candidates is not None:
+        if allowed_candidates.shape != activations.shape:
+            raise ValueError("allowed_candidates must match activation shape")
+        eligible_candidate = eligible_candidate & allowed_candidates.to(
+            device=device, dtype=torch.bool
+        )
     candidate_score = torch.where(
         eligible_candidate,
         predicted_improvement,

@@ -378,7 +378,12 @@ def update_discrete_candidate_scheduler_trace_commit(trace_path, commit):
 
 
 def _run_discrete_candidate_buffer_scheduler_impl(
-    *, lane, model, rounds, allow_existing_activation=False
+    *,
+    lane,
+    model,
+    rounds,
+    allow_existing_activation=False,
+    incremental_gate=None,
 ):
     """Run Candidate Route-B on one frozen full-design candidate topology."""
     rounds = int(rounds)
@@ -387,6 +392,16 @@ def _run_discrete_candidate_buffer_scheduler_impl(
     state = _assert_candidate_state(
         lane,
         require_zero=not bool(allow_existing_activation),
+    )
+    preexisting_virtual_count = int(
+        state.activation_param.detach().sum().cpu().item()
+    )
+    gate_active = (
+        incremental_gate is not None
+        and incremental_gate.check_available(
+            preexisting_virtual_count=preexisting_virtual_count
+        )
+        is None
     )
     selection_fraction = float(
         getattr(lane.config, "route_b_selection_fraction", 0.001)
@@ -473,25 +488,80 @@ def _run_discrete_candidate_buffer_scheduler_impl(
             )
             objective_grad_ms = (time.perf_counter() - gradient_started_at) * 1000.0
         scheduler_started_at = time.perf_counter()
-        if getattr(state, "is_typed_candidate", False):
-            transition = schedule_typed_candidate_gradient_actions(
+
+        def _schedule_once(raw_grad=raw_grad, gate_active=gate_active):
+            if getattr(state, "is_typed_candidate", False):
+                return schedule_typed_candidate_gradient_actions(
+                    candidate_net_index=state.candidate_net_index,
+                    net_ids=state.net_ids,
+                    candidate_ids=state.candidate_ids,
+                    activations=state.activation_param.detach(),
+                    raw_grad=raw_grad,
+                    selection_fraction=selection_fraction,
+                    allowed_actions=(
+                        incremental_gate.allowed_typed_actions(state)
+                        if gate_active
+                        else state.drive_type_allowed
+                    ),
+                )
+            return schedule_candidate_gradient_actions(
                 candidate_net_index=state.candidate_net_index,
                 net_ids=state.net_ids,
                 candidate_ids=state.candidate_ids,
                 activations=state.activation_param.detach(),
                 raw_grad=raw_grad,
                 selection_fraction=selection_fraction,
-                allowed_actions=state.drive_type_allowed,
+                allowed_candidates=(
+                    incremental_gate.allowed_untyped_candidates(state)
+                    if gate_active
+                    else None
+                ),
             )
-        else:
-            transition = schedule_candidate_gradient_actions(
-                candidate_net_index=state.candidate_net_index,
-                net_ids=state.net_ids,
-                candidate_ids=state.candidate_ids,
-                activations=state.activation_param.detach(),
-                raw_grad=raw_grad,
-                selection_fraction=selection_fraction,
+
+        transition = _schedule_once()
+        proposed_count = int(transition.accepted_count)
+        incremental_report = None
+        if incremental_gate is not None:
+            transition, incremental_report = (
+                incremental_gate.filter_candidate_transition(state, transition)
             )
+            if (
+                gate_active
+                and isinstance(incremental_report, dict)
+                and incremental_report.get("status") == "ok"
+            ):
+                tier_attempts = 1
+                total_evaluated = int(incremental_report.get("evaluated_count", 0))
+                total_input = int(incremental_report.get("input_count", 0))
+                total_rej_area = int(incremental_report.get("rejected_area_count", 0))
+                total_rej_loss = int(incremental_report.get("rejected_loss_count", 0))
+                while (
+                    proposed_count > 0
+                    and transition.accepted_count == 0
+                    and tier_attempts < 8
+                ):
+                    next_trial = _schedule_once()
+                    if next_trial.accepted_count == 0:
+                        break
+                    tier_attempts += 1
+                    transition, next_rep = (
+                        incremental_gate.filter_candidate_transition(state, next_trial)
+                    )
+                    if isinstance(next_rep, dict) and next_rep.get("status") == "ok":
+                        total_evaluated += int(next_rep.get("evaluated_count", 0))
+                        total_input += int(next_rep.get("input_count", 0))
+                        total_rej_area += int(next_rep.get("rejected_area_count", 0))
+                        total_rej_loss += int(next_rep.get("rejected_loss_count", 0))
+                        incremental_report = {
+                            **next_rep,
+                            "tier_attempts": tier_attempts,
+                            "input_count": total_input,
+                            "evaluated_count": total_evaluated,
+                            "rejected_area_count": total_rej_area,
+                            "rejected_loss_count": total_rej_loss,
+                        }
+            else:
+                gate_active = False
         scheduler_wall_ms = (time.perf_counter() - scheduler_started_at) * 1000.0
         next_activation = transition.next_activations.detach()
         active_count_after = int(
@@ -556,15 +626,23 @@ def _run_discrete_candidate_buffer_scheduler_impl(
                 transition.selected_predicted_improvements.sum().detach().cpu().item()
             ),
             "selected_rows": _selected_rows(state, transition),
+            **(
+                {}
+                if incremental_report is None
+                else {"incremental_commit": incremental_report}
+            ),
         }
         trace_rounds.append(record)
         iterations += 1
         if transition.accepted_count == 0:
-            terminal_reason = (
-                "all_candidates_active"
-                if transition.eligible_net_count == 0
-                else "no_positive_action"
-            )
+            if gate_active and proposed_count > 0:
+                terminal_reason = "incremental_gate_no_improving_action"
+            else:
+                terminal_reason = (
+                    "all_candidates_active"
+                    if transition.eligible_net_count == 0
+                    else "no_positive_action"
+                )
             break
         with torch.no_grad():
             state.activation_param.copy_(transition.next_activations)
@@ -589,7 +667,7 @@ def _run_discrete_candidate_buffer_scheduler_impl(
         -float(terminal_snapshot.get("wns") or 0.0),
         int(iterations),
     )
-    if terminal_key < best_key:
+    if gate_active or terminal_key < best_key:
         best_key = terminal_key
         best_score = float(terminal_snapshot["restore_score"])
         best_round = int(iterations)
@@ -789,7 +867,12 @@ def _release_candidate_python_state(lane):
 
 
 def run_discrete_candidate_buffer_scheduler(
-    *, lane, model, rounds, allow_existing_activation=False
+    *,
+    lane,
+    model,
+    rounds,
+    allow_existing_activation=False,
+    incremental_gate=None,
 ):
     try:
         with buffer_timing_fast_path(model):
@@ -798,6 +881,7 @@ def run_discrete_candidate_buffer_scheduler(
                 model=model,
                 rounds=rounds,
                 allow_existing_activation=allow_existing_activation,
+                incremental_gate=incremental_gate,
             )
     finally:
         _release_candidate_python_state(lane)

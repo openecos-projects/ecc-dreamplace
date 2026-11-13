@@ -19,6 +19,21 @@ def create_session(engine):
     if not resolve_flag(engine.params, "repair_buffering_midplace_enable"):
         if getattr(engine.params, "_midplace_objectives_pending", False):
             engine.params._midplace_objectives_pending = False
+        buffering_active = bool(
+            getattr(engine.params, "timing_opt_enabled", False)
+            and getattr(engine.params, "timing_opt_buffering_enabled", False)
+        ) or (
+            str(getattr(engine.params, "joint_quality_profile", "") or "")
+            == "discrete_alternating_sizing_buffering_v1"
+        )
+        if buffering_active:
+            from dreamplace.flows.direct_buffer_commit import (
+                DirectBufferCommitSession,
+                supports_direct_buffer_commit,
+            )
+
+            if supports_direct_buffer_commit(engine.params, engine.placedb):
+                return DirectBufferCommitSession(engine)
         return None
     from dreamplace.flows.midplace_repair import MidplaceRepairSession
 

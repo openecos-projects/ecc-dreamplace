@@ -6,6 +6,7 @@ from time import perf_counter
 import numpy as np
 import torch
 
+from dreamplace.flows.discrete_timing_common import parse_enabled_flag
 from dreamplace.ops.discrete_gradient_topk.discrete_gradient_topk import sizes_to_logits
 from dreamplace.ops.discrete_gradient_topk.quad_gradient_topk import (
     ACTION_NAMES,
@@ -32,28 +33,14 @@ def _contiguous_np(value, dtype):
     return np.ascontiguousarray(_cpu_np(value, dtype), dtype=dtype)
 
 
-def _is_enabled(params):
-    raw = getattr(params, "timing_sizing_incremental_commit", 1)
-    if raw is None:
-        return True
-    if isinstance(raw, str):
-        return raw.strip().lower() not in ("", "0", "false", "no", "off")
-    return bool(int(raw))
-
-
-def _skip_reason(owner, model):
-    params = owner.params
-    if not _is_enabled(params):
-        return "disabled"
+def common_incremental_sta_skip_reason(params, model) -> str | None:
+    """Check runtime prerequisites shared by incremental sizing and buffering gates."""
     hold_obj = getattr(model, "hold_objective", None)
     if hold_obj is not None and (
         float(getattr(hold_obj, "wns", 0.0) or 0.0) > 0.0
         or float(getattr(hold_obj, "tns", 0.0) or 0.0) > 0.0
     ):
         return "hold_objective_active"
-    relaxed_fn = getattr(model, "_relaxed_buffer_timing_enabled", None)
-    if callable(relaxed_fn) and bool(relaxed_fn()):
-        return "relaxed_buffer_timing_active"
     if str(getattr(params, "critical_endpoint_pruning_mode", "off") or "off") != "off":
         return "critical_endpoint_pruning_active"
     op_collections = getattr(model, "op_collections", None)
@@ -65,6 +52,16 @@ def _skip_reason(owner, model):
     if timing_op is None or getattr(timing_op, "arcs_info", None) is None:
         return "timing_propagation_unavailable"
     return None
+
+
+def _skip_reason(owner, model):
+    params = owner.params
+    if not parse_enabled_flag(params, "timing_sizing_incremental_commit", default=True):
+        return "disabled"
+    relaxed_fn = getattr(model, "_relaxed_buffer_timing_enabled", None)
+    if callable(relaxed_fn) and bool(relaxed_fn()):
+        return "relaxed_buffer_timing_active"
+    return common_incremental_sta_skip_reason(params, model)
 
 
 def _build_rc_forest_payload(owner, model, pos, num_pins, num_nets):
@@ -131,9 +128,14 @@ def _build_rc_forest_payload(owner, model, pos, num_pins, num_nets):
             new_x.numel(), dtype=torch.float64, device=edge_res.device
         )
         flat_res.scatter_(0, to_idx, edge_res)
+        flat_edge_cap = torch.zeros(
+            new_x.numel(), dtype=torch.float64, device=edge_cap.device
+        )
+        flat_edge_cap.scatter_(0, to_idx, edge_cap)
 
     wire_cap = _contiguous_np(net_caps, np.float64)
     incoming_res = _contiguous_np(flat_res, np.float64)
+    incoming_wire_cap = _contiguous_np(flat_edge_cap, np.float64)
     pin_fa_sig = (int(data.pin_fa.data_ptr()), int(data.pin_fa._version))
     key = (
         "placement",
@@ -146,6 +148,7 @@ def _build_rc_forest_payload(owner, model, pos, num_pins, num_nets):
     payload = {
         "wire_cap": wire_cap,
         "incoming_resistance": incoming_res,
+        "incoming_wire_cap": incoming_wire_cap,
         "parent": _contiguous_np(data.pin_fa, np.int32),
         "child_start": _contiguous_np(data.flat_pin_to_start, np.int32),
         "children": _contiguous_np(data.flat_pin_to, np.int32),
@@ -155,6 +158,45 @@ def _build_rc_forest_payload(owner, model, pos, num_pins, num_nets):
         "pin_to_vertex": np.arange(num_pins, dtype=np.int32),
     }
     return key, payload, wire_cap, incoming_res
+
+
+def _decode_lib_name(val) -> str:
+    if isinstance(val, (bytes, np.bytes_)):
+        return val.decode("utf-8", errors="replace")
+    return str(val)
+
+
+def _compute_lib_arc_pin_offsets(placedb, data):
+    arc_names = getattr(placedb, "flat_libarc_names", None)
+    pin_names = getattr(placedb, "flat_lib_pin_names", None)
+    if arc_names is None or pin_names is None:
+        return None
+    arc_names_np = np.asarray(arc_names)
+    pin_names_np = np.asarray(pin_names)
+    if arc_names_np.ndim != 2 or arc_names_np.shape[1] < 2:
+        return None
+    cache_key = (int(arc_names_np.shape[0]), int(pin_names_np.shape[0]))
+    cached = getattr(placedb, "_cached_lib_arc_pin_offsets", None)
+    if cached is not None and cached[0] == cache_key:
+        return cached[1]
+
+    arc_start = _contiguous_np(data.cell_id_2_arc_id_start, np.int64)
+    pin_start = _contiguous_np(data.cell_id_2_libpin_id_start, np.int64)
+    num_cells = len(arc_start) - 1
+    offsets = np.full((int(arc_names_np.shape[0]), 2), -1, dtype=np.int64)
+    for cell in range(num_cells):
+        a0, a1 = int(arc_start[cell]), int(arc_start[cell + 1])
+        if a0 >= a1:
+            continue
+        p0, p1 = int(pin_start[cell]), int(pin_start[cell + 1])
+        pin_map = {
+            _decode_lib_name(pin_names_np[p]): p - p0 for p in range(p0, p1)
+        }
+        for a in range(a0, a1):
+            offsets[a, 0] = pin_map.get(_decode_lib_name(arc_names_np[a, 0]), -1)
+            offsets[a, 1] = pin_map.get(_decode_lib_name(arc_names_np[a, 1]), -1)
+    placedb._cached_lib_arc_pin_offsets = (cache_key, offsets)
+    return offsets
 
 
 def _build_engine_config(owner, model, rc_payload):
@@ -243,6 +285,13 @@ def _build_engine_config(owner, model, rc_payload):
             data.cell_id_2_libpin_id_start, np.int64
         ),
         "flat_libarc_info": _contiguous_np(data.flat_libarc_info, np.int64),
+        "flat_libarc_check_types": (
+            None
+            if getattr(data, "flat_libarc_check_types", None) is None
+            else _contiguous_np(data.flat_libarc_check_types, np.int64)
+        ),
+        "lib_arc_pin_offsets": _compute_lib_arc_pin_offsets(owner.placedb, data),
+        "net_driver_pin": _contiguous_np(timing.net2driver_pin_map, np.int32),
         "flat_lib_pin_cap": _contiguous_np(data.flat_lib_pin_cap, np.float64),
         "flat_lib_pin_rcap": _contiguous_np(data.flat_lib_pin_rcap, np.float64),
         "flat_lib_pin_fcap": _contiguous_np(data.flat_lib_pin_fcap, np.float64),
@@ -294,6 +343,16 @@ def _build_engine_config(owner, model, rc_payload):
             "state_valid": np.ascontiguousarray(arrays["state_valid"], dtype=bool),
             "state_seed": np.ascontiguousarray(arrays["state_seed"], dtype=bool),
             "state_reference": _contiguous_np(arrays["state_reference"], np.float64),
+            "state_source_type": (
+                None
+                if "state_source_type" not in arrays
+                else _contiguous_np(arrays["state_source_type"], np.int32)
+            ),
+            "state_role": (
+                None
+                if "state_role" not in arrays
+                else _contiguous_np(arrays["state_role"], np.int32)
+            ),
             "cell_edges": _contiguous_np(arrays["cell_edges"], np.int64),
             "cell_transition_mask": _contiguous_np(
                 arrays["cell_transition_mask"], np.int64

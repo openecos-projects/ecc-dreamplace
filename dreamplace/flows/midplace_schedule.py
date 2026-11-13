@@ -33,6 +33,12 @@ class MidplaceSchedule:
     use_l_shape_routability: bool = False
     l_shape_state: dict = field(default_factory=dict)
     inflated_movable_sizes: dict[str, tuple[float, float]] = field(default_factory=dict)
+    oscillation_snapshot: dict | None = None
+    committed_buffer_count: int = 0
+    committed_buffer_records: list = field(default_factory=list)
+    alternating_completed_rounds: int = 0
+    alternating_placement_step_count: int = 0
+    alternating_trace: list = field(default_factory=list)
 
     def capture(
         self,
@@ -46,11 +52,29 @@ class MidplaceSchedule:
         cursor=None,
         metric=None,
     ):
+        alternating = getattr(placer, "alternating_discrete", None)
         owner = getattr(placer, "inflation_s5b1", None)
+        if owner is None and alternating is not None:
+            owner = getattr(alternating, "owner", None)
         if owner is not None:
             self.timing = copy.deepcopy(owner.schedule)
             self.timing_round = owner.round_index
             self.timing_summaries = copy.deepcopy(owner.summaries)
+            osc = getattr(owner, "oscillation", None)
+            if osc is not None and callable(getattr(osc, "snapshot", None)):
+                self.oscillation_snapshot = copy.deepcopy(osc.snapshot())
+            self.committed_buffer_count = int(
+                getattr(owner, "committed_buffer_count", 0) or 0
+            )
+            self.committed_buffer_records = copy.deepcopy(
+                list(getattr(owner, "committed_buffer_records", ()) or ())
+            )
+        if alternating is not None:
+            self.alternating_completed_rounds = int(alternating.completed_rounds)
+            self.alternating_placement_step_count = int(
+                alternating.placement_step_count
+            )
+            self.alternating_trace = copy.deepcopy(list(alternating.trace))
         dc = getattr(placer, "data_collections", None)
         placedb = getattr(placer, "placedb", None)
         if (
@@ -238,19 +262,29 @@ class MidplaceSchedule:
         self.restore_l_shape_state(model, params)
 
     def restore(self, owner, controller):
-        if self.timing is not None:
-            if owner is None:
-                raise RuntimeError("midplace lost its S5B1 owner during runtime reconstruction")
-            owner.schedule = copy.deepcopy(self.timing)
-            owner.milestones = owner.schedule.milestones
-            owner.pending_milestones = owner.schedule.pending_milestones
-            owner.window_count = owner.schedule.window_count
-            owner.round_index = self.timing_round
-            owner.summaries = copy.deepcopy(self.timing_summaries)
-            if callable(getattr(owner, "_write_summaries", None)) and owner.summaries:
-                owner._write_summaries()
-            if owner.lane is not None:
+        if self.timing is not None and owner is not None:
+            target = getattr(owner, "owner", owner)
+            target.schedule = copy.deepcopy(self.timing)
+            target.milestones = target.schedule.milestones
+            target.pending_milestones = target.schedule.pending_milestones
+            target.window_count = target.schedule.window_count
+            target.round_index = self.timing_round
+            target.summaries = copy.deepcopy(self.timing_summaries)
+            if self.oscillation_snapshot is not None and hasattr(target, "oscillation"):
+                target.oscillation.restore(copy.deepcopy(self.oscillation_snapshot))
+            target.committed_buffer_count = int(self.committed_buffer_count)
+            target.committed_buffer_records = copy.deepcopy(
+                self.committed_buffer_records
+            )
+            if callable(getattr(target, "_write_summaries", None)) and target.summaries:
+                target._write_summaries()
+            if target.lane is not None:
                 raise RuntimeError("fresh S5B1 owner unexpectedly retained virtual topology")
+        elif self.timing is not None and owner is None:
+            # AlternatingDiscreteController is constructed later in NonLinearPlace.__call__;
+            # bind_alternating_controller restores it via restore_alternating().
+            if not self.alternating_trace and self.alternating_completed_rounds == 0:
+                raise RuntimeError("midplace lost its S5B1 owner during runtime reconstruction")
         controller._gp_steps = self.gp_steps
         controller._last_inflation_step = self.last_inflation_step
         return {
@@ -264,6 +298,27 @@ class MidplaceSchedule:
             "gp_steps_completed": self.gp_steps,
             "inflated_movable_nodes_captured": len(self.inflated_movable_sizes),
         }
+
+    def restore_alternating(self, alternating):
+        if alternating is None:
+            return
+        owner = alternating.owner
+        if self.timing is not None:
+            owner.schedule = copy.deepcopy(self.timing)
+            owner.milestones = owner.schedule.milestones
+            owner.pending_milestones = owner.schedule.pending_milestones
+            owner.window_count = owner.schedule.window_count
+            owner.round_index = self.timing_round
+            owner.summaries = copy.deepcopy(self.timing_summaries)
+        if self.oscillation_snapshot is not None and hasattr(owner, "oscillation"):
+            owner.oscillation.restore(copy.deepcopy(self.oscillation_snapshot))
+        owner.committed_buffer_count = int(self.committed_buffer_count)
+        owner.committed_buffer_records = copy.deepcopy(self.committed_buffer_records)
+        alternating.completed_rounds = int(self.alternating_completed_rounds)
+        alternating.placement_step_count = int(self.alternating_placement_step_count)
+        alternating.trace = copy.deepcopy(self.alternating_trace)
+        if alternating.trace:
+            alternating.last_result = alternating.trace[-1]
 
     def restore_inflated_geometry(self, placer, placedb, cooptimization=None):
         if not self.inflated_movable_sizes:

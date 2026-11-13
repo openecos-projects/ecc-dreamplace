@@ -14,6 +14,7 @@ from dreamplace.flows.candidate_refresh import (
 from dreamplace.flows.discrete_sizing_state import SizingState
 from dreamplace.flows.discrete_timing_common import (
     segment_counts,
+    sync_owner_native_sizing,
     timing_area_fits,
     timing_electrical_window,
     timing_sizing_action_mask,
@@ -100,6 +101,10 @@ class DiscreteTimingOwner:
         self._pending_dirty_instance_ids = set()
         self._pending_dirty_net_ids = set()
         self.last_candidate_dirty_net_summary = {}
+        self.direct_commit_enabled = False
+        self.committed_buffer_count = 0
+        self.committed_buffer_records = []
+        self._pending_window_commit_request = None
         # ``cooptimization_geometry`` is consumed by the native placement
         # write-back path even when routability inflation is disabled.  The
         # legacy PlaceDataCollection initializer only creates these snapshots
@@ -1710,7 +1715,21 @@ class DiscreteTimingOwner:
             "rounds": rounds,
         }
 
-    def run_buffering(self, model, pos, capacity):
+    def run_buffering(self, model, pos, capacity, *, geometry=None):
+        from dreamplace.flows.incremental_buffering_filter import IncrementalBufferingGate
+        from dreamplace.ops.routability.cooptimization_area import SizingWindowGeometry
+
+        data = getattr(self, "data", None)
+        placedb = getattr(self, "placedb", None)
+        if (
+            geometry is None
+            and hasattr(data, "node_size_x")
+            and hasattr(placedb, "num_movable_nodes")
+        ):
+            geometry = SizingWindowGeometry(data, placedb, pos)
+        incremental_gate = IncrementalBufferingGate(
+            self, model, pos, geometry, capacity, lane=self.lane
+        )
         self.lane.timing_loss = model._timing_loss
         state = self.lane._current_state()
         if hasattr(state, "activation_param"):
@@ -1722,12 +1741,18 @@ class DiscreteTimingOwner:
             activation_before = activation.detach().clone()
             requires_grad = activation.requires_grad
             activation.requires_grad_(requires_grad=True)
+            scheduler_kwargs = (
+                {"incremental_gate": incremental_gate}
+                if incremental_gate.check_available() is None
+                else {}
+            )
             try:
                 loop_summary = run_discrete_candidate_buffer_scheduler(
                     lane=self.lane,
                     model=model,
                     rounds=int(getattr(self.lane.config, "continuous_steps", 0)),
                     allow_existing_activation=True,
+                    **scheduler_kwargs,
                 )
             finally:
                 activation.requires_grad_(requires_grad)
@@ -1758,6 +1783,14 @@ class DiscreteTimingOwner:
                 "strategy": "discrete_net_gradient",
                 "best_restore": restore,
             }
+            incremental_rounds = [
+                record["incremental_commit"]
+                for record in getattr(loop_summary, "metrics_trace", ()) or ()
+                if record.get("incremental_commit") is not None
+            ]
+            if incremental_rounds:
+                result["incremental_commit"] = incremental_rounds[-1]
+                result["incremental_commit_rounds"] = incremental_rounds
             result["phase_metrics"] = {
                 "before": phase_metrics(restore.get("initial_snapshot")),
                 "after": phase_metrics(restore.get("best_snapshot")),
@@ -1782,26 +1815,33 @@ class DiscreteTimingOwner:
             max_count=state.max_repeater_count,
             selection_fraction=float(self.params.buffering_route_b_selection_fraction),
         )
-        accepted = 0
-        for count in transition_backtracking_sizes(transition.accepted_count):
-            trial = take_transition_prefix(transition, counts=before, selected_count=count)
+        filtered = incremental_gate.filter_segment_transition(state, before, transition)
+        incremental_report = None
+        if filtered is not None:
+            next_counts, accepted, _final_inc, incremental_report = filtered
             with torch.no_grad():
-                state.z_param.copy_(trial.next_counts)
-            if not self._fits(model, capacity):
-                continue
-            with torch.no_grad():
-                actual = float(self._loss(model, pos))
-            if actual < initial:
-                accepted = count
-                break
-        if not accepted:
-            with torch.no_grad():
-                state.z_param.copy_(before)
+                state.z_param.copy_(next_counts)
+        else:
+            accepted = 0
+            for count in transition_backtracking_sizes(transition.accepted_count):
+                trial = take_transition_prefix(transition, counts=before, selected_count=count)
+                with torch.no_grad():
+                    state.z_param.copy_(trial.next_counts)
+                if not self._fits(model, capacity):
+                    continue
+                with torch.no_grad():
+                    actual = float(self._loss(model, pos))
+                if actual < initial:
+                    accepted = count
+                    break
+            if not accepted:
+                with torch.no_grad():
+                    state.z_param.copy_(before)
         model._timing_geometry_cache = None
         with torch.no_grad():
             final_loss = self._loss(model, pos)
         final_objective = objective_snapshot(model, final_loss)
-        return {
+        result = {
             "initial_loss": initial,
             "final_loss": float(final_loss.detach()),
             "scheduled": transition.accepted_count,
@@ -1813,6 +1853,9 @@ class DiscreteTimingOwner:
                 "after": phase_metrics(final_objective),
             },
         }
+        if incremental_report is not None:
+            result["incremental_commit"] = incremental_report
+        return result
 
     def retain_buffered_nets(self, model):
         """Retain virtual segment or candidate timing state for ordinary GP."""
@@ -1908,30 +1951,7 @@ class DiscreteTimingOwner:
         model._virtual_cell_density_view = None
 
     def sync_native_sizing(self):
-        from dreamplace.ops.placeio_ecc.place_io import PlaceIOFunction
-        from dreamplace.ops.routability.gpugr_context import invalidate_route_state
-
-        if str(self.params.place_io_engine) != "ecc":
-            raise ValueError("inflation S5B1 requires the ECC native backend")
-        targets = self.data.inst_cell_id.detach().cpu()
-        changed = int((targets != self.native_cell_ids).sum())
-        if not changed:
-            return {"ok": True, "accepted_count": 0, "requested_count": 0}
-        names = [
-            name.decode() if isinstance(name, bytes) else str(name)
-            for name in self.placedb.flat_libcell_names
-        ]
-        summary = PlaceIOFunction.apply_sizing(
-            self.placedb.rawdb,
-            targets.numpy(),
-            names,
-            current_cell_ids=self.native_cell_ids.numpy(),
-        )
-        if not summary.get("ok") or int(summary.get("accepted_count", 0)) != changed:
-            raise RuntimeError(f"S5B1 native sizing transaction failed: {summary}")
-        self.native_cell_ids.copy_(targets)
-        invalidate_route_state(self.placedb)
-        return summary
+        return sync_owner_native_sizing(self)
 
     def prepare_terminal_request(self, model, pos, *, iteration, refresh_geometry=True):
         from dreamplace.flows.discrete_buffer_commit import prepare_terminal_request

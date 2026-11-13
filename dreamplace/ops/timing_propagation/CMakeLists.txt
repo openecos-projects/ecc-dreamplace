@@ -18,10 +18,12 @@ file(GLOB CPP_SOURCES
   src/timing_propagation_paths.cpp
   src/timing_kernels.cpp
   src/incremental_sizing_engine.cpp
+  src/incremental_buffering_engine.cpp
   src/timing_propagation_pybind.cpp
   )
 set_source_files_properties(
   src/incremental_sizing_engine.cpp
+  src/incremental_buffering_engine.cpp
   PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 add_pytorch_extension(${TARGET_NAME}_cpp 
   ${CPP_SOURCES}

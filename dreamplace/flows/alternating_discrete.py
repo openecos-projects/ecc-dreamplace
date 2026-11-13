@@ -8,6 +8,11 @@ from contextlib import contextmanager
 from copy import copy
 from dataclasses import dataclass, is_dataclass, replace
 
+from dreamplace.flows.candidate_refresh import refresh_topology_if_needed
+from dreamplace.flows.direct_buffer_commit import (
+    clear_virtual_buffer_state,
+    project_window_buffer_request,
+)
 from dreamplace.ops.buffer_insertion.candidate_density import install_candidate_density
 from dreamplace.ops.routability.cooptimization_area import SizingWindowGeometry
 
@@ -242,6 +247,28 @@ class AlternatingDiscreteController:
         return self.completed_rounds < self.outer_rounds and self.last_finalize_result is None
 
     @contextmanager
+    def _buffering_lane_config(self):
+        lane = self.owner.lane
+        if lane is None:
+            yield
+            return
+        previous_config = lane.config
+        if is_dataclass(previous_config):
+            lane.config = replace(
+                previous_config,
+                continuous_steps=self.buffering_rounds,
+                route_b_selection_fraction=self.buffering_fraction,
+            )
+        else:
+            lane.config = copy(previous_config)
+            lane.config.continuous_steps = self.buffering_rounds
+            lane.config.route_b_selection_fraction = self.buffering_fraction
+        try:
+            yield
+        finally:
+            lane.config = previous_config
+
+    @contextmanager
     def _profile_params(self):
         names = {
             "timing_opt_sizing_rounds": self.sizing_rounds,
@@ -250,34 +277,16 @@ class AlternatingDiscreteController:
         previous = {name: getattr(self.params, name, None) for name in names}
         for name, value in names.items():
             setattr(self.params, name, value)
-        self.params.enable_relaxed_buffer_timing = True
-        lane = self.owner.lane
-        previous_config = None
-        if lane is not None:
-            previous_config = lane.config
-            # BufferingConfig is frozen so the alternating controller must
-            # replace the phase configuration rather than mutate fields in
-            # place.  Restoring the original object also preserves all
-            # unrelated buffering defaults and explicit provenance.
-            if is_dataclass(previous_config):
-                lane.config = replace(
-                    previous_config,
-                    continuous_steps=self.buffering_rounds,
-                    route_b_selection_fraction=self.buffering_fraction,
-                )
-            else:
-                lane.config = copy(previous_config)
-                lane.config.continuous_steps = self.buffering_rounds
-                lane.config.route_b_selection_fraction = self.buffering_fraction
+        direct_commit = bool(getattr(self.owner, "direct_commit_enabled", False))
+        self.params.enable_relaxed_buffer_timing = not direct_commit
         try:
             yield
         finally:
             for name, value in previous.items():
                 setattr(self.params, name, value)
-            if self.owner.lane is not None:
-                self.params.enable_relaxed_buffer_timing = True
-            if lane is not None and previous_config is not None:
-                lane.config = previous_config
+            self.params.enable_relaxed_buffer_timing = bool(
+                self.owner.lane is not None and not direct_commit
+            )
 
     def _ensure_lane(self, model, pos):
         self.owner.prepare(model, pos)
@@ -292,8 +301,15 @@ class AlternatingDiscreteController:
         if self.completed_rounds >= self.outer_rounds:
             return None
         started_at = time.perf_counter()
-        self._ensure_lane(model, pos)
-        self.owner.lane.timing_loss = model._timing_loss
+        direct_commit = bool(getattr(self.owner, "direct_commit_enabled", False))
+        if direct_commit:
+            self.params.enable_relaxed_buffer_timing = False
+            refresh_topology_if_needed(
+                self.owner, pos, force=(self.owner.lane is None)
+            )
+        else:
+            self._ensure_lane(model, pos)
+            self.owner.lane.timing_loss = model._timing_loss
         with (
             self._profile_params(),
             self.owner.electrical_window(),
@@ -302,9 +318,30 @@ class AlternatingDiscreteController:
             sizing = run_sizing_phase(self, model, pos)
             sizing["coefficients"] = dict(coefficients)
             self.owner.prepare(model, pos, active_only=False)
-            buffering = run_buffering_phase(self, model, pos)
-        self.owner.retain_buffered_nets(model)
-        install_candidate_density(model, self.owner.lane._current_state())
+            if self.owner.lane is None or self.owner.lane._current_state() is None:
+                raise RuntimeError("alternating discrete profile failed to prepare candidate lane")
+            self.owner.lane.timing_loss = model._timing_loss
+            self.params.enable_relaxed_buffer_timing = True
+            with self._buffering_lane_config():
+                buffering = run_buffering_phase(self, model, pos)
+        lane_summary = self.owner.lane.summarize()
+        if direct_commit:
+            accepted_count = int(buffering.get("accepted", 0) or 0)
+            buffering["cumulative_count"] = (
+                int(getattr(self.owner, "committed_buffer_count", 0)) + accepted_count
+            )
+            if accepted_count > 0:
+                self.owner._pending_window_commit_request = project_window_buffer_request(
+                    self.owner,
+                    model,
+                    pos,
+                    iteration=int(iteration),
+                    reason=f"alternating_discrete_round_{self.completed_rounds + 1}",
+                )
+            clear_virtual_buffer_state(self.owner, model)
+        else:
+            self.owner.retain_buffered_nets(model)
+            install_candidate_density(model, self.owner.lane._current_state())
         self.owner.publish_geometry(model)
         self._candidate_payload_topology_generation = None
         self.completed_rounds += 1
@@ -316,7 +353,6 @@ class AlternatingDiscreteController:
             buffering=buffering,
             runtime_ms=(time.perf_counter() - started_at) * 1000.0,
         ).to_dict()
-        lane_summary = self.owner.lane.summarize()
         result["candidate_state"] = {
             key: lane_summary.get(key)
             for key in (

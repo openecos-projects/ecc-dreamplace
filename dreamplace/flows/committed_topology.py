@@ -58,8 +58,12 @@ def finalize_discrete_window(
     params, placedb = engine.params, engine.placedb
     result_dir = str(params.result_dir)
     stem = os.path.join(result_dir, params.design_name() + "_" + artifact_stem)
+    direct_buf_count = int(getattr(owner, "committed_buffer_count", 0) or 0)
+    direct_buf_records = list(getattr(owner, "committed_buffer_records", ()) or ())
     summary = {"status": "pending", **owner.terminal_summary, "request": request.to_summary(),
-               "atomic_across_sizing_and_buffer": False}
+               "atomic_across_sizing_and_buffer": False,
+               "direct_committed_buffer_count": direct_buf_count,
+               "direct_committed_buffers": direct_buf_records}
     try:
         sync_native_sizing = getattr(
             owner,
@@ -108,7 +112,9 @@ def finalize_discrete_window(
         if bool(getattr(params, "repair_buffering_midplace_enable", False)):
             summary["prelegal_def"] = stem + ".prelegal.def"
             write_native_def(placedb, summary["prelegal_def"])
-        owner.ops.steiner_topo_op.frozen_nets.segment_state = None
+        frozen_nets = getattr(owner.ops.steiner_topo_op, "frozen_nets", None)
+        if frozen_nets is not None:
+            frozen_nets.segment_state = None
         owner.data.buffer_optimization_state = None
         owner.data.buffer_segment_count_state = None
         owner.data.buffer_segment_count_payload = None

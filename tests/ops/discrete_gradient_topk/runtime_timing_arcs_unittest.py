@@ -118,3 +118,37 @@ def test_runtime_arc_sync_updates_timing_check_arcs_and_offsets():
     assert torch.equal(
         timing_op.endpoints_timing_check_arcs, data.endpoints_timing_check_arcs
     )
+
+
+def test_runtime_arc_sync_disambiguates_setup_and_hold_check_types():
+    data = SimpleNamespace(
+        pin2node_map=torch.tensor([0, 0], dtype=torch.long),
+        inst_cell_id=torch.tensor([1], dtype=torch.long),
+        cell_id_2_arc_id_start=torch.tensor([0, 2, 4], dtype=torch.long),
+        flat_libarc_info=torch.tensor(
+            [
+                [0, 1, 0, 0, 1, 1],
+                [0, 1, 0, 1, 1, 1],
+                [0, 1, 1, 2, 1, 1],
+                [0, 1, 1, 3, 1, 1],
+            ],
+            dtype=torch.long,
+        ),
+        flat_libarc_check_types=torch.tensor([1, 2, 2, 1], dtype=torch.long),
+        endpoints_timing_check_arcs=torch.tensor(
+            [[0, 1, 0, 0, 1, 1, 1, 0]],
+            dtype=torch.long,
+        ),
+    )
+    placedb = SimpleNamespace(
+        endpoints_timing_check_arcs=np.zeros((1, 8), dtype=np.int64),
+    )
+
+    result = sync_timing_arc_lut_rows(data, placedb, None, [0])
+
+    assert result["status"] == "ok"
+    assert data.endpoints_timing_check_arcs.tolist() == [[0, 1, 1, 3, 1, 1, 1, 1]]
+    np.testing.assert_array_equal(
+        placedb.endpoints_timing_check_arcs, [[0, 1, 1, 3, 1, 1, 1, 1]]
+    )
+

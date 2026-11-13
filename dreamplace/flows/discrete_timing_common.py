@@ -10,12 +10,22 @@ from dreamplace.flows.timing_phase_coefficients import timing_phase_coefficients
 from dreamplace.ops.routability.cooptimization_area import capture_area
 
 
+def parse_enabled_flag(params, attr: str, *, default: bool = True) -> bool:
+    """Parse boolean/int/string config flag with consistent string-falsy handling."""
+    raw = getattr(params, attr, int(default) if isinstance(default, bool) else default)
+    if raw is None:
+        return bool(default)
+    if isinstance(raw, str):
+        return raw.strip().lower() not in ("", "0", "false", "no", "off")
+    return bool(int(raw))
+
+
 def timing_sizing_action_mask(params, action_mask=None):
     """Resolve window/diff-opt defaults while preserving explicit phase masks."""
     if action_mask is not None:
         return action_mask
     action = getattr(params, "timing_sizing_action", "quad")
-    if action not in DIFF_SIZING_ACTION_MASKS:
+    if action not in ("up", "down", "quad"):
         raise ValueError("timing_sizing_action must be one of: up, down, quad")
     return DIFF_SIZING_ACTION_MASKS[action]
 
@@ -170,8 +180,47 @@ def transfer_segment_counts(state, counts):
         )
 
 
+def sync_owner_native_sizing(owner):
+    """Commit owner master changes to the ECC native DB and Python timing carrier."""
+
+    from dreamplace.ops.placeio_ecc.place_io import PlaceIOFunction
+    from dreamplace.ops.placeio_ecc.timing_carrier import apply_inplace_carrier_sizing
+    from dreamplace.ops.routability.gpugr_context import invalidate_route_state
+
+    if str(owner.params.place_io_engine) != "ecc":
+        raise ValueError("inflation S5B1 requires the ECC native backend")
+    targets = owner.data.inst_cell_id.detach().cpu()
+    changed_ids = torch.nonzero(targets != owner.native_cell_ids).flatten().tolist()
+    changed = len(changed_ids)
+    if not changed:
+        return {"ok": True, "accepted_count": 0, "requested_count": 0}
+    names = [
+        name.decode() if isinstance(name, bytes) else str(name)
+        for name in owner.placedb.flat_libcell_names
+    ]
+    summary = PlaceIOFunction.apply_sizing(
+        owner.placedb.rawdb,
+        targets.numpy(),
+        names,
+        current_cell_ids=owner.native_cell_ids.numpy(),
+    )
+    if not summary.get("ok") or int(summary.get("accepted_count", 0)) != changed:
+        raise RuntimeError(f"S5B1 native sizing transaction failed: {summary}")
+    if getattr(owner.placedb.rawdb, "pydb", None) is not None:
+        resizes = [
+            {"node_id": int(node_id), "target_cell_index": int(targets[node_id])}
+            for node_id in changed_ids
+        ]
+        apply_inplace_carrier_sizing(owner.placedb.rawdb, resizes)
+    owner.native_cell_ids.copy_(targets)
+    invalidate_route_state(owner.placedb)
+    return summary
+
+
 __all__ = [
+    "parse_enabled_flag",
     "segment_counts",
+    "sync_owner_native_sizing",
     "timing_area_fits",
     "timing_electrical_window",
     "timing_sizing_coefficients",

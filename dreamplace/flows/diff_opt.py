@@ -5,10 +5,17 @@ import os
 import shutil
 import time
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import is_dataclass, replace
 
 import numpy as np
 
+from dreamplace.flows.candidate_refresh import refresh_topology_if_needed
+from dreamplace.flows.direct_buffer_commit import (
+    clear_virtual_buffer_state,
+    commit_buffer_request_to_ecc,
+    project_window_buffer_request,
+    supports_direct_buffer_commit,
+)
 from dreamplace.flows.discrete_timing_owner import DiscreteTimingOwner
 from dreamplace.flows.timing_opt_config import TIMING_OPT_COEFFICIENT_FIELDS
 from dreamplace.ops.buffer_insertion.buffering_lane import _tensor_digest
@@ -24,11 +31,23 @@ class DiffOptController:
     after all phases have completed.
     """
 
-    def __init__(self, params, placedb, data, ops, refresh_topology, *, lane=None):
+    def __init__(
+        self,
+        params,
+        placedb,
+        data,
+        ops,
+        refresh_topology,
+        *,
+        lane=None,
+        rebuild_runtime_fn=None,
+    ):
         self.params = params
         self.placedb = placedb
         self.data = data
         self.ops = ops
+        self._rebuild_runtime_fn = rebuild_runtime_fn
+        self.direct_commit_enabled = supports_direct_buffer_commit(params, placedb)
         self.owner = DiscreteTimingOwner(
             params,
             placedb,
@@ -38,6 +57,9 @@ class DiffOptController:
             refresh_candidates_after_sizing=True,
         )
         self.owner.lane = lane
+        self.owner.direct_commit_enabled = self.direct_commit_enabled
+        self.direct_commit_records = []
+        self.full_rebuild_count = 0
         self.trace = []
         self.phase_count = 0
         self.geometry_refresh_count = 0
@@ -125,6 +147,17 @@ class DiffOptController:
         lane = self.owner.lane
         if lane is None or lane._current_state() is None:
             raise RuntimeError("diff_opt failed to prepare its candidate lane")
+        lane_config = getattr(lane, "config", None)
+        if lane_config is not None and is_dataclass(lane_config):
+            steps = getattr(self.params, "buffering_continuous_steps", None)
+            if steps is not None:
+                lane.config = replace(
+                    lane_config,
+                    continuous_steps=int(steps),
+                    route_b_selection_fraction=float(
+                        getattr(self.params, "diff_buffering_selection_fraction", 0.003)
+                    ),
+                )
         timing_loss = getattr(model, "_timing_loss", None)
         if not callable(timing_loss):
             raise RuntimeError("diff_opt requires the model timing loss callback")
@@ -138,6 +171,7 @@ class DiffOptController:
         )
         started_at = time.perf_counter()
         self.status = "active"
+        trailing_committed_without_rebuild = False
         for phase_index, spec in enumerate(specs):
             phase_started_at = time.perf_counter()
             topology_refresh_start = int(
@@ -169,13 +203,18 @@ class DiffOptController:
                 self._phase_coefficients(model, spec.coefficients),
             ):
                 if spec.action == "sz":
-                    # S only needs the buffers already retained in the design.
-                    # The next BF phase enables the complete action domain.
                     prepare_started_at = time.perf_counter()
-                    self.owner.prepare(model, pos, active_only=True)
-                    prepare_runtime_profile = dict(
-                        getattr(self.owner, "last_prepare_runtime_profile", {}) or {}
-                    )
+                    if self.direct_commit_enabled:
+                        self.params.enable_relaxed_buffer_timing = False
+                        refresh_topology_if_needed(self.owner, pos)
+                        prepare_runtime_profile = {}
+                    else:
+                        # S only needs the buffers already retained in the design.
+                        # The next BF phase enables the complete action domain.
+                        self.owner.prepare(model, pos, active_only=True)
+                        prepare_runtime_profile = dict(
+                            getattr(self.owner, "last_prepare_runtime_profile", {}) or {}
+                        )
                     record_phase_stage("prepare_ms", prepare_started_at)
                     from dreamplace.ops.routability.cooptimization_area import SizingWindowGeometry
 
@@ -193,25 +232,99 @@ class DiffOptController:
                     operation_started_at = time.perf_counter()
                     result = self.owner.run_buffering(model, pos, self.owner.capacity)
                     record_phase_stage("operation_ms", operation_started_at)
-            # A final buffering phase is already consumed by the terminal
-            # projection below.  Freezing and immediately repacking its
-            # candidates adds no state needed by a later phase and can make
-            # the native topology packer observe a partially frozen tree.
-            # Retain accepted nets only when another explicit phase follows.
-            if spec.action == "bf" and phase_index + 1 < len(specs):
-                retain_started_at = time.perf_counter()
-                self.owner.retain_buffered_nets(model)
-                record_phase_stage("retain_ms", retain_started_at)
-            publish_started_at = time.perf_counter()
-            geometry_refresh = self.owner.publish_geometry(model)
-            record_phase_stage("publish_geometry_ms", publish_started_at)
-            self.geometry_refresh_count += 1
-            self.timing_refresh_count += 1
+
             result = dict(result or {})
             lane = self.owner.lane
             summarize = getattr(lane, "summarize", None)
-            if callable(summarize):
-                lane_summary = summarize()
+            lane_summary = summarize() if callable(summarize) else None
+
+            if self.direct_commit_enabled and spec.action == "bf":
+                accepted_count = int(result.get("accepted", 0) or 0)
+                result["cumulative_count"] = (
+                    int(self.owner.committed_buffer_count) + accepted_count
+                )
+                if accepted_count > 0:
+                    commit_started_at = time.perf_counter()
+                    req = project_window_buffer_request(
+                        self.owner,
+                        model,
+                        pos,
+                        iteration=int(iteration),
+                        reason=f"diff_opt_phase_{phase_index:03d}_bf",
+                    )
+                    clear_virtual_buffer_state(self.owner, model)
+                    commit_info = commit_buffer_request_to_ecc(
+                        self.owner,
+                        self.placedb,
+                        self.params,
+                        req,
+                        pos=pos,
+                        output_dir=getattr(self.params, "result_dir", None),
+                    )
+                    result["direct_buffer_commit"] = commit_info
+                    self.direct_commit_records.append(commit_info)
+                    self.full_rebuild_count += 1
+                    record_phase_stage("retain_ms", commit_started_at)
+                    if phase_index + 1 < len(specs) and callable(self._rebuild_runtime_fn):
+                        publish_started_at = time.perf_counter()
+                        prev_committed_count = int(self.owner.committed_buffer_count)
+                        prev_committed_records = list(self.owner.committed_buffer_records)
+                        prev_osc_snapshot = self.owner.oscillation.snapshot()
+                        (
+                            model,
+                            pos,
+                            new_data,
+                            new_ops,
+                            new_refresh_topology,
+                            new_lane,
+                        ) = self._rebuild_runtime_fn()
+                        self.data = new_data
+                        self.ops = new_ops
+                        self.owner = DiscreteTimingOwner(
+                            self.params,
+                            self.placedb,
+                            new_data,
+                            new_ops,
+                            new_refresh_topology,
+                            refresh_candidates_after_sizing=True,
+                        )
+                        self.owner.lane = new_lane
+                        self.owner.direct_commit_enabled = True
+                        self.owner.committed_buffer_count = prev_committed_count
+                        self.owner.committed_buffer_records = prev_committed_records
+                        self.owner.oscillation.restore(prev_osc_snapshot)
+                        trailing_committed_without_rebuild = False
+                        geometry_refresh = self.owner.publish_geometry(model)
+                        record_phase_stage("publish_geometry_ms", publish_started_at)
+                    else:
+                        trailing_committed_without_rebuild = True
+                        geometry_refresh = {
+                            "status": "committed_to_ecc_db",
+                            "accepted_count": accepted_count,
+                        }
+                else:
+                    trailing_committed_without_rebuild = False
+                    clear_virtual_buffer_state(self.owner, model)
+                    publish_started_at = time.perf_counter()
+                    geometry_refresh = self.owner.publish_geometry(model)
+                    record_phase_stage("publish_geometry_ms", publish_started_at)
+            else:
+                trailing_committed_without_rebuild = False
+                # A final buffering phase is already consumed by the terminal
+                # projection below.  Freezing and immediately repacking its
+                # candidates adds no state needed by a later phase and can make
+                # the native topology packer observe a partially frozen tree.
+                # Retain accepted nets only when another explicit phase follows.
+                if spec.action == "bf" and phase_index + 1 < len(specs):
+                    retain_started_at = time.perf_counter()
+                    self.owner.retain_buffered_nets(model)
+                    record_phase_stage("retain_ms", retain_started_at)
+                publish_started_at = time.perf_counter()
+                geometry_refresh = self.owner.publish_geometry(model)
+                record_phase_stage("publish_geometry_ms", publish_started_at)
+            self.geometry_refresh_count += 1
+            self.timing_refresh_count += 1
+            if lane_summary is not None:
                 result["candidate_state"] = {
                     key: lane_summary.get(key)
                     for key in (
@@ -306,16 +419,49 @@ class DiffOptController:
             self.trace.append(result)
             self.phase_count += 1
 
-        # Publish sizing to the native database exactly once, after every
-        # phase has restored/published its virtual state and before the final
-        # buffer request is materialized.
-        sizing_commit = self.owner.sync_native_sizing()
-        self.terminal_request = self.owner.prepare_terminal_request(
-            model,
-            pos,
-            iteration=int(iteration),
-            refresh_geometry=False,
-        )
+        if self.direct_commit_enabled and trailing_committed_without_rebuild:
+            sizing_commit = self.direct_commit_records[-1]["sizing"]
+            if self.owner.lane is None:
+                from dreamplace.ops.buffer_insertion.buffering_config import (
+                    build_buffering_config_from_params,
+                )
+                from dreamplace.ops.buffer_insertion.buffering_lane import (
+                    BufferingOptimizationLane,
+                )
+
+                self.owner.lane = BufferingOptimizationLane(
+                    build_buffering_config_from_params(
+                        self.params, flow_kind="buffering"
+                    ),
+                    placedb=self.placedb,
+                )
+            noop_req = self.owner.lane.build_commit_request(
+                None,
+                iteration=int(iteration),
+                reason="diff_opt_direct_commit_final_noop",
+                commit_enabled=True,
+                refresh_mode="python_carrier",
+                rebuild_mode="full_rebuild",
+            )
+            self.owner.terminal_request = noop_req
+            self.terminal_request = {
+                "status": "request_ready",
+                "iteration": int(iteration),
+                "projected_buffer_count": 0,
+                "direct_committed_count": int(self.owner.committed_buffer_count),
+                "commit_request": noop_req.to_summary(),
+            }
+        else:
+            # Publish sizing to the native database exactly once, after every
+            # phase has restored/published its virtual state and before the final
+            # buffer request is materialized.
+            sizing_commit = self.owner.sync_native_sizing()
+            self.terminal_request = self.owner.prepare_terminal_request(
+                model,
+                pos,
+                iteration=int(iteration),
+                refresh_geometry=False,
+            )
         self.status = "request_ready"
         summary = {
             "artifact": "diff_opt",
@@ -327,10 +473,16 @@ class DiffOptController:
             "phases": list(self.trace),
             "sizing_commit": sizing_commit,
             "terminal_request": self.terminal_request,
+            "direct_committed_buffer_count": int(
+                getattr(self.owner, "committed_buffer_count", 0) or 0
+            ),
+            "direct_committed_buffers": list(
+                getattr(self.owner, "committed_buffer_records", ()) or ()
+            ),
             "refresh_counts": {
                 "geometry_refresh_count": int(self.geometry_refresh_count),
                 "timing_refresh_count": int(self.timing_refresh_count),
-                "full_rebuild_count": 0,
+                "full_rebuild_count": int(self.full_rebuild_count),
                 "topology_refresh_count": int(
                     getattr(self.owner, "topology_refresh_count", 0)
                 ),
@@ -349,6 +501,49 @@ class DiffOptController:
                 stream.write("\n")
             self.summary_path = path
         return summary
+
+
+def _build_diff_opt_runtime(engine, *, rebuild: bool = False):
+    saved_flow_kind = getattr(engine.params, "flow_kind", None)
+    saved_build_model_only = getattr(engine.params, "build_model_only", False)
+    saved_relaxed_timing = bool(
+        getattr(engine.params, "enable_relaxed_buffer_timing", False)
+    )
+    engine.params.flow_kind = "placement"
+    engine.params.global_place_flag = 1
+    engine.params.legalize_flag = 0
+    engine.params.detailed_place_flag = 0
+    engine.params.build_model_only = True
+    if rebuild:
+        engine.params.enable_relaxed_buffer_timing = False
+        engine.placedb.cooptimization_geometry = None
+        engine.placer = None
+    try:
+        engine.place()
+    finally:
+        engine.params.flow_kind = saved_flow_kind
+        engine.params.build_model_only = saved_build_model_only
+        if rebuild:
+            engine.params.enable_relaxed_buffer_timing = saved_relaxed_timing
+    model = getattr(engine.placer, "last_global_place_model", None)
+    if model is None:
+        raise RuntimeError("diff_opt did not construct a placement timing model")
+    topology = engine.placer.op_collections.steiner_topo_op
+    if not bool(getattr(topology, "topology_frozen", False)):
+        engine.placer._refresh_live_timing_topology(
+            engine.placer.data_collections.pos[0]
+        )
+        topology.freeze_topology()
+    engine.params.flow_kind = "buffering"
+    lane = engine.placer._build_buffering_lane(engine.params)
+    return (
+        model,
+        engine.placer.data_collections.pos[0],
+        engine.placer.data_collections,
+        engine.placer.op_collections,
+        engine.placer._refresh_live_timing_topology,
+        lane,
+    )
 
 
 def run_diff_opt(engine):
@@ -384,61 +579,21 @@ def run_diff_opt(engine):
     stages = list(getattr(engine.params, "global_place_stages", None) or [{}])
     if any(int(stage.get("iteration", 0) or 0) != 0 for stage in stages):
         raise ValueError("diff_opt flow requires zero GP iterations")
-    # ``apply_diff_opt_defaults`` keeps the original mode-specific
-    # ``flow_kind`` (``buffering`` for buffering-only and the historical
-    # joint profile) so timing metadata remains active at the native
-    # boundary.  The zero-iteration model construction below must still
-    # go through the ordinary placement path: ``flow_kind=buffering``
-    # makes ``NonLinearPlace.__call__`` enter its legacy buffering inner
-    # loop before the explicit tuple controller gets a chance to run.
-    # Build only the timing model here, then restore the mode for the
-    # standalone controller and terminal commit.
-    saved_flow_kind = getattr(engine.params, "flow_kind", None)
-    saved_build_model_only = getattr(engine.params, "build_model_only", False)
-    engine.params.flow_kind = "placement"
-    engine.params.global_place_flag = 1
-    engine.params.legalize_flag = 0
-    engine.params.detailed_place_flag = 0
-    engine.params.build_model_only = True
-    try:
-        engine.place()
-    finally:
-        engine.params.flow_kind = saved_flow_kind
-        engine.params.build_model_only = saved_build_model_only
-    model = getattr(engine.placer, "last_global_place_model", None)
-    if model is None:
-        raise RuntimeError("diff_opt did not construct a placement timing model")
-    # Candidate payloads and live geometry must use one topology identity
-    # for the whole diff_opt transaction.  Rebuilding FLUTE after a sizing
-    # action can change the vertex count/order by one or more nodes, which
-    # would bind a frozen candidate row to a different coordinate domain.
-    # Freeze the placement snapshot before constructing the candidate lane;
-    # subsequent forwards still update coordinates through the frozen
-    # Steiner relations while preserving node IDs and net slices.
-    topology = engine.placer.op_collections.steiner_topo_op
-    if not bool(getattr(topology, "topology_frozen", False)):
-        engine.placer._refresh_live_timing_topology(engine.placer.data_collections.pos[0])
-        topology.freeze_topology()
-    # The model was constructed in the placement coordinate flow; the
-    # explicit controller needs the joint lane contract while it prepares
-    # typed candidates, without changing the placement-parasitic source.
-    # The candidate lane's standalone validation intentionally requires
-    # ``flow_kind=buffering``.  This is only the controller/runtime mode;
-    # the model above was already built on the ordinary placement path,
-    # and the terminal finalizer switches back to placement after commit.
-    engine.params.flow_kind = "buffering"
-    lane = engine.placer._build_buffering_lane(engine.params)
+    model, pos, data, ops, refresh_topology, lane = _build_diff_opt_runtime(
+        engine, rebuild=False
+    )
     controller = DiffOptController(
         engine.params,
         engine.placedb,
-        engine.placer.data_collections,
-        engine.placer.op_collections,
-        engine.placer._refresh_live_timing_topology,
+        data,
+        ops,
+        refresh_topology,
         lane=lane,
+        rebuild_runtime_fn=lambda: _build_diff_opt_runtime(engine, rebuild=True),
     )
     summary = controller.run(
         model,
-        engine.placer.data_collections.pos[0],
+        pos,
         flows=getattr(engine.params, "diff_optimization_flows", None),
         iteration=0,
     )
@@ -460,12 +615,37 @@ def run_diff_opt(engine):
             "commit": commit_result,
         }
         return engine.last_run_result
+    commit_payload = dict((commit_result or {}).get("commit", {}) or {})
+    committed_count = int(
+        getattr(controller.owner, "committed_buffer_count", 0) or 0
+    )
+    if committed_count > 0:
+        committed_records = list(
+            getattr(controller.owner, "committed_buffer_records", ()) or ()
+        )
+        committed_names = [
+            rec["inserted_buffer_name"]
+            for rec in committed_records
+            if isinstance(rec, dict) and rec.get("inserted_buffer_name")
+        ]
+        commit_payload = {
+            **commit_payload,
+            "status": "accepted",
+            "requested_action_count": committed_count,
+            "accepted_action_count": committed_count,
+            "committed_buffer_instance_names": committed_names,
+            "results": committed_records,
+            "phase_commits": list(controller.direct_commit_records),
+            "direct_commit_after_b1": True,
+        }
+        if isinstance(commit_result, dict):
+            commit_result = {**commit_result, "commit": commit_payload}
     engine.placer.last_buffering_lane_summary = {
         "status": "completed",
         "flow_kind": "diff_opt",
         "parasitic_source": "placement",
         "inner_loop": summary,
-        "commit": dict((commit_result or {}).get("commit", {}) or {}),
+        "commit": commit_payload,
     }
     engine.last_run_result = {
         "status": "ok",

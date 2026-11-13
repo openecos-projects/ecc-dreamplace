@@ -1,4 +1,10 @@
+#include <algorithm>
+#include <filesystem>
+#include <string>
+#include <vector>
+
 #include "openroad_place_io_impl_bridge.h"
+#include "utility/src/pybind_path.h"
 
 namespace dreamplace {
 namespace placeio_openroad {
@@ -180,10 +186,25 @@ void bridgeImplWriteDef(const std::shared_ptr<void>& impl, const std::string& fi
 }  // namespace placeio_openroad
 }  // namespace dreamplace
 
+// Copy of the pybind glue retained from the argv-based interface. The live
+// bindings are registered in openroad_place_io.cpp; the entry points below are
+// kept in sync with it (path-typed forward/write) so a future revival cannot
+// resurrect the removed argv interface. parseFlagValues/parseFlagInt have no
+// caller since that change and stay only as part of the retained copy.
 namespace {
 
 using dreamplace::placeio_openroad::OpenRoadPlaceIOBridge;
 using dreamplace::placeio_openroad::PyPlaceDB;
+
+std::vector<std::string> pathTexts(const std::vector<std::filesystem::path>& paths)
+{
+  std::vector<std::string> texts;
+  texts.reserve(paths.size());
+  for (const auto& path : paths) {
+    texts.push_back(path.string());
+  }
+  return texts;
+}
 
 std::vector<std::string> parseFlagValues(const py::list& args, const std::string& flag)
 {
@@ -212,27 +233,23 @@ int parseFlagInt(const py::list& args, const std::string& flag, int default_valu
 
 using BridgePtr = std::shared_ptr<OpenRoadPlaceIOBridge>;
 
-BridgePtr forward(const py::list& args)
+BridgePtr forward(const std::filesystem::path& def_input,
+                  const std::vector<std::filesystem::path>& lef_input,
+                  const std::vector<std::filesystem::path>& lib_input,
+                  const std::filesystem::path& sdc_input,
+                  const std::vector<std::string>& vt_suffixes,
+                  int num_threads)
 {
-  const auto lef_files = parseFlagValues(args, "--lef_input");
-  const auto def_files = parseFlagValues(args, "--def_input");
-  const auto liberty_files = parseFlagValues(args, "--lib_input");
-  const auto sdc_files = parseFlagValues(args, "--sdc_input");
-  auto vt_suffixes = parseFlagValues(args, "--vt_suffix");
-  const int thread_count = parseFlagInt(args, "--num_threads", 8);
-  if (def_files.empty()) {
+  if (def_input.empty()) {
     throw std::runtime_error("placeio_openroad requires exactly one DEF input");
   }
-  if (sdc_files.size() > 1) {
-    throw std::runtime_error("placeio_openroad accepts at most one SDC input");
-  }
   return std::make_shared<OpenRoadPlaceIOBridge>(
-      lef_files,
-      def_files.front(),
-      liberty_files,
-      sdc_files.empty() ? std::string() : sdc_files.front(),
+      pathTexts(lef_input),
+      def_input.string(),
+      pathTexts(lib_input),
+      sdc_input.string(),
       vt_suffixes,
-      thread_count);
+      std::max(1, num_threads));
 }
 
 PyPlaceDB pydb(const BridgePtr& bridge)
@@ -330,13 +347,13 @@ py::dict run_diff_guided_batch_loop_compact(const BridgePtr& bridge,
 }
 
 void write(const BridgePtr& bridge,
-           const std::string& filename,
+           const std::filesystem::path& filename,
            int,
            const py::object& node_x,
            const py::object& node_y)
 {
   apply(bridge, node_x, node_y);
-  bridge->writeDef(filename);
+  bridge->writeDef(filename.string());
 }
 
 }  // namespace

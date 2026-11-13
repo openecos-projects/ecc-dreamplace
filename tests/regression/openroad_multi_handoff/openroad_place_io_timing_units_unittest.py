@@ -42,32 +42,45 @@ def load_place_io_with_fake_cpp(fake_cpp):
                 sys.modules[name] = original
 
 
+class _FakeRawDB:
+    def __init__(self):
+        self.commands = []
+
+    def eval_tcl_string(self, command):
+        self.commands.append(command)
+        return ""
+
+
 class OpenRoadPlaceIOTimingUnitsTest(unittest.TestCase):
-    def test_read_sources_rc_tcl_before_pydb_export(self):
-        class FakeRawDB:
-            def __init__(self):
-                self.commands = []
+    def _read_with_design_inputs(self, design_inputs, **params_extra):
+        raw_db = _FakeRawDB()
+        calls = []
 
-            def eval_tcl_string(self, command):
-                self.commands.append(command)
-                return ""
+        def fake_forward(**kwargs):
+            calls.append(kwargs)
+            return raw_db
 
-        raw_db = FakeRawDB()
-        fake_cpp = types.SimpleNamespace(forward=lambda args: raw_db)
-        place_io = load_place_io_with_fake_cpp(fake_cpp)
+        place_io = load_place_io_with_fake_cpp(
+            types.SimpleNamespace(forward=fake_forward)
+        )
         params = types.SimpleNamespace(
-            design_inputs={
+            design_inputs=design_inputs, place_io_engine="openroad", **params_extra
+        )
+        returned = place_io.PlaceIOFunction.read(params)
+        return returned, raw_db, calls
+
+    def test_read_sources_rc_tcl_before_pydb_export(self):
+        returned, raw_db, calls = self._read_with_design_inputs(
+            {
                 "tech_lef": ["/tmp/tech.lef"],
                 "def": "/tmp/design.def",
                 "lib": ["/tmp/lib.lib"],
                 "sdc": "/tmp/design.sdc",
                 "rc_tcl": "/tmp/setRC.tcl",
-            },
-            place_io_engine="openroad",
+            }
         )
 
-        returned = place_io.PlaceIOFunction.read(params)
-
+        self.assertEqual(len(calls), 1)
         self.assertIs(returned, raw_db)
         self.assertEqual(
             raw_db.commands,
@@ -75,6 +88,38 @@ class OpenRoadPlaceIOTimingUnitsTest(unittest.TestCase):
                 "set_ideal_network [all_clocks]",
                 "source {/tmp/setRC.tcl}",
                 "estimate_parasitics -placement",
+            ],
+        )
+
+    def test_read_passes_path_arguments_as_paths(self):
+        # Path objects must reach the native keyword interface unchanged:
+        # no string joining and no whitespace splitting on design paths.
+        tech_lef = Path("/tmp/pdk dir/tech.lef")
+        design_def = Path("/tmp/design dir/top level.def")
+        design_lib = Path("/tmp/pdk dir/slow.lib")
+        design_sdc = Path("/tmp/design dir/top level.sdc")
+
+        _returned, _raw_db, calls = self._read_with_design_inputs(
+            {
+                "tech_lef": [tech_lef],
+                "def": design_def,
+                "lib": [design_lib],
+                "sdc": design_sdc,
+            },
+            openroad_vt_suffixes=["HVT"],
+        )
+
+        self.assertEqual(
+            calls,
+            [
+                {
+                    "def_input": design_def,
+                    "lef_input": [tech_lef],
+                    "lib_input": [design_lib],
+                    "sdc_input": design_sdc,
+                    "vt_suffixes": ["HVT"],
+                    "num_threads": 8,
+                }
             ],
         )
 

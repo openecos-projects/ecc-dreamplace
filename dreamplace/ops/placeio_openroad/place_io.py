@@ -219,7 +219,6 @@ class PlaceIOFunction(Function):
     @staticmethod
     def read(params):
         profile = {}
-        args = "DREAMPlace"
         # OpenROAD is design-inputs-first: workspace resolution happens before
         # this adapter, then params.design_inputs carries tech LEF, LEF, DEF,
         # Liberty, SDC, and optional RC Tcl paths into OpenROAD.
@@ -227,17 +226,13 @@ class PlaceIOFunction(Function):
         place_io_engine = PLACE_IO_ENGINE or getattr(
             params, "place_io_engine", DEFAULT_PLACE_IO_ENGINE
         )
-        num_threads = int(getattr(params, "num_threads", 8) or 8)
-        args += " --num_threads %d" % max(1, num_threads)
-        for suffix in _normalize_openroad_vt_suffixes(
-            getattr(params, "openroad_vt_suffixes", None)
-        ):
-            args += " --vt_suffix %s" % suffix
-        profile["openroad_vt_suffixes"] = list(
+        num_threads = max(1, int(getattr(params, "num_threads", 8) or 8))
+        vt_suffixes = list(
             _normalize_openroad_vt_suffixes(
                 getattr(params, "openroad_vt_suffixes", None)
             )
         )
+        profile["openroad_vt_suffixes"] = vt_suffixes
 
         if place_io_engine == "openroad" and not design_inputs:
             raise RuntimeError(
@@ -262,30 +257,18 @@ class PlaceIOFunction(Function):
 
         if not lef_inputs and "lef_input" in params.__dict__:
             lef_inputs = params.lef_input
-        if lef_inputs:
-            if isinstance(lef_inputs, list):
-                for lef in lef_inputs:
-                    args += " --lef_input %s" % (lef)
-            else:
-                args += " --lef_input %s" % (lef_inputs)
+        if lef_inputs and not isinstance(lef_inputs, list):
+            lef_inputs = [lef_inputs]
 
         def_input = design_inputs.get("def")
         if not def_input and "def_input" in params.__dict__:
             def_input = params.def_input
-        if def_input:
-            args += " --def_input %s" % (def_input)
 
         liberty_inputs = design_inputs.get("lib")
-        if liberty_inputs:
-            if isinstance(liberty_inputs, list):
-                for liberty in liberty_inputs:
-                    args += " --lib_input %s" % (liberty)
-            else:
-                args += " --lib_input %s" % (liberty_inputs)
+        if liberty_inputs and not isinstance(liberty_inputs, list):
+            liberty_inputs = [liberty_inputs]
 
         sdc_input = design_inputs.get("sdc")
-        if sdc_input:
-            args += " --sdc_input %s" % (sdc_input)
 
         if place_io_engine == "openroad":
             if not lef_inputs:
@@ -297,7 +280,16 @@ class PlaceIOFunction(Function):
                     "OpenROAD place_io requires design_inputs['def'] (workspace DEF path)"
                 )
         stage_start = time.perf_counter()
-        raw_db = placeio_openroad_cpp.forward(args.split(" "))
+        # Path-like design inputs cross the native boundary as paths; the empty
+        # string is the unset spelling for the optional DEF/SDC slots.
+        raw_db = placeio_openroad_cpp.forward(
+            def_input=def_input or "",
+            lef_input=lef_inputs or [],
+            lib_input=liberty_inputs or [],
+            sdc_input=sdc_input or "",
+            vt_suffixes=vt_suffixes,
+            num_threads=num_threads,
+        )
         profile["setup_rawdb_cpp_forward_ms"] = (
             time.perf_counter() - stage_start
         ) * 1000.0

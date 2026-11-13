@@ -7,11 +7,11 @@ def write_native_def(placedb, filename):
     """Write the current native DB, shared by commits and route handoffs."""
     backend = _capabilities(placedb).get("backend")
     if backend == "openroad":
-        return placedb.openroad_bridge.write_def(str(filename))
+        return placedb.openroad_bridge.write_def(filename)
     if backend == "ecc":
         from dreamplace.ops.placeio_ecc.place_io import PlaceIOFunction
 
-        return PlaceIOFunction.write_def(placedb.rawdb, str(filename))
+        return PlaceIOFunction.write_def(placedb.rawdb, filename)
     raise RuntimeError(f"Native DEF export is unsupported for backend {backend!r}")
 
 

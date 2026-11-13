@@ -5,6 +5,7 @@
  * Last Modified Date: 07.20.2023
  * Last Modified By  : Yibo Lin <yibolin@pku.edu.cn>
  */
+#include "utility/src/pybind_path.h"
 #include "utility/src/torch.h"
 #include "utility/src/utils.h"
 
@@ -20,8 +21,10 @@ int computeRMSTWLLauncher(const T* x, const T* y, const int* flat_netpin,
 
 int rmst_wl_forward(at::Tensor pos, at::Tensor flat_netpin,
                     at::Tensor netpin_start, int ignore_net_degree,
-                    int read_lut_flag, const char* POWVFILE,
-                    const char* POSTFILE, at::Tensor rmst_wl) {
+                    int read_lut_flag,
+                    const std::filesystem::path& POWVFILE,
+                    const std::filesystem::path& POSTFILE,
+                    at::Tensor rmst_wl) {
   CHECK_FLAT_CPU(pos);
   CHECK_EVEN(pos);
   CHECK_CONTIGUOUS(pos);
@@ -32,6 +35,11 @@ int rmst_wl_forward(at::Tensor pos, at::Tensor flat_netpin,
   CHECK_FLAT_CPU(rmst_wl);
   CHECK_CONTIGUOUS(rmst_wl);
 
+  // flute consumes plain strings; convert once and keep them alive across
+  // the dispatch call.
+  const std::string powv_file = POWVFILE.string();
+  const std::string post_file = POSTFILE.string();
+
   int ret = 0;
   DREAMPLACE_DISPATCH_FLOATING_TYPES(pos, "computeRMSTWLLauncher", [&] {
     computeRMSTWLLauncher<scalar_t>(
@@ -39,8 +47,8 @@ int rmst_wl_forward(at::Tensor pos, at::Tensor flat_netpin,
         DREAMPLACE_TENSOR_DATA_PTR(pos, scalar_t) + pos.numel() / 2,
         DREAMPLACE_TENSOR_DATA_PTR(flat_netpin, int),
         DREAMPLACE_TENSOR_DATA_PTR(netpin_start, int), ignore_net_degree,
-        netpin_start.numel() - 1, read_lut_flag, POWVFILE, POSTFILE,
-        DREAMPLACE_TENSOR_DATA_PTR(rmst_wl, scalar_t));
+        netpin_start.numel() - 1, read_lut_flag, powv_file.c_str(),
+        post_file.c_str(), DREAMPLACE_TENSOR_DATA_PTR(rmst_wl, scalar_t));
   });
   return ret;
 }
@@ -84,7 +92,15 @@ int computeRMSTWLLauncher(const T* x, const T* y, const int* flat_netpin,
 DREAMPLACE_END_NAMESPACE
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("forward", &DREAMPLACE_NAMESPACE::rmst_wl_forward, "RMSTWL forward");
+  m.def("forward", &DREAMPLACE_NAMESPACE::rmst_wl_forward, "RMSTWL forward",
+        pybind11::arg("pos"),
+        pybind11::arg("flat_netpin"),
+        pybind11::arg("netpin_start"),
+        pybind11::arg("ignore_net_degree"),
+        pybind11::arg("read_lut_flag"),
+        pybind11::arg("powv_file"),
+        pybind11::arg("post_file"),
+        pybind11::arg("rmst_wl"));
   // m.def("backward", &DREAMPLACE_NAMESPACE::rmst_wl_backward, "RMSTWL
   // backward");
 }

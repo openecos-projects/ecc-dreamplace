@@ -431,10 +431,10 @@ class PlacementEngine:
         if place_io_engine == "ecc":
             import dreamplace.ops.placeio_ecc.place_io as placeio_ecc
 
-            os.makedirs(os.path.dirname(str(verilog_file)) or ".", exist_ok=True)
+            os.makedirs(os.path.dirname(verilog_file) or ".", exist_ok=True)
             return placeio_ecc.PlaceIOFunction.write_verilog(
                 self.placedb.rawdb,
-                str(verilog_file),
+                verilog_file,
             )
         if place_io_engine != "openroad":
             raise RuntimeError("Verilog writeback is only supported by the OpenROAD or ECC backend")

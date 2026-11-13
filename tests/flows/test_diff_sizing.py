@@ -218,6 +218,7 @@ def test_diff_sizing_controller_runs_ordered_action_phases(monkeypatch):
     [
         ("gr", 0, "diff_sizing_terminal_gr_sta_disabled"),
         ("placement", 1, "diff_sizing_timing_rc_mode_placement"),
+        ("spef", 0, "diff_sizing_timing_rc_mode_spef"),
     ],
 )
 def test_run_diff_sizing_commits_refreshes_and_writes_summary(
@@ -254,7 +255,9 @@ def test_run_diff_sizing_commits_refreshes_and_writes_summary(
                 result_dir=str(tmp_path),
             )
             self.placedb = SimpleNamespace(
-                gr_sizing=gr_session if timing_rc_mode == "gr" else None,
+                gr_sizing=(
+                    gr_session if timing_rc_mode in {"gr", "spef"} else None
+                ),
                 pin_offset_x=np.array([0.0, 0.0], dtype=np.float32),
                 pin_offset_y=np.array([0.0, 0.0], dtype=np.float32),
                 rawdb=SimpleNamespace(
@@ -322,7 +325,7 @@ def test_run_diff_sizing_commits_refreshes_and_writes_summary(
     np.testing.assert_allclose(engine.placedb.pin_offset_y, [7.0, 9.0])
     assert engine.placedb.rawdb.pydb.native_state_dirty is False
     assert engine.placedb.gr_sizing is (
-        gr_session if timing_rc_mode == "gr" else None
+        gr_session if timing_rc_mode in {"gr", "spef"} else None
     )
     assert engine.params.timing_action_gradient_mode == "lut_action"
     assert engine.params.timing_opt_sizing_rounds == 10
@@ -341,3 +344,51 @@ def test_run_diff_sizing_commits_refreshes_and_writes_summary(
     assert summary["status"] == "ok"
     assert summary["final_timing"] == {"wns": -1.0, "tns": -2.0}
     assert engine.last_run_result is result
+
+
+@pytest.mark.parametrize(
+    ("timing_rc_mode", "initially_legal", "expect_legalizer_call"),
+    [
+        ("spef", True, False),
+        ("spef", False, True),
+        ("gr", True, True),
+    ],
+)
+def test_legalize_and_measure_preserves_legal_postroute_placement_in_spef_mode(
+    monkeypatch, tmp_path, timing_rc_mode, initially_legal, expect_legalizer_call
+):
+    import dreamplace.NonLinearPlace as nlp_mod
+    import torch
+    from dreamplace.flows import diff_sizing
+
+    calls = []
+
+    class FakePlacer:
+        def __init__(self, terminal_params, placedb, _):
+            self.pos = [torch.tensor([1.0, 2.0])]
+            self._legal = initially_legal
+            self.op_collections = SimpleNamespace(
+                legality_check_op=lambda _pos: self._legal,
+                hpwl_op=lambda _pos: torch.tensor(123.5),
+            )
+
+        def __call__(self, terminal_params, placedb):
+            calls.append("legalize")
+            self._legal = True
+            return 10.0, 20.0, {"timing_stage_summary": {}}
+
+        def run_sta_only(self, terminal_params, placedb):
+            calls.append("sta")
+            return float("inf"), float("inf"), {
+                "timing_stage_summary": {"sta": {"wns": -0.25, "tns": -1.5}}
+            }
+
+    monkeypatch.setattr(nlp_mod, "NonLinearPlace", FakePlacer)
+    params = SimpleNamespace(timing_rc_mode=timing_rc_mode, result_dir=str(tmp_path))
+    engine = SimpleNamespace(placedb=SimpleNamespace(cooptimization_geometry="old"))
+
+    timing = diff_sizing._legalize_and_measure(engine, params)
+
+    assert timing == {"wns": -0.25, "tns": -1.5}
+    assert calls == (["legalize", "sta"] if expect_legalizer_call else ["sta"])
+    assert engine.hpwl == (20.0 if expect_legalizer_call else 123.5)

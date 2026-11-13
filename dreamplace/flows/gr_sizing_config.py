@@ -1,33 +1,49 @@
 """Validate the first GR timing mode before native database initialization."""
 
+import math
+
 from dreamplace.ops.gpugr.xplace_backend import normalize_gpugr_backend
 
 
 def configure_gr_sizing(params):
     mode = str(getattr(params, "timing_rc_mode", "placement"))
-    if mode not in {"placement", "gr"}:
-        raise ValueError("timing_rc_mode must be placement or gr")
+    if mode not in {"placement", "gr", "spef"}:
+        raise ValueError("timing_rc_mode must be placement, gr, or spef")
     params.timing_rc_mode = mode
     terminal_gr_sta_enabled = getattr(params, "diff_sizing_terminal_gr_sta_enabled", 0)
     if terminal_gr_sta_enabled not in (0, 1, False, True):
         raise ValueError("diff_sizing_terminal_gr_sta_enabled must be 0 or 1")
     params.diff_sizing_terminal_gr_sta_enabled = int(bool(terminal_gr_sta_enabled))
+    raw_scale = getattr(params, "spef_coupling_cap_scale", 1.0)
+    if isinstance(raw_scale, bool):
+        raise ValueError("spef_coupling_cap_scale must be a finite nonnegative float")
+    try:
+        coupling_scale = float(1.0 if raw_scale is None else raw_scale)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("spef_coupling_cap_scale must be a finite nonnegative float") from exc
+    if not math.isfinite(coupling_scale) or coupling_scale < 0.0:
+        raise ValueError("spef_coupling_cap_scale must be a finite nonnegative float")
+    params.spef_coupling_cap_scale = coupling_scale
+    params.spef_input = str(getattr(params, "spef_input", "") or "").strip()
     if mode == "placement":
         return
     if getattr(params, "place_io_engine", "ieda") != "ecc" or params.gpu:
-        raise ValueError("GR timing requires the native ECC backend and gpu=0")
-    backend = normalize_gpugr_backend(getattr(params, "gpugr_backend", "auto"))
-    if backend == "cuda":
-        raise ValueError(
-            "GR timing requires a CPU routing backend: cpu_pr, cpu_pr_mt, or cpu_pr_maze"
-        )
-    # This production lane is CPU-qualified even when the host has CUDA.
-    params.gpugr_backend = "cpu_pr_mt" if backend == "auto" else backend
-    rrr_iters = int(getattr(params, "gr_sizing_rrr_iters", 0))
-    if rrr_iters < 0:
-        raise ValueError("gr_sizing_rrr_iters must be non-negative")
-    if rrr_iters > 0 and params.gpugr_backend != "cpu_pr_maze":
-        raise ValueError("positive gr_sizing_rrr_iters requires gpugr_backend=cpu_pr_maze")
+        raise ValueError(f"{mode.upper()} timing requires the native ECC backend and gpu=0")
+    if mode == "gr":
+        backend = normalize_gpugr_backend(getattr(params, "gpugr_backend", "auto"))
+        if backend == "cuda":
+            raise ValueError(
+                "GR timing requires a CPU routing backend: cpu_pr, cpu_pr_mt, or cpu_pr_maze"
+            )
+        # This production lane is CPU-qualified even when the host has CUDA.
+        params.gpugr_backend = "cpu_pr_mt" if backend == "auto" else backend
+        rrr_iters = int(getattr(params, "gr_sizing_rrr_iters", 0))
+        if rrr_iters < 0:
+            raise ValueError("gr_sizing_rrr_iters must be non-negative")
+        if rrr_iters > 0 and params.gpugr_backend != "cpu_pr_maze":
+            raise ValueError("positive gr_sizing_rrr_iters requires gpugr_backend=cpu_pr_maze")
+    elif params.diff_sizing_terminal_gr_sta_enabled:
+        raise ValueError("diff_sizing_terminal_gr_sta_enabled requires timing_rc_mode=gr")
     if params.flow_kind not in {"sizing", "sta"}:
         raise ValueError("GR timing supports standalone sizing or read-only STA only")
     if getattr(params, "placement_sizing_mode", "place_only") == "joint":

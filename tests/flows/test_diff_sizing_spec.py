@@ -14,14 +14,27 @@ def test_parse_diff_sizing_flows_preserves_order_and_action_masks():
             ["up", 10, [500, 5, 1, 1], 1],
             ["down", 1, [100, 2, 3, 4], 0.1],
             ["quad", 3, [10, 1, 1, 1], 5],
+            ["vt", 5, [500, 5, 1, 1], 2],
+            ["vt_fast", 4, [500, 5, 1, 1], 1],
+            ["vt_slow", 2, [0, 0, 1, 1], 0.5],
         ]
     )
 
-    assert [spec.action for spec in flows] == ["up", "down", "quad"]
+    assert [spec.action for spec in flows] == [
+        "up",
+        "down",
+        "quad",
+        "vt",
+        "vt_fast",
+        "vt_slow",
+    ]
     assert [spec.action_mask for spec in flows] == [
         (True, False, False, True),
         (False, True, True, False),
         (True, True, True, True),
+        (False, False, True, True),
+        (False, False, False, True),
+        (False, False, True, False),
     ]
     assert flows[1].coefficients.to_dict() == {
         "wns": 100.0,

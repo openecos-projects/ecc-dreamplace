@@ -687,3 +687,323 @@ def test_incremental_carrier_matches_full_rebuild_on_undriven_pad_nets():
         full.net_flat_arcs,
         full.net_flat_arcs_start,
     )
+
+
+def _sign_sparse_dict(view):
+    from dreamplace.ops.placeio_ecc.sparse_timing_schema import (
+        STATE_KEYS,
+        model_digest,
+        sparse_digest,
+    )
+
+    arrays, metadata = view["arrays"], view["metadata"]
+    view["semantic_digest"] = sparse_digest(arrays, metadata)
+    view["model_digest"] = model_digest(arrays, metadata)
+    view["state_key_digest"] = sparse_digest(
+        {key: arrays[key] for key in STATE_KEYS},
+        {
+            "domains": metadata["domains"],
+            "tags": metadata["tags"],
+            "launch_tags": metadata["launch_tags"],
+        },
+    )
+    return view
+
+
+def _schema3_base():
+    """Schema-3 multi-domain fixture (sys legal + jtag false_path) over _base()."""
+    base = _base()
+    base.timing_schema_version = 3
+    # Pins: 0=IN, 1=u:A, 2=u:Y, 3=OUT; each pin carries 2 states (domain 0=sys, 1=jtag)
+    arrays = {
+        "pin_reference_cap": np.zeros((4, 2), dtype=np.float64),
+        "pin_state_start": np.array([0, 2, 4, 6, 8], dtype=np.int64),
+        "state_pin": np.array([0, 0, 1, 1, 2, 2, 3, 3], dtype=np.int64),
+        "state_domain": np.array([0, 1, 0, 1, 0, 1, 0, 1], dtype=np.int64),
+        "state_tag": np.array([0, 1, 0, 1, 0, 1, 0, 1], dtype=np.int64),
+        "state_launch_tag": np.array([0, 1, 0, 1, 0, 1, 0, 1], dtype=np.int64),
+        "state_source_type": np.ones(8, dtype=np.int64),
+        "state_role": np.zeros(8, dtype=np.int64),
+        "state_level": np.array([0, 0, 1, 1, 2, 2, 3, 3], dtype=np.int64),
+        "state_slew_group": np.array([0, 0, 1, 1, 2, 2, 3, 3], dtype=np.int64),
+        "state_valid": np.ones((8, 2), dtype=np.uint8),
+        "state_seed": np.array([[1, 1], [1, 1]] + [[0, 0]] * 6, dtype=np.uint8),
+        "state_reference": np.array(
+            [[2.0, 3.0, 15.0, 20.0], [80.0, 90.0, 35.0, 40.0]]
+            + [[-9.0e7, -9.0e7, 0.0, 0.0]] * 6,
+            dtype=np.float64,
+        ),
+        "cell_edges": np.array([[0, 2, 4], [0, 3, 5]], dtype=np.int64),
+        "cell_transition_mask": np.array([9, 9], dtype=np.int64),
+        "slew_only_cell_edges": np.empty((0, 3), dtype=np.int64),
+        "slew_only_cell_transition_mask": np.empty(0, dtype=np.int64),
+        "net_edges": np.array(
+            [[1, 0, 2], [1, 1, 3], [3, 4, 6], [3, 5, 7]], dtype=np.int64
+        ),
+        "net_transition_mask": np.array([9, 9, 9, 9], dtype=np.int64),
+        "net_threshold_adjustments": np.tile(
+            np.array([0.0, 0.0, 1.0, 1.0], dtype=np.float64), (4, 1)
+        ),
+        # Domain 0 (sys) is normal legal check (RAT=100ps); domain 1 (jtag) is false_path!
+        "check_index": np.array(
+            [
+                [6, 0, -1, 0, -1, 0, 1],
+                [6, 0, -1, 1, -1, 0, 1],
+                [7, 1, -1, 0, 0, 3, 0],
+                [7, 1, -1, 1, 0, 3, 0],
+            ],
+            dtype=np.int64,
+        ),
+        "check_values": np.array(
+            [
+                [100.0, 0.0, 0.0, 100.0],
+                [100.0, 0.0, 0.0, 100.0],
+                [0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+            ],
+            dtype=np.float64,
+        ),
+        "context_state": np.empty(0, dtype=np.int64),
+    }
+    base.timing_sparse = _sign_sparse_dict(
+        {
+            "metadata": {
+                "format_version": 3,
+                "analysis": "max",
+                "domains": ["sys", "jtag", ""],
+                "tags": ["L\x1fsys", "L\x1fjtag"],
+                "launch_tags": ["sys", "jtag"],
+                "unsupported": [],
+                "capabilities": [
+                    "sparse_max_v1",
+                    "native_required_affine_v1",
+                    "native_transition_mask_v1",
+                ],
+            },
+            "arrays": arrays,
+        }
+    )
+    return base
+
+
+def _schema3_reference_after(base):
+    """Explicit hand-authored Schema-3 graph after inserting buffer b on n1."""
+    ref = _reference_after(base)
+    ref.timing_schema_version = 3
+    # Ref pins: 0=IN, 1=u:A, 2=u:Y, 3=b:A, 4=b:Y, 5=OUT
+    arrays = {
+        "pin_reference_cap": np.zeros((6, 2), dtype=np.float64),
+        "pin_state_start": np.array([0, 2, 4, 6, 8, 10, 12], dtype=np.int64),
+        "state_pin": np.repeat(np.arange(6, dtype=np.int64), 2),
+        "state_domain": np.tile(np.array([0, 1], dtype=np.int64), 6),
+        "state_tag": np.tile(np.array([0, 1], dtype=np.int64), 6),
+        "state_launch_tag": np.tile(np.array([0, 1], dtype=np.int64), 6),
+        "state_source_type": np.ones(12, dtype=np.int64),
+        "state_role": np.zeros(12, dtype=np.int64),
+        "state_level": np.repeat(np.arange(6, dtype=np.int64), 2),
+        "state_slew_group": np.repeat(np.arange(6, dtype=np.int64), 2),
+        "state_valid": np.ones((12, 2), dtype=np.uint8),
+        "state_seed": np.array([[1, 1], [1, 1]] + [[0, 0]] * 10, dtype=np.uint8),
+        "state_reference": np.array(
+            [[2.0, 3.0, 15.0, 20.0], [80.0, 90.0, 35.0, 40.0]]
+            + [[-9.0e7, -9.0e7, 0.0, 0.0]] * 10,
+            dtype=np.float64,
+        ),
+        "cell_edges": np.array(
+            [[0, 2, 4], [0, 3, 5], [1, 6, 8], [1, 7, 9]], dtype=np.int64
+        ),
+        "cell_transition_mask": np.array([9, 9, 9, 9], dtype=np.int64),
+        "slew_only_cell_edges": np.empty((0, 3), dtype=np.int64),
+        "slew_only_cell_transition_mask": np.empty(0, dtype=np.int64),
+        "net_edges": np.array(
+            [
+                [1, 0, 2],
+                [1, 1, 3],
+                [3, 4, 6],
+                [3, 5, 7],
+                [5, 8, 10],
+                [5, 9, 11],
+            ],
+            dtype=np.int64,
+        ),
+        "net_transition_mask": np.full(6, 9, dtype=np.int64),
+        "net_threshold_adjustments": np.tile(
+            np.array([0.0, 0.0, 1.0, 1.0], dtype=np.float64), (6, 1)
+        ),
+        "check_index": np.array(
+            [
+                [10, 0, -1, 0, -1, 0, 1],
+                [10, 0, -1, 1, -1, 0, 1],
+                [11, 1, -1, 0, 0, 3, 0],
+                [11, 1, -1, 1, 0, 3, 0],
+            ],
+            dtype=np.int64,
+        ),
+        "check_values": base.timing_sparse["arrays"]["check_values"].copy(),
+        "context_state": np.empty(0, dtype=np.int64),
+    }
+    ref.timing_sparse = _sign_sparse_dict(
+        {
+            "metadata": deepcopy(base.timing_sparse["metadata"]),
+            "arrays": arrays,
+        }
+    )
+    return ref
+
+
+def test_schema3_carrier_inherits_sparse_view_across_chained_buffers_and_sizing():
+    from dreamplace.ops.placeio_ecc.place_io import ECCPlaceIOBackend
+    from dreamplace.ops.placeio_ecc.timing_carrier import (
+        apply_inplace_carrier_sizing,
+        refresh_python_timing_carrier,
+    )
+    from dreamplace.ops.placeio_ecc.timing_schema import validate_timing_schema
+
+    base = _schema3_base()
+    initial_view = validate_timing_schema(base)
+    physical_one_buf = _physical_after()
+    raw = ECCPlaceIOBackend(
+        SimpleNamespace(ecc=SimpleNamespace(pydb=lambda *a, **k: physical_one_buf)),
+        ".",
+        object(),
+        base,
+        timing_enabled=True,
+        sparse_timing_view=initial_view,
+    )
+
+    carrier, summary = refresh_python_timing_carrier(raw)
+    assert summary["ecc_sta_run"] is False
+    assert carrier.timing_schema_version == 3
+    assert raw.sparse_timing_view is carrier.sparse_timing_view
+    assert raw.sparse_timing_view is not None
+    assert raw.sparse_timing_view.statistics()["num_states"] == 12
+
+    ref = _schema3_reference_after(base)
+    assert _timing(carrier).baseline.as_dict() == pytest.approx(
+        _timing(ref).baseline.as_dict(), abs=1e-8, rel=0
+    )
+
+    # Chained second buffer b2 between b and OUT + resize u (node 1 in physical_one_buf) -> BUF2
+    chained = SimpleNamespace(
+        num_nodes=5,
+        num_terminals=0,
+        num_terminal_NIs=2,
+        dbu=1000,
+        node_names=["b2", "b", "u", "OUT", "IN"],
+        node_master_names=["BUF1", "BUF2", "BUF1", "", ""],
+        node_x=[75000.0, 50000.0, 10000.0, 100000.0, 0.0],
+        node_y=[0.0] * 5,
+        node_size_x=[1000.0, 2000.0, 1000.0, 0.0, 0.0],
+        node_size_y=[1000.0, 1000.0, 1000.0, 0.0, 0.0],
+        pin_names=["OUT", "b2:Y", "b2:A", "b:Y", "u:A", "b:A", "u:Y", "IN"],
+        pin2node_map=[3, 0, 0, 1, 2, 1, 2, 4],
+        pin_offset_x=[0.0] * 8,
+        pin_offset_y=[0.0] * 8,
+        pin_direct=["R0"] * 8,
+        net_names=["n1_leaf", "n1_child", "n0", "n1"],
+        clock_net_names=[],
+        flat_net2pin_map=[1, 0, 3, 2, 7, 4, 6, 5],
+        flat_net2pin_start_map=[0, 2, 4, 6, 8],
+    )
+    raw.module = SimpleNamespace(ecc=SimpleNamespace(pydb=lambda *a, **k: chained))
+    carrier2, _ = refresh_python_timing_carrier(raw)
+    assert carrier2.timing_schema_version == 3
+    assert raw.sparse_timing_view is carrier2.sparse_timing_view
+    assert raw.sparse_timing_view.statistics()["num_states"] == 16
+
+    # Subsequent in-place sizing preserves sparse_timing_view without dropping to None.
+    sized, sz_summary = apply_inplace_carrier_sizing(
+        raw,
+        [{"node_id": 2, "target_cell_index": 1, "target_master_name": "BUF2"}],
+    )
+    assert sz_summary["refresh_path"] == "inplace_carrier_sizing"
+    assert sized.timing_schema_version == 3
+    assert raw.sparse_timing_view is sized.sparse_timing_view
+    assert validate_timing_schema(sized).semantic_digest == raw.sparse_timing_view.semantic_digest
+
+
+def test_schema3_hold_contexts_and_min_sparse_survive_carrier_rebuild():
+    from dreamplace.ops.placeio_ecc.hold_schema import read_hold_timing_schema
+
+    base = _schema3_base()
+    base.hold_schema_version = 2
+    base.timing_clock_names = ["sys", "jtag"]
+    base.flat_lib_pin_min_rcap = [0.004, 0.0, 0.008, 0.0]
+    base.flat_lib_pin_min_fcap = [0.005, 0.0, 0.009, 0.0]
+    base.min_outcaps_rise = [0.0]
+    base.min_outcaps_fall = [0.0]
+    base.flat_libarc_check_types = [0, 0]
+    base.flat_libarc_is_latch_data = [False, False]
+    base.endpoints_min_valid = np.array([[True, False]], dtype=bool)
+    base.endpoints_min_reason = np.array([[0, 1]], dtype=np.int32)
+    base.endpoints_timing_check_min_valid = np.empty((0, 2), dtype=bool)
+    base.endpoints_timing_check_min_reason = np.empty((0, 2), dtype=np.int32)
+    base.startpoints_min_valid = np.array([[True, True]], dtype=bool)
+    base.min_inrdelays = [1.0]
+    base.min_infdelays = [1.5]
+    base.min_inrtrans = [10.0]
+    base.min_inftrans = [12.0]
+    base.hold_contexts = [
+        {
+            "start_pin": 0,
+            "native_start_pin": 0,
+            "launch_pin": -1,
+            "endpoint_pin": 3,
+            "capture_pin": -1,
+            "launch_clock": "sys",
+            "capture_clock": "sys",
+            "path_tag": "",
+            "source_type": 1,
+            "check_type": 0,
+            "data_transition": 1,
+            "launch_transition": 1,
+            "capture_transition": 1,
+            "capture_pin_transition": 0,
+            "arrival_ps": 15.0,
+            "required_ps": 5.0,
+            "data_slew_ps": 12.0,
+            "launch_time_ps": 0.0,
+            "launch_clock_arrival_ps": 0.0,
+            "launch_clock_slew_ps": 0.0,
+            "capture_edge_ps": 5.0,
+            "capture_arrival_ps": 0.0,
+            "capture_slew_ps": 0.0,
+            "check_time_ps": 0.0,
+            "uncertainty_ps": 0.0,
+            "cppr_ps": 0.0,
+        }
+    ]
+    base.hold_launches = [
+        {
+            "start_pin": 0,
+            "launch_pin": -1,
+            "launch_clock": "sys",
+            "source_type": 1,
+            "data_transition": 1,
+            "launch_transition": 1,
+            "arrival_ps": 1.0,
+            "slew_ps": 10.0,
+            "launch_time_ps": 0.0,
+            "launch_slew_ps": 0.0,
+        }
+    ]
+    min_view = deepcopy(base.timing_sparse)
+    min_view["metadata"]["analysis"] = "min"
+    min_view["metadata"]["capabilities"] = [
+        "sparse_min_v1",
+        "native_required_affine_v1",
+        "native_transition_mask_v1",
+    ]
+    min_view["arrays"]["context_state"] = np.array([6], dtype=np.int64)
+    base.timing_min_sparse = _sign_sparse_dict(min_view)
+
+    assert len(read_hold_timing_schema(base).contexts) == 1
+    carrier = CommittedTimingPyDB(base, _physical_after())
+    hold_after = read_hold_timing_schema(carrier)
+    assert hold_after.sparse_view is not None
+    assert hold_after.sparse_view.statistics()["num_states"] == 12
+    # In _physical_after(), IN is pin 5 and OUT is pin 0
+    assert hold_after.contexts[0].start_pin == 5
+    assert hold_after.contexts[0].endpoint_pin == 0
+    assert hold_after.launches[0].start_pin == 5
+

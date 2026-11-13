@@ -69,9 +69,9 @@ def _validate_action_profile(params):
     if str(getattr(params, "flow_kind", "")) != "sizing":
         raise ValueError("diff_sizing action path requires flow_kind=sizing")
     timing_rc_mode = str(getattr(params, "timing_rc_mode", "gr") or "gr")
-    if timing_rc_mode not in {"placement", "gr"}:
+    if timing_rc_mode not in {"placement", "gr", "spef"}:
         raise ValueError(
-            "diff_sizing action path requires timing_rc_mode=placement or gr"
+            "diff_sizing action path requires timing_rc_mode=placement, gr, or spef"
         )
     if str(getattr(params, "placement_sizing_mode", "")) != "size_only":
         raise ValueError("diff_sizing action path requires placement_sizing_mode=size_only")
@@ -145,9 +145,19 @@ def _legalize_and_measure(engine, params):
     engine.placedb.cooptimization_geometry = None
     placer = NonLinearPlace(terminal_params, engine.placedb, None)
     engine.placer = placer
-    engine.rsmt, engine.hpwl, engine.metrics = placer(terminal_params, engine.placedb)
-    if not placer.op_collections.legality_check_op(placer.pos[0]):
-        raise RuntimeError("diff_sizing terminal placement is not legal")
+    preserve_routed_placement = (
+        str(getattr(params, "timing_rc_mode", "")) == "spef"
+        and bool(placer.op_collections.legality_check_op(placer.pos[0]))
+    )
+    if preserve_routed_placement:
+        engine.rsmt = -1.0
+        engine.hpwl = float(
+            placer.op_collections.hpwl_op(placer.pos[0]).detach().cpu().item()
+        )
+    else:
+        engine.rsmt, engine.hpwl, engine.metrics = placer(terminal_params, engine.placedb)
+        if not placer.op_collections.legality_check_op(placer.pos[0]):
+            raise RuntimeError("diff_sizing terminal placement is not legal")
     _, _, engine.metrics = placer.run_sta_only(terminal_params, engine.placedb)
     timing = engine.metrics["timing_stage_summary"]["sta"]
     if not all(math.isfinite(float(timing[key])) for key in ("wns", "tns")):
@@ -282,7 +292,7 @@ class DiffSizingController:
 
 
 def _sync_committed_sizing_inplace(engine, sizing_commit):
-    """Sync oriented pin offsets from native PyPlaceDB without rebuilding STA."""
+    """Sync native PyPlaceDB carrier, sparse view, and pin offsets without rebuilding STA."""
     import numpy as np
 
     placedb = engine.placedb
@@ -290,6 +300,11 @@ def _sync_committed_sizing_inplace(engine, sizing_commit):
     pydb = getattr(rawdb, "pydb", None)
     pin_offsets_synced = False
     if pydb is not None:
+        placedb.pydb = pydb
+        if hasattr(placedb, "sparse_timing_view") or hasattr(rawdb, "sparse_timing_view"):
+            placedb.sparse_timing_view = getattr(
+                rawdb, "sparse_timing_view", getattr(pydb, "sparse_timing_view", None)
+            )
         scale = float(getattr(engine.params, "scale_factor", 1.0) or 1.0)
         for field in ("pin_offset_x", "pin_offset_y"):
             dst = getattr(placedb, field, None)
@@ -334,13 +349,14 @@ def run_diff_sizing(engine):
 
     try:
         engine.setup_placedb()
-        gr_session = None
-        if timing_rc_mode == "gr":
-            gr_session = getattr(engine.placedb, "gr_sizing", None)
-            if gr_session is None:
-                raise RuntimeError(
-                    "diff_sizing action path requires an initialized GR timing session"
-                )
+        if (
+            timing_rc_mode in {"gr", "spef"}
+            and getattr(engine.placedb, "gr_sizing", None) is None
+        ):
+            raise RuntimeError(
+                "diff_sizing action path requires an initialized "
+                f"{timing_rc_mode.upper()} timing session"
+            )
 
         model = _build_timing_model(engine)
         data = engine.placer.data_collections
@@ -397,11 +413,12 @@ def run_diff_sizing(engine):
                 final = finalize_gr_sizing(engine, result)
             else:
                 final = dict(result)
-                reason = (
-                    "diff_sizing_timing_rc_mode_placement"
-                    if timing_rc_mode == "placement"
-                    else "diff_sizing_terminal_gr_sta_disabled"
-                )
+                if timing_rc_mode == "placement":
+                    reason = "diff_sizing_timing_rc_mode_placement"
+                elif timing_rc_mode == "spef":
+                    reason = "diff_sizing_timing_rc_mode_spef"
+                else:
+                    reason = "diff_sizing_terminal_gr_sta_disabled"
                 final["gr_sizing"] = {
                     "status": "skipped",
                     "reason": reason,

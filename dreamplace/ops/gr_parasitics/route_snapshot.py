@@ -5,7 +5,9 @@ microns, ohms and picofarads; the existing RC solver consequently returns ps.
 The route graph is never installed in the placement or routability topology.
 """
 
+import math
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -33,7 +35,7 @@ class RouteIdentity:
 @dataclass(frozen=True)
 class RouteSnapshot:
     identity: RouteIdentity
-    rc_parameters: RCParameters
+    rc_parameters: RCParameters | None
     pin_to_vertex: torch.Tensor
     pin_grid_vertex: torch.Tensor
     valid_pin_mask: torch.Tensor
@@ -67,6 +69,51 @@ def _indices(value):
     if value.numel() and (int(value.min()) < -(2**31) or int(value.max()) >= 2**31):
         raise ValueError("GR pin mapping exceeds int32 capacity")
     return value.to(dtype=torch.int32).contiguous().numpy()
+
+
+_FLOATING_TENSORS = frozenset(
+    {
+        "vertex_xy_um",
+        "incoming_resistance",
+        "wire_cap",
+        "edge_resistance",
+        "edge_capacitance",
+    }
+)
+
+
+def _materialize_snapshot(
+    packed: dict,
+    *,
+    identity: RouteIdentity,
+    rc_parameters: RCParameters | None,
+    dtype,
+    extra_report: dict | None = None,
+) -> RouteSnapshot:
+    tensors = {
+        name: torch.from_numpy(value).to(
+            dtype=dtype if name in _FLOATING_TENSORS else torch.int32
+        )
+        for name, value in packed.items()
+        if isinstance(value, np.ndarray)
+    }
+    pin_vertex = tensors["pin_to_vertex"].to(torch.int64)
+    valid = pin_vertex >= 0
+    valid_ids = valid.nonzero().flatten()
+    tensors["pin_to_vertex"] = pin_vertex
+    model_report = dict(packed["model_report"])
+    if extra_report:
+        model_report.update(extra_report)
+    return RouteSnapshot(
+        identity=identity,
+        rc_parameters=rc_parameters,
+        valid_pin_mask=valid,
+        valid_pin_ids=valid_ids,
+        valid_vertex_ids=pin_vertex[valid_ids],
+        filtered_net_count=int(packed["filtered_net_count"]),
+        model_report=model_report,
+        **tensors,
+    )
 
 
 def prepare_snapshot(
@@ -131,31 +178,51 @@ def prepare_snapshot(
         rc_parameters.capacitance_per_um,
         rc_parameters.via_resistance,
     )
-    floating = {
-        "vertex_xy_um",
-        "incoming_resistance",
-        "wire_cap",
-        "edge_resistance",
-        "edge_capacitance",
-    }
-    tensors = {
-        name: torch.from_numpy(value).to(dtype=dtype if name in floating else torch.int32)
-        for name, value in packed.items()
-        if isinstance(value, np.ndarray)
-    }
-    pin_vertex = tensors["pin_to_vertex"].to(torch.int64)
-    valid = pin_vertex >= 0
-    valid_ids = valid.nonzero().flatten()
-    tensors["pin_to_vertex"] = pin_vertex
-    model_report = dict(packed["model_report"])
-    model_report["filtered_missing_pin_access_net_count"] = len(missing_pin_access)
-    return RouteSnapshot(
+    return _materialize_snapshot(
+        packed,
         identity=identity,
         rc_parameters=rc_parameters,
-        valid_pin_mask=valid,
-        valid_pin_ids=valid_ids,
-        valid_vertex_ids=pin_vertex[valid_ids],
-        filtered_net_count=int(packed["filtered_net_count"]),
-        model_report=model_report,
-        **tensors,
+        dtype=dtype,
+        extra_report={"filtered_missing_pin_access_net_count": len(missing_pin_access)},
+    )
+
+
+def prepare_spef_snapshot(
+    spef_path: str | Path,
+    pin_mapping: PinMapping,
+    identity: RouteIdentity,
+    *,
+    coupling_cap_scale: float = 1.0,
+    dtype=torch.float32,
+) -> RouteSnapshot:
+    if dtype not in (torch.float32, torch.float64):
+        raise ValueError("SPEF RC supports CPU float32/float64")
+    eligible = pin_mapping.eligible_nets
+    if eligible.device.type != "cpu" or eligible.ndim != 1 or eligible.dtype != torch.bool:
+        raise ValueError("SPEF eligible-net mask must be a flat CPU bool tensor")
+    if isinstance(coupling_cap_scale, bool):
+        raise ValueError("spef_coupling_cap_scale must be a finite nonnegative float")
+    try:
+        scale = float(coupling_cap_scale)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("spef_coupling_cap_scale must be a finite nonnegative float") from exc
+    if not math.isfinite(scale) or scale < 0.0:
+        raise ValueError("spef_coupling_cap_scale must be a finite nonnegative float")
+    resolved_spef = Path(spef_path)
+    if not resolved_spef.is_file():
+        raise FileNotFoundError(f"SPEF file does not exist: {resolved_spef}")
+    packed = gr_parasitics_cpp.prepare_spef_tree(
+        str(resolved_spef),
+        pin_mapping.pin_names,
+        pin_mapping.net_names,
+        _indices(pin_mapping.pin_net),
+        _indices(pin_mapping.driver_pin),
+        eligible.contiguous().numpy().astype(np.int32),
+        scale,
+    )
+    return _materialize_snapshot(
+        packed,
+        identity=identity,
+        rc_parameters=None,
+        dtype=dtype,
     )

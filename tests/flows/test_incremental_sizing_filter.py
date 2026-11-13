@@ -1,5 +1,6 @@
 """Flow-level unit and native parity tests for sequential incremental STA sizing."""
 
+import gzip
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from dreamplace.Placer import PlacementEngine
 from gr_sizing_fixture import make_fixture
 
 from chipcompiler.data import PDK, EccData, EccStep, OriginDesign, StepEnum, Workspace
+from chipcompiler.data.workspace.timing_constraints import generate_timing_scripts
 from chipcompiler.tools.ecc.module import ECCToolsModule
 from chipcompiler.tools.ecc_dreamplace.module import DreamplaceModule, DreamplaceRunMode
 
@@ -272,3 +274,228 @@ def test_native_diff_sizing_incremental_commit_matches_placeobj_loss(tmp_path, t
 
     if len(rounds) >= 2 and rounds[1]["incremental_commit"].get("input_count", 0) > 0:
         assert rounds[1]["incremental_commit"]["cache_hit"] is True
+
+
+def test_native_spef_diff_sizing_uses_propagated_post_cts_sta_and_matches_placeobj(tmp_path):
+    """Verify post-route .spef.gz diff_sizing feeds post_CTS SDC + SPEF STA and keeps parity."""
+    repo_root = Path(__file__).resolve().parents[5]
+    fixture = make_fixture(tmp_path / "inputs")
+
+    # Give H7L distinct leakage (so VT classification separates R vs L) and give DFFX1H7R/L
+    # distinct setup constraints (80ps vs 10ps) so swapping capture FF changes check_arcs_ by 70ps!
+    lib_path = fixture / "fixture.lib"
+    lib_text = lib_path.read_text(encoding="utf-8")
+    old_check = (
+        'rise_constraint(check) {values("0.01, 0.02", "0.02, 0.03");} '
+        'fall_constraint(check) {values("0.01, 0.02", "0.02, 0.03");}'
+    )
+    r_check = (
+        'rise_constraint(check) {values("0.08, 0.10", "0.10, 0.12");} '
+        'fall_constraint(check) {values("0.08, 0.10", "0.10, 0.12");}'
+    )
+    for name, leak in (("BUFX1H7L", 1.5), ("BUFX2H7L", 3.0), ("DFFX1H7L", 1.5), ("DFFX2H7L", 3.0)):
+        size = 1 if "X1" in name else 2
+        lib_text = lib_text.replace(
+            f"cell({name}) {{area: {size}; cell_leakage_power: {size};",
+            f"cell({name}) {{area: {size}; cell_leakage_power: {leak};",
+        )
+    dff_r_body = lib_text.split("cell(DFFX1H7R) {")[1].split("cell(DFFX1H7L)")[0]
+    lib_path.write_text(
+        lib_text.replace(
+            f"cell(DFFX1H7R) {{{dff_r_body}",
+            f"cell(DFFX1H7R) {{{dff_r_body.replace(old_check, r_check)}",
+        ),
+        encoding="utf-8",
+    )
+
+    # Add a virtual I/O clock so complete STA compiles Schema 3 SparseTimingView.
+    (fixture / "fixture.sdc").write_text(
+        "create_clock -name clk -period 0.8 [get_ports clk]\n"
+        "create_clock -name vclk -period 0.8\n"
+        "set_input_delay 0.01 -clock vclk [get_ports in]\n"
+        "set_output_delay 0.01 -clock clk [get_ports out]\n"
+        "set_input_transition 0.02 [get_ports in]\nset_load 0.02 [get_ports out]\n",
+        encoding="utf-8",
+    )
+
+    spef_text = """*SPEF "IEEE 1481-1999"
+*DESIGN "gr_fixture"
+*DATE "Thu Nov 12 00:00:00 2026"
+*VENDOR "ECC"
+*PROGRAM "test"
+*VERSION "1.0"
+*DESIGN_FLOW "PIN_CAP NONE"
+*DIVIDER /
+*DELIMITER :
+*BUS_DELIMITER []
+*T_UNIT 1 NS
+*C_UNIT 1 PF
+*R_UNIT 1 KOHM
+*L_UNIT 1 HENRY
+
+*PORTS
+clk I
+in I
+out O
+
+*D_NET clk 0.06
+*CONN
+*P clk I
+*I launch:CK I
+*I capture:CK I
+*CAP
+1 launch:CK 0.01
+2 capture:CK 0.05
+*RES
+1 clk launch:CK 0.1
+2 clk capture:CK 2.0
+*END
+
+*D_NET in 0.01
+*CONN
+*P in I
+*I launch:D I
+*CAP
+1 launch:D 0.01
+*RES
+1 in launch:D 0.1
+*END
+
+*D_NET n1 0.02
+*CONN
+*I launch:Q O
+*I b1:A I
+*CAP
+1 launch:Q 0.01
+2 b1:A 0.01
+*RES
+1 launch:Q b1:A 0.5
+*END
+
+*D_NET n2 0.02
+*CONN
+*I b1:Y O
+*I b2:A I
+*CAP
+1 b1:Y 0.01
+2 b2:A 0.01
+*RES
+1 b1:Y b2:A 0.5
+*END
+
+*D_NET n3 0.02
+*CONN
+*I b2:Y O
+*I capture:D I
+*CAP
+1 b2:Y 0.01
+2 capture:D 0.01
+*RES
+1 b2:Y capture:D 0.5
+*END
+
+*D_NET out 0.01
+*CONN
+*I capture:Q O
+*P out O
+*CAP
+1 out 0.01
+*RES
+1 capture:Q out 0.1
+*END
+"""
+    spef_gz = fixture / "fixture.spef.gz"
+    with gzip.open(spef_gz, "wt", encoding="utf-8") as stream:
+        stream.write(spef_text)
+
+    base_cfg = json.loads(
+        (repo_root / "chipcompiler/tools/ecc_dreamplace/configs/dreamplace_ecc.json").read_text()
+    )
+    base_cfg.update(
+        {
+            "timing_sizing_incremental_commit": 1,
+            "diff_sizing_timing_rc_mode": "spef",
+            "spef_input": str(spef_gz),
+            "diff_sizing_optimization_flows": [
+                ["vt_fast", 4, [500.0, 5.0, 1.0, 1.0], 50.0],
+            ],
+            "place_io_engine": "ecc",
+            "base_design_name": "gr_fixture",
+            "num_threads": 2,
+            "num_bins_x": 8,
+            "num_bins_y": 8,
+            "cell_padding_x": 0,
+            "result_dir": str(tmp_path / "result"),
+            "def_input": str(fixture / "fixture.def"),
+            "verilog_input": str(fixture / "fixture.v"),
+            "lef_input": [str(fixture / "fixture.lef")],
+        }
+    )
+    config_path = tmp_path / "dreamplace.json"
+    config_path.write_text(json.dumps(base_cfg))
+    (tmp_path / "origin").mkdir()
+    workspace = Workspace(
+        directory=tmp_path,
+        design=OriginDesign(name="gr_fixture"),
+        pdk=PDK(
+            name="gr_fixture",
+            tech=fixture / "fixture.lef",
+            libs=[lib_path],
+            sdc=fixture / "fixture.sdc",
+        ),
+        config={"dreamplace": config_path},
+    )
+    generate_timing_scripts(workspace)
+    step = EccStep(
+        name=StepEnum.DIFF_SIZING.value,
+        data=EccData(steps={StepEnum.DIFF_SIZING.value: tmp_path / "result"}),
+    )
+    wrapper = DreamplaceModule(
+        workspace,
+        step,
+        None,
+        fixture / "fixture.def",
+        fixture / "fixture.v",
+        None,
+        None,
+    )
+    run_params = wrapper._build_params(Params, mode=DreamplaceRunMode.DIFF_SIZING)
+    assert (
+        run_params.design_inputs["sdc"]
+        == tmp_path / "origin/post_CTS/fixture.sdc.ecc.tcl"
+    )
+    assert run_params.design_inputs["spef"] == str(spef_gz)
+    assert run_params.design_inputs["timing_mode"] == "complete"
+
+    module = ECCToolsModule()
+    module.init_config(str(fixture / "db.json"), tmp_path / "native", tmp_path / "feature")
+    module.init_techlef(str(fixture / "fixture.lef"))
+    assert module.read_def(str(fixture / "fixture.def"))
+    try:
+        engine = PlacementEngine(run_params)
+        engine.setup_rawdb(module)
+        # Asymmetric SPEF RC on clk (launch 0.1*0.01 vs capture 2.0*0.05) yields real clock skew!
+        assert engine.placedb.rawdb.sparse_timing_view is not None
+        clk_aat = list(engine.placedb.rawdb.pydb.clk_pin_r_aat)
+        assert len(clk_aat) == 2 and clk_aat[0] != clk_aat[1] and max(clk_aat) > 0.0
+        result = engine.run()
+    finally:
+        module.close()
+
+    assert result["status"] == "ok"
+    sizing = result["diff_sizing"]["sizing"]
+    assert sizing["best_loss"] < sizing["initial_loss"]
+    committed_rounds = [r for r in sizing["rounds"] if not r.get("no_action", False)]
+    assert committed_rounds
+    # Capture register (instance 3) must be among accepted VT swaps and match PlaceObj._timing_loss!
+    accepted_all = {
+        inst_id
+        for r in committed_rounds
+        for inst_id in r["incremental_commit"]["accepted_instance_ids"]
+    }
+    assert 3 in accepted_all
+    for r in committed_rounds:
+        inc = r["incremental_commit"]
+        assert inc["status"] == "ok"
+        assert inc["final_loss"] == pytest.approx(r["loss"], rel=1e-6, abs=1e-6)
+

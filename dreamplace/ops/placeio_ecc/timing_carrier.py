@@ -91,8 +91,16 @@ class CommittedTimingPyDB:
         previous_pydb=None,
         validate_schema=True,
         recovery_rat_is_capture_deadline=False,
+        preserve_sparse=True,
     ):
         from dreamplace.ops.rebuffer import rebuffer_cpp
+
+        from .sparse_timing_carrier import (
+            _old_to_new_pin_map,
+            rebuild_sparse_view_dict,
+            remap_hold_carrier_metadata,
+        )
+        from .sparse_timing_schema import read_sparse_timing_view
 
         require_carrier_schema(base_pydb)
         self.recovery_rat_is_capture_deadline = bool(
@@ -122,15 +130,45 @@ class CommittedTimingPyDB:
         meta_clocks = [str(n) for n in getattr(self._metadata, "clock_net_names", ()) or ()]
         phys_clocks = [str(n) for n in getattr(self._physical, "clock_net_names", ()) or ()]
         self.clock_net_names = list(dict.fromkeys(meta_clocks + phys_clocks))
-        # The rebuilt carrier owns a compact schedule, not the export's sparse
-        # constraint view, so it declares the legacy per-pin schema.  The
-        # original sparse view stays qualified on the metadata owner.
-        self.timing_schema_version = 2
-        if validate_schema:
-            # The sparse view describes the immutable export, while the payload
-            # carries the rebuilt schedule.  Qualify the owner they both come
-            # from instead of the mixed carrier view.
-            validate_timing_schema(rebuild_base)
+
+        old_to_new_pin = None
+        if hasattr(rebuild_base, "hold_contexts") or hasattr(rebuild_base, "hold_launches"):
+            old_to_new_pin = _old_to_new_pin_map(rebuild_base, self)
+            remap_hold_carrier_metadata(rebuild_base, self, old_to_new_pin)
+
+        if (
+            preserve_sparse
+            and int(getattr(rebuild_base, "timing_schema_version", 2)) == 3
+            and getattr(rebuild_base, "timing_sparse", None)
+        ):
+            if old_to_new_pin is None:
+                old_to_new_pin = _old_to_new_pin_map(rebuild_base, self)
+            self.timing_sparse = rebuild_sparse_view_dict(
+                rebuild_base,
+                self,
+                rebuild_base.timing_sparse,
+                equivalent_arc_lut=_equivalent_arc_lut,
+                old_to_new_pin=old_to_new_pin,
+            )
+            if getattr(rebuild_base, "timing_min_sparse", None):
+                self.timing_min_sparse = rebuild_sparse_view_dict(
+                    rebuild_base,
+                    self,
+                    rebuild_base.timing_min_sparse,
+                    equivalent_arc_lut=_equivalent_arc_lut,
+                    old_to_new_pin=old_to_new_pin,
+                )
+            self.timing_schema_version = 3
+            self.sparse_timing_view = (
+                validate_timing_schema(self)
+                if validate_schema
+                else read_sparse_timing_view(self)
+            )
+        else:
+            self.timing_schema_version = 2
+            self.sparse_timing_view = None
+            if validate_schema:
+                validate_timing_schema(rebuild_base)
 
     def __getattr__(self, name):
         if name.startswith("backend_endpoint_"):
@@ -245,9 +283,16 @@ def apply_inplace_carrier_sizing(raw_db, resizes, *, profile=None):
     if not is_native_phys and not isinstance(old_pydb, CommittedTimingPyDB):
         return None
 
+    preserve_sparse = (
+        getattr(raw_db, "sparse_timing_view", None) is not None
+        or int(getattr(old_pydb, "timing_schema_version", 2)) == 3
+    )
+
     with measure_phase(profile, "timing_carrier_rebuild_ms"):
         if not isinstance(old_pydb, CommittedTimingPyDB):
-            carrier = CommittedTimingPyDB(old_pydb, physical)
+            carrier = CommittedTimingPyDB(
+                old_pydb, physical, preserve_sparse=preserve_sparse
+            )
         else:
             carrier = old_pydb
             lib_names = list(getattr(metadata, "flat_libcell_names", ()))
@@ -390,7 +435,9 @@ def apply_inplace_carrier_sizing(raw_db, resizes, *, profile=None):
             pass
 
     raw_db.pydb = carrier
-    raw_db.sparse_timing_view = None
+    raw_db.sparse_timing_view = (
+        getattr(carrier, "sparse_timing_view", None) if preserve_sparse else None
+    )
     raw_db.refresh_generation += 1
     PlaceIOFunction._promote(
         raw_db,
@@ -438,10 +485,18 @@ def refresh_python_timing_carrier(raw_db, *, profile=None):
             include_clock_nets=True,
             **asdict(options),
         )
+    preserve_sparse = (
+        getattr(raw_db, "sparse_timing_view", None) is not None
+        or int(getattr(old_pydb, "timing_schema_version", 2)) == 3
+    )
     with measure_phase(profile, "timing_carrier_rebuild_ms"):
-        carrier = CommittedTimingPyDB(old_pydb, physical)
+        carrier = CommittedTimingPyDB(
+            old_pydb, physical, preserve_sparse=preserve_sparse
+        )
     raw_db.pydb = carrier
-    raw_db.sparse_timing_view = None
+    raw_db.sparse_timing_view = (
+        getattr(carrier, "sparse_timing_view", None) if preserve_sparse else None
+    )
     raw_db.refresh_generation += 1
     PlaceIOFunction._promote(
         raw_db,

@@ -10,11 +10,14 @@ from dataclasses import dataclass
 
 from .diff_opt_spec import TimingCoefficients
 
-DIFF_SIZING_ACTIONS = frozenset(("quad", "up", "down"))
+DIFF_SIZING_ACTIONS = frozenset(("quad", "up", "down", "vt", "vt_fast", "vt_slow"))
 DIFF_SIZING_ACTION_MASKS = {
     "quad": (True, True, True, True),
     "up": (True, False, False, True),
     "down": (False, True, True, False),
+    "vt": (False, False, True, True),
+    "vt_fast": (False, False, False, True),
+    "vt_slow": (False, False, True, False),
 }
 
 

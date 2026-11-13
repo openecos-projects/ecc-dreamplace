@@ -115,6 +115,48 @@ class GRSizingSession:
     pin_names: dict[str, int]
 
 
+def build_signal_pin_mapping(params, placedb) -> PinMapping:
+    pin_names, net_names = _names(placedb.pin_names), _names(placedb.net_names)
+    pin_name_to_id = dict(zip(pin_names, range(len(pin_names)), strict=True))
+    if len(set(pin_names)) != len(pin_names) or len(set(net_names)) != len(net_names):
+        raise ValueError("GR timing requires unique physical pin and net names")
+    eligible = torch.ones(len(net_names), dtype=torch.bool)
+    excluded = sorted(clock_net_ids(placedb))
+    pin_to_net = torch.as_tensor(placedb.pin2net_map, dtype=torch.long)
+    for port_name in _sdc_clock_port_names(params):
+        pin_id = pin_name_to_id.get(port_name)
+        if pin_id is None or pin_id < 0 or pin_id >= pin_to_net.numel():
+            continue
+        net_id = int(pin_to_net[pin_id].item())
+        if 0 <= net_id < len(net_names):
+            excluded.append(net_id)
+    excluded = sorted(set(excluded))
+    eligible[excluded] = False
+    return PinMapping(
+        pin_name_to_id,
+        dict(zip(net_names, range(len(net_names)), strict=True)),
+        torch.as_tensor(placedb.pin2net_map),
+        torch.as_tensor(placedb.net2driver_pin_map),
+        eligible,
+    )
+
+
+def compute_placedb_geometry_sha256(placedb) -> str:
+    geometry_hash = hashlib.sha256()
+    for values in (
+        placedb.node_x,
+        placedb.node_y,
+        placedb.node_size_x,
+        placedb.node_size_y,
+        placedb.pin_offset_x,
+        placedb.pin_offset_y,
+        placedb.inst_libcell_offset,
+    ):
+        geometry_hash.update(np.ascontiguousarray(values).tobytes())
+    geometry_hash.update("\n".join(_names(placedb.node_names)).encode())
+    return geometry_hash.hexdigest()
+
+
 def prepare_gr_sizing(params, placedb):
     started = time.perf_counter()
     lefs = list(params.lef_input)
@@ -140,42 +182,12 @@ def prepare_gr_sizing(params, placedb):
     )
     routing_seconds = time.perf_counter() - started
     pack = routed["timing_route_pack"]
-    pin_names, net_names = _names(placedb.pin_names), _names(placedb.net_names)
-    pin_name_to_id = dict(zip(pin_names, range(len(pin_names)), strict=True))
-    if len(set(pin_names)) != len(pin_names) or len(set(net_names)) != len(net_names):
-        raise ValueError("GR timing requires unique physical pin and net names")
-    eligible = torch.ones(len(net_names), dtype=torch.bool)
-    excluded = sorted(clock_net_ids(placedb))
-    pin_to_net = torch.as_tensor(placedb.pin2net_map, dtype=torch.long)
-    for port_name in _sdc_clock_port_names(params):
-        pin_id = pin_name_to_id.get(port_name)
-        if pin_id is None or pin_id < 0 or pin_id >= pin_to_net.numel():
-            continue
-        net_id = int(pin_to_net[pin_id].item())
-        if 0 <= net_id < len(net_names):
-            excluded.append(net_id)
-    excluded = sorted(set(excluded))
-    eligible[excluded] = False
-    mapping = PinMapping(
-        dict(zip(pin_names, range(len(pin_names)), strict=True)),
-        dict(zip(net_names, range(len(net_names)), strict=True)),
-        torch.as_tensor(placedb.pin2net_map),
-        torch.as_tensor(placedb.net2driver_pin_map),
-        eligible,
+    mapping = build_signal_pin_mapping(params, placedb)
+    identity = RouteIdentity(
+        _file_hash(params.def_input),
+        compute_placedb_geometry_sha256(placedb),
+        1,
     )
-    geometry_hash = hashlib.sha256()
-    for values in (
-        placedb.node_x,
-        placedb.node_y,
-        placedb.node_size_x,
-        placedb.node_size_y,
-        placedb.pin_offset_x,
-        placedb.pin_offset_y,
-        placedb.inst_libcell_offset,
-    ):
-        geometry_hash.update(np.ascontiguousarray(values).tobytes())
-    geometry_hash.update("\n".join(_names(placedb.node_names)).encode())
-    identity = RouteIdentity(_file_hash(params.def_input), geometry_hash.hexdigest(), 1)
     rc = RCParameters.from_lefs(lefs, pack["layer_names"])
     # Native prepare validates routing, estimates local access and records the
     # electrical loop reduction. Missing connectivity/RC still fails.

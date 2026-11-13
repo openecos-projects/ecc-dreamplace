@@ -1010,15 +1010,23 @@
     },
     "timing_rc_mode": {
         "default": "placement",
-        "description": "timing parasitics, placement | gr; gr requires native ECC CPU sizing or STA"
+        "description": "timing parasitics, placement | gr | spef; gr and spef require native ECC CPU sizing or STA"
     },
     "diff_sizing_timing_rc_mode": {
         "default": "gr",
-        "description": "standalone diff_sizing timing RC source; placement uses the placement parasitics and gr uses the frozen GR snapshot"
+        "description": "standalone diff_sizing timing RC source; placement uses placement parasitics, gr uses the frozen GR snapshot, and spef uses extracted post-route SPEF"
+    },
+    "spef_input": {
+        "default": "",
+        "description": "post-route SPEF or SPEF.gz path consumed when timing_rc_mode=spef"
+    },
+    "spef_coupling_cap_scale": {
+        "default": 1.0,
+        "description": "nonnegative Miller-like multiplier applied to cross-net coupling capacitors in SPEF mode"
     },
     "diff_sizing_optimization_flows": {
         "default": null,
-        "description": "ordered standalone diff_sizing phases: [action, rounds, [wns, tns, slew, cap], selection_percent]; action is quad, up, or down and percent is in (0, 100]; null selects a quad phase; ECC defaults to 50 rounds with diff_sizing_coefficients and a shared 1% budget per round"
+        "description": "ordered standalone diff_sizing phases: [action, rounds, [wns, tns, slew, cap], selection_percent]; action is quad, up, down, vt, vt_fast, or vt_slow and percent is in (0, 100]; null selects a quad phase; ECC defaults to 50 rounds with diff_sizing_coefficients and a shared 1% budget per round"
     },
     "cell_model_schema": {
         "default": "main_id_arc_offset_piecewise_linear",

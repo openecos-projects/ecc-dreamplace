@@ -212,6 +212,10 @@ class PlacementEngine:
             from dreamplace.flows.gr_sizing import prepare_gr_sizing
 
             prepare_gr_sizing(self.params, self.placedb)
+        elif self.params.timing_rc_mode == "spef":
+            from dreamplace.flows.spef_sizing import prepare_spef_sizing
+
+            prepare_spef_sizing(self.params, self.placedb)
         else:
             self.placedb.gr_sizing = None
         logging.info(

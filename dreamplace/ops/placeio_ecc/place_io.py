@@ -139,7 +139,12 @@ class PlaceIOFunction:
             from .library_metadata import attach_repair_library_source
             from .timing_carrier import CommittedTimingPyDB
 
-            pydb = CommittedTimingPyDB(pydb, pydb, recovery_rat_is_capture_deadline=True)
+            pydb = CommittedTimingPyDB(
+                pydb,
+                pydb,
+                recovery_rat_is_capture_deadline=True,
+                preserve_sparse=False,
+            )
             attach_repair_library_source(pydb, params, timing_inputs)
             sparse_timing_view = None
         raw_db = ECCPlaceIOBackend(
@@ -440,8 +445,11 @@ class PlaceIOFunction:
     def refresh(raw_db, *, refresh_mode="full_rebuild", rebuild_mode="full_rebuild"):
         from .timing_carrier import CommittedTimingPyDB, refresh_python_timing_carrier
 
-        if isinstance(raw_db.pydb, CommittedTimingPyDB):
-            if refresh_mode != "full_rebuild" or rebuild_mode != "full_rebuild":
+        if refresh_mode == "python_carrier" or isinstance(raw_db.pydb, CommittedTimingPyDB):
+            if (
+                refresh_mode not in {"full_rebuild", "python_carrier"}
+                or rebuild_mode != "full_rebuild"
+            ):
                 raise ValueError("Python timing carrier refresh requires full_rebuild")
             return refresh_python_timing_carrier(raw_db)
 

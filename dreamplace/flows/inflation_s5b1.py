@@ -33,6 +33,15 @@ from dreamplace.flows.discrete_timing_common import (
     virtual_timing_area,
 )
 from dreamplace.flows.discrete_timing_owner import DiscreteTimingOwner
+from dreamplace.flows.s5b1_area_budget import (
+    S5B1WindowAreaBudget,
+    bind_window_area_budget,
+    effective_buffering_selection_fraction,
+    effective_fits_capacity,
+    effective_sizing_budget_percent,
+    resolve_median_buffer_area,
+    resolve_proposal_buffer_area,
+)
 from dreamplace.flows.timing_opt_schedule import TimingOptWindowSchedule
 from dreamplace.ops.buffer_insertion.buffering_config import build_buffering_config_from_params
 from dreamplace.ops.buffer_insertion.buffering_lane import BufferingOptimizationLane
@@ -40,6 +49,9 @@ from dreamplace.ops.buffer_insertion.discrete_virtual_scheduler import (
     schedule_net_gradient_actions,
     take_transition_prefix,
     transition_backtracking_sizes,
+)
+from dreamplace.ops.buffer_insertion.incremental_candidate_refresh import (
+    IncrementalCandidateSession,
 )
 from dreamplace.ops.buffer_insertion.segment_count_state import build_segment_count_state
 from dreamplace.ops.discrete_gradient_topk import (
@@ -121,6 +133,9 @@ class InflationS5B1:
         self.milestones = self.schedule.milestones
         self.pending_milestones = self.schedule.pending_milestones
         self.capacity = capture_area(data, placedb).capacity
+        self.median_buffer_area = resolve_median_buffer_area(data, placedb, params)
+        self.proposal_buffer_area = resolve_proposal_buffer_area(data, placedb, params)
+        self._active_area_budget = None
         self.native_cell_ids = data.inst_cell_id.detach().cpu().clone()
         self.terminal_request = None
         self.terminal_commit_started = False
@@ -209,7 +224,7 @@ class InflationS5B1:
         return virtual_timing_area(self, model, state)
 
     def _fits(self, model, capacity):
-        return timing_area_fits(self, model, capacity)
+        return timing_area_fits(self, model, effective_fits_capacity(self, capacity))
 
     @staticmethod
     def _counts(state):
@@ -302,9 +317,7 @@ class InflationS5B1:
                 size_down_percent=0.0,
                 vt_percent=0.0,
                 candidate_table=candidates,
-                shared_budget_percent=float(
-                    self.params.discrete_gradient_topk_shared_budget_percent
-                ),
+                shared_budget_percent=effective_sizing_budget_percent(self, model),
                 blocked_instances=blocked,
                 size_parameterization="real_size",
             )
@@ -411,18 +424,112 @@ class InflationS5B1:
                 run_discrete_candidate_buffer_scheduler,
             )
 
-            activation_before = state.activation_param.detach().clone()
-            scheduler_kwargs = (
-                {"incremental_gate": incremental_gate}
-                if incremental_gate.check_available() is None
-                else {}
+            fallback_fraction = float(
+                getattr(
+                    self.lane.config,
+                    "route_b_selection_fraction",
+                    getattr(self.params, "buffering_route_b_selection_fraction", 0.001),
+                )
             )
+            selection_fraction = effective_buffering_selection_fraction(
+                self,
+                model,
+                affected_net_count=int(state.net_ids.numel()),
+                fallback_fraction=fallback_fraction,
+            )
+            if selection_fraction is None:
+                params = getattr(self, "params", None)
+                if params is not None:
+                    params.enable_relaxed_buffer_timing = False
+                count = int(state.activation_param.detach().sum().cpu().item())
+                return {
+                    "status": "area_budget_exhausted",
+                    "initial_loss": 0.0,
+                    "final_loss": 0.0,
+                    "scheduled": 0,
+                    "accepted": 0,
+                    "accepted_net_ids": [],
+                    "gradient_norm": None,
+                    "cumulative_count": count,
+                }
+
+            activation_before = state.activation_param.detach().clone()
+            raw_cids = getattr(state, "candidate_ids", None)
+            candidate_ids_before = raw_cids.detach().clone() if raw_cids is not None else None
+            buffering_rounds = int(
+                getattr(self.params, "timing_opt_buffering_rounds", 0)
+                or getattr(self.lane.config, "continuous_steps", 0)
+                or 1
+            )
+            scheduler_kwargs = {}
+            if incremental_gate.check_available() is None:
+                scheduler_kwargs["incremental_gate"] = incremental_gate
+                if (
+                    raw_cids is not None
+                    and getattr(self.lane, "buffer_relaxed_timing_payload", None) is not None
+                ):
+                    session = IncrementalCandidateSession(
+                        lane=self.lane,
+                        model=model,
+                        params=self.params,
+                        incremental_gate=incremental_gate,
+                    )
+                    scheduler_kwargs["on_round_accepted"] = (
+                        lambda infos, dirty: session.refresh_round(
+                            accepted_action_infos=infos,
+                            dirty_nets=dirty,
+                        )
+                    )
+            active_budget = getattr(self, "_active_area_budget", None)
+            if active_budget is not None:
+
+                def _round_budget_fn(*, round_idx, total_rounds, current_area, gate):
+                    cur_state = self.lane._current_state()
+                    cur_area = (
+                        float(current_area)
+                        if current_area is not None
+                        else float(
+                            capture_area(
+                                self.data,
+                                self.placedb,
+                                self.virtual_area(model),
+                                capacity=active_budget.placement_capacity,
+                            ).movable
+                        )
+                    )
+                    frac = active_budget.buffering_selection_fraction(
+                        current_movable=cur_area,
+                        affected_net_count=int(cur_state.net_ids.numel()),
+                        fallback_fraction=fallback_fraction,
+                        round_idx=round_idx,
+                        total_rounds=total_rounds,
+                    )
+                    if frac is None:
+                        return {"exhausted": True}
+                    rcap = active_budget.round_capacity(
+                        current_movable=cur_area,
+                        round_idx=round_idx,
+                        total_rounds=total_rounds,
+                    )
+                    return {
+                        "exhausted": False,
+                        "selection_fraction": float(frac),
+                        "round_capacity": float(rcap),
+                        "min_buffer_area": float(
+                            getattr(active_budget, "proposal_buffer_area", 0.0)
+                            or getattr(active_budget, "median_buffer_area", 0.0)
+                            or 0.0
+                        ),
+                    }
+
+                scheduler_kwargs["round_budget_fn"] = _round_budget_fn
             try:
                 loop_summary = run_discrete_candidate_buffer_scheduler(
                     lane=self.lane,
                     model=model,
-                    rounds=int(getattr(self.lane.config, "continuous_steps", 0)),
+                    rounds=buffering_rounds,
                     allow_existing_activation=True,
+                    selection_fraction=selection_fraction,
                     **scheduler_kwargs,
                 )
             finally:
@@ -432,10 +539,12 @@ class InflationS5B1:
                 params = getattr(self, "params", None)
                 if params is not None:
                     params.enable_relaxed_buffer_timing = False
+            state = self.lane._current_state()
             count = int(state.activation_param.detach().sum().cpu().item())
             accepted_net_ids = accepted_candidate_net_ids(
                 activation_before,
                 state,
+                candidate_ids_before=candidate_ids_before,
             )
             self._pending_dirty_net_ids.update(accepted_net_ids)
             terminal = dict(loop_summary.terminal_metrics or {})
@@ -466,6 +575,22 @@ class InflationS5B1:
                 result["incremental_commit"] = incremental_rounds[-1]
                 result["incremental_commit_rounds"] = incremental_rounds
             return result
+        selection_fraction = effective_buffering_selection_fraction(
+            self,
+            model,
+            affected_net_count=int(state.net_ids.numel()),
+            fallback_fraction=float(self.params.buffering_route_b_selection_fraction),
+        )
+        if selection_fraction is None:
+            return {
+                "status": "area_budget_exhausted",
+                "initial_loss": 0.0,
+                "final_loss": 0.0,
+                "scheduled": 0,
+                "accepted": 0,
+                "gradient_norm": 0.0,
+                "cumulative_count": int(state.z_param.detach().sum()),
+            }
         before = state.z_param.detach().clone()
         state.z_param.requires_grad_(requires_grad=True)
         try:
@@ -482,7 +607,7 @@ class InflationS5B1:
             counts=before,
             raw_grad=gradient,
             max_count=state.max_repeater_count,
-            selection_fraction=float(self.params.buffering_route_b_selection_fraction),
+            selection_fraction=selection_fraction,
         )
         filtered = incremental_gate.filter_segment_transition(state, before, transition)
         incremental_report = None
@@ -527,7 +652,10 @@ class InflationS5B1:
         state = self.lane._current_state()
         if hasattr(state, "activation_param"):
             net_ids = active_candidate_net_ids(state)
-            if net_ids:
+            if net_ids and not any(
+                bool(rec.get("cpp_subnet_refreshed", False))
+                for rec in getattr(state, "candidate_records", ()) or ()
+            ):
                 topo = self.ops.steiner_topo_op
                 topo.freeze_nets(net_ids)
                 topo.frozen_nets.candidate_state = state
@@ -618,45 +746,81 @@ class InflationS5B1:
         entry = capture_area(self.data, self.placedb, self.virtual_area(model))
         if not entry.fits():
             raise RuntimeError("S5B1 entry exceeds placement capacity")
-        with self.electrical_window(), self._sizing_coefficients(model) as coefficients:
-            sizing = self.run_sizing(model, pos, geometry, entry.capacity)
-            sizing["coefficients"] = coefficients
-        sizing_done = time.perf_counter()
-        preparation_ms = buffering_ms = 0.0
-        buffering = {"status": "disabled", "scheduled": 0, "accepted": 0, "cumulative_count": 0}
-        if bool(getattr(self.params, "timing_opt_buffering_enabled", False)):
-            if bool(getattr(self.params, "repair_buffering_midplace_enable", False)):
-                buffering = {
-                    "status": "deferred_to_midplace_repair_timing",
-                    "scheduled": 0,
-                    "accepted": 0,
-                    "cumulative_count": 0,
-                }
-            else:
-                self.prepare(model, pos)
-                prepared = time.perf_counter()
-                with self.electrical_window():
-                    buffering = self.run_buffering(model, pos, entry.capacity)
-                buffering_done = time.perf_counter()
-                if getattr(self, "direct_commit_enabled", False):
-                    accepted_count = int(buffering.get("accepted", 0) or 0)
-                    buffering["cumulative_count"] = (
-                        int(getattr(self, "committed_buffer_count", 0)) + accepted_count
-                    )
-                    if accepted_count > 0:
-                        self._pending_window_commit_request = project_window_buffer_request(
-                            self,
-                            model,
-                            pos,
-                            iteration=int(iteration),
-                            reason=f"inflation_s5b1_window_{self.window_count}",
-                        )
-                    clear_virtual_buffer_state(self, model)
+        area_budget = S5B1WindowAreaBudget.for_window(
+            entry,
+            median_buffer_area=getattr(self, "median_buffer_area", None),
+            proposal_buffer_area=getattr(self, "proposal_buffer_area", None),
+        )
+        with bind_window_area_budget(self, area_budget):
+            with self.electrical_window(), self._sizing_coefficients(model) as coefficients:
+                sizing = self.run_sizing(
+                    model, pos, geometry, area_budget.window_capacity
+                )
+                sizing["coefficients"] = coefficients
+            sizing_done = time.perf_counter()
+            after_sizing_movable = (
+                capture_area(
+                    self.data,
+                    self.placedb,
+                    self.virtual_area(model),
+                    capacity=entry.capacity,
+                ).movable
+                if area_budget.enabled
+                else entry.movable
+            )
+            after_window_movable = after_sizing_movable
+            preparation_ms = buffering_ms = 0.0
+            buffering = {
+                "status": "disabled",
+                "scheduled": 0,
+                "accepted": 0,
+                "cumulative_count": 0,
+            }
+            if bool(getattr(self.params, "timing_opt_buffering_enabled", False)):
+                if bool(getattr(self.params, "repair_buffering_midplace_enable", False)):
+                    buffering = {
+                        "status": "deferred_to_midplace_repair_timing",
+                        "scheduled": 0,
+                        "accepted": 0,
+                        "cumulative_count": 0,
+                    }
                 else:
-                    self.retain_buffered_nets(model)
-                preparation_ms = (prepared - sizing_done) * 1000.0
-                buffering_ms = (buffering_done - prepared) * 1000.0
-        return {
+                    self.prepare(model, pos)
+                    prepared = time.perf_counter()
+                    with self.electrical_window():
+                        buffering = self.run_buffering(
+                            model, pos, area_budget.window_capacity
+                        )
+                    buffering_done = time.perf_counter()
+                    if area_budget.enabled:
+                        after_window_movable = capture_area(
+                            self.data,
+                            self.placedb,
+                            self.virtual_area(model),
+                            capacity=entry.capacity,
+                        ).movable
+                    if getattr(self, "direct_commit_enabled", False):
+                        accepted_count = int(buffering.get("accepted", 0) or 0)
+                        buffering["cumulative_count"] = (
+                            int(getattr(self, "committed_buffer_count", 0))
+                            + accepted_count
+                        )
+                        if accepted_count > 0:
+                            self._pending_window_commit_request = (
+                                project_window_buffer_request(
+                                    self,
+                                    model,
+                                    pos,
+                                    iteration=int(iteration),
+                                    reason=f"inflation_s5b1_window_{self.window_count}",
+                                )
+                            )
+                        clear_virtual_buffer_state(self, model)
+                    else:
+                        self.retain_buffered_nets(model)
+                    preparation_ms = (prepared - sizing_done) * 1000.0
+                    buffering_ms = (buffering_done - prepared) * 1000.0
+        result = {
             "iteration": int(iteration),
             "sizing": sizing,
             "buffering": buffering,
@@ -665,6 +829,12 @@ class InflationS5B1:
             "buffering_ms": buffering_ms,
             "runtime_ms": (time.perf_counter() - started) * 1000.0,
         }
+        if area_budget.enabled:
+            result["area_budget"] = area_budget.to_summary(
+                after_sizing_movable=after_sizing_movable,
+                after_window_movable=after_window_movable,
+            )
+        return result
 
     def _sync_native_sizing(self):
         return sync_owner_native_sizing(self)

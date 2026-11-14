@@ -829,3 +829,280 @@ def test_incremental_buffering_gate_checks_dynamic_virtual_count_after_static_ca
     )
     assert disabled_gate.check_available() == "disabled"
 
+
+def test_cpp_refresh_dirty_subnet_steiner_trees_and_multi_depth_session():
+    """Verify C++ 2n sub-net FLUTE refresh + IncrementalCandidateSession multi-depth export."""
+    from dreamplace.ops.buffer_insertion.incremental_candidate_refresh import (
+        IncrementalCandidateSession,
+    )
+    from dreamplace.ops.buffer_insertion.optimization_state import (
+        build_typed_discrete_candidate_state,
+    )
+    from dreamplace.ops.net_subgraph_timing.candidate_live_geometry import (
+        CandidateLiveGeometry,
+    )
+    from dreamplace.ops.steiner_topo.steiner_topo import (
+        _FLUTE_POST_FILE,
+        _FLUTE_POWV_FILE,
+    )
+
+    cfg, policy = _build_chain_netlist(
+        inst_cells=[0, 1],
+        total_r=600.0,
+        total_c=0.240,
+        sparse_mode=True,
+    )
+    policy["cap_weight"] = 10.0
+    # Populate coordinates + wire RC unit + FLUTE LUTs on the 5-pin netlist (pins 0..4, 3 nets).
+    cfg["rc_forest"]["vertex_x_dbu"] = np.array([0.0, 1000.0, 1000.0, 601000.0, 601000.0])
+    cfg["rc_forest"]["vertex_y_dbu"] = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
+    cfg["rc_forest"]["dbu"] = 1000.0
+    cfg["rc_forest"]["r_unit"] = 1.0
+    cfg["rc_forest"]["c_unit"] = 0.0004
+    cfg["rc_forest"]["flute_powv_file"] = str(_FLUTE_POWV_FILE)
+    cfg["rc_forest"]["flute_post_file"] = str(_FLUTE_POST_FILE)
+
+    engine = timing_propagation_cpp.IncrementalSizingEngine(cfg)
+    r0 = dict(
+        engine.evaluate_ranked_buffer_candidates(
+            [
+                {
+                    "net_id": 1,
+                    "parent_vertex": 2,
+                    "child_vertices": [3],
+                    "split_ratio": 0.5,
+                    "target_cell_id": 2,
+                    "x_dbu": 301000.0,
+                    "y_dbu": 0.0,
+                }
+            ],
+            policy,
+        )
+    )
+    assert r0["accepted_indices"] == [0]
+    assert len(r0["dirty_nets"]) == 2
+    assert r0["dirty_nets"] == sorted([1, r0["accepted_actions"][0]["new_net"]])
+
+    # Build matching initial Python state & payload for both nets (0: pins 0->1, 1: pins 2->3).
+    from dreamplace.ops.buffer_insertion.drive_type_table import DriveTypeEntry
+
+    table = SimpleNamespace(
+        entries=(
+            DriveTypeEntry(
+                drive_type_id=0,
+                master_name="BUF_FAST",
+                drive_strength=1.0,
+                cell_id=2,
+                bsu_index=0,
+            ),
+        ),
+        to_metadata=lambda: {
+            "masters": [
+                {
+                    "drive_type_id": 0,
+                    "bsu_index": 0,
+                    "cell_id": 2,
+                    "master_name": "BUF_FAST",
+                }
+            ]
+        },
+    )
+    rec0 = {
+        "candidate_id": 1,
+        "net_id": 0,
+        "net_name": "net0",
+        "driver_pin_id": 0,
+        "driver_pin_name": "pi",
+        "candidate_node_id": 2,
+        "parent_node_id": 0,
+        "child_node_ids": [1],
+        "segment_split_ratio": 0.5,
+        "buffer_main_type_index": 0,
+        "x_dbu": 500.0,
+        "y_dbu": 0.0,
+        "candidate_location_x": 0.5,
+        "candidate_location_y": 0.0,
+        "downstream_pin_ids": (1,),
+        "downstream_pin_names": ("drv/A",),
+    }
+    rec1 = {
+        "candidate_id": 2,
+        "net_id": 1,
+        "net_name": "net1",
+        "driver_pin_id": 2,
+        "driver_pin_name": "drv/Y",
+        "candidate_node_id": 5,
+        "parent_node_id": 2,
+        "child_node_ids": [3],
+        "segment_split_ratio": 0.5,
+        "buffer_main_type_index": 0,
+        "x_dbu": 76000.0,
+        "y_dbu": 0.0,
+        "candidate_location_x": 76.0,
+        "candidate_location_y": 0.0,
+        "downstream_pin_ids": (3,),
+        "downstream_pin_names": ("sink/A",),
+    }
+    state = build_typed_discrete_candidate_state(
+        [rec0, rec1],
+        buffer_main_type_index=0,
+        legal_buffer_count=2,
+        drive_type_table=table,
+        dtype=torch.float64,
+    )
+    state.activation_param.data[1, 0] = 1.0
+    # Nodes 0..2 belong to net 0; nodes 3..5 belong to net 1.
+    payload = {
+        "net_flat_topo_sort": torch.tensor([0, 2, 1, 3, 5, 4], dtype=torch.long),
+        "net_flat_topo_sort_start": torch.tensor([0, 3, 6], dtype=torch.long),
+        "pin_fa": torch.tensor([-1, 2, 0, -1, 5, 3], dtype=torch.long),
+        "flat_pin_to_start": torch.tensor([0, 1, 1, 2, 3, 3, 4], dtype=torch.long),
+        "flat_pin_to": torch.tensor([2, 1, 5, 4], dtype=torch.long),
+        "edge_resistance": torch.tensor(
+            [0.0, 0.5, 0.5, 0.0, 75.0, 75.0], dtype=torch.float64
+        ),
+        "edge_capacitance": torch.tensor(
+            [0.0, 0.0002, 0.0002, 0.0, 0.03, 0.03], dtype=torch.float64
+        ),
+        "node_capacitance": torch.tensor(
+            [0.0, 0.002, 0.0, 0.0, 0.008, 0.0], dtype=torch.float64
+        ),
+        "candidate_node_id": torch.tensor([2, 5], dtype=torch.long),
+        "candidate_net_id": torch.tensor([0, 1], dtype=torch.long),
+        "sink_node_id": torch.tensor([1, 4], dtype=torch.long),
+        "sink_pin_id": torch.tensor([1, 3], dtype=torch.long),
+        "sink_net_index": torch.tensor([0, 1], dtype=torch.long),
+        "per_size_input_cap": torch.tensor([[0.002, 0.002]] * 2, dtype=torch.float64),
+        "metadata": {
+            "net_ids": [0, 1],
+            "compact_node_to_original": [0, 1, -1, 2, 3, -1],
+        },
+    }
+
+    class _FakeGate:
+        def refresh_dirty_subnets(self, dirty):
+            return list(engine.refresh_dirty_subnet_steiner_trees(dirty))
+
+        def remap_rejection_masks(self, **_kwargs):
+            return None
+
+    class _FakeLane:
+        def __init__(self):
+            self.buffer_optimization_state = state
+            self.buffer_relaxed_timing_payload = payload
+
+        def _current_state(self):
+            return self.buffer_optimization_state
+
+        def attach_state(self, data):
+            data.buffer_optimization_state = self.buffer_optimization_state
+            data.buffer_relaxed_timing_payload = self.buffer_relaxed_timing_payload
+
+        def register_model_parameters(self, _model):
+            return self
+
+    lane = _FakeLane()
+    placedb = SimpleNamespace(
+        num_nodes=5,
+        num_pins=5,
+        pin_names=["pi", "drv/A", "drv/Y", "sink/A", "sink/Y"],
+    )
+    data = SimpleNamespace(dbu=1000)
+    model = SimpleNamespace(placedb=placedb, data_collections=data)
+    params = SimpleNamespace(
+        dbu=1000,
+        buffering_max_candidates_per_segment=3,
+        buffering_include_tree_node_candidates=0,
+        buffering_candidate_policy="rebuffer_sites",
+        buffering_candidate_drive_type_mode="single_fixed",
+    )
+    session = IncrementalCandidateSession(
+        lane=lane, model=model, params=params, incremental_gate=_FakeGate()
+    )
+
+    info0 = dict(r0["accepted_actions"][0])
+    info0.update({"candidate_id": 2, "orig_net_id": 1, "drive_type_id": 0, "row_idx": 1})
+    rep0 = session.refresh_round(
+        accepted_action_infos=[info0],
+        dirty_nets=r0["dirty_nets"],
+    )
+    assert rep0["status"] == "ok"
+    assert rep0["dirty_subnet_count"] == 2
+    assert rep0["dirty_orig_net_count"] == 1
+    # Untouched net 0 row preserved; net 1 now has sub-net candidates with cpp_parent_vertex.
+    new_state = lane.buffer_optimization_state
+    new_payload = lane.buffer_relaxed_timing_payload
+    assert bool(new_payload["static_rc_edge_mask"].any().item())
+    locked_net1 = [
+        rec
+        for row, rec in enumerate(new_state.candidate_records)
+        if int(rec["net_id"]) == 1 and float(new_state.activation_param[row, 0].item()) == 1.0
+    ]
+    assert len(locked_net1) == 1
+    assert locked_net1[0]["segment_tree_depth"] == 0
+    assert locked_net1[0]["downstream_pin_names"] == ("sink/A",)
+
+    # Verify CandidateLiveGeometry accepts refreshed mixed static/live masks cleanly!
+    geom = CandidateLiveGeometry(new_payload, new_state)
+    geom.bind(
+        new_x=torch.tensor([0.0, 1.0, 1.0, 601.0, 601.0], dtype=torch.float64),
+        new_y=torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0], dtype=torch.float64),
+        r_unit=1.0,
+        c_unit=0.0004,
+        scale_factor=0.001,
+        dbu=1000.0,
+        pin_capacitance_by_sense={
+            "base": torch.tensor([0.0, 0.002, 0.0, 0.008, 0.0], dtype=torch.float64)
+        },
+    )
+    assert geom.rc["edge_resistance"].shape[0] == new_payload["edge_resistance"].shape[0]
+
+    # Round 1: insert a 2nd buffer DOWNSTREAM inside net 1's new_net -> verify depth 0 < depth 1!
+    downstream_cand = max(
+        (
+            rec
+            for rec in new_state.candidate_records
+            if rec.get("cpp_subnet_refreshed")
+            and int(rec["cpp_net_id"]) == int(r0["accepted_actions"][0]["new_net"])
+        ),
+        key=lambda rec: float(rec.get("segment_split_ratio", 0.0)),
+    )
+    r1 = dict(
+        engine.evaluate_ranked_buffer_candidates(
+            [
+                {
+                    "net_id": downstream_cand["cpp_net_id"],
+                    "parent_vertex": downstream_cand["cpp_parent_vertex"],
+                    "child_vertices": list(downstream_cand["cpp_child_vertices"]),
+                    "split_ratio": downstream_cand["segment_split_ratio"],
+                    "target_cell_id": 2,
+                    "x_dbu": downstream_cand["x_dbu"],
+                    "y_dbu": downstream_cand["y_dbu"],
+                }
+            ],
+            policy,
+        )
+    )
+    assert r1["accepted_indices"] == [0]
+    info1 = dict(r1["accepted_actions"][0])
+    info1.update(
+        {
+            "candidate_id": downstream_cand["candidate_id"],
+            "orig_net_id": 1,
+            "drive_type_id": 0,
+        }
+    )
+    session.refresh_round(accepted_action_infos=[info1], dirty_nets=r1["dirty_nets"])
+    final_state = lane.buffer_optimization_state
+    locked_all = sorted(
+        [
+            rec
+            for row, rec in enumerate(final_state.candidate_records)
+            if int(rec["net_id"]) == 1 and float(final_state.activation_param[row, 0].item()) == 1.0
+        ],
+        key=lambda rec: rec["segment_tree_depth"],
+    )
+    assert [rec["segment_tree_depth"] for rec in locked_all] == [0, 1]
+    assert locked_all[0]["downstream_pin_names"] == ("sink/A",)
+    assert locked_all[1]["downstream_pin_names"] == ("sink/A",)
+

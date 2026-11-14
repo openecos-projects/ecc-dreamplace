@@ -24,6 +24,10 @@ from dreamplace.flows.discrete_timing_common import (
 )
 from dreamplace.flows.discrete_timing_diagnostics import objective_snapshot, phase_metrics
 from dreamplace.flows.incremental_sizing_filter import IncrementalSizingGate
+from dreamplace.flows.s5b1_area_budget import (
+    effective_fits_capacity,
+    effective_sizing_budget_percent,
+)
 from dreamplace.ops.buffer_insertion.buffering_lane import (
     _tensor_digest,
 )
@@ -611,7 +615,7 @@ class DiscreteTimingOwner:
         )
         action_count = int(scores.shape[1])
         sizeable_count = int(data.inst_is_sizeable.sum().item())
-        percent = float(self.params.discrete_gradient_topk_shared_budget_percent)
+        percent = effective_sizing_budget_percent(self, model)
         budget = (
             max(1, int(math.ceil(sizeable_count * percent / 100.0)))
             if percent > 0.0
@@ -976,7 +980,7 @@ class DiscreteTimingOwner:
         return virtual_timing_area(self, model, state)
 
     def _fits(self, model, capacity):
-        return timing_area_fits(self, model, capacity)
+        return timing_area_fits(self, model, effective_fits_capacity(self, capacity))
 
     @staticmethod
     def _counts(state):
@@ -1289,9 +1293,7 @@ class DiscreteTimingOwner:
                     size_logits=size,
                     vt_logits=vt,
                     candidate_table=candidates,
-                    shared_budget_percent=float(
-                        self.params.discrete_gradient_topk_shared_budget_percent
-                    ),
+                    shared_budget_percent=effective_sizing_budget_percent(self, model),
                     blocked_instances=blocked,
                     size_parameterization="real_size",
                 )
@@ -1350,8 +1352,8 @@ class DiscreteTimingOwner:
                         size_down_percent=0.0,
                         vt_percent=0.0,
                         candidate_table=candidates,
-                        shared_budget_percent=float(
-                            self.params.discrete_gradient_topk_shared_budget_percent
+                        shared_budget_percent=effective_sizing_budget_percent(
+                            self, model
                         ),
                         blocked_instances=blocked,
                         size_parameterization="real_size",

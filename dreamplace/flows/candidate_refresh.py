@@ -320,21 +320,50 @@ def compact_candidate_dirty_summary(summary):
     }
 
 
-def accepted_candidate_net_ids(activation_before, state):
+def accepted_candidate_net_ids(activation_before, state, *, candidate_ids_before=None):
     """Return candidate nets whose position became newly active."""
 
-    active_before = (
-        activation_before.detach().reshape(activation_before.shape[0], -1).sum(dim=1) > 0
-    )
     active_after = (
         state.activation_param.detach().reshape(state.activation_param.shape[0], -1).sum(dim=1) > 0
     )
-    accepted_rows = torch.nonzero(
-        active_before ^ active_after,
-        as_tuple=False,
-    ).flatten()
     candidate_net_id = getattr(state, "candidate_net_id", None)
-    if candidate_net_id is None or not accepted_rows.numel():
+    if candidate_net_id is None or not int(active_after.numel()):
+        return []
+    if (
+        activation_before.shape[0] == state.activation_param.shape[0]
+        and candidate_ids_before is None
+    ):
+        active_before = (
+            activation_before.detach().reshape(activation_before.shape[0], -1).sum(dim=1) > 0
+        )
+        accepted_rows = torch.nonzero(
+            active_before ^ active_after,
+            as_tuple=False,
+        ).flatten()
+    else:
+        before_active = (
+            activation_before.detach().reshape(activation_before.shape[0], -1).sum(dim=1) > 0
+        )
+        before_ids = (
+            candidate_ids_before.detach().cpu().tolist()
+            if candidate_ids_before is not None
+            else []
+        )
+        before_active_set = {
+            int(before_ids[row])
+            for row, flag in enumerate(before_active.cpu().tolist())
+            if flag and row < len(before_ids)
+        }
+        after_ids = state.candidate_ids.detach().cpu().tolist()
+        accepted_rows = torch.tensor(
+            [
+                row
+                for row, flag in enumerate(active_after.cpu().tolist())
+                if flag and int(after_ids[row]) not in before_active_set
+            ],
+            dtype=torch.long,
+        )
+    if not accepted_rows.numel():
         return []
     return (
         torch.unique(

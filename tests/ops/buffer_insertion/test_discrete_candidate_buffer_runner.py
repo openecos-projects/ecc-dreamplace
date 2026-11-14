@@ -447,3 +447,213 @@ def test_placement_commit_handoff_updates_candidate_trace_and_summary(tmp_path):
     assert trace["commit"] == {"status": "accepted", "accepted_action_count": 1}
     assert written["payload"]["trace_sha256"] == hashlib.sha256(trace_path.read_bytes()).hexdigest()
     assert written["payload"]["inner_loop"]["trace_sha256"] == written["payload"]["trace_sha256"]
+
+
+def test_candidate_runner_tiered_retry_margin_and_round_early_break(tmp_path):
+    """In-round tier retry consumes leftover round capacity, then early-breaks on 0-accept."""
+    lane = _FakeCandidateLane(tmp_path)
+    lane.state = build_discrete_candidate_state(
+        [_candidate(11, 5, 2, 10), _candidate(12, 5, 3, 20), _candidate(22, 7, 4, 30)],
+        buffer_main_type_index=4,
+        legal_buffer_count=3,
+        fixed_bsu_index=1,
+    )
+
+    class _FakeGate:
+        def __init__(self):
+            self.blocked_cids = {11}
+            self.last_area = 100.0
+            self.calls = 0
+
+        def check_available(self, preexisting_virtual_count=0):
+            return None
+
+        def current_area(self):
+            return self.last_area
+
+        def allowed_untyped_candidates(self, state):
+            return torch.tensor(
+                [int(cid) not in self.blocked_cids for cid in state.candidate_ids.tolist()],
+                dtype=torch.bool,
+            )
+
+        def filter_candidate_transition(self, state, transition, *, capacity_override=None):
+            self.calls += 1
+            rows = transition.selected_candidate_indices.detach().cpu().tolist()
+            keep = []
+            infos = []
+            dirty = []
+            for spec_i, row in enumerate(rows):
+                cid = int(state.candidate_ids[row].item())
+                if cid == 22:
+                    self.blocked_cids.add(cid)  # simulate STA rejection on net 7
+                elif cid == 12:
+                    keep.append(spec_i)
+                    self.last_area += 5.0
+                    infos.append(
+                        {
+                            "row_idx": int(row),
+                            "candidate_id": cid,
+                            "orig_net_id": int(state.candidate_net_id[row].item()),
+                            "active_net": 5,
+                            "new_net": 99,
+                        }
+                    )
+                    dirty.extend([5, 99])
+            keep_t = torch.tensor(keep, dtype=torch.long)
+            next_acts = state.activation_param.detach().clone()
+            if keep:
+                sel_rows = transition.selected_candidate_indices.index_select(0, keep_t)
+                next_acts[sel_rows] = 1.0
+            from dreamplace.ops.buffer_insertion.discrete_candidate_scheduler import (
+                DiscreteCandidateTransition,
+            )
+
+            sel_rows = transition.selected_candidate_indices.index_select(0, keep_t)
+            filtered = DiscreteCandidateTransition(
+                next_activations=next_acts,
+                selected_candidate_indices=sel_rows,
+                selected_net_indices=transition.selected_net_indices.index_select(0, keep_t),
+                selected_candidate_ids=transition.selected_candidate_ids.index_select(0, keep_t),
+                selected_raw_grads=transition.selected_raw_grads.index_select(0, keep_t),
+                selected_predicted_improvements=transition.selected_predicted_improvements.index_select(
+                    0, keep_t
+                ),
+                affected_net_count=transition.affected_net_count,
+                eligible_net_count=transition.eligible_net_count,
+                prefix_size=transition.prefix_size,
+                positive_prefix_count=transition.positive_prefix_count,
+            )
+            return filtered, {
+                "status": "ok",
+                "input_count": len(rows),
+                "evaluated_count": len(rows),
+                "accepted_count": len(keep),
+                "rejected_area_count": 0,
+                "rejected_loss_count": len(rows) - len(keep),
+                "accepted_action_infos": infos,
+                "dirty_nets": sorted(set(dirty)),
+            }
+
+    gate = _FakeGate()
+    refreshes = []
+    # Tier 1 proposes net 5 (cid 12 -> accepted!) and net 7 (cid 22 -> rejected!).
+    # After round 0 refreshes dirty=[5, 99], round 1 proposes net 5 again (cid 12 inactive,
+    # Wait: suppose no new improving candidates left -> round 1 has accepted=0 -> early break!).
+    summary = run_discrete_candidate_buffer_scheduler(
+        lane=lane,
+        model=SimpleNamespace(),
+        rounds=3,
+        incremental_gate=gate,
+        selection_fraction=0.5,  # ceil(2 * 0.5) = 1 -> triggers tier retry on net 7 rejection!
+        round_budget_fn=lambda **kw: {
+            "exhausted": False,
+            "selection_fraction": 0.5,
+            "round_capacity": 120.0,
+            "min_buffer_area": 5.0,
+        },
+        on_round_accepted=lambda infos, dirty: refreshes.append((infos, dirty)) or {"status": "ok"},
+    )
+    assert len(refreshes) == 1
+    assert refreshes[0][1] == [5, 99]
+    assert int(lane.state.activation_param.sum().item()) == 1
+    # Round 0 accepted 1; Round 1 had accepted=0 -> broke before Round 2.
+    assert summary.iterations == 2
+
+
+def test_candidate_runner_reanchors_best_activation_after_refresh_when_gate_degrades(
+    tmp_path,
+):
+    """Refreshing candidate rows in Round 0 must re-anchor best_activation if Round 1 gate skips."""
+    lane = _FakeCandidateLane(tmp_path)
+    lane.state = build_discrete_candidate_state(
+        [_candidate(11, 5, 2, 30), _candidate(22, 7, 4, 10)],
+        buffer_main_type_index=4,
+        legal_buffer_count=3,
+        fixed_bsu_index=1,
+    )
+
+    class _DegradingGate:
+        def __init__(self):
+            self.round_calls = 0
+            self.last_area = 100.0
+
+        def check_available(self, preexisting_virtual_count=0):
+            return None
+
+        def current_area(self):
+            return self.last_area
+
+        def allowed_untyped_candidates(self, state):
+            return None
+
+        def filter_candidate_transition(
+            self, state, transition, *, capacity_override=None
+        ):
+            self.round_calls += 1
+            if self.round_calls == 1:
+                row = int(transition.selected_candidate_indices[0].item())
+                return transition, {
+                    "status": "ok",
+                    "input_count": 1,
+                    "evaluated_count": 1,
+                    "accepted_count": int(transition.accepted_count),
+                    "rejected_area_count": 0,
+                    "rejected_loss_count": 0,
+                    "accepted_action_infos": [
+                        {
+                            "row_idx": row,
+                            "candidate_id": int(state.candidate_ids[row].item()),
+                            "orig_net_id": int(state.candidate_net_id[row].item()),
+                            "active_net": 5,
+                            "new_net": 99,
+                        }
+                    ],
+                    "dirty_nets": [5, 99],
+                }
+            return transition, {"status": "skipped", "reason": "engine_unavailable"}
+
+    def _on_round_accepted(infos, dirty):
+        # Expand state from 2 -> 4 rows (locked buffer + refreshed sub-net candidates).
+        rebuilt = build_discrete_candidate_state(
+            [
+                _candidate(11, 5, 2, 0),
+                _candidate(31, 5, 6, -5),
+                _candidate(32, 5, 8, -5),
+                _candidate(22, 7, 4, -5),
+            ],
+            buffer_main_type_index=4,
+            legal_buffer_count=3,
+            fixed_bsu_index=1,
+        )
+        with torch.no_grad():
+            rebuilt.activation_param[0] = 1.0
+        lane.state = rebuilt
+        return {"status": "ok", "candidate_count": 4}
+
+    # Non-convex objective: 1 active buffer improves (-1), but 2 active buffers regress (+5)
+    # despite negative local gradient at [1, 0, 0, 0], forcing terminal rollback to best_activation!
+    def _nonconvex_objective(_model):
+        lane.objective_calls += 1
+        act = lane.state.activation_param
+        s = act.sum()
+        loss = -s + 3.0 * torch.clamp(s - 1.0, min=0.0) ** 2 + (
+            4.0 * float((s.detach() > 1.5).item())
+        )
+        return loss, {"loss": loss.detach(), "tns": -loss.detach(), "wns": -loss.detach()}
+
+    lane.objective = _nonconvex_objective
+
+    summary = run_discrete_candidate_buffer_scheduler(
+        lane=lane,
+        model=SimpleNamespace(),
+        rounds=2,
+        incremental_gate=_DegradingGate(),
+        selection_fraction=0.5,
+        on_round_accepted=_on_round_accepted,
+    )
+    assert tuple(lane.state.activation_param.shape) == (4,)
+    assert lane.state.activation_param.detach().tolist() == [1.0, 0.0, 0.0, 0.0]
+    assert summary.final_projection.projected_buffer_count == 1
+    assert summary.iterations == 2
+

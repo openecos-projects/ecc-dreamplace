@@ -376,6 +376,30 @@ IncrementalSizingEngine::IncrementalSizingEngine(const py::dict& config)
   rc_forest_.scratch_ldelay.assign(rc_forest_.vertex_count, 0.0);
   rc_forest_.scratch_beta.assign(rc_forest_.vertex_count, 0.0);
 
+  if (rc_cfg.contains("vertex_x_dbu") && !rc_cfg["vertex_x_dbu"].is_none()
+      && rc_cfg.contains("vertex_y_dbu") && !rc_cfg["vertex_y_dbu"].is_none()) {
+    vertex_x_dbu_ = copy1D<double>(rc_cfg["vertex_x_dbu"], "vertex_x_dbu");
+    vertex_y_dbu_ = copy1D<double>(rc_cfg["vertex_y_dbu"], "vertex_y_dbu");
+    require(static_cast<int>(vertex_x_dbu_.size()) == rc_forest_.vertex_count
+                && static_cast<int>(vertex_y_dbu_.size()) == rc_forest_.vertex_count,
+            "rc_forest vertex_x_dbu/vertex_y_dbu length mismatch");
+  }
+  if (rc_cfg.contains("dbu") && !rc_cfg["dbu"].is_none()) {
+    rc_dbu_ = rc_cfg["dbu"].cast<double>();
+  }
+  if (rc_cfg.contains("r_unit") && !rc_cfg["r_unit"].is_none()) {
+    rc_r_unit_ = rc_cfg["r_unit"].cast<double>();
+  }
+  if (rc_cfg.contains("c_unit") && !rc_cfg["c_unit"].is_none()) {
+    rc_c_unit_ = rc_cfg["c_unit"].cast<double>();
+  }
+  if (rc_cfg.contains("flute_powv_file") && !rc_cfg["flute_powv_file"].is_none()) {
+    flute_powv_file_ = rc_cfg["flute_powv_file"].cast<std::string>();
+  }
+  if (rc_cfg.contains("flute_post_file") && !rc_cfg["flute_post_file"].is_none()) {
+    flute_post_file_ = rc_cfg["flute_post_file"].cast<std::string>();
+  }
+
   pin_load_r_.assign(num_pins_, 0.0);
   pin_load_f_.assign(num_pins_, 0.0);
   pin_delay_r_.assign(num_pins_, 0.0);

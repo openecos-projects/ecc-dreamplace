@@ -39,6 +39,8 @@ class IncrementalSizingEngine
       const pybind11::list& candidates,
       const pybind11::dict& policy);
 
+  pybind11::list refreshDirtySubnetSteinerTrees(const std::vector<int>& net_ids);
+
   pybind11::dict currentMetrics() const;
 
  private:
@@ -90,6 +92,23 @@ class IncrementalSizingEngine
     std::vector<int> child_vertices;
     double split_ratio = -1.0;
     int target_cell_id = -1;
+    bool has_xy_dbu = false;
+    double x_dbu = 0.0;
+    double y_dbu = 0.0;
+  };
+
+  struct InsertedBufferInfo
+  {
+    int buf_node = -1;
+    int p_in = -1;
+    int p_out = -1;
+    int v_in = -1;
+    int v_out = -1;
+    int active_net = -1;
+    int new_net = -1;
+    int target_cell_id = -1;
+    double x_dbu = 0.0;
+    double y_dbu = 0.0;
   };
 
   struct RankingPolicy
@@ -252,7 +271,8 @@ class IncrementalSizingEngine
   bool insertSingleBuffer(const BufferActionSpec& spec,
                           std::vector<int>* dirty_nets,
                           std::vector<int>* seed_states,
-                          std::vector<int>* new_pins);
+                          std::vector<int>* new_pins,
+                          InsertedBufferInfo* out_info = nullptr);
   void ensureStrictDownstreamLevels(int start_state);
   void recomputeNetRc(int net_id, bool record_undo, std::vector<int>* changed_rc_pins);
   void propagateFull();
@@ -313,6 +333,13 @@ class IncrementalSizingEngine
 
   // Static RC forest
   StaticRcForest rc_forest_;
+  double rc_dbu_ = 0.0;
+  double rc_r_unit_ = 0.0;
+  double rc_c_unit_ = 0.0;
+  std::string flute_powv_file_;
+  std::string flute_post_file_;
+  std::vector<double> vertex_x_dbu_;
+  std::vector<double> vertex_y_dbu_;
   std::vector<double> pin_load_r_, pin_load_f_;
   std::vector<double> pin_delay_r_, pin_delay_f_;
   std::vector<double> pin_impulse_r_, pin_impulse_f_;

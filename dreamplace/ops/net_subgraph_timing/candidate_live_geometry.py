@@ -54,7 +54,23 @@ class CandidateLiveGeometry:
                 [record["segment_split_ratio"] for record in records], dtype=torch.float64
             )
         num_compact = int(self.original_nodes.numel())
+        raw_static_mask = payload.get("static_rc_edge_mask")
+        if raw_static_mask is not None:
+            static_mask = torch.as_tensor(raw_static_mask, dtype=torch.bool).detach().cpu()
+            if int(static_mask.numel()) != num_compact:
+                raise ValueError("static_rc_edge_mask length must match compact node count")
+            self.static_rc_mask = static_mask if bool(static_mask.any().item()) else None
+        else:
+            self.static_rc_mask = None
+        if self.static_rc_mask is not None and int(self.split_nodes.numel()):
+            keep_splits = ~self.static_rc_mask[self.split_nodes]
+            self.split_nodes = self.split_nodes[keep_splits]
+            self.split_parents = self.split_parents[keep_splits]
+            self.split_children = self.split_children[keep_splits]
+            self.split_ratios = self.split_ratios[keep_splits]
         self._original_clamped = self.original_nodes.clamp(min=0)
+        if self.static_rc_mask is not None:
+            self._original_clamped[self.static_rc_mask] = 0
         self._parents_clamped = self.parents.clamp(min=0)
         self._nonroot = self.parents >= 0
         self._node_is_split = torch.zeros(num_compact, dtype=torch.bool)
@@ -82,7 +98,12 @@ class CandidateLiveGeometry:
             return
         original = self.original_nodes.to(device)
         split_nodes = self.split_nodes.to(device)
-        invalid_original = original >= int(coord_count)
+        static_mask = (
+            self.static_rc_mask.to(device)
+            if self.static_rc_mask is not None
+            else torch.zeros_like(original, dtype=torch.bool)
+        )
+        invalid_original = (~static_mask) & (original >= int(coord_count))
         if bool(invalid_original.any().item()):
             invalid_indices = invalid_original.nonzero(as_tuple=False).view(-1)
             sample = invalid_indices[:8].detach().cpu().tolist()
@@ -94,7 +115,7 @@ class CandidateLiveGeometry:
                 f"invalid_indices={sample}, "
                 f"invalid_nodes={[int(original[index].item()) for index in sample]}"
             )
-        covered = original >= 0
+        covered = (original >= 0) | static_mask
         covered[split_nodes] = True
         if not bool(covered.all()):
             raise ValueError("candidate tree contains an unmapped synthetic node")
@@ -193,6 +214,16 @@ class CandidateLiveGeometry:
                 "edge_resistance": torch.where(nonroot, length * r_unit, 0.0),
                 "edge_capacitance": torch.where(nonroot, length * c_unit, 0.0),
             }
+        if self.static_rc_mask is not None:
+            static_mask = self.static_rc_mask.to(x.device)
+            self._rc = {
+                name: torch.where(
+                    static_mask,
+                    self.payload[name].to(device=self._rc[name].device, dtype=self._rc[name].dtype),
+                    self._rc[name],
+                )
+                for name in ("edge_resistance", "edge_capacitance")
+            }
         if cache_key is not None:
             self._detached_rc_cache = (cache_key, self._rc)
         return self._rc
@@ -284,8 +315,16 @@ class CandidateLiveGeometry:
             c_unit = float(units["c_unit"])
             dx = x_sub - x_parent
             dy = y_sub - y_parent
+            sub_static_mask = (
+                self.static_rc_mask.index_select(0, indices_cpu).to(device)
+                if self.static_rc_mask is not None
+                else None
+            )
             if units.get("require_axis_aligned", False):
-                if bool(((dx != 0) & (dy != 0)).any().item()):
+                diagonal = (dx != 0) & (dy != 0)
+                if sub_static_mask is not None:
+                    diagonal = diagonal & (~sub_static_mask)
+                if bool(diagonal.any().item()):
                     raise ValueError("live segment topology contains a diagonal edge")
             length = (torch.abs(dx) + torch.abs(dy)) / scale_factor / dbu
             cached_rc = {
@@ -296,6 +335,17 @@ class CandidateLiveGeometry:
                     device=device, dtype=dtype
                 ),
             }
+            if sub_static_mask is not None and bool(sub_static_mask.any().item()):
+                cached_rc = {
+                    name: torch.where(
+                        sub_static_mask,
+                        self.payload[name]
+                        .index_select(0, indices_cpu.to(self.payload[name].device))
+                        .to(device=device, dtype=dtype),
+                        cached_rc[name],
+                    )
+                    for name in ("edge_resistance", "edge_capacitance")
+                }
             if rc_key is not None:
                 self._active_override_cache[rc_key] = cached_rc
         caps = pin_capacitance_by_sense[resolved_sense]

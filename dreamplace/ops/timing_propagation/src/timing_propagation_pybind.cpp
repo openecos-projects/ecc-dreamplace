@@ -232,6 +232,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            &dreamplace::IncrementalSizingEngine::evaluateRankedBufferCandidates,
            py::arg("candidates"),
            py::arg("policy"))
+      .def("refresh_dirty_subnet_steiner_trees",
+           &dreamplace::IncrementalSizingEngine::refreshDirtySubnetSteinerTrees,
+           py::arg("net_ids"))
       .def("current_metrics",
            &dreamplace::IncrementalSizingEngine::currentMetrics);
 }

@@ -382,7 +382,7 @@
     },
     "timing_coeff_growth_factor": {
         "description": "positive finite multiplier applied to WNS/TNS coefficients at each GP density-weight update; 1 disables growth; size_only skips this schedule",
-        "default": 1.01
+        "default": 1.0
     },
     "sizing_parameterization": {
         "description": "continuous sizing coordinate, logits | real_size",
@@ -594,6 +594,10 @@
     "timing_opt_sizing_rounds": {
         "description": "maximum discrete size/VT rounds in each timing-optimization window, up to ten",
         "default": 10
+    },
+    "timing_opt_buffering_rounds": {
+        "description": "maximum incremental buffering rounds in each timing-optimization window",
+        "default": 3
     },
     "timing_opt_coefficients": {
         "description": "GP sizing-window coefficient policy: mode=inherit uses live placement values; mode=fixed requires wns, tns, slew and cap during S rounds only, with outer timing weight 1; placement weights are restored on exit",

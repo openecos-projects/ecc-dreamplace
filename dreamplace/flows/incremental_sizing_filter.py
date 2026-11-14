@@ -136,6 +136,19 @@ def _build_rc_forest_payload(owner, model, pos, num_pins, num_nets):
     wire_cap = _contiguous_np(net_caps, np.float64)
     incoming_res = _contiguous_np(flat_res, np.float64)
     incoming_wire_cap = _contiguous_np(flat_edge_cap, np.float64)
+    scale = float(getattr(owner.params, "scale_factor", 1.0) or 1.0)
+    shift = getattr(owner.params, "shift_factor", (0.0, 0.0)) or (0.0, 0.0)
+    vertex_x_dbu = _contiguous_np(
+        (new_x.detach().double() / scale + float(shift[0])).round(), np.float64
+    )
+    vertex_y_dbu = _contiguous_np(
+        (new_y.detach().double() / scale + float(shift[1])).round(), np.float64
+    )
+    from dreamplace.ops.steiner_topo.steiner_topo import (
+        _FLUTE_POST_FILE,
+        _FLUTE_POWV_FILE,
+    )
+
     pin_fa_sig = (int(data.pin_fa.data_ptr()), int(data.pin_fa._version))
     key = (
         "placement",
@@ -156,6 +169,13 @@ def _build_rc_forest_payload(owner, model, pos, num_pins, num_nets):
         "topo_start": _contiguous_np(data.net_flat_topo_sort_start, np.int32),
         "tree_by_net": np.arange(num_nets, dtype=np.int32),
         "pin_to_vertex": np.arange(num_pins, dtype=np.int32),
+        "vertex_x_dbu": vertex_x_dbu,
+        "vertex_y_dbu": vertex_y_dbu,
+        "dbu": float(rc_op.dbu),
+        "r_unit": float(rc_op.r_unit),
+        "c_unit": float(rc_op.c_unit),
+        "flute_powv_file": str(_FLUTE_POWV_FILE),
+        "flute_post_file": str(_FLUTE_POST_FILE),
     }
     return key, payload, wire_cap, incoming_res
 

@@ -783,8 +783,9 @@ def apply_flow_defaults(params):
         for name, upper_bound in (
             ("timing_opt_max_windows", 5),
             ("timing_opt_sizing_rounds", 10),
+            ("timing_opt_buffering_rounds", 10),
         ):
-            value = getattr(params, name, 5)
+            value = getattr(params, name, 3 if name == "timing_opt_buffering_rounds" else 5)
             if isinstance(value, bool) or int(value) != value or not 1 <= value <= upper_bound:
                 raise ValueError(f"{name} must be an integer in [1, {upper_bound}]")
             setattr(params, name, int(value))
@@ -838,6 +839,13 @@ def apply_flow_defaults(params):
                 "enable_net_weighting", "pin2pin_net_weighting", "enhanced_inflation_replay_best_round_flag",
             }:
                 _set_discrete_route_default(params, name, value)
+            elif name in {
+                "timing_opt_buffering_rounds",
+                "buffering_candidate_policy",
+                "buffering_candidate_drive_type_mode",
+                "buffering_candidate_strategy",
+            }:
+                _set_canonical_profile_value(params, name, value)
             else:
                 _set_flow_default(params, name, value, force=True)
     _resolve_timing_propagation_device_default(params)

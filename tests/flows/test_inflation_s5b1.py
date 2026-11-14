@@ -1038,3 +1038,269 @@ def test_s5b1_loss_respects_lut_action_without_triggering_surrogate(
     )
     assert float(owner._loss(model, torch.tensor([0.0]))) == pytest.approx(0.0)
     assert seen_modes == [expected_surrogate_mode]
+
+
+def test_resolve_median_buffer_area_and_window_budget_sharing():
+    from dreamplace.flows.s5b1_area_budget import (
+        S5B1WindowAreaBudget,
+        resolve_median_buffer_area,
+    )
+    from dreamplace.ops.routability.cooptimization_area import AreaState
+
+    placedb = SimpleNamespace(
+        flat_libcell_info=[
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 2.0, 1.0, 0.0],
+            [0.0, 2.0, 2.0, 0.0],
+            [0.0, 2.0, 4.0, 0.0],
+        ],
+        buffer_main_type_candidate_indices=[2],
+        buffer_main_type_index=2,
+        flat_libcell_width=[2.0, 3.0, 5.0, 11.0],
+        flat_libcell_height=[2.0, 10.0, 10.0, 10.0],
+    )
+    data = SimpleNamespace(
+        flat_libcell_width=torch.tensor([2.0, 3.0, 5.0, 11.0]),
+        flat_libcell_height=torch.tensor([2.0, 10.0, 10.0, 10.0]),
+    )
+    params = SimpleNamespace(cell_padding_x=0.5, place_io_engine="unknown")
+
+    median_area = resolve_median_buffer_area(data, placedb, params)
+    assert median_area == pytest.approx(60.0)
+
+    entry = AreaState(
+        movable=600.0,
+        filler=0.0,
+        capacity=1000.0,
+    )
+    budget = S5B1WindowAreaBudget.for_window(entry, median_buffer_area=median_area)
+    assert budget.safe_ceiling == pytest.approx(900.0)
+    assert budget.remaining_area == pytest.approx(300.0)
+    assert budget.max_window_area_delta == pytest.approx(75.0)
+    assert budget.window_capacity == pytest.approx(675.0)
+    assert budget.window_buffer_equivalent_count == 2
+    assert budget.sizing_budget_percent(
+        600.0, sizeable_count=20, fallback_percent=1.0
+    ) == pytest.approx(10.0)
+    assert budget.sizing_budget_percent(
+        675.0, sizeable_count=20, fallback_percent=1.0
+    ) == pytest.approx(1.0)
+    assert budget.buffering_selection_fraction(
+        615.0, affected_net_count=10, fallback_fraction=0.001
+    ) == pytest.approx(0.1)
+    assert (
+        budget.buffering_selection_fraction(
+            675.0, affected_net_count=10, fallback_fraction=0.001
+        )
+        is None
+    )
+
+
+def test_s5b1_window_shares_25_percent_remaining_area_between_s5_and_b1(monkeypatch):
+    from contextlib import nullcontext
+
+    from dreamplace.flows.s5b1_area_budget import (
+        effective_buffering_selection_fraction,
+        effective_sizing_budget_percent,
+    )
+
+    owner = InflationS5B1.__new__(InflationS5B1)
+    owner.params = SimpleNamespace(
+        timing_opt_buffering_enabled=True,
+        repair_buffering_midplace_enable=False,
+        discrete_gradient_topk_shared_budget_percent=1.0,
+        buffering_route_b_selection_fraction=0.001,
+        enable_relaxed_buffer_timing=True,
+        cell_padding_x=0.0,
+    )
+    owner.placedb = SimpleNamespace(
+        regions=[],
+        num_movable_nodes=2,
+        num_filler_nodes=0,
+        area=1000.0,
+        total_fixed_node_area=0.0,
+        total_space_area=1000.0,
+    )
+    owner.data = SimpleNamespace(
+        sizing_parameterization="real_size",
+        inst_is_sizeable=torch.tensor([True] * 100),
+        node_size_x=torch.tensor([30.0, 30.0]),
+        node_size_y=torch.tensor([10.0, 10.0]),
+        original_node_size_x=torch.tensor([30.0, 30.0]),
+        original_node_size_y=torch.tensor([10.0, 10.0]),
+    )
+    owner.ops = SimpleNamespace(
+        timing_propagation_op=None,
+        steiner_topo_op=SimpleNamespace(topology_generation=1, frozen_nets=None),
+        virtual_cell_density_op=None,
+    )
+    owner.median_buffer_area = 10.0
+    owner._active_area_budget = None
+    owner._lut_action_owner = SimpleNamespace(_active_area_budget=None)
+    owner._pending_dirty_net_ids = set()
+    owner.window_count = 1
+    owner.direct_commit_enabled = False
+    owner.virtual_area = lambda _model: 0.0
+    owner.electrical_window = nullcontext
+    owner._sizing_coefficients = lambda _model: nullcontext({"wns": 1.0})
+    owner.retain_buffered_nets = lambda _model: None
+
+    state = SimpleNamespace(
+        activation_param=torch.zeros((4, 2), dtype=torch.float64),
+        net_ids=torch.arange(50, dtype=torch.long),
+        candidate_net_index=torch.tensor([0, 1, 2, 3], dtype=torch.long),
+    )
+    owner.lane = SimpleNamespace(
+        config=SimpleNamespace(route_b_selection_fraction=0.001, continuous_steps=1),
+        _current_state=lambda: state,
+    )
+    owner.prepare = lambda *_a, **_k: setattr(
+        owner.params, "enable_relaxed_buffer_timing", True
+    )
+
+    observed = {}
+
+    def _partial_sizing(model, _pos, _geom, capacity):
+        observed["sizing_cap"] = capacity
+        observed["sizing_pct_before"] = effective_sizing_budget_percent(owner, model)
+        assert owner._lut_action_owner._active_area_budget is owner._active_area_budget
+        # Consume 25 of the 75 window allowance (entry=600, safe=900, 25%*300=75).
+        owner.data.node_size_x = torch.tensor([32.5, 30.0])
+        observed["sizing_pct_after"] = effective_sizing_budget_percent(owner, model)
+        return {"best_round": 1}
+
+    def _fake_candidate_scheduler(**kwargs):
+        observed["b1_selection_fraction"] = kwargs["selection_fraction"]
+        observed["b1_gate_cap"] = kwargs["incremental_gate"].capacity
+        return SimpleNamespace(
+            strategy="discrete_net_gradient",
+            iterations=1,
+            terminal_reason="max_rounds",
+            terminal_metrics={"loss": -5.0},
+            metrics_trace=[],
+            trace_path=None,
+            trace_sha256=None,
+            best_restore={"best_round": 1},
+        )
+
+    monkeypatch.setattr(
+        "dreamplace.flows.incremental_buffering_filter.IncrementalBufferingGate.check_available",
+        lambda _self: None,
+    )
+    monkeypatch.setattr(
+        "dreamplace.ops.buffer_insertion.discrete_candidate_buffer_runner.run_discrete_candidate_buffer_scheduler",
+        _fake_candidate_scheduler,
+    )
+    owner.run_sizing = _partial_sizing
+
+    model = SimpleNamespace(_timing_geometry_cache=None)
+    pos = torch.tensor([0.0, 0.0, 0.0, 0.0])
+    summary1 = owner.run(model, pos, iteration=5)
+
+    assert observed == {
+        "sizing_cap": pytest.approx(675.0),
+        "sizing_pct_before": pytest.approx(8.0),
+        "sizing_pct_after": pytest.approx(5.0),
+        "b1_selection_fraction": pytest.approx(5.0 / 50.0),
+        "b1_gate_cap": pytest.approx(675.0),
+    }
+    assert summary1["area_budget"] == {
+        "enabled": True,
+        "entry_movable": pytest.approx(600.0),
+        "placement_capacity": pytest.approx(1000.0),
+        "max_density_ratio": pytest.approx(0.90),
+        "max_remaining_fraction": pytest.approx(0.25),
+        "safe_ceiling": pytest.approx(900.0),
+        "remaining_area": pytest.approx(300.0),
+        "max_window_area_delta": pytest.approx(75.0),
+        "window_capacity": pytest.approx(675.0),
+        "median_buffer_area": pytest.approx(10.0),
+        "window_buffer_equivalent_count": 8,
+        "after_sizing_movable": pytest.approx(625.0),
+        "sizing_consumed_area": pytest.approx(25.0),
+        "buffering_remaining_allowance": pytest.approx(50.0),
+        "after_window_movable": pytest.approx(625.0),
+        "window_consumed_area": pytest.approx(25.0),
+    }
+    assert owner._active_area_budget is None
+    assert owner._lut_action_owner._active_area_budget is None
+
+    # Now verify that when S5 consumes the full 25% window allowance, B1 skips cleanly.
+    def _exhaust_sizing(model, _pos, _geom, capacity):
+        assert capacity == pytest.approx(693.75)
+        owner.data.node_size_x = torch.tensor([39.375, 30.0])
+        assert (
+            effective_buffering_selection_fraction(
+                owner, model, affected_net_count=50, fallback_fraction=0.001
+            )
+            is None
+        )
+        return {"best_round": 2}
+
+    owner.run_sizing = _exhaust_sizing
+    summary2 = owner.run(model, pos, iteration=6)
+    assert summary2["buffering"] == {
+        "status": "area_budget_exhausted",
+        "initial_loss": 0.0,
+        "final_loss": 0.0,
+        "scheduled": 0,
+        "accepted": 0,
+        "accepted_net_ids": [],
+        "gradient_norm": None,
+        "cumulative_count": 0,
+    }
+    assert owner.params.enable_relaxed_buffer_timing is False
+
+
+def test_s5b1_window_area_budget_3round_rollover_and_proposal_quartile():
+    from dreamplace.flows.s5b1_area_budget import (
+        S5B1WindowAreaBudget,
+        resolve_proposal_buffer_area,
+    )
+    from dreamplace.ops.routability.cooptimization_area import AreaState
+
+    placedb = SimpleNamespace(
+        flat_libcell_info=[
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 2.0, 1.0, 0.0],
+            [0.0, 2.0, 2.0, 0.0],
+            [0.0, 2.0, 3.0, 0.0],
+            [0.0, 2.0, 4.0, 0.0],
+        ],
+        buffer_main_type_candidate_indices=[2],
+        buffer_main_type_index=2,
+    )
+    data = SimpleNamespace(
+        flat_libcell_width=[10.0, 2.0, 1.0, 4.0, 8.0],
+        flat_libcell_height=[1.0, 2.0, 2.0, 2.0, 2.0],
+    )
+    params = SimpleNamespace(cell_padding_x=0.0, place_io_engine="unknown")
+    # Sorted legal areas = [2.0, 4.0, 8.0, 16.0]; index 4 // 4 = 1 -> 4.0.
+    assert resolve_proposal_buffer_area(data, placedb, params) == pytest.approx(4.0)
+
+    entry = AreaState(
+        movable=600.0,
+        filler=0.0,
+        capacity=1000.0,
+    )
+    # remaining = 900 - 600 = 300; window max delta = 75 -> window_capacity = 675.
+    budget = S5B1WindowAreaBudget.for_window(
+        entry,
+        median_buffer_area=10.0,
+        proposal_buffer_area=4.0,
+    )
+    assert budget.round_allowance(600.0, round_idx=0, total_rounds=3) == pytest.approx(25.0)
+    assert budget.round_capacity(600.0, round_idx=0, total_rounds=3) == pytest.approx(625.0)
+    # Unused rollover: only +5.0 consumed in round 0 -> remaining 70.0 / 2 = 35.0 in round 1.
+    assert budget.round_allowance(605.0, round_idx=1, total_rounds=3) == pytest.approx(35.0)
+    assert budget.round_capacity(605.0, round_idx=1, total_rounds=3) == pytest.approx(640.0)
+    # Round 2 takes all remaining capacity up to window_capacity=675.
+    assert budget.round_capacity(620.0, round_idx=2, total_rounds=3) == pytest.approx(675.0)
+    # Exhausted when current_movable >= window_capacity.
+    assert budget.buffering_selection_fraction(
+        current_movable=675.0,
+        affected_net_count=50,
+        fallback_fraction=0.1,
+        round_idx=1,
+        total_rounds=3,
+    ) is None

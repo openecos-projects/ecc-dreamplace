@@ -86,8 +86,8 @@ def build_liberty_view_from_pydb(pydb, *, dbu=None):
         }
 
     try:
-        cell_info = list(getattr(pydb, "flat_libcell_info", ()) or ())
-        names = [str(item) for item in (getattr(pydb, "flat_libcell_names", ()) or ())]
+        cell_info = _list(getattr(pydb, "flat_libcell_info", None))
+        names = [str(item) for item in _list(getattr(pydb, "flat_libcell_names", None))]
         widths = _floats(getattr(pydb, "flat_libcell_width", ()))
         heights = _floats(getattr(pydb, "flat_libcell_height", ()))
         leakage = _floats(getattr(pydb, "flat_libcell_leakage", ()))
@@ -99,20 +99,20 @@ def build_liberty_view_from_pydb(pydb, *, dbu=None):
         pin_fcap = _floats(getattr(pydb, "flat_lib_pin_fcap", ()))
         pin_cap_limit = _floats(getattr(pydb, "flat_lib_pin_cap_limit", ()))
         pin_slew_limit = _floats(getattr(pydb, "flat_lib_pin_slew_limit", ()))
-        libarc_info = list(getattr(pydb, "flat_libarc_info", ()) or ())
-        f_delay_values = list(getattr(pydb, "f_delay_flat_luts_values", ()) or ())
-        r_delay_values = list(getattr(pydb, "r_delay_flat_luts_values", ()) or ())
-        f_trans_values = list(getattr(pydb, "f_trans_flat_luts_values", ()) or ())
-        r_trans_values = list(getattr(pydb, "r_trans_flat_luts_values", ()) or ())
-        f_delay_dim = list(getattr(pydb, "f_delay_flat_luts_dim", ()) or ())
-        f_delay_trans = list(getattr(pydb, "f_delay_flat_luts_trans_table", ()) or ())
-        r_delay_trans = list(getattr(pydb, "r_delay_flat_luts_trans_table", ()) or ())
-        f_trans_trans = list(getattr(pydb, "f_trans_flat_luts_trans_table", ()) or ())
-        r_trans_trans = list(getattr(pydb, "r_trans_flat_luts_trans_table", ()) or ())
-        f_delay_cap = list(getattr(pydb, "f_delay_flat_luts_cap_table", ()) or ())
-        r_delay_cap = list(getattr(pydb, "r_delay_flat_luts_cap_table", ()) or ())
-        f_trans_cap = list(getattr(pydb, "f_trans_flat_luts_cap_table", ()) or ())
-        r_trans_cap = list(getattr(pydb, "r_trans_flat_luts_cap_table", ()) or ())
+        libarc_info = _list(getattr(pydb, "flat_libarc_info", None))
+        f_delay_values = _list(getattr(pydb, "f_delay_flat_luts_values", None))
+        r_delay_values = _list(getattr(pydb, "r_delay_flat_luts_values", None))
+        f_trans_values = _list(getattr(pydb, "f_trans_flat_luts_values", None))
+        r_trans_values = _list(getattr(pydb, "r_trans_flat_luts_values", None))
+        f_delay_dim = _list(getattr(pydb, "f_delay_flat_luts_dim", None))
+        f_delay_trans = _list(getattr(pydb, "f_delay_flat_luts_trans_table", None))
+        r_delay_trans = _list(getattr(pydb, "r_delay_flat_luts_trans_table", None))
+        f_trans_trans = _list(getattr(pydb, "f_trans_flat_luts_trans_table", None))
+        r_trans_trans = _list(getattr(pydb, "r_trans_flat_luts_trans_table", None))
+        f_delay_cap = _list(getattr(pydb, "f_delay_flat_luts_cap_table", None))
+        r_delay_cap = _list(getattr(pydb, "r_delay_flat_luts_cap_table", None))
+        f_trans_cap = _list(getattr(pydb, "f_trans_flat_luts_cap_table", None))
+        r_trans_cap = _list(getattr(pydb, "r_trans_flat_luts_cap_table", None))
     except (TypeError, ValueError) as exc:
         return {
             "artifact": ARTIFACT,
@@ -135,10 +135,9 @@ def build_liberty_view_from_pydb(pydb, *, dbu=None):
             "unsupported_reasons": ["invalid_cell_or_csr_layout"],
         }
 
-    buffer_main_ids = {
-        int(item)
-        for item in (getattr(pydb, "buffer_main_type_candidate_indices", ()) or ())
-    }
+    buffer_main_ids = set(
+        _ints(getattr(pydb, "buffer_main_type_candidate_indices", None))
+    )
 
     cell_main_id = np.empty(num_cells, dtype=np.int32)
     cell_size = np.empty(num_cells, dtype=np.int32)

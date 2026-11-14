@@ -1,11 +1,18 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Incremental topology mutation and ranked evaluation for buffer insertion.
+#include "flute.hpp"
 #include "incremental_sizing_engine.h"
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <filesystem>
 #include <limits>
 #include <map>
+#include <mutex>
+#include <set>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "pybind11/stl.h"
 
@@ -16,9 +23,26 @@ namespace {
 
 int legalArcMask(int64_t sense, int64_t trigger)
 {
-  const int sm = (sense == 1) ? 9 : ((sense == -1) ? 6 : 15);
-  const int tm = (trigger == 1) ? 3 : ((trigger == -1) ? 12 : 15);
+  int sm = (sense == 1) ? 9 : ((sense == -1) ? 6 : 15);
+  int tm = (trigger == 1) ? 3 : ((trigger == -1) ? 12 : 15);
   return sm & tm;
+}
+
+void ensureFluteLutLoaded(const std::string& powv_file, const std::string& post_file)
+{
+  if (powv_file.empty() || post_file.empty()) {
+    throw std::runtime_error(
+        "flute_powv_file and flute_post_file must be configured for FLUTE refresh");
+  }
+  if (!std::filesystem::is_regular_file(powv_file)
+      || !std::filesystem::is_regular_file(post_file)) {
+    throw std::runtime_error(
+        "FLUTE LUT file missing: powv=" + powv_file + ", post=" + post_file);
+  }
+  static std::once_flag flute_lut_once;
+  std::call_once(flute_lut_once, [&]() {
+    flute::readLUT(powv_file.c_str(), post_file.c_str());
+  });
 }
 
 }  // namespace
@@ -40,6 +64,12 @@ IncrementalSizingEngine::BufferActionSpec IncrementalSizingEngine::parseBufferAc
           ? d["split_ratio"].cast<double>()
           : -1.0;
   spec.target_cell_id = d["target_cell_id"].cast<int>();
+  if (d.contains("x_dbu") && !d["x_dbu"].is_none()
+      && d.contains("y_dbu") && !d["y_dbu"].is_none()) {
+    spec.has_xy_dbu = true;
+    spec.x_dbu = d["x_dbu"].cast<double>();
+    spec.y_dbu = d["y_dbu"].cast<double>();
+  }
   return spec;
 }
 
@@ -169,6 +199,10 @@ void IncrementalSizingEngine::restoreBufferUndo(const BufferUndoCheckpoint& cp)
   rc_forest_.vertex_net.resize(cp.vertex_count);
   rc_forest_.adj_children.resize(cp.vertex_count);
   rc_forest_.net_topo.resize(cp.tree_count);
+  if (!vertex_x_dbu_.empty()) {
+    vertex_x_dbu_.resize(cp.vertex_count);
+    vertex_y_dbu_.resize(cp.vertex_count);
+  }
 
   cell_arcs_.resize(cp.cell_arc_count);
   cell_arc_dst_states_.resize(cp.cell_arc_count);
@@ -801,7 +835,8 @@ bool IncrementalSizingEngine::insertSingleBuffer(
     const BufferActionSpec& spec,
     std::vector<int>* dirty_nets,
     std::vector<int>* seed_states,
-    std::vector<int>* new_pins)
+    std::vector<int>* new_pins,
+    InsertedBufferInfo* out_info)
 {
   const int target = spec.target_cell_id;
   if (target < 0 || target >= num_cells_) return false;
@@ -810,6 +845,24 @@ bool IncrementalSizingEngine::insertSingleBuffer(
   int in_off = -1, out_off = -1;
   std::vector<int> buf_luts;
   if (!collectBufferArcLayout(target, in_off, out_off, buf_luts)) return false;
+
+  double buf_x_dbu = spec.x_dbu;
+  double buf_y_dbu = spec.y_dbu;
+  const bool track_coords = !vertex_x_dbu_.empty();
+  if (track_coords && !spec.has_xy_dbu) {
+    if (spec.parent_vertex >= 0 && spec.parent_vertex < rc_forest_.vertex_count) {
+      buf_x_dbu = vertex_x_dbu_[spec.parent_vertex];
+      buf_y_dbu = vertex_y_dbu_[spec.parent_vertex];
+      if (spec.child_vertices.size() == 1 && spec.split_ratio >= 0.0) {
+        const int child_v = spec.child_vertices[0];
+        if (child_v >= 0 && child_v < rc_forest_.vertex_count) {
+          const double r = std::clamp(spec.split_ratio, 0.0, 1.0);
+          buf_x_dbu = (1.0 - r) * vertex_x_dbu_[spec.parent_vertex] + r * vertex_x_dbu_[child_v];
+          buf_y_dbu = (1.0 - r) * vertex_y_dbu_[spec.parent_vertex] + r * vertex_y_dbu_[child_v];
+        }
+      }
+    }
+  }
 
   int active_net = -1;
   const int new_net = num_nets_;
@@ -821,6 +874,12 @@ bool IncrementalSizingEngine::insertSingleBuffer(
   if (!rc_ok) return false;
 
   rc_forest_.vertex_count += 2;
+  if (track_coords) {
+    vertex_x_dbu_.push_back(buf_x_dbu);
+    vertex_x_dbu_.push_back(buf_x_dbu);
+    vertex_y_dbu_.push_back(buf_y_dbu);
+    vertex_y_dbu_.push_back(buf_y_dbu);
+  }
   const int active_tree = rc_forest_.tree_by_net[active_net];
   if (active_tree < 0 || active_tree >= static_cast<int>(rc_forest_.net_topo.size())
       || rc_forest_.net_topo[active_tree].empty()) {
@@ -965,6 +1024,18 @@ bool IncrementalSizingEngine::insertSingleBuffer(
     new_pins->push_back(p_in);
     new_pins->push_back(p_out);
   }
+  if (out_info != nullptr) {
+    out_info->buf_node = buf_node;
+    out_info->p_in = p_in;
+    out_info->p_out = p_out;
+    out_info->v_in = v_in;
+    out_info->v_out = v_out;
+    out_info->active_net = active_net;
+    out_info->new_net = new_net;
+    out_info->target_cell_id = target;
+    out_info->x_dbu = buf_x_dbu;
+    out_info->y_dbu = buf_y_dbu;
+  }
   return true;
 }
 
@@ -979,7 +1050,10 @@ py::dict IncrementalSizingEngine::evaluateRankedBufferCandidates(
 
   clearBufferUndo();
   std::vector<int> accepted_indices;
+  std::vector<py::dict> accepted_actions;
+  std::vector<int> accepted_dirty_nets;
   accepted_indices.reserve(candidates.size());
+  accepted_actions.reserve(candidates.size());
   int evaluated_count = 0;
   int rejected_area_count = 0;
   int rejected_loss_count = 0;
@@ -1053,11 +1127,15 @@ py::dict IncrementalSizingEngine::evaluateRankedBufferCandidates(
 
     try {
       bool inserted_ok = true;
+      std::vector<InsertedBufferInfo> trial_infos;
+      trial_infos.reserve(bundle.size());
       for (const auto& spec : bundle) {
-        if (!insertSingleBuffer(spec, &dirty_nets, &seed_states, &new_pins)) {
+        InsertedBufferInfo info;
+        if (!insertSingleBuffer(spec, &dirty_nets, &seed_states, &new_pins, &info)) {
           inserted_ok = false;
           break;
         }
+        trial_infos.push_back(info);
       }
       if (!inserted_ok) {
         restoreBufferUndo(cp);
@@ -1085,6 +1163,23 @@ py::dict IncrementalSizingEngine::evaluateRankedBufferCandidates(
                                           seed_states, touched_endpoints, drv_pins, drv_seen,
                                           drv_undo)) {
         accepted_indices.push_back(static_cast<int>(idx));
+        for (const auto& info : trial_infos) {
+          py::dict rec;
+          rec["spec_index"] = static_cast<int>(idx);
+          rec["buf_node"] = info.buf_node;
+          rec["p_in"] = info.p_in;
+          rec["p_out"] = info.p_out;
+          rec["v_in"] = info.v_in;
+          rec["v_out"] = info.v_out;
+          rec["active_net"] = info.active_net;
+          rec["new_net"] = info.new_net;
+          rec["target_cell_id"] = info.target_cell_id;
+          rec["x_dbu"] = info.x_dbu;
+          rec["y_dbu"] = info.y_dbu;
+          accepted_actions.push_back(std::move(rec));
+          accepted_dirty_nets.push_back(info.active_net);
+          accepted_dirty_nets.push_back(info.new_net);
+        }
         clearBufferUndo();
       } else {
         restoreDrvUndo(eval, drv_undo);
@@ -1102,13 +1197,324 @@ py::dict IncrementalSizingEngine::evaluateRankedBufferCandidates(
   }
 
   clearBufferUndo();
+  std::sort(accepted_dirty_nets.begin(), accepted_dirty_nets.end());
+  accepted_dirty_nets.erase(
+      std::unique(accepted_dirty_nets.begin(), accepted_dirty_nets.end()),
+      accepted_dirty_nets.end());
   py::dict result = makeEvalReport(
       pol, eval, static_cast<int>(candidates.size()), evaluated_count,
       static_cast<int>(accepted_indices.size()), rejected_area_count, rejected_loss_count,
       started);
   result["accepted_indices"] = accepted_indices;
+  result["accepted_actions"] = accepted_actions;
+  result["dirty_nets"] = accepted_dirty_nets;
   result["skipped_invalid_count"] = skipped_invalid_count;
   return result;
+}
+
+py::list IncrementalSizingEngine::refreshDirtySubnetSteinerTrees(
+    const std::vector<int>& net_ids)
+{
+  if (static_cast<int>(vertex_x_dbu_.size()) != rc_forest_.vertex_count
+      || static_cast<int>(vertex_y_dbu_.size()) != rc_forest_.vertex_count) {
+    throw std::runtime_error(
+        "refreshDirtySubnetSteinerTrees requires vertex_x_dbu/vertex_y_dbu in rc_forest");
+  }
+  if (!(rc_dbu_ > 0.0)) {
+    throw std::runtime_error(
+        "refreshDirtySubnetSteinerTrees requires positive dbu in rc_forest");
+  }
+  ensureFluteLutLoaded(flute_powv_file_, flute_post_file_);
+
+  std::vector<int> dirty_nets;
+  dirty_nets.reserve(net_ids.size());
+  for (int nid : net_ids) {
+    if (nid >= 0 && nid < num_nets_) dirty_nets.push_back(nid);
+  }
+  std::sort(dirty_nets.begin(), dirty_nets.end());
+  dirty_nets.erase(std::unique(dirty_nets.begin(), dirty_nets.end()), dirty_nets.end());
+
+  py::list rebuilt_subnets;
+  if (dirty_nets.empty()) return rebuilt_subnets;
+
+  clearBufferUndo();
+  std::vector<int> changed_rc_pins;
+  std::vector<int> seed_states;
+  std::vector<int> touched_endpoints;
+
+  for (int net_id : dirty_nets) {
+    const auto& pins = net_pins_[net_id];
+    const int drv_pin = net_driver_pin_[net_id];
+    if (pins.empty() || drv_pin < 0 || drv_pin >= num_pins_) continue;
+    const int drv_v = rc_forest_.pin_to_vertex[drv_pin];
+    if (drv_v < 0) continue;
+    const int tree_idx = rc_forest_.tree_by_net[net_id];
+    if (tree_idx < 0 || tree_idx >= static_cast<int>(rc_forest_.net_topo.size())) continue;
+
+    // Purge stale edge_segments_ involving any vertex from the previous tree.
+    {
+      std::unordered_set<int> old_vset(
+          rc_forest_.net_topo[tree_idx].begin(),
+          rc_forest_.net_topo[tree_idx].end());
+      for (auto it = edge_segments_.begin(); it != edge_segments_.end();) {
+        if (old_vset.count(it->first.first) || old_vset.count(it->first.second)) {
+          it = edge_segments_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+
+    // Group pins on this sub-net by quantized DBU coordinate.
+    std::map<std::pair<int, int>, std::vector<int>> pin_sites;
+    for (int pin : pins) {
+      const int vp = rc_forest_.pin_to_vertex[pin];
+      if (vp < 0) continue;
+      const int qx = static_cast<int>(std::llround(vertex_x_dbu_[vp]));
+      const int qy = static_cast<int>(std::llround(vertex_y_dbu_[vp]));
+      pin_sites[{qx, qy}].push_back(pin);
+    }
+    if (pin_sites.empty()) continue;
+
+    std::unordered_map<int, std::vector<int>> adj;
+    auto add_undirected = [&](int u, int v) {
+      if (u == v || u < 0 || v < 0) return;
+      auto& nu = adj[u];
+      if (std::find(nu.begin(), nu.end(), v) == nu.end()) nu.push_back(v);
+      auto& nv = adj[v];
+      if (std::find(nv.begin(), nv.end(), u) == nv.end()) nv.push_back(u);
+    };
+
+    std::map<std::pair<int, int>, int> site_canon_vertex;
+    std::vector<flute::DType> vx;
+    std::vector<flute::DType> vy;
+    std::vector<int> site_vertices;
+    vx.reserve(pin_sites.size());
+    vy.reserve(pin_sites.size());
+    site_vertices.reserve(pin_sites.size());
+
+    for (const auto& kv : pin_sites) {
+      const auto& pt = kv.first;
+      const auto& site_pins = kv.second;
+      int canon_v = rc_forest_.pin_to_vertex[site_pins.front()];
+      if (std::find(site_pins.begin(), site_pins.end(), drv_pin) != site_pins.end()) {
+        canon_v = drv_v;
+      }
+      site_canon_vertex[pt] = canon_v;
+      vx.push_back(static_cast<flute::DType>(pt.first));
+      vy.push_back(static_cast<flute::DType>(pt.second));
+      site_vertices.push_back(canon_v);
+      for (int pin : site_pins) {
+        const int vp = rc_forest_.pin_to_vertex[pin];
+        if (vp >= 0 && vp != canon_v) {
+          add_undirected(canon_v, vp);
+        }
+      }
+    }
+
+    const int num_unique = static_cast<int>(site_vertices.size());
+    auto append_steiner_vertex = [&](double x_dbu, double y_dbu) -> int {
+      const int sv = rc_forest_.vertex_count++;
+      rc_forest_.wire_cap.push_back(0.0);
+      rc_forest_.incoming_resistance.push_back(0.0);
+      rc_forest_.incoming_wire_cap.push_back(0.0);
+      rc_forest_.parent.push_back(-1);
+      rc_forest_.vertex_net.push_back(net_id);
+      rc_forest_.adj_children.emplace_back();
+      vertex_x_dbu_.push_back(x_dbu);
+      vertex_y_dbu_.push_back(y_dbu);
+      return sv;
+    };
+
+    if (num_unique >= 2 && num_unique <= MAXD) {
+      flute::Tree ftree = flute::flute(num_unique, vx.data(), vy.data(), ACCURACY);
+      std::map<std::pair<int, int>, int> steiner_coord_to_vertex;
+      const int branch_count = 2 * ftree.deg - 2;
+      if (ftree.branch != nullptr && branch_count > 0) {
+        for (int bid = 0; bid < branch_count; ++bid) {
+          const auto& b = ftree.branch[bid];
+          const std::pair<int, int> pt(static_cast<int>(b.x), static_cast<int>(b.y));
+          if (site_canon_vertex.find(pt) == site_canon_vertex.end()
+              && steiner_coord_to_vertex.find(pt) == steiner_coord_to_vertex.end()) {
+            steiner_coord_to_vertex[pt] =
+                append_steiner_vertex(static_cast<double>(pt.first), static_cast<double>(pt.second));
+          }
+        }
+        auto resolve_pt = [&](const std::pair<int, int>& pt) -> int {
+          auto it_site = site_canon_vertex.find(pt);
+          if (it_site != site_canon_vertex.end()) return it_site->second;
+          auto it_st = steiner_coord_to_vertex.find(pt);
+          return it_st != steiner_coord_to_vertex.end() ? it_st->second : -1;
+        };
+        for (int bid = 0; bid < branch_count; ++bid) {
+          const auto& b1 = ftree.branch[bid];
+          const auto& b2 = ftree.branch[b1.n];
+          const std::pair<int, int> p1(static_cast<int>(b1.x), static_cast<int>(b1.y));
+          const std::pair<int, int> p2(static_cast<int>(b2.x), static_cast<int>(b2.y));
+          if (p1 == p2) continue;
+          add_undirected(resolve_pt(p1), resolve_pt(p2));
+        }
+      }
+      if (ftree.branch != nullptr) {
+        std::free(ftree.branch);
+      }
+    } else if (num_unique > MAXD) {
+      // Fallback Prim Manhattan MST for oversized nets exceeding FLUTE MAXD.
+      std::vector<uint8_t> in_mst(num_unique, 0);
+      std::vector<double> min_dist(num_unique, std::numeric_limits<double>::infinity());
+      std::vector<int> nearest(num_unique, 0);
+      int start_idx = 0;
+      for (int i = 0; i < num_unique; ++i) {
+        if (site_vertices[i] == drv_v) {
+          start_idx = i;
+          break;
+        }
+      }
+      min_dist[start_idx] = 0.0;
+      for (int step = 0; step < num_unique; ++step) {
+        int u = -1;
+        for (int i = 0; i < num_unique; ++i) {
+          if (!in_mst[i] && (u < 0 || min_dist[i] < min_dist[u])) u = i;
+        }
+        if (u < 0) break;
+        in_mst[u] = 1;
+        if (step > 0) add_undirected(site_vertices[nearest[u]], site_vertices[u]);
+        for (int v = 0; v < num_unique; ++v) {
+          if (in_mst[v]) continue;
+          const double d = std::abs(static_cast<double>(vx[v] - vx[u]))
+                           + std::abs(static_cast<double>(vy[v] - vy[u]));
+          if (d < min_dist[v]) {
+            min_dist[v] = d;
+            nearest[v] = u;
+          }
+        }
+      }
+    }
+
+    // BFS from drv_v to orient directed RC tree and recompute edge R/C.
+    std::vector<int> topo;
+    topo.reserve(pins.size() + 8);
+    std::unordered_set<int> visited;
+    auto init_root = [&](int r) {
+      visited.insert(r);
+      topo.push_back(r);
+      rc_forest_.parent[r] = -1;
+      rc_forest_.incoming_resistance[r] = 0.0;
+      rc_forest_.incoming_wire_cap[r] = 0.0;
+      rc_forest_.wire_cap[r] = 0.0;
+      rc_forest_.vertex_net[r] = net_id;
+      rc_forest_.adj_children[r].clear();
+    };
+    init_root(drv_v);
+
+    auto link_edge = [&](int p, int c) {
+      rc_forest_.parent[c] = p;
+      rc_forest_.adj_children[p].push_back(c);
+      rc_forest_.adj_children[c].clear();
+      rc_forest_.vertex_net[c] = net_id;
+      const double len_dbu =
+          std::abs(vertex_x_dbu_[c] - vertex_x_dbu_[p])
+          + std::abs(vertex_y_dbu_[c] - vertex_y_dbu_[p]);
+      const double len = len_dbu / rc_dbu_;
+      const double r_val = len * rc_r_unit_;
+      const double c_val = len * rc_c_unit_;
+      rc_forest_.incoming_resistance[c] = r_val;
+      rc_forest_.incoming_wire_cap[c] = c_val;
+      rc_forest_.wire_cap[c] = 0.5 * c_val;
+      rc_forest_.wire_cap[p] += 0.5 * c_val;
+    };
+
+    for (std::size_t head = 0; head < topo.size(); ++head) {
+      const int u = topo[head];
+      const auto it_adj = adj.find(u);
+      if (it_adj == adj.end()) continue;
+      for (int nxt : it_adj->second) {
+        if (visited.find(nxt) != visited.end()) continue;
+        visited.insert(nxt);
+        topo.push_back(nxt);
+        link_edge(u, nxt);
+      }
+    }
+    // Safety fallback if any net pin remained unreachable from drv_v.
+    for (int pin : pins) {
+      const int vp = rc_forest_.pin_to_vertex[pin];
+      if (vp >= 0 && visited.find(vp) == visited.end()) {
+        visited.insert(vp);
+        topo.push_back(vp);
+        link_edge(drv_v, vp);
+      }
+    }
+
+    rc_forest_.net_topo[tree_idx] = topo;
+    recomputeNetRc(net_id, false, &changed_rc_pins);
+
+    std::unordered_map<int, int> vtx_to_pin;
+    py::dict py_pin_to_v;
+    std::vector<int> sink_pins;
+    sink_pins.reserve(pins.size());
+    for (int pin : pins) {
+      const int vp = rc_forest_.pin_to_vertex[pin];
+      if (vp >= 0 && vtx_to_pin.find(vp) == vtx_to_pin.end()) {
+        vtx_to_pin[vp] = pin;
+      }
+      py_pin_to_v[py::int_(pin)] = vp;
+      if (pin != drv_pin) sink_pins.push_back(pin);
+    }
+
+    std::vector<int> out_parent(topo.size());
+    std::vector<double> out_edge_r(topo.size());
+    std::vector<double> out_edge_c(topo.size());
+    std::vector<double> out_wire_cap(topo.size());
+    std::vector<double> out_x_dbu(topo.size());
+    std::vector<double> out_y_dbu(topo.size());
+    std::vector<int> out_vtx_pin(topo.size(), -1);
+    for (std::size_t k = 0; k < topo.size(); ++k) {
+      const int v = topo[k];
+      out_parent[k] = rc_forest_.parent[v];
+      out_edge_r[k] = rc_forest_.incoming_resistance[v];
+      out_edge_c[k] = rc_forest_.incoming_wire_cap[v];
+      out_wire_cap[k] = rc_forest_.wire_cap[v];
+      out_x_dbu[k] = vertex_x_dbu_[v];
+      out_y_dbu[k] = vertex_y_dbu_[v];
+      auto it_vp = vtx_to_pin.find(v);
+      if (it_vp != vtx_to_pin.end()) out_vtx_pin[k] = it_vp->second;
+    }
+
+    py::dict net_rec;
+    net_rec["net_id"] = net_id;
+    net_rec["root_vertex"] = drv_v;
+    net_rec["driver_pin_id"] = drv_pin;
+    net_rec["sink_pin_ids"] = sink_pins;
+    net_rec["topo"] = topo;
+    net_rec["parent"] = out_parent;
+    net_rec["edge_r"] = out_edge_r;
+    net_rec["edge_c"] = out_edge_c;
+    net_rec["wire_cap"] = out_wire_cap;
+    net_rec["vertex_x_dbu"] = out_x_dbu;
+    net_rec["vertex_y_dbu"] = out_y_dbu;
+    net_rec["vertex_pin_id"] = out_vtx_pin;
+    net_rec["pin_to_vertex"] = py_pin_to_v;
+    rebuilt_subnets.append(std::move(net_rec));
+  }
+
+  for (int pin : changed_rc_pins) {
+    for (int s : pin_states_[pin]) seed_states.push_back(s);
+  }
+  for (int net_id : dirty_nets) {
+    for (int pin : net_pins_[net_id]) {
+      for (int s : pin_states_[pin]) seed_states.push_back(s);
+    }
+  }
+  std::sort(seed_states.begin(), seed_states.end());
+  seed_states.erase(std::unique(seed_states.begin(), seed_states.end()), seed_states.end());
+
+  propagateEvents(seed_states, nullptr, &touched_endpoints);
+  for (int ep : touched_endpoints) {
+    touched_endpoint_mask_[ep] = 0;
+    endpoint_slacks_[ep] = computeEndpointSlack(ep);
+  }
+  clearBufferUndo();
+  return rebuilt_subnets;
 }
 
 }  // namespace dreamplace

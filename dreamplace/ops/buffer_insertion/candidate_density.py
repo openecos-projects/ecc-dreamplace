@@ -13,9 +13,44 @@ class CandidateDensityView:
         data = model.data_collections
         rows = torch.nonzero(state.activation_param.detach().sum(dim=1) > 0).flatten()
         records = [state.candidate_records[index] for index in rows.cpu().tolist()]
-        self.parent = torch.tensor([record["parent_node_id"] for record in records])
-        self.child = torch.tensor([record["child_node_ids"][0] for record in records])
-        self.ratio = torch.tensor([record["segment_split_ratio"] for record in records])
+        raw_parent = torch.tensor(
+            [int(record.get("parent_node_id", -1)) for record in records],
+            dtype=torch.long,
+        )
+        raw_child = torch.tensor(
+            [
+                int(record["child_node_ids"][0])
+                if record.get("child_node_ids")
+                else -1
+                for record in records
+            ],
+            dtype=torch.long,
+        )
+        self.raw_parent = raw_parent
+        self.raw_child = raw_child
+        self.parent = raw_parent.clamp(min=0)
+        self.child = raw_child.clamp(min=0)
+        self.ratio = torch.tensor(
+            [float(record.get("segment_split_ratio", 0.5) or 0.5) for record in records]
+        )
+        self.fixed_x_dbu = torch.tensor(
+            [
+                float(record.get("x_dbu", record.get("candidate_location_x", 0.0)) or 0.0)
+                for record in records
+            ],
+            dtype=torch.float64,
+        )
+        self.fixed_y_dbu = torch.tensor(
+            [
+                float(record.get("y_dbu", record.get("candidate_location_y", 0.0)) or 0.0)
+                for record in records
+            ],
+            dtype=torch.float64,
+        )
+        self.prefer_fixed_xy = torch.tensor(
+            [bool(record.get("cpp_subnet_refreshed", False)) for record in records],
+            dtype=torch.bool,
+        )
         types = state.selected_drive_type().index_select(0, rows)
         cells = state.drive_type_cell_ids.index_select(0, types).to(data.flat_libcell_width.device)
         self.width = data.flat_libcell_width[cells].detach() + 2 * model.params.cell_padding_x
@@ -62,10 +97,36 @@ class CandidateDensityView:
         model = self.model
         db = model.placedb
         _, x, y = model._timing_geometry_for_pos(pos)
-        parent, child = self.parent.to(pos.device), self.child.to(pos.device)
+        coord_count = int(x.numel())
+        raw_parent = self.raw_parent.to(pos.device)
+        raw_child = self.raw_child.to(pos.device)
+        live_mask = (
+            (~self.prefer_fixed_xy.to(pos.device))
+            & (raw_parent >= 0)
+            & (raw_parent < coord_count)
+            & (raw_child >= 0)
+            & (raw_child < coord_count)
+        )
+        parent = raw_parent.clamp(min=0, max=max(0, coord_count - 1))
+        child = raw_child.clamp(min=0, max=max(0, coord_count - 1))
         ratio = self.ratio.to(pos)
-        vx = (1 - ratio) * x[parent].to(pos) + ratio * x[child].to(pos) - self.width.to(pos) / 2
-        vy = (1 - ratio) * y[parent].to(pos) + ratio * y[child].to(pos) - self.height.to(pos) / 2
+        live_x = (1 - ratio) * x[parent].to(pos) + ratio * x[child].to(pos)
+        live_y = (1 - ratio) * y[parent].to(pos) + ratio * y[child].to(pos)
+        if not bool(live_mask.all().item()):
+            scale = float(getattr(model.params, "scale_factor", 1.0) or 1.0)
+            shift = getattr(model.params, "shift_factor", (0.0, 0.0)) or (0.0, 0.0)
+            fixed_x = (
+                (self.fixed_x_dbu.to(device=pos.device, dtype=torch.float64) - float(shift[0]))
+                * scale
+            ).to(pos)
+            fixed_y = (
+                (self.fixed_y_dbu.to(device=pos.device, dtype=torch.float64) - float(shift[1]))
+                * scale
+            ).to(pos)
+            live_x = torch.where(live_mask, live_x, fixed_x)
+            live_y = torch.where(live_mask, live_y, fixed_y)
+        vx = live_x - self.width.to(pos) / 2
+        vy = live_y - self.height.to(pos) / 2
         combined = build_combined_virtual_position(
             pos,
             vx,

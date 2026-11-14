@@ -60,6 +60,8 @@ class IncrementalBufferingGate:
         self._static_skip_reason: str | None = None
         self._rejected_typed_actions: torch.Tensor | None = None
         self._rejected_untyped_candidates: torch.Tensor | None = None
+        self.last_area: float | None = None
+        self.accepted_action_infos: list[dict] = []
 
     def check_available(self, *, preexisting_virtual_count: int = 0) -> str | None:
         """Return None when C++ incremental buffering gate can run, else a skip reason."""
@@ -89,7 +91,7 @@ class IncrementalBufferingGate:
         self._build_ms = (perf_counter() - started) * 1000.0
         return self._engine, False, self._build_ms
 
-    def _policy(self) -> dict:
+    def _policy(self, *, capacity: float | None = None) -> dict:
         timing = self.model.op_collections.timing_propagation_op
         num_pins = int(timing.num_pins)
         num_cells = int(self.owner.data.cell_id_2_arc_id_start.numel()) - 1
@@ -97,13 +99,45 @@ class IncrementalBufferingGate:
             self.owner,
             self.model,
             self.geometry,
-            self.capacity,
+            self.capacity if capacity is None else float(capacity),
             num_pins,
             num_cells,
         )
         # Accepted buffers in this window are tracked inside self._engine directly.
         policy["virtual_area"] = 0.0
         return policy
+
+    def current_area(self) -> float | None:
+        if self.last_area is not None:
+            return float(self.last_area)
+        return None
+
+    def refresh_dirty_subnets(self, dirty_nets: list[int]) -> list[dict]:
+        """Rebuild FLUTE Steiner trees & incremental STA on accepted split sub-nets."""
+        if not dirty_nets or self._engine is None:
+            return []
+        return list(self._engine.refresh_dirty_subnet_steiner_trees([int(n) for n in dirty_nets]))
+
+    def remap_rejection_masks(
+        self,
+        *,
+        is_typed: bool,
+        new_shape: tuple[int, ...],
+        old_to_new_rows: dict[int, int],
+        dirty_orig_nets: set[int],
+        new_candidate_orig_nets: list[int],
+    ) -> None:
+        """Preserve untouched nets' rejection masks while clearing refreshed sub-net rows."""
+        attr = "_rejected_typed_actions" if is_typed else "_rejected_untyped_candidates"
+        old_mask = getattr(self, attr)
+        if old_mask is None:
+            return
+        new_mask = torch.zeros(new_shape, dtype=torch.bool, device=old_mask.device)
+        for old_row, new_row in old_to_new_rows.items():
+            if int(new_candidate_orig_nets[int(new_row)]) in dirty_orig_nets:
+                continue
+            new_mask[int(new_row)] = old_mask[int(old_row)]
+        setattr(self, attr, new_mask)
 
     def allowed_typed_actions(self, state):
         base = getattr(state, "drive_type_allowed", None)
@@ -123,7 +157,13 @@ class IncrementalBufferingGate:
             device=state.activation_param.device, dtype=torch.bool
         )
 
-    def filter_candidate_transition(self, state, transition):
+    def filter_candidate_transition(
+        self,
+        state,
+        transition,
+        *,
+        capacity_override: float | None = None,
+    ):
         """Filter one round's gradient-selected candidate actions via C++ incremental STA."""
         reason = self.check_available()
         if reason is not None:
@@ -160,9 +200,18 @@ class IncrementalBufferingGate:
         specs = []
         for row_idx, dtype_id in zip(rows, drive_types, strict=True):
             rec = state.candidate_records[int(row_idx)]
-            net_id = int(state.candidate_net_id[int(row_idx)].detach().cpu().item())
-            parent_v = rec.get("parent_node_id")
-            child_vs = [int(v) for v in (rec.get("child_node_ids") or ())]
+            net_id = int(
+                rec.get(
+                    "cpp_net_id",
+                    state.candidate_net_id[int(row_idx)].detach().cpu().item(),
+                )
+            )
+            parent_v = rec.get(
+                "cpp_parent_vertex",
+                rec.get("parent_node_id"),
+            )
+            raw_children = rec.get("cpp_child_vertices", rec.get("child_node_ids")) or ()
+            child_vs = [int(v) for v in raw_children]
             raw_ratio = rec.get("segment_split_ratio")
             split_ratio = -1.0 if raw_ratio is None else float(raw_ratio)
             if is_typed:
@@ -172,25 +221,59 @@ class IncrementalBufferingGate:
             else:
                 assert legal_cell_ids is not None
                 target_cell = int(legal_cell_ids[int(state.fixed_bsu_index)])
-            specs.append(
-                {
-                    "net_id": net_id,
-                    "parent_vertex": -1 if parent_v is None else int(parent_v),
-                    "child_vertices": child_vs,
-                    "split_ratio": split_ratio,
-                    "target_cell_id": target_cell,
-                }
-            )
+            spec = {
+                "net_id": net_id,
+                "parent_vertex": -1 if parent_v is None else int(parent_v),
+                "child_vertices": child_vs,
+                "split_ratio": split_ratio,
+                "target_cell_id": target_cell,
+            }
+            if rec.get("x_dbu") is not None and rec.get("y_dbu") is not None:
+                spec["x_dbu"] = float(rec["x_dbu"])
+                spec["y_dbu"] = float(rec["y_dbu"])
+            specs.append(spec)
 
         engine, cache_hit, build_ms = self._ensure_engine()
         eval_result = dict(
-            engine.evaluate_ranked_buffer_candidates(specs, self._policy())
+            engine.evaluate_ranked_buffer_candidates(
+                specs,
+                self._policy()
+                if capacity_override is None
+                else self._policy(capacity=capacity_override),
+            )
         )
         eval_result["cache_hit"] = bool(cache_hit)
         eval_result["engine_build_ms"] = float(build_ms)
         eval_result["total_filter_ms"] = float((perf_counter() - started) * 1000.0)
+        if "final_area" in eval_result:
+            self.last_area = float(eval_result["final_area"])
 
         accepted_idx = [int(i) for i in eval_result["accepted_indices"]]
+        accepted_set = set(accepted_idx)
+        accepted_action_infos = list(eval_result.get("accepted_actions") or ())
+        info_by_spec = {
+            int(info["spec_index"]): dict(info)
+            for info in accepted_action_infos
+            if "spec_index" in info
+        }
+        batch_infos = []
+        for spec_i in accepted_idx:
+            row_i = int(rows[spec_i])
+            rec = state.candidate_records[row_i]
+            info = dict(info_by_spec.get(spec_i, {}))
+            info.update(
+                {
+                    "row_idx": row_i,
+                    "candidate_id": int(rec.get("candidate_id", row_i)),
+                    "orig_net_id": int(rec.get("net_id", rec.get("affected_net_id", -1))),
+                    "drive_type_id": (
+                        None if drive_types[spec_i] is None else int(drive_types[spec_i])
+                    ),
+                }
+            )
+            batch_infos.append(info)
+            self.accepted_action_infos.append(info)
+        eval_result["accepted_action_infos"] = batch_infos
         device = state.activation_param.device
         keep = torch.tensor(accepted_idx, dtype=torch.long, device=device)
 
@@ -235,24 +318,24 @@ class IncrementalBufferingGate:
             )
 
         if accepted_idx:
-            self._rejected_typed_actions = None
-            self._rejected_untyped_candidates = None
             self.owner._incremental_sizing_cache = None
-        else:
+        if len(accepted_set) < len(rows):
             if is_typed:
                 if self._rejected_typed_actions is None:
                     self._rejected_typed_actions = torch.zeros(
                         state.activation_param.shape, dtype=torch.bool
                     )
-                for row_idx, dtype_id in zip(rows, drive_types, strict=True):
-                    self._rejected_typed_actions[int(row_idx), int(dtype_id)] = True
+                for spec_i, (row_idx, dtype_id) in enumerate(zip(rows, drive_types, strict=True)):
+                    if spec_i not in accepted_set:
+                        self._rejected_typed_actions[int(row_idx), int(dtype_id)] = True
             else:
                 if self._rejected_untyped_candidates is None:
                     self._rejected_untyped_candidates = torch.zeros(
                         state.activation_param.shape, dtype=torch.bool
                     )
-                for row_idx in rows:
-                    self._rejected_untyped_candidates[int(row_idx)] = True
+                for spec_i, row_idx in enumerate(rows):
+                    if spec_i not in accepted_set:
+                        self._rejected_untyped_candidates[int(row_idx)] = True
 
         return filtered, eval_result
 

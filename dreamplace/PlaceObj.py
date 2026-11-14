@@ -10975,7 +10975,7 @@ class PlaceObj(nn.Module):
         LOWER_PCOF = params.RePlAce_LOWER_PCOF
         UPPER_PCOF = params.RePlAce_UPPER_PCOF
         timing_coeff_growth_factor = float(
-            getattr(params, "timing_coeff_growth_factor", 1.01)
+            getattr(params, "timing_coeff_growth_factor", 1.0)
         )
         if not math.isfinite(timing_coeff_growth_factor) or timing_coeff_growth_factor <= 0:
             raise ValueError("timing_coeff_growth_factor must be a positive finite float")

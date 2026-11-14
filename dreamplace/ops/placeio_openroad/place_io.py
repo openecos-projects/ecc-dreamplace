@@ -54,7 +54,7 @@ def _load_placeio_openroad_cpp():
 placeio_openroad_cpp = _load_placeio_openroad_cpp()
 
 DEFAULT_PLACE_IO_ENGINE = "openroad"
-DEFAULT_OPENROAD_VT_SUFFIXES = ("H7H", "H7R", "H7L")
+DEFAULT_OPENROAD_VT_SUFFIXES = ("_9THVT", "_9TSVT", "_9TLVT")
 PLACE_IO_ENGINE = os.environ.get("PLACE_IO_ENGINE", "").strip().lower()
 SUPPORTED_OPENROAD_REFRESH_MODES = ("topo", "all")
 DEFAULT_BUFFER_INSERTION_STRATEGY = "repair_design"

@@ -270,7 +270,7 @@ class FlowConfigTest(unittest.TestCase):
         params = types.SimpleNamespace(flow_kind="sizing")
         apply_flow_defaults(params)
 
-        self.assertEqual(("H7H", "H7R", "H7L"), params.openroad_vt_suffixes)
+        self.assertEqual(("_9THVT", "_9TSVT", "_9TLVT"), params.openroad_vt_suffixes)
 
     def test_openroad_vt_suffixes_custom_value_survives_explicit_placement_flow(self):
         from dreamplace.flows.flow_config import apply_flow_defaults

@@ -251,7 +251,7 @@ def write_case_drive_type_table(path, *, buffer_library, source="case-buffer-lis
     }
     rows = []
     for drive_type_id, (master_name, strength) in enumerate(
-        zip(EXPECTED_DRIVE_TYPE_MASTERS, (8.0, 12.0, 16.0, 20.0))
+        zip(EXPECTED_DRIVE_TYPE_MASTERS, (8.0, 12.0, 16.0, 24.0))
     ):
         if master_name not in by_master:
             raise ValueError(f"missing approved case buffer: {master_name}")

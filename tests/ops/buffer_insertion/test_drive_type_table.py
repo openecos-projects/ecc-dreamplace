@@ -72,7 +72,7 @@ def _write_table(path):
                 "cell_id": 100 + index,
             }
             for index, (name, strength) in enumerate(
-                zip(EXPECTED_DRIVE_TYPE_MASTERS, (8, 12, 16, 20))
+                zip(EXPECTED_DRIVE_TYPE_MASTERS, (8, 12, 16, 24))
             )
         ],
     }
@@ -96,10 +96,10 @@ def test_drive_type_table_rejects_wrong_master_order(tmp_path):
     path = tmp_path / "drive_strength.json"
     _write_table(path)
     payload = json.loads(path.read_text())
-    payload["buffers"][0]["master_name"] = "BUFX20H7L"
+    payload["buffers"][0]["master_name"] = "BUFX24_9TLVT"
     path.write_text(json.dumps(payload))
 
-    with pytest.raises(ValueError, match="must be BUFX8H7L"):
+    with pytest.raises(ValueError, match="must be BUFX8_9TLVT"):
         load_drive_type_table(path, buffer_library=_buffer_library())
 
 
@@ -108,7 +108,7 @@ def test_write_case_drive_type_table_is_explicit_and_reloadable(tmp_path):
     table = write_case_drive_type_table(path, buffer_library=_buffer_library())
 
     assert path.is_file()
-    assert [entry.drive_strength for entry in table.entries] == [8.0, 12.0, 16.0, 20.0]
+    assert [entry.drive_strength for entry in table.entries] == [8.0, 12.0, 16.0, 24.0]
 
 
 def test_typed_state_has_position_one_hot_and_type_specific_bsu(tmp_path):
@@ -166,8 +166,8 @@ def test_typed_projection_and_commit_preserve_selected_master(tmp_path):
 
     assert projection.validation["exact_active_action_match"]
     assert projection.selected_actions[0]["drive_type_id"] == 1
-    assert projection.selected_actions[0]["buffer_master_name"] == "BUFX12H7L"
-    assert projection.selected_actions[0]["drive_type_master_name"] == "BUFX12H7L"
+    assert projection.selected_actions[0]["buffer_master_name"] == "BUFX12_9TLVT"
+    assert projection.selected_actions[0]["drive_type_master_name"] == "BUFX12_9TLVT"
 
 
 def test_typed_projection_forwards_selected_master_to_coordinate_commit(tmp_path):
@@ -222,5 +222,5 @@ def test_typed_projection_forwards_selected_master_to_coordinate_commit(tmp_path
     assert summary["status"] == "accepted"
     assert summary["accepted_action_count"] == 1
     assert bridge.actions[0][0]["drive_type_id"] == 3
-    assert bridge.actions[0][0]["buffer_master_name"] == "BUFX20H7L"
+    assert bridge.actions[0][0]["buffer_master_name"] == "BUFX24_9TLVT"
     assert bridge.actions[0][0]["buffer_master_id"] == 103

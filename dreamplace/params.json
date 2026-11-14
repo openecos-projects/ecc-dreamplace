@@ -137,7 +137,7 @@
     },
     "buffering_fixed_buffer_master": {
         "description": "physical buffer master used for Segment buffering",
-        "default": "BUFX1H7L"
+        "default": "BUFX1_9TLVT"
     },
     "buffering_segment_count_timing_backend": {
         "description": "timing implementation for Segment buffering",
@@ -309,9 +309,9 @@
     "openroad_vt_suffixes": {
         "description": "OpenROAD VT suffixes used to classify equivalent Liberty cells",
         "default": [
-            "H7H",
-            "H7R",
-            "H7L"
+            "_9THVT",
+            "_9TSVT",
+            "_9TLVT"
         ]
     },
     "verilog_input": {

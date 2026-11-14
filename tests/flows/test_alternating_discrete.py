@@ -206,7 +206,7 @@ def test_window_schedules_execute_discrete_phases_and_preserve_candidates(tmp_pa
             "delay": 1.0 + index,
             "output_slew": 0.5 + index,
         }
-        for index, name in enumerate(("BUFX8H7L", "BUFX12H7L", "BUFX16H7L", "BUFX20H7L"))
+        for index, name in enumerate(("BUFX8_9TLVT", "BUFX12_9TLVT", "BUFX16_9TLVT", "BUFX24_9TLVT"))
     }
     table = write_case_drive_type_table(tmp_path / "drive_strength.json", buffer_library=library)
     state = build_typed_discrete_candidate_state(

@@ -7,9 +7,9 @@ from .backend_caps import DEFAULT_BACKEND_CAPS
 
 
 DEFAULT_VT_CONFIG = [
-    ("H7H", "HVT"),
-    ("H7L", "LVT"),
-    ("H7R", "RVT"),
+    ("_9THVT", "HVT"),
+    ("_9TLVT", "LVT"),
+    ("_9TSVT", "RVT"),
 ]
 
 IEDAIO = None

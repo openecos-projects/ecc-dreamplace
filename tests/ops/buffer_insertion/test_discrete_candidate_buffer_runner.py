@@ -299,8 +299,8 @@ def test_typed_candidate_runner_probes_four_types_and_projects_master(tmp_path):
     actions = summary.final_projection.selected_actions
     assert [action["drive_type_id"] for action in actions] == [3, 3]
     assert [action["drive_type_master_name"] for action in actions] == [
-        "BUFX20H7L",
-        "BUFX20H7L",
+        "BUFX24_9TLVT",
+        "BUFX24_9TLVT",
     ]
     payload = json.loads((tmp_path / "candidate_discrete_scheduler_trace.json").read_text())
     assert payload["candidate_drive_type_mode"] == "four_strength_table"

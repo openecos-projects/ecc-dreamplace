@@ -3,7 +3,7 @@ BUFFERING_DEFAULTS = (
     ("buffering_continuous_relaxed_optimization", 1),
     ("buffering_candidate_policy", "segment_only"),
     ("buffering_max_repeaters_per_segment", 3),
-    ("buffering_fixed_buffer_master", "BUFX1H7L"),
+    ("buffering_fixed_buffer_master", "BUFX1_9TLVT"),
     ("buffering_fixed_bsu_index", None),
     ("buffering_route_b_selection_fraction", 0.001),
     ("buffering_include_tree_node_candidates", 0),

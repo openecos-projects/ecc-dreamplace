@@ -90,7 +90,7 @@ def _set_default_if_missing(params, name, value):
 
 def _normalize_openroad_vt_suffixes(params):
     """Normalize the configured OpenROAD VT suffix list for bridge input."""
-    raw = getattr(params, "openroad_vt_suffixes", ("H7H", "H7R", "H7L"))
+    raw = getattr(params, "openroad_vt_suffixes", ("_9THVT", "_9TSVT", "_9TLVT"))
     if isinstance(raw, str):
         raw = raw.replace(";", ",").split(",")
     try:

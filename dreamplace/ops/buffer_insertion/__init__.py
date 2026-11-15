@@ -33,7 +33,6 @@ from .candidate_geometry import (
 from .contract import BufferFamilyContract, BufferFamilyLegalTable
 from .drive_type_table import (
     DRIVE_TYPE_TABLE_SCHEMA,
-    EXPECTED_DRIVE_TYPE_MASTERS,
     DriveTypeEntry,
     DriveTypeTable,
     load_drive_type_table,
@@ -88,7 +87,6 @@ __all__ = [
     "BufferingStateBuildResult",
     "CandidateRefreshResult",
     "DRIVE_TYPE_TABLE_SCHEMA",
-    "EXPECTED_DRIVE_TYPE_MASTERS",
     "DriveTypeEntry",
     "DriveTypeTable",
     "DiscreteVirtualSchedulerTransition",

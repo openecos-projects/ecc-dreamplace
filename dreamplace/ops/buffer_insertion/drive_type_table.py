@@ -1,6 +1,6 @@
 """Drive-strength table loading for typed discrete candidate buffering.
 
-The table is an input contract for the four candidate buffer masters.  Liberty
+The table is an input contract for the configured candidate buffer masters.  Liberty
 timing data remains owned by the native metadata/buffer library; this module
 only validates the external type identity and maps each master to its legal
 family-local BSU index.
@@ -15,7 +15,6 @@ from pathlib import Path
 
 from dreamplace.flows.buffer_drive_table import (
     DRIVE_TYPE_TABLE_SCHEMA,
-    EXPECTED_DRIVE_TYPE_MASTERS,
 )
 
 
@@ -123,7 +122,7 @@ def load_drive_type_table(
     path,
     *,
     buffer_library,
-    expected_masters=EXPECTED_DRIVE_TYPE_MASTERS,
+    expected_masters=None,
 ):
     """Load and validate the external table against the legal buffer library."""
 
@@ -139,6 +138,10 @@ def load_drive_type_table(
     rows = payload.get("buffers")
     if not isinstance(rows, list):
         raise ValueError("drive-strength table requires a buffers list")
+    if not rows:
+        raise ValueError("drive-strength table must contain at least one buffer")
+    if expected_masters is None:
+        expected_masters = [row.get("master_name", "") for row in rows if isinstance(row, dict)]
     expected_masters = tuple(str(name) for name in expected_masters)
     if len(rows) != len(expected_masters):
         raise ValueError(
@@ -237,13 +240,8 @@ def load_drive_type_table(
     )
 
 
-def write_case_drive_type_table(path, *, buffer_library, source="case-buffer-list"):
-    """Write the fixed ICS55 four-master table for a case preflight artifact.
-
-    This helper is deliberately explicit: it does not infer arbitrary strength
-    types from suffixes.  It only emits the four approved masters and uses the
-    known drive-strength values as the external table's ordering contract.
-    """
+def write_case_drive_type_table(path, *, buffer_library, drive_strengths, library_name="", source="case-buffer-list"):
+    """Write a validated table from explicitly configured masters and strengths."""
 
     by_master = {
         str(entry.get("master_name", "")): (int(bsu), dict(entry))
@@ -251,7 +249,7 @@ def write_case_drive_type_table(path, *, buffer_library, source="case-buffer-lis
     }
     rows = []
     for drive_type_id, (master_name, strength) in enumerate(
-        zip(EXPECTED_DRIVE_TYPE_MASTERS, (8.0, 12.0, 16.0, 24.0))
+        ((entry["master"], entry["strength"]) for entry in drive_strengths)
     ):
         if master_name not in by_master:
             raise ValueError(f"missing approved case buffer: {master_name}")
@@ -273,7 +271,7 @@ def write_case_drive_type_table(path, *, buffer_library, source="case-buffer-lis
     payload = {
         "schema": DRIVE_TYPE_TABLE_SCHEMA,
         "source": str(source),
-        "library": "ics55",
+        "library": library_name,
         "units": {"drive_strength": "relative", "capacitance": "library"},
         "buffers": rows,
     }

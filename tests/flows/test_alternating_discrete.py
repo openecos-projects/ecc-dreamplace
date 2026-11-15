@@ -12,6 +12,14 @@ from dreamplace.ops.buffer_insertion.optimization_state import (
 )
 
 
+EXPECTED_DRIVE_TYPE_MASTERS = ("BUFX8_9TLVT", "BUFX12_9TLVT", "BUFX16_9TLVT", "BUFX24_9TLVT")
+DRIVE_STRENGTHS = [
+    {"master": name, "strength": strength}
+    for name, strength in zip(EXPECTED_DRIVE_TYPE_MASTERS, (8, 12, 16, 24))
+]
+
+
+
 class _FixtureOwner(alternating_discrete.AlternatingSizingOwner):
     def sync_native_sizing(self):
         return {"ok": True}
@@ -208,7 +216,7 @@ def test_window_schedules_execute_discrete_phases_and_preserve_candidates(tmp_pa
         }
         for index, name in enumerate(("BUFX8_9TLVT", "BUFX12_9TLVT", "BUFX16_9TLVT", "BUFX24_9TLVT"))
     }
-    table = write_case_drive_type_table(tmp_path / "drive_strength.json", buffer_library=library)
+    table = write_case_drive_type_table(tmp_path / "drive_strength.json", drive_strengths=DRIVE_STRENGTHS, buffer_library=library)
     state = build_typed_discrete_candidate_state(
         records,
         buffer_main_type_index=4,

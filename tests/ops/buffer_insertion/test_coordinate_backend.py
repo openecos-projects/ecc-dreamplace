@@ -927,7 +927,9 @@ class DuCoordinateBackendContractTest(unittest.TestCase):
         )
 
     def test_placeio_wrapper_calls_coordinate_buffer_insert_bridge(self):
-        from dreamplace.ops.placeio_openroad.place_io import PlaceIOFunction
+        import pytest
+        bridge = pytest.importorskip("dreamplace.ops.placeio_openroad.place_io", reason="optional OpenROAD bridge was not built")
+        PlaceIOFunction = bridge.PlaceIOFunction
 
         class FakeRawDb:
             def __init__(self):
@@ -957,7 +959,9 @@ class DuCoordinateBackendContractTest(unittest.TestCase):
                 "set DREAMPLACE_BUFFERING_REAL_COORDINATE_BUFFER_SMOKE=1 to run real coordinate smoke"
             )
 
-        from dreamplace.ops.placeio_openroad.place_io import PlaceIOFunction
+        import pytest
+        bridge = pytest.importorskip("dreamplace.ops.placeio_openroad.place_io", reason="optional OpenROAD bridge was not built")
+        PlaceIOFunction = bridge.PlaceIOFunction
 
         openroad_root = Path(
             "/nfs/share/home/zhaoxueyan/ord-buffer-benchmark/"
@@ -1027,7 +1031,9 @@ class DuCoordinateBackendContractTest(unittest.TestCase):
                 "set DREAMPLACE_BUFFERING_REAL_COORDINATE_BUFFER_SMOKE=1 to run real coordinate smoke"
             )
 
-        from dreamplace.ops.placeio_openroad.place_io import PlaceIOFunction
+        import pytest
+        bridge = pytest.importorskip("dreamplace.ops.placeio_openroad.place_io", reason="optional OpenROAD bridge was not built")
+        PlaceIOFunction = bridge.PlaceIOFunction
 
         openroad_root = Path(
             "/nfs/share/home/zhaoxueyan/ord-buffer-benchmark/"

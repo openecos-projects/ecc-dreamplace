@@ -617,8 +617,8 @@ def build_typed_discrete_candidate_state(
     buffer_main_type_index = int(buffer_main_type_index)
     legal_buffer_count = int(legal_buffer_count)
     entries = tuple(getattr(drive_type_table, "entries", ()) or ())
-    if len(entries) != 4:
-        raise ValueError("typed discrete candidate buffering requires four drive types")
+    if len(entries) < 2:
+        raise ValueError("typed discrete candidate buffering requires at least two drive types")
     if legal_buffer_count < 2:
         raise ValueError("legal_buffer_count must be at least 2")
 

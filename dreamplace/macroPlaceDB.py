@@ -6293,6 +6293,9 @@ row height = %g, site width = %g
                 getattr(params, "placement_sizing_mode", "place_only") != "size_only"
             ),
         )
+        recorder = getattr(params, "_replay_capture", None)
+        if recorder is not None:
+            recorder.sample(params, self, np.concatenate((self.node_x, self.node_y)), "native_writeback", committed=True)
         if (
             getattr(params, "place_io_engine", "ieda") == "ecc"
             and getattr(self.rawdb, "timing_enabled", False)

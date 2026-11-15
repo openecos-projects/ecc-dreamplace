@@ -5,7 +5,6 @@ import torch
 
 from dreamplace.ops.buffer_insertion.drive_type_table import (
     DRIVE_TYPE_TABLE_SCHEMA,
-    EXPECTED_DRIVE_TYPE_MASTERS,
     load_drive_type_table,
     write_case_drive_type_table,
 )
@@ -14,6 +13,14 @@ from dreamplace.ops.buffer_insertion.optimization_state import (
 )
 from dreamplace.ops.buffer_insertion.projection import project_candidate_buffer_state
 from dreamplace.ops.buffer_insertion.coordinate_backend import commit_coordinate_buffer_actions
+
+
+EXPECTED_DRIVE_TYPE_MASTERS = ("BUFX8_9TLVT", "BUFX12_9TLVT", "BUFX16_9TLVT", "BUFX24_9TLVT")
+DRIVE_STRENGTHS = [
+    {"master": name, "strength": strength}
+    for name, strength in zip(EXPECTED_DRIVE_TYPE_MASTERS, (8, 12, 16, 24))
+]
+
 
 
 def _buffer_library():
@@ -83,7 +90,7 @@ def test_load_drive_type_table_resolves_legal_bsu_and_provenance(tmp_path):
     path = tmp_path / "drive_strength.json"
     _write_table(path)
 
-    table = load_drive_type_table(path, buffer_library=_buffer_library())
+    table = load_drive_type_table(path, buffer_library=_buffer_library(), expected_masters=EXPECTED_DRIVE_TYPE_MASTERS)
 
     assert table.master_names == EXPECTED_DRIVE_TYPE_MASTERS
     assert table.bsu_indices == (0, 1, 2, 3)
@@ -100,12 +107,12 @@ def test_drive_type_table_rejects_wrong_master_order(tmp_path):
     path.write_text(json.dumps(payload))
 
     with pytest.raises(ValueError, match="must be BUFX8_9TLVT"):
-        load_drive_type_table(path, buffer_library=_buffer_library())
+        load_drive_type_table(path, buffer_library=_buffer_library(), expected_masters=EXPECTED_DRIVE_TYPE_MASTERS)
 
 
 def test_write_case_drive_type_table_is_explicit_and_reloadable(tmp_path):
     path = tmp_path / "generated.json"
-    table = write_case_drive_type_table(path, buffer_library=_buffer_library())
+    table = write_case_drive_type_table(path, drive_strengths=DRIVE_STRENGTHS, buffer_library=_buffer_library())
 
     assert path.is_file()
     assert [entry.drive_strength for entry in table.entries] == [8.0, 12.0, 16.0, 24.0]
@@ -172,7 +179,7 @@ def test_typed_projection_and_commit_preserve_selected_master(tmp_path):
 
 def test_typed_projection_forwards_selected_master_to_coordinate_commit(tmp_path):
     table_path = tmp_path / "drive_strength.json"
-    table = write_case_drive_type_table(table_path, buffer_library=_buffer_library())
+    table = write_case_drive_type_table(table_path, drive_strengths=DRIVE_STRENGTHS, buffer_library=_buffer_library())
     state = build_typed_discrete_candidate_state(
         _candidates(),
         buffer_main_type_index=4,
@@ -224,3 +231,25 @@ def test_typed_projection_forwards_selected_master_to_coordinate_commit(tmp_path
     assert bridge.actions[0][0]["drive_type_id"] == 3
     assert bridge.actions[0][0]["buffer_master_name"] == "BUFX24_9TLVT"
     assert bridge.actions[0][0]["buffer_master_id"] == 103
+
+
+def test_custom_two_strength_table_drives_dynamic_candidate_shape(tmp_path):
+    library = {key: value for key, value in _buffer_library().items() if key < 2}
+    library[0]["master_name"] = "vendor_weak"
+    library[1]["master_name"] = "vendor_strong"
+    table = write_case_drive_type_table(
+        tmp_path / "custom.json", buffer_library=library, library_name="custom",
+        drive_strengths=[{"master": "vendor_weak", "strength": 0.5}, {"master": "vendor_strong", "strength": 3.0}],
+    )
+    state = build_typed_discrete_candidate_state(
+        _candidates(), buffer_main_type_index=4, legal_buffer_count=2,
+        drive_type_table=table, device="cpu",
+    )
+    assert tuple(state.activation_param.shape) == (2, 2)
+    with torch.no_grad():
+        state.activation_param[0, 1] = 1.0
+    projection = project_candidate_buffer_state(state, legal_table={
+        "legal_cell_ids": [100, 101], "legal_master_names": ["vendor_weak", "vendor_strong"],
+        "legal_size_values": [0.0, 1.0],
+    })
+    assert projection.selected_actions[0]["buffer_master_name"] == "vendor_strong"

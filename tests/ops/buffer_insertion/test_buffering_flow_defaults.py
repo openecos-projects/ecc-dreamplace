@@ -21,7 +21,7 @@ def test_buffering_flow_defaults_to_segment_native_projection_recipe():
     assert params.buffering_segment_transfer_backend == "segment_transfer_native"
     assert params.buffering_segment_integer_projection_start_step == 0
     assert params.buffering_segment_integer_projection_interval == 0
-    assert params.buffering_fixed_buffer_master == "BUFX1_9TLVT"
+    assert params.buffering_fixed_buffer_master == ""
     assert params.buffering_fixed_bsu_index is None
     assert params.buffering_route_b_selection_fraction == 0.001
     assert params.buffering_commit_enabled == 1
@@ -79,7 +79,7 @@ def test_candidate_discrete_net_gradient_flow_preserves_exact_candidate_controls
     assert params.buffering_mode == "candidate"
     assert params.buffering_segment_strategy == "continuous"
     assert params.buffering_candidate_strategy == "discrete_net_gradient"
-    assert params.buffering_fixed_buffer_master == "BUFX1_9TLVT"
+    assert params.buffering_fixed_buffer_master == ""
     assert params.buffering_fixed_bsu_index == 7
     assert params.buffering_continuous_steps == 5
 
@@ -102,6 +102,7 @@ def test_candidate_discrete_net_gradient_rejects_explicit_continuous_lr():
         buffering_mode="candidate",
         buffering_candidate_strategy="discrete_net_gradient",
         buffering_fixed_bsu_index=7,
+        _buffering_fixed_bsu_index_explicit=True,
         buffering_continuous_steps=5,
         buffering_continuous_lr=0.01,
         _buffering_continuous_lr_explicit=True,
@@ -112,7 +113,7 @@ def test_candidate_discrete_net_gradient_rejects_explicit_continuous_lr():
 
 
 def test_joint_flow_defaults_to_segment_buffering_profile():
-    params = SimpleNamespace(flow_kind="joint")
+    params = SimpleNamespace(flow_kind="joint", buffering_fixed_buffer_master="fixture_buffer", _buffering_fixed_buffer_master_explicit=True)
 
     apply_flow_defaults(params)
 
@@ -180,6 +181,8 @@ def test_joint_flow_keeps_explicit_buffering_overrides():
 def test_segment_count_direct_joint_profile_resolves_fixed_pb_recipe():
     params = SimpleNamespace(
         flow_kind="joint",
+        buffering_fixed_buffer_master="fixture_buffer",
+        _buffering_fixed_buffer_master_explicit=True,
         joint_quality_profile="segment_count_direct_joint_v1",
     )
 
@@ -191,7 +194,7 @@ def test_segment_count_direct_joint_profile_resolves_fixed_pb_recipe():
     assert params.buffering_mode == "segment"
     assert params.buffering_segment_strategy == "discrete_net_gradient"
     assert params.buffering_segment_count_z_init == 0.0
-    assert params.buffering_fixed_buffer_master == "BUFX1_9TLVT"
+    assert params.buffering_fixed_buffer_master == "fixture_buffer"
     assert params.buffering_fixed_bsu_index is None
     assert params.buffering_max_repeaters_per_segment == 3
     assert params.buffering_segment_live_geometry == 1

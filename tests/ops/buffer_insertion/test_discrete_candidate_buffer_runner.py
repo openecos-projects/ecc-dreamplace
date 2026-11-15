@@ -11,7 +11,6 @@ from dreamplace.ops.buffer_insertion.discrete_candidate_buffer_runner import (
     update_discrete_candidate_scheduler_trace_commit,
 )
 from dreamplace.ops.buffer_insertion.drive_type_table import (
-    EXPECTED_DRIVE_TYPE_MASTERS,
     write_case_drive_type_table,
 )
 from dreamplace.ops.buffer_insertion.optimization_state import (
@@ -20,6 +19,14 @@ from dreamplace.ops.buffer_insertion.optimization_state import (
 )
 from dreamplace.ops.buffer_insertion.projection import project_candidate_buffer_state
 from torch.utils import deterministic
+
+
+EXPECTED_DRIVE_TYPE_MASTERS = ("BUFX8_9TLVT", "BUFX12_9TLVT", "BUFX16_9TLVT", "BUFX24_9TLVT")
+DRIVE_STRENGTHS = [
+    {"master": name, "strength": strength}
+    for name, strength in zip(EXPECTED_DRIVE_TYPE_MASTERS, (8, 12, 16, 24))
+]
+
 
 
 def _candidate(candidate_id, net_id, node_id, x_dbu):
@@ -113,7 +120,7 @@ class _FakeTypedCandidateLane:
             for index, name in enumerate(EXPECTED_DRIVE_TYPE_MASTERS)
         }
         table_path = output_dir / "drive_strength.json"
-        table = write_case_drive_type_table(table_path, buffer_library=library)
+        table = write_case_drive_type_table(table_path, drive_strengths=DRIVE_STRENGTHS, buffer_library=library)
         self.state = build_typed_discrete_candidate_state(
             candidates,
             buffer_main_type_index=4,

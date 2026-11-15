@@ -133,7 +133,9 @@ class BufferFamilyContract:
         backend="unknown",
         preferred_master_name="",
         candidate_drive_type_mode="single_fixed",
+        drive_strength_table="",
     ):
+        self.drive_strength_table = drive_strength_table
         self.metadata = metadata
         self.backend = backend
         self.preferred_master_name = str(preferred_master_name or "").strip()
@@ -145,6 +147,7 @@ class BufferFamilyContract:
     def from_buffering_params(cls, metadata, params, backend="unknown"):
         return cls(
             metadata,
+            drive_strength_table=getattr(params, "buffering_candidate_drive_strength_table", ""),
             backend=backend,
             preferred_master_name=getattr(
                 params,
@@ -159,7 +162,7 @@ class BufferFamilyContract:
         )
 
     def _typed_legal_table(self):
-        """Build a four-master table even when OpenSTA exposes separate families.
+        """Build a configured master table even when OpenSTA exposes separate families.
 
         The legacy contract intentionally requires one equivalent-cell family.
         Typed candidate buffering is different: each table row names its own
@@ -168,7 +171,13 @@ class BufferFamilyContract:
         the first family id as the compatibility value used by candidate
         geometry records.
         """
-        from .drive_type_table import EXPECTED_DRIVE_TYPE_MASTERS
+        import json
+        from pathlib import Path
+
+        if not self.drive_strength_table:
+            return None, ["missing_configured_drive_strength_table"]
+        payload = json.loads(Path(self.drive_strength_table).read_text())
+        configured_masters = [row["master_name"] for row in payload["buffers"]]
 
         names = _as_list(getattr(self.metadata, "flat_libcell_names", []))
         rows = _as_rows(getattr(self.metadata, "flat_libcell_info", []))
@@ -188,7 +197,7 @@ class BufferFamilyContract:
         size_values = []
         main_ids = []
         missing = []
-        for master_name in EXPECTED_DRIVE_TYPE_MASTERS:
+        for master_name in configured_masters:
             match = by_name.get(master_name)
             if match is None:
                 missing.append(master_name)

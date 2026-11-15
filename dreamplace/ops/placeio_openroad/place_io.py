@@ -54,7 +54,7 @@ def _load_placeio_openroad_cpp():
 placeio_openroad_cpp = _load_placeio_openroad_cpp()
 
 DEFAULT_PLACE_IO_ENGINE = "openroad"
-DEFAULT_OPENROAD_VT_SUFFIXES = ("_9THVT", "_9TSVT", "_9TLVT")
+DEFAULT_OPENROAD_VT_SUFFIXES = ()
 PLACE_IO_ENGINE = os.environ.get("PLACE_IO_ENGINE", "").strip().lower()
 SUPPORTED_OPENROAD_REFRESH_MODES = ("topo", "all")
 DEFAULT_BUFFER_INSERTION_STRATEGY = "repair_design"
@@ -109,8 +109,6 @@ def _normalize_openroad_vt_suffixes(value):
     if isinstance(value, str):
         value = value.replace(";", ",").split(",")
     suffixes = tuple(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
-    if not suffixes:
-        raise RuntimeError("openroad_vt_suffixes must contain at least one suffix")
     return suffixes
 
 

@@ -10,42 +10,12 @@
 #include <vector>
 
 #include "openroad_place_io_impl_shared.h"
+#include "pdk_cell_classification.h"
 
 namespace dreamplace {
 namespace placeio_openroad {
 namespace impl {
 namespace sizing_metadata {
-
-struct CellClass
-{
-  std::string drive_key;
-  std::string vt_key;
-};
-
-inline bool endsWith(const std::string& value, const std::string& suffix)
-{
-  return value.size() >= suffix.size()
-         && value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
-}
-
-inline CellClass classifyCell(const std::string& cell_name,
-                              const std::vector<std::string>& configured_vt_suffixes)
-{
-  for (const std::string& suffix : configured_vt_suffixes) {
-    if (!suffix.empty() && endsWith(cell_name, suffix)) {
-      return {cell_name.substr(0, cell_name.size() - suffix.size()), suffix};
-    }
-  }
-
-  static const std::array<std::string, 6> vt_suffixes{
-      "ULVT", "SLVT", "LVT", "RVT", "HVT", "SVT"};
-  for (const std::string& suffix : vt_suffixes) {
-    if (endsWith(cell_name, suffix)) {
-      return {cell_name.substr(0, cell_name.size() - suffix.size()), suffix};
-    }
-  }
-  return {cell_name, "default"};
-}
 
 inline double groupLeakageRank(const std::vector<sta::LibertyCell*>& cells)
 {

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from dreamplace.flows import alternating_discrete
+from dreamplace.flows.baselines import alternating_discrete
 from dreamplace.ops.buffer_insertion.buffering_lane import BufferingOptimizationLane
 from dreamplace.ops.buffer_insertion.drive_type_table import write_case_drive_type_table
 from dreamplace.ops.buffer_insertion.optimization_state import (
@@ -361,12 +361,9 @@ def test_alternating_discrete_direct_b1_runs_sizing_cleanly_and_restores_after_r
 ):
     from contextlib import nullcontext
 
-    from dreamplace.flows.direct_buffer_commit import DirectBufferCommitSession
-    from dreamplace.flows.midplace_state import (
-        MidplaceRestart,
-        PlacementCursor,
-        create_session,
-    )
+    from dreamplace.flows.discrete.buffer_commit import DirectBufferCommitSession
+    from dreamplace.flows.gp.continuation import MidplaceRestart, PlacementCursor
+    from dreamplace.Placer import create_session
 
     placedb = ecc_schema3_carrier_harness.placedb
     rawdb = ecc_schema3_carrier_harness.rawdb

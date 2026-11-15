@@ -6,8 +6,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
-from dreamplace.flows.hold_objective import HoldObjective
-from dreamplace.flows.hold_rc import HoldRC
+from dreamplace.flows.gp.hold_timing import HoldObjective
+from dreamplace.flows.gp.hold_timing import HoldRC
 from dreamplace.ops.discrete_gradient_topk.quad_gradient_topk import ACTION_NAMES
 from dreamplace.ops.placeio_ecc.hold_schema import HoldContext, HoldLaunch, HoldTimingData
 from dreamplace.ops.timing_propagation.discrete_actions import DiscreteActionContext

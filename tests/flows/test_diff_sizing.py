@@ -22,7 +22,7 @@ def test_sizing_lut_action_dispatches_to_diff_sizing():
 
 
 def test_diff_sizing_controller_uses_one_action_phase(monkeypatch):
-    from dreamplace.flows import diff_sizing
+    from dreamplace.flows.post_gp import diff_sizing
 
     calls = []
 
@@ -102,8 +102,8 @@ def test_diff_sizing_controller_uses_one_action_phase(monkeypatch):
 
 
 def test_diff_sizing_controller_runs_ordered_action_phases(monkeypatch):
-    from dreamplace.flows import diff_sizing
-    from dreamplace.flows.diff_sizing_spec import parse_diff_sizing_flows
+    from dreamplace.flows.post_gp import diff_sizing
+    from dreamplace.flows.config.specs import parse_diff_sizing_flows
 
     calls = []
 
@@ -224,7 +224,7 @@ def test_diff_sizing_controller_runs_ordered_action_phases(monkeypatch):
 def test_run_diff_sizing_commits_refreshes_and_writes_summary(
     monkeypatch, tmp_path, timing_rc_mode, terminal_gr_sta_enabled, expected_reason
 ):
-    from dreamplace.flows import diff_sizing
+    from dreamplace.flows.post_gp import diff_sizing
 
     calls = []
     gr_session = object()
@@ -359,7 +359,7 @@ def test_legalize_and_measure_preserves_legal_postroute_placement_in_spef_mode(
 ):
     import dreamplace.NonLinearPlace as nlp_mod
     import torch
-    from dreamplace.flows import diff_sizing
+    from dreamplace.flows.post_gp import diff_sizing
 
     calls = []
 
@@ -395,7 +395,7 @@ def test_legalize_and_measure_preserves_legal_postroute_placement_in_spef_mode(
 
 
 def test_build_timing_model_forces_lut_only_and_restores_params():
-    from dreamplace.flows import diff_sizing
+    from dreamplace.flows.post_gp import diff_sizing
 
     seen_modes = []
 
@@ -430,7 +430,7 @@ def test_build_timing_model_forces_lut_only_and_restores_params():
 def test_configure_gr_sizing_sets_surrogate_mode_by_action_mode(
     action_mode, expected_surrogate_mode
 ):
-    from dreamplace.flows.gr_sizing_config import configure_gr_sizing
+    from dreamplace.flows.config.specs import configure_gr_sizing
 
     params = SimpleNamespace(
         flow_kind="sizing",

@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 
 import torch
-from dreamplace.flows.flow_config import resolve_flow_config
+from dreamplace.flows.config.resolver import resolve_flow_config
 from dreamplace.ops.gpugr.xplace_backend import XplaceGPUGR
 from dreamplace.ops.steiner_topo.steiner_topo import SteinerTopo
 from dreamplace.Params import Params

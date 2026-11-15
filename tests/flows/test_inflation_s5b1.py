@@ -7,9 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from dreamplace.flows.discrete_timing_diagnostics import phase_metrics
-from dreamplace.flows.inflation_s5b1 import InflationS5B1
-from dreamplace.flows.timing_opt_schedule import TimingOptWindowSchedule
+from dreamplace.flows.discrete.common import phase_metrics
+from dreamplace.flows.s5b1.inflation_s5b1 import InflationS5B1
+from dreamplace.flows.gp.continuation import TimingOptWindowSchedule
 from dreamplace.ops.routability.cooptimization_area import SizingWindowGeometry
 
 
@@ -31,7 +31,7 @@ def inflation_window_params():
 
 @pytest.mark.parametrize("rounds", [1, 10])
 def test_sizing_round_limit_keeps_window_limit_separate(rounds, inflation_window_params):
-    from dreamplace.flows.flow_config import apply_flow_defaults
+    from dreamplace.flows.config.resolver import apply_flow_defaults
 
     params = inflation_window_params
     expected = (params.timing_opt_max_windows, rounds)
@@ -41,8 +41,8 @@ def test_sizing_round_limit_keeps_window_limit_separate(rounds, inflation_window
 
 
 def test_pin2pin_placement_preserves_sizing_window_and_routability(inflation_window_params):
-    from dreamplace.flows.flow_config import apply_flow_defaults
-    from dreamplace.flows.timing_objective_policy import reset_legacy_net_weight_gate_summary
+    from dreamplace.flows.config.resolver import apply_flow_defaults
+    from dreamplace.flows.gp.timing_carriers import reset_legacy_net_weight_gate_summary
 
     params = inflation_window_params
     overrides = {
@@ -70,7 +70,7 @@ def test_pin2pin_placement_preserves_sizing_window_and_routability(inflation_win
     ("timing_opt_sizing_rounds", True),
 ])
 def test_invalid_window_limits_are_rejected(name, value, inflation_window_params):
-    from dreamplace.flows.flow_config import apply_flow_defaults
+    from dreamplace.flows.config.resolver import apply_flow_defaults
 
     setattr(inflation_window_params, name, value)
     with pytest.raises(ValueError, match=name + " must be an integer"):
@@ -78,7 +78,7 @@ def test_invalid_window_limits_are_rejected(name, value, inflation_window_params
 
 
 def test_nesterov_gp_keeps_discrete_window_parameters_outside_optimizer(inflation_window_params):
-    from dreamplace.flows.flow_config import apply_flow_defaults
+    from dreamplace.flows.config.resolver import apply_flow_defaults
     from dreamplace.NesterovAcceleratedGradientOptimizer import (
         NesterovAcceleratedGradientOptimizer,
     )
@@ -228,7 +228,7 @@ def timing_window_model(polynomial_window_inputs):
 
 
 def window_weight_state(model):
-    from dreamplace.flows.timing_opt_config import TIMING_OPT_COEFFICIENT_FIELDS
+    from dreamplace.flows.config.specs import TIMING_OPT_COEFFICIENT_FIELDS
 
     return {
         **{name: getattr(model, field) for name, field in TIMING_OPT_COEFFICIENT_FIELDS.items()},
@@ -342,7 +342,7 @@ def test_fixed_coefficients_restore_on_sizing_failure(
       for invalid in (-1., float("nan"), float("inf"), True, "1")],
 ])
 def test_invalid_coefficient_policy_fails_before_flow_execution(policy, inflation_window_params):
-    from dreamplace.flows.flow_config import apply_flow_defaults
+    from dreamplace.flows.config.resolver import apply_flow_defaults
 
     inflation_window_params.timing_opt_coefficients = policy
     with pytest.raises(ValueError, match="timing_opt_coefficients"):
@@ -795,12 +795,9 @@ def test_s5b1_direct_b1_session_skips_zero_accept_and_commits_and_restarts_on_ac
 ):
     from contextlib import nullcontext
 
-    from dreamplace.flows.direct_buffer_commit import DirectBufferCommitSession
-    from dreamplace.flows.midplace_state import (
-        MidplaceRestart,
-        PlacementCursor,
-        create_session,
-    )
+    from dreamplace.flows.discrete.buffer_commit import DirectBufferCommitSession
+    from dreamplace.flows.gp.continuation import MidplaceRestart, PlacementCursor
+    from dreamplace.Placer import create_session
     from dreamplace.ops.buffer_insertion.buffering_lane import BufferingOptimizationLane
     from dreamplace.ops.buffer_insertion.optimization_state import (
         build_typed_discrete_candidate_state,
@@ -1024,7 +1021,7 @@ def test_s5b1_direct_b1_session_skips_zero_accept_and_commits_and_restarts_on_ac
 def test_s5b1_loss_respects_lut_action_without_triggering_surrogate(
     action_mode, expected_surrogate_mode
 ):
-    from dreamplace.flows.inflation_s5b1 import InflationS5B1
+    from dreamplace.flows.s5b1.inflation_s5b1 import InflationS5B1
 
     seen_modes = []
     owner = object.__new__(InflationS5B1)
@@ -1041,7 +1038,7 @@ def test_s5b1_loss_respects_lut_action_without_triggering_surrogate(
 
 
 def test_resolve_median_buffer_area_and_window_budget_sharing():
-    from dreamplace.flows.s5b1_area_budget import (
+    from dreamplace.flows.discrete.common import (
         S5B1WindowAreaBudget,
         resolve_median_buffer_area,
     )
@@ -1099,7 +1096,7 @@ def test_resolve_median_buffer_area_and_window_budget_sharing():
 def test_s5b1_window_shares_25_percent_remaining_area_between_s5_and_b1(monkeypatch):
     from contextlib import nullcontext
 
-    from dreamplace.flows.s5b1_area_budget import (
+    from dreamplace.flows.discrete.common import (
         effective_buffering_selection_fraction,
         effective_sizing_budget_percent,
     )
@@ -1184,7 +1181,7 @@ def test_s5b1_window_shares_25_percent_remaining_area_between_s5_and_b1(monkeypa
         )
 
     monkeypatch.setattr(
-        "dreamplace.flows.incremental_buffering_filter.IncrementalBufferingGate.check_available",
+        "dreamplace.flows.discrete.buffering_filter.IncrementalBufferingGate.check_available",
         lambda _self: None,
     )
     monkeypatch.setattr(
@@ -1253,7 +1250,7 @@ def test_s5b1_window_shares_25_percent_remaining_area_between_s5_and_b1(monkeypa
 
 
 def test_s5b1_window_area_budget_3round_rollover_and_proposal_quartile():
-    from dreamplace.flows.s5b1_area_budget import (
+    from dreamplace.flows.discrete.common import (
         S5B1WindowAreaBudget,
         resolve_proposal_buffer_area,
     )

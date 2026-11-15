@@ -20,17 +20,40 @@ import matplotlib.pyplot as plt
 import inspect
 import hashlib
 from dataclasses import replace
-from dreamplace.flows import sizing_dynamics_policy, continuous_early_stop
-from dreamplace.flows import l_shape_iteration
-from dreamplace.flows import projected_pin_refresh
-from dreamplace.flows import placement_step_profile
+from dreamplace.flows.baselines import (
+    sizing_dynamics as sizing_dynamics_policy,
+    sizing_dynamics as continuous_early_stop,
+)
+from dreamplace.flows.gp import l_shape_iteration
+from dreamplace.flows.baselines import gate_projection as projected_pin_refresh
+from dreamplace.flows.gp import metrics as placement_step_profile
 from dreamplace.ops.routability import l_shape_telemetry
-from dreamplace.flows import sizing_debug, placement_metrics, metric_state, timing_artifacts, projection_context
-from dreamplace.flows import timing_iteration, joint_iteration, placement_topology_iteration
-from dreamplace.flows import segment_buffer_gradient, segment_joint_terminal, joint_commit_control
-from dreamplace.flows import sizing_dynamics, discrete_sizing_step, segment_sizing_frame
-from dreamplace.flows.inflation_s5b1 import InflationS5B1
-from dreamplace.flows.alternating_discrete import (
+from dreamplace.flows.baselines import (
+    sizing_dynamics as sizing_debug,
+    gate_projection as projection_context,
+)
+from dreamplace.flows.gp import (
+    timing_artifacts as placement_metrics,
+    metrics as metric_state,
+    timing_artifacts,
+)
+from dreamplace.flows.gp import (
+    topology_refresh as timing_iteration,
+    topology_refresh as placement_topology_iteration,
+)
+from dreamplace.flows.baselines import joint_runtime as joint_iteration
+from dreamplace.flows.baselines import (
+    segment_buffering as segment_buffer_gradient,
+    segment_joint as segment_joint_terminal,
+    joint_runtime as joint_commit_control,
+)
+from dreamplace.flows.baselines import (
+    sizing_dynamics,
+    real_size_transition as discrete_sizing_step,
+    segment_buffering as segment_sizing_frame,
+)
+from dreamplace.flows.s5b1.inflation_s5b1 import InflationS5B1
+from dreamplace.flows.baselines.alternating_discrete import (
     AlternatingDiscreteController,
     PROFILE as DISCRETE_ALTERNATING_PROFILE,
 )
@@ -117,7 +140,7 @@ from dreamplace.ops.steiner_topo.ggr_l_shape_topology import (
 from dreamplace.ops.routability.routability_controller import RoutabilityController
 from dreamplace.ops.irt_egr.egr_padding import apply_egr_padding, restore_egr_padding
 from dreamplace.ops.routability import inflation_legalization
-from dreamplace.flows.handoff_state import (
+from dreamplace.flows.gp.continuation import (
     build_continuation_seed,
     call_restart_after_topology_sync,
     apply_warm_schedule_state,
@@ -128,13 +151,13 @@ from dreamplace.flows.handoff_state import (
     restart_probe_payload,
     restart_scalar,
 )
-from dreamplace.flows.handoff_transaction import (
+from dreamplace.flows.baselines.repair_buffering import (
     HandoffTransactionContext,
     build_handoff_command_failure_payload,
     build_session_mutation_result,
     execute_openroad_handoff_transaction,
 )
-from dreamplace.flows.metric_state import (
+from dreamplace.flows.gp.metrics import (
     apply_metric_snapshot,
     combined_timing_loss,
     finite_timing_scalar,
@@ -148,7 +171,7 @@ from dreamplace.flows.metric_state import (
     update_metric_timing,
     value_has_nonfinite,
 )
-from dreamplace.flows.real_size_transition import (
+from dreamplace.flows.baselines.real_size_transition import (
     RealSizeTransitionContext,
     TransitionProjection,
     capture_transaction,
@@ -157,7 +180,7 @@ from dreamplace.flows.real_size_transition import (
     sync_projected_real_size,
     transition_to_discrete,
 )
-from dreamplace.flows.real_size_transition_profile import (
+from dreamplace.flows.baselines.real_size_transition import (
     finalize_transition_accounting,
     process_peak_rss_bytes,
     record_transition_artifacts,
@@ -168,7 +191,7 @@ from dreamplace.flows.real_size_transition_profile import (
     transition_profile_device,
     write_transition_profile,
 )
-from dreamplace.flows.timing_objective_policy import (
+from dreamplace.flows.gp.timing_carriers import (
     diff_tdp_controls_direct_timing_objective,
     diff_tdp_enabled,
     diff_tdp_gate_status,
@@ -186,22 +209,24 @@ from dreamplace.flows.timing_objective_policy import (
     should_use_live_timing_loss,
     timing_placement_carrier,
 )
-from dreamplace.flows.timing_net_weighting import (
-    TimingNetWeightingContext, LegacyWeightContext, update_legacy_weights,
+from dreamplace.flows.gp.timing_carriers import (
+    TimingNetWeightingContext,
+    LegacyWeightContext,
+    update_legacy_weights,
     rebuild_pin2pin_pair_weights,
 )
-from dreamplace.flows.timing_gradient_projection import (
+from dreamplace.flows.gp.timing_carriers import (
     TimingGradientProjectionContext,
     project_timing_gradient_to_net_weights,
 )
-from dreamplace.flows.timing_topology import (
+from dreamplace.flows.gp.topology_refresh import (
     TimingTopologyContext,
     freeze_live_timing_topology,
     prepare_legacy_net_weight_timing_topology,
     publish_live_timing_topology,
     refresh_live_timing_topology,
 )
-from dreamplace.flows.segment_joint import (
+from dreamplace.flows.baselines.segment_joint import (
     SegmentJointContext,
     apply_segment_overflow_milestone_transaction,
     apply_segment_rebootstrap_milestone_transaction,
@@ -210,7 +235,7 @@ from dreamplace.flows.segment_joint import (
     rebuild_and_install_segment_pin2pin,
     run_segment_milestone_sizing_micro_loop,
 )
-from dreamplace.flows.segment_joint_terminal import (
+from dreamplace.flows.baselines.segment_joint import (
     TerminalLaneContext,
     TerminalRouteBContext,
     rebuild_terminal_segment_route_b_state,
@@ -219,7 +244,7 @@ from dreamplace.flows.segment_joint_terminal import (
     terminal_route_b_round_budget,
     terminal_static_timing_snapshot,
 )
-from dreamplace.flows.timing_artifacts import (
+from dreamplace.flows.gp.timing_artifacts import (
     StageCompareWriterContext,
     artifact_bool,
     artifact_float,
@@ -233,7 +258,7 @@ from dreamplace.flows.timing_artifacts import (
     write_timing_stage_summary,
     write_post_projection_timing_summary,
 )
-from dreamplace.flows.projection_context import (
+from dreamplace.flows.baselines.gate_projection import (
     ProjectionScoringContext,
     aggregate_violation_per_instance,
     build_projection_context,
@@ -244,7 +269,7 @@ from dreamplace.flows.projection_context import (
     projection_objective_profile,
     projection_profile_term_weights,
 )
-from dreamplace.flows.projection_artifacts import (
+from dreamplace.flows.baselines.gate_projection import (
     ProjectionFrameContext,
     build_projection_frame,
     projected_vt_distribution,
@@ -252,7 +277,7 @@ from dreamplace.flows.projection_artifacts import (
     projection_changed_inst_mask,
     write_projection_summary_artifact,
 )
-from dreamplace.flows.projection_runtime_refresh import (
+from dreamplace.flows.baselines.gate_projection import (
     ProjectionTimingSnapshotContext,
     compute_post_projection_timing_snapshot,
 )
@@ -2124,7 +2149,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         return result
 
     def _final_joint_physical_context(self, pos, *, iteration):
-        from dreamplace.flows.joint_physical_actions import final_physical_context
+        from dreamplace.flows.baselines.joint_runtime import final_physical_context
 
         return final_physical_context(self, pos, iteration=iteration)
 
@@ -2546,7 +2571,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         return compact
 
     def _maybe_run_buffering_inner_loop(self, params, model):
-        from dreamplace.flows.buffering_coordinator import run_buffering_inner_loop
+        from dreamplace.flows.baselines.segment_buffering import run_buffering_inner_loop
 
         return run_buffering_inner_loop(self, params, model)
 
@@ -3421,9 +3446,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         )
 
     def _apply_projected_runtime_refresh(self, params, placedb):
-        from dreamplace.flows.projection_runtime_refresh import (
-            apply_projected_runtime_refresh,
-        )
+        from dreamplace.flows.baselines.gate_projection import apply_projected_runtime_refresh
 
         return apply_projected_runtime_refresh(self, params, placedb)
 
@@ -3920,7 +3943,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
         midplace = getattr(self, "midplace_repair", None)
         if midplace is not None:
-            from dreamplace.flows.midplace_state import PlacementCursor
+            from dreamplace.flows.gp.continuation import PlacementCursor
 
         resume_cursor = midplace.resume_cursor if midplace is not None else None
         iteration = resume_cursor.raw_iteration if resume_cursor is not None else 0
@@ -4113,7 +4136,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     model.inflation_state = None
                 handoff_controller = placedb.create_openroad_handoff_controller(params)
                 if self._joint_flow_enabled(params):
-                    from dreamplace.flows.joint_coordinator import JointCoordinator
+                    from dreamplace.flows.baselines.joint_coordinator import JointCoordinator
 
                     previous_lane = getattr(self, "last_buffering_lane", None)
                     reuse_buffering_lane = (
@@ -6721,7 +6744,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 getattr(params, "repair_buffering_enable", False)
                 and pending_joint_topology_commit_result is None
             ):
-                from dreamplace.flows.repair_buffering import (
+                from dreamplace.flows.baselines.repair_buffering import (
                     reenter_after_repair_buffering,
                 )
 

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from dreamplace.flows.repair_buffering import resolve_repair_timing_config
+from dreamplace.flows.baselines.repair_buffering import resolve_repair_timing_config
 from dreamplace.ops.placeio_ecc.current_driver_tree import map_current_driver_tree_actions
 from dreamplace.ops.placeio_ecc.timing_carrier import CommittedTimingPyDB
 from dreamplace.ops.rebuffer import rebuffer_cpp

@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import numpy as np
 import preflight
 import torch
-from dreamplace.flows.hold_objective import HoldObjective
+from dreamplace.flows.gp.hold_timing import HoldObjective
 from dreamplace.ops.discrete_gradient_topk.quad_gradient_topk import (
     ACTION_NAMES,
     _select_quad_actions,

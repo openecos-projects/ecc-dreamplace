@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 
 import pytest
-from dreamplace.flows.repair_buffering import resolve_repair_timing_config
+from dreamplace.flows.baselines.repair_buffering import resolve_repair_timing_config
 from dreamplace.ops.placeio_ecc.buffer_session import PlaceIOBufferSession
 from dreamplace.ops.rebuffer import rebuffer_cpp
 from dreamplace.ops.rebuffer.rebuffer_timing import RebufferPlanContext

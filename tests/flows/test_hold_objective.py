@@ -3,12 +3,12 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from dreamplace.flows.diff_opt_spec import TimingCoefficients
-from dreamplace.flows.discrete_timing_common import timing_sizing_coefficients
-from dreamplace.flows.hold_objective import HoldObjective
-from dreamplace.flows.metric_state import combined_timing_loss, enrich_timing_record
-from dreamplace.flows.timing_opt_config import normalize_timing_opt_coefficients
-from dreamplace.flows.timing_phase_coefficients import timing_phase_coefficients
+from dreamplace.flows.config.specs import TimingCoefficients
+from dreamplace.flows.discrete.common import timing_sizing_coefficients
+from dreamplace.flows.gp.hold_timing import HoldObjective
+from dreamplace.flows.gp.metrics import combined_timing_loss, enrich_timing_record
+from dreamplace.flows.config.specs import normalize_timing_opt_coefficients
+from dreamplace.flows.discrete.common import timing_phase_coefficients
 
 
 def test_named_hold_weights_extend_the_four_item_flow_contract():

@@ -13,23 +13,23 @@ sys.path.append(str(REPO_ROOT))
 
 class OptimizationFlowTest(unittest.TestCase):
     def test_sta_only_success_does_not_treat_hpwl_sentinel_as_failure(self):
-        from dreamplace.flows.flow_config import FlowKind
-        from dreamplace.flows.optimization_flow import _is_failed_run_result
+        from dreamplace.flows.config.resolver import FlowKind
+        from dreamplace.placer_cli import _is_failed_run_result
 
         result = {"status": "ok", "hpwl": float("inf")}
         self.assertFalse(_is_failed_run_result(result, FlowKind.STA))
         self.assertTrue(_is_failed_run_result(result, FlowKind.PLACEMENT))
 
     def _resolved_params(self, **kwargs):
-        from dreamplace.flows.flow_config import apply_flow_defaults
+        from dreamplace.flows.config.resolver import apply_flow_defaults
 
         params = types.SimpleNamespace(**kwargs)
         apply_flow_defaults(params)
         return params
 
     def test_run_optimization_flow_invokes_existing_engine_sequence(self):
-        from dreamplace.flows.flow_config import FlowKind
-        from dreamplace.flows.optimization_flow import run_optimization_flow
+        from dreamplace.flows.config.resolver import FlowKind
+        from dreamplace.placer_cli import run_optimization_flow
 
         calls = []
         created_engines = []
@@ -78,7 +78,7 @@ class OptimizationFlowTest(unittest.TestCase):
         )
 
     def test_run_optimization_flow_skips_writeback_without_output_def(self):
-        from dreamplace.flows.optimization_flow import run_optimization_flow
+        from dreamplace.placer_cli import run_optimization_flow
 
         calls = []
 
@@ -105,8 +105,8 @@ class OptimizationFlowTest(unittest.TestCase):
         self.assertIsInstance(result.flow_kind.value, str)
 
     def test_run_optimization_flow_skips_writeback_for_sta_flow(self):
-        from dreamplace.flows.flow_config import FlowKind
-        from dreamplace.flows.optimization_flow import run_optimization_flow
+        from dreamplace.flows.config.resolver import FlowKind
+        from dreamplace.placer_cli import run_optimization_flow
 
         calls = []
 
@@ -133,7 +133,7 @@ class OptimizationFlowTest(unittest.TestCase):
         self.assertEqual([("setup_rawdb", "/tmp/workspace"), ("run",)], calls)
 
     def test_run_optimization_flow_writes_initialization_profile_when_enabled(self):
-        from dreamplace.flows.optimization_flow import run_optimization_flow
+        from dreamplace.placer_cli import run_optimization_flow
 
         result_dir = Path(tempfile.mkdtemp())
         calls = []
@@ -186,7 +186,7 @@ class OptimizationFlowTest(unittest.TestCase):
         )
 
     def test_run_optimization_flow_includes_rawdb_subprofile(self):
-        from dreamplace.flows.optimization_flow import run_optimization_flow
+        from dreamplace.placer_cli import run_optimization_flow
 
         result_dir = Path(tempfile.mkdtemp())
 
@@ -229,7 +229,7 @@ class OptimizationFlowTest(unittest.TestCase):
         self.assertIn('"setup_rawdb_pydb_export_ms": 22.0', profile)
 
     def test_run_optimization_flow_includes_pydb_export_subprofile(self):
-        from dreamplace.flows.optimization_flow import run_optimization_flow
+        from dreamplace.placer_cli import run_optimization_flow
 
         result_dir = Path(tempfile.mkdtemp())
 
@@ -272,7 +272,7 @@ class OptimizationFlowTest(unittest.TestCase):
         self.assertIn('"setup_rawdb_pydb_export_graph_csr_ms": 3.0', profile)
 
     def test_run_optimization_flow_rejects_unresolved_params(self):
-        from dreamplace.flows.optimization_flow import run_optimization_flow
+        from dreamplace.placer_cli import run_optimization_flow
 
         with self.assertRaisesRegex(ValueError, "requires Params resolved"):
             run_optimization_flow(
@@ -282,8 +282,8 @@ class OptimizationFlowTest(unittest.TestCase):
             )
 
     def test_run_optimization_flow_writes_cli_manifest_without_reinterpreting_params(self):
-        from dreamplace.flows.flow_config import resolved_params_manifest
-        from dreamplace.flows.optimization_flow import run_optimization_flow
+        from dreamplace.flows.config.resolver import resolved_params_manifest
+        from dreamplace.placer_cli import run_optimization_flow
 
         workspace = Path(tempfile.mkdtemp())
 

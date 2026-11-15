@@ -18,7 +18,7 @@ from dreamplace.ops.size_interpolated_pin import sizing_limit_utils
 from dreamplace.macroPlaceDB import MacroPlaceDB
 from dreamplace.NonLinearPlace import NonLinearPlace
 from dreamplace.PlaceObj import PlaceObj
-from dreamplace.flows.joint_proximal import JointProximalObjective
+from dreamplace.flows.baselines.joint_runtime import JointProximalObjective
 from dreamplace.ops.timing_propagation.timing_propagation import (
     ARCS_INFO,
     LUTS_INFO,

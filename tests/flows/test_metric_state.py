@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import torch
 from dreamplace.EvalMetrics import EvalMetrics
-from dreamplace.flows import metric_state
+from dreamplace.flows.gp import metrics as metric_state
 from dreamplace.NonLinearPlace import NonLinearPlace
 
 

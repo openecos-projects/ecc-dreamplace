@@ -1,3 +1,3 @@
-from .flow_config import FlowKind, infer_flow_kind
-from .optimization_flow import run_optimization_flow
+from dreamplace.flows.config.resolver import FlowKind, infer_flow_kind
 
+__all__ = ["FlowKind", "infer_flow_kind"]

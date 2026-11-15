@@ -8,7 +8,7 @@ from dreamplace.ops.placeio_common import physical_mutation
 from dreamplace.ops.routability import gpugr_context
 from dreamplace.Placer import PlacementEngine
 
-from dreamplace.flows import committed_topology
+from dreamplace.flows.s5b1 import committed_topology
 
 
 def test_failed_gp_does_not_enter_s5b1_native_finalization(monkeypatch):

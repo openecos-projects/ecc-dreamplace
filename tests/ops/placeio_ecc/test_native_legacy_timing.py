@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from dreamplace.flows.repair_buffering import resolve_repair_timing_config
+from dreamplace.flows.baselines.repair_buffering import resolve_repair_timing_config
 from dreamplace.ops.placeio_ecc.repair_timing import plan_timing_repair
 from dreamplace.ops.rebuffer import rebuffer_cpp
 from tests.ops.placeio_ecc.test_native_timing_evaluation import _session

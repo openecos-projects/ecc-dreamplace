@@ -1,7 +1,7 @@
 """The production planning bridge must not materialize a Python carrier."""
 
 import pytest
-from dreamplace.flows.repair_buffering import resolve_repair_timing_config
+from dreamplace.flows.baselines.repair_buffering import resolve_repair_timing_config
 from dreamplace.ops.placeio_ecc.repair_timing import plan_timing_repair
 from dreamplace.ops.rebuffer.rebuffer_timing import RebufferPlanContext
 from tests.ops.placeio_ecc.test_native_timing_evaluation import _session

@@ -142,8 +142,8 @@ from dreamplace.ops.size_interpolated_pin.sizing_limit_utils import (
     compute_size_interpolated_pin_properties,
     warmup_size_interpolated_pin_native_cache,
 )
-from dreamplace.flows.joint_proximal import JointProximalObjective
-from dreamplace.flows.hold_objective import HoldObjective
+from dreamplace.flows.baselines.joint_runtime import JointProximalObjective
+from dreamplace.flows.gp.hold_timing import HoldObjective
 
 _AIMP_TRUE_VALUES = {"1", "true", "yes", "on"}
 _AIMP_FALSE_VALUES = {"0", "false", "no", "off"}
@@ -10413,7 +10413,7 @@ class PlaceObj(nn.Module):
             hold_timing_data=getattr(placedb, "hold_timing_data", None),
         )
         if getattr(placedb, "hold_timing_data", None) is not None:
-            from dreamplace.flows.hold_rc import HoldRC
+            from dreamplace.flows.gp.hold_timing import HoldRC
 
             timing_propagation_op.hold_rc = HoldRC(placedb.hold_timing_data)
         write_crash_stage_marker(

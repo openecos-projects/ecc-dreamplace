@@ -1,7 +1,7 @@
 """Physical area and buffer-count contracts at the terminal commit boundary."""
 
 import pytest
-from dreamplace.flows.committed_topology import (
+from dreamplace.flows.s5b1.committed_topology import (
     MaterializationAreaPolicy,
     validate_materialized_area,
 )

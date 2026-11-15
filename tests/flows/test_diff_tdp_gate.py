@@ -6,8 +6,8 @@ import torch
 import numpy as np
 
 from dreamplace.NonLinearPlace import NonLinearPlace
-from dreamplace.flows import timing_gradient_projection
-from dreamplace.flows import timing_topology
+from dreamplace.flows.gp import timing_carriers as timing_gradient_projection
+from dreamplace.flows.gp import topology_refresh as timing_topology
 
 
 def _placer():

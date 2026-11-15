@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from dreamplace.flows.repair_buffering import resolve_repair_timing_config
+from dreamplace.flows.baselines.repair_buffering import resolve_repair_timing_config
 from dreamplace.ops.placeio_ecc.persistent_timing import _compact_current_pydb
 from dreamplace.ops.placeio_ecc.repair_timing import plan_timing_repair
 from dreamplace.ops.placeio_ecc.timing_carrier import CommittedTimingPyDB

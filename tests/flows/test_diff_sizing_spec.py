@@ -1,7 +1,7 @@
 import math
 
 import pytest
-from dreamplace.flows.diff_sizing_spec import (
+from dreamplace.flows.config.specs import (
     DiffSizingFlowSpec,
     canonical_diff_sizing_flows,
     parse_diff_sizing_flows,

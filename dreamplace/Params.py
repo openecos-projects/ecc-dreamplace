@@ -27,10 +27,7 @@ import logging
 from collections import OrderedDict
 import pdb
 
-from dreamplace.flows.timing_opt_config import (
-    is_legacy_timing_opt_name,
-    normalize_timing_opt_params,
-)
+from dreamplace.flows.config.specs import is_legacy_timing_opt_name, normalize_timing_opt_params
 
 
 class Params:

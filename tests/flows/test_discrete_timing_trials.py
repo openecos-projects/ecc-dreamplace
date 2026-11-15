@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 
 import torch
-from dreamplace.flows.discrete_timing_owner import DiscreteTimingOwner
+from dreamplace.flows.discrete.owner import DiscreteTimingOwner
 from dreamplace.ops.discrete_gradient_topk.oscillation import CellOscillationState
 
 

@@ -563,7 +563,7 @@ def test_standalone_buffering_refreshes_once_without_another_optimization_window
         assert engine_arg is engine
         return refreshed
 
-    monkeypatch.setattr("dreamplace.flows.committed_topology.refresh_committed_topology", refresh)
+    monkeypatch.setattr("dreamplace.flows.s5b1.committed_topology.refresh_committed_topology", refresh)
     engine.placer.last_buffering_lane_summary = {
         "status": "completed",
         "mode": "segment",

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from dreamplace.flows.discrete_timing_owner import DiscreteTimingOwner
+from dreamplace.flows.discrete.owner import DiscreteTimingOwner
 from dreamplace.ops.discrete_gradient_topk import ACTION_NAMES
 from dreamplace.ops.timing_propagation.timing_propagation import TimingPropagation
 from dreamplace.PlaceObj import PlaceObj

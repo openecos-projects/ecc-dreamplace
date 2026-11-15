@@ -1570,7 +1570,7 @@ def _run_export(argv: list[str]) -> int:
         parser.error("missing Placer.py arguments")
 
     from dreamplace import Placer
-    from dreamplace.flows.optimization_flow import run_optimization_flow
+    from dreamplace.placer_cli import run_optimization_flow
 
     placer_parser = Placer.build_arg_parser()
     placer_args = placer_parser.parse_args(placer_argv)

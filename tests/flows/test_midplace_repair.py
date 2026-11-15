@@ -8,15 +8,12 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 import torch
-from dreamplace.flows import midplace_repair as repair
-from dreamplace.flows.midplace_observation import (
-    committed_seed,
-    runtime_topology,
-    validate_position_seed,
-)
-from dreamplace.flows.midplace_schedule import MidplaceSchedule
-from dreamplace.flows.midplace_state import PlacementCursor
-from dreamplace.flows.timing_opt_schedule import TimingOptWindowSchedule
+from dreamplace.flows.baselines import midplace_repair as repair
+from dreamplace.flows.gp.continuation import committed_seed
+from dreamplace.flows.baselines.midplace_repair import runtime_topology, validate_position_seed
+from dreamplace.flows.gp.continuation import MidplaceSchedule
+from dreamplace.flows.gp.continuation import PlacementCursor
+from dreamplace.flows.gp.continuation import TimingOptWindowSchedule
 from dreamplace.Placer import PlacementEngine
 from dreamplace.placer_cli import _load_params_json
 
@@ -336,18 +333,18 @@ def test_outer_owner_unwinds_before_restart_and_bounded_stop_skips_terminal(setu
         raise repair.MidplaceBoundedStop()
 
     engine.place = Mock(side_effect=place)
-    monkeypatch.setattr("dreamplace.flows.midplace_state.create_session", lambda owner: session)
+    monkeypatch.setattr("dreamplace.Placer.create_session", lambda owner: session)
     finalize = Mock(
         side_effect=AssertionError("bounded lane must not enter terminal materialization")
     )
-    monkeypatch.setattr("dreamplace.flows.committed_topology.finalize_inflation_s5b1", finalize)
+    monkeypatch.setattr("dreamplace.flows.s5b1.committed_topology.finalize_inflation_s5b1", finalize)
     assert engine.run()["status"] == "bounded_completed"
     assert seen_sessions == [session, session]
     finalize.assert_not_called()
 
 
 def test_poststep_overflow_uses_live_position_and_initial_area_normalization():
-    from dreamplace.flows.midplace_observation import post_step_overflow
+    from dreamplace.flows.baselines.midplace_repair import post_step_overflow
 
     db = SimpleNamespace(total_movable_node_area=10.0, overflow_reference_area=20.0)
     placer = SimpleNamespace(pos=[torch.tensor([1.0])], data_collections=SimpleNamespace())
@@ -461,8 +458,8 @@ def test_full_continuation_keeps_sparse_checkpoints_and_the_last_step(setup):
 
 
 def test_objectives_and_windows_wait_for_the_physical_repair(setup):
-    from dreamplace.flows.inflation_s5b1 import InflationS5B1
-    from dreamplace.flows.timing_objective_policy import diff_tdp_gate_status
+    from dreamplace.flows.s5b1.inflation_s5b1 import InflationS5B1
+    from dreamplace.flows.gp.timing_carriers import diff_tdp_gate_status
     from dreamplace.ops.routability.l_shape_policy import LShapePolicy
     from dreamplace.ops.routability.routability_controller import RoutabilityController
 

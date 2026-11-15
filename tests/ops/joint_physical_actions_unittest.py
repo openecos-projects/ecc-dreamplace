@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
-from dreamplace.flows.joint_physical_actions import (
+from dreamplace.flows.baselines.joint_runtime import (
     commit_joint_physical_actions,
     final_physical_context,
 )

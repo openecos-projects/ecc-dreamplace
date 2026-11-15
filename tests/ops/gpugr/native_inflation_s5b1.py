@@ -10,8 +10,8 @@ import logging
 from pathlib import Path
 
 import torch
-from dreamplace.flows.flow_config import resolve_flow_config
-from dreamplace.flows.inflation_s5b1 import InflationS5B1
+from dreamplace.flows.config.resolver import resolve_flow_config
+from dreamplace.flows.s5b1.inflation_s5b1 import InflationS5B1
 from dreamplace.ops.routability.cooptimization_area import capture_area
 from dreamplace.PlaceObj import PlaceObj
 from native_refresh_route import make_engine, snapshot

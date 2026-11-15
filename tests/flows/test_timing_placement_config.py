@@ -5,12 +5,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from dreamplace.flows.flow_config import resolve_flow_config
-from dreamplace.flows.timing_objective_policy import (
+from dreamplace.flows.config.resolver import resolve_flow_config
+from dreamplace.flows.gp.timing_carriers import (
     diff_tdp_enabled,
     reset_legacy_net_weight_gate_summary,
 )
-from dreamplace.flows.timing_opt_config import DEFAULT_TIMING_OPT_COEFFICIENTS
+from dreamplace.flows.config.specs import DEFAULT_TIMING_OPT_COEFFICIENTS
 from dreamplace.Params import Params
 
 

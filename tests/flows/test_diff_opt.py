@@ -1,8 +1,8 @@
 from types import SimpleNamespace
 
 import pytest
-from dreamplace.flows.diff_opt import DiffOptController
-from dreamplace.flows.diff_opt_spec import parse_diff_opt_flows
+from dreamplace.flows.post_gp.diff_opt import DiffOptController
+from dreamplace.flows.config.specs import parse_diff_opt_flows
 
 
 def test_diff_opt_default_modes_are_step_local():
@@ -76,8 +76,8 @@ def test_diff_opt_buffer_phase_rebuilds_full_domain_and_binds_timing_loss():
 
 def test_diff_opt_each_phase_uses_its_four_terms_and_restores_model_state(monkeypatch, tmp_path):
     import torch
-    from dreamplace.flows import diff_opt
-    from dreamplace.flows.discrete_timing_owner import DiscreteTimingOwner
+    from dreamplace.flows.post_gp import diff_opt
+    from dreamplace.flows.discrete.owner import DiscreteTimingOwner
     from dreamplace.PlaceObj import PlaceObj
 
     params = SimpleNamespace(
@@ -224,7 +224,7 @@ def test_diff_opt_direct_b1_commits_to_ecc_carrier_rebuilds_for_next_sz_and_aggr
     ecc_schema3_carrier_harness, monkeypatch, tmp_path
 ):
     import torch
-    from dreamplace.flows import diff_opt
+    from dreamplace.flows.post_gp import diff_opt
     from dreamplace.ops.buffer_insertion.buffering_lane import BufferingOptimizationLane
     from dreamplace.ops.buffer_insertion.optimization_state import (
         build_typed_discrete_candidate_state,

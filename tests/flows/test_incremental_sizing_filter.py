@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from dreamplace.flows import incremental_sizing_filter
-from dreamplace.flows.incremental_sizing_filter import IncrementalSizingGate
+from dreamplace.flows.discrete import sizing_filter as incremental_sizing_filter
+from dreamplace.flows.discrete.sizing_filter import IncrementalSizingGate
 from dreamplace.ops.steiner_topo.steiner_topo import SteinerTopo
 from dreamplace.Params import Params
 from dreamplace.Placer import PlacementEngine

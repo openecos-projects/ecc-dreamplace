@@ -5,7 +5,7 @@ import argparse
 import json
 from pathlib import Path
 
-from dreamplace.flows.buffer_drive_table import build_drive_strength_table
+from dreamplace.ops.buffer_insertion.drive_type_table import build_drive_strength_table
 
 
 def export_table(pdk_path, output_path):

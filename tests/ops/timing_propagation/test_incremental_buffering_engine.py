@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
-from dreamplace.flows.incremental_buffering_filter import IncrementalBufferingGate
+from dreamplace.flows.discrete.buffering_filter import IncrementalBufferingGate
 from dreamplace.ops.buffer_insertion.discrete_candidate_scheduler import (
     TypedDiscreteCandidateTransition,
 )

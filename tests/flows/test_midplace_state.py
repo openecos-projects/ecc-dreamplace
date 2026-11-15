@@ -1,13 +1,8 @@
 from dataclasses import FrozenInstanceError
 
 import pytest
-from dreamplace.flows.midplace_state import (
-    OverflowObservation,
-    OverflowTracker,
-    PlacementCursor,
-    remaining_steps,
-    stage_budgets,
-)
+from dreamplace.flows.baselines.midplace_repair import OverflowObservation, OverflowTracker
+from dreamplace.flows.gp.continuation import PlacementCursor, remaining_steps, stage_budgets
 
 
 def observation(overflow, step=1, generation=0, stage=0):

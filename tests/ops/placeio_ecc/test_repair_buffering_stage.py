@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
-from dreamplace.flows import repair_buffering
+from dreamplace.flows.baselines import repair_buffering
 from dreamplace.ops.placeio_ecc.place_io import PlaceIOFunction
 
 

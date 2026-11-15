@@ -3890,6 +3890,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         @param params parameters
         @param placedb placement database
         """
+        from dreamplace.replay_capture import capture as capture_replay
+
+        capture_replay(params, placedb, self.pos[0], "initial_working_state")
         self._validate_sizing_mode(params)
         self._write_backend_capability_artifact(params, placedb)
         self._validate_backend_capabilities(params, placedb)
@@ -5005,9 +5008,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     _profile_t = profile_now()
                     plot_interval = int(getattr(params, "plot_interval", 30) or 30)
                     should_plot_interval = plot_interval > 0 and iteration % plot_interval == 0
-                    if params.plot_flag and (should_plot_interval or iteration == 999):
+                    replay_due = getattr(params, "_replay_capture", None) is not None and iteration % 30 == 0
+                    if (params.plot_flag and (should_plot_interval or iteration == 999)) or replay_due:
                         cur_pos = self.pos[0].data.clone().cpu().numpy()
-                        self.plot(params, placedb, iteration, cur_pos)
+                        capture_replay(params, placedb, cur_pos, "pre_optimizer_step", iteration)
+                        if params.plot_flag and (should_plot_interval or iteration == 999):
+                            self.plot(params, placedb, iteration, cur_pos)
                     profile_add("plot_ms", _profile_t)
 
                     # Clear the grads, reconstruct the placement model, compute the loss value, and the gradients
@@ -5453,6 +5459,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 and div_flag
                             ):
                                 self.pos[0].data.copy_(best_pos[0].data)
+                                capture_replay(params, placedb, self.pos[0], "divergence_restore", iteration)
                                 stop_placement = 1
 
                                 logging.error(
@@ -6741,10 +6748,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 iteration += 1
 
         if params.legalize_flag:
+            capture_replay(params, placedb, self.pos[0], "before_legalization", iteration)
             iteration = self._run_standard_legalization(
                 params, placedb, iteration, all_metrics
             )
             cur_metric = all_metrics[-1]
+            capture_replay(params, placedb, self.pos[0], "after_legalization", iteration)
             self._augment_metric_observability(cur_metric)
 
             # perform an additional timing analysis on the legalized solution.
@@ -6934,11 +6943,13 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
         # detailed placement
         if params.detailed_place_flag:
+            capture_replay(params, placedb, self.pos[0], "before_detailed_placement", iteration)
             tt = time.time()
             self.pos[0].data.copy_(
                 self.op_collections.detailed_place_op(self.pos[0]))
             logging.info("detailed placement takes %.3f seconds" %
                          (time.time() - tt))
+            capture_replay(params, placedb, self.pos[0], "after_detailed_placement", iteration)
             cur_metric = EvalMetrics.EvalMetrics(iteration)
             all_metrics.append(cur_metric)
             cur_metric.evaluate(
@@ -6988,6 +6999,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             iteration += 1
 
         # save results
+        capture_replay(params, placedb, self.pos[0], "placement_end", iteration)
         cur_pos = self.pos[0].data.clone().cpu().numpy()
         if self._segment_direct_joint_enabled():
             # Keep the local PlaceDB snapshot coherent while deferring every

@@ -571,6 +571,7 @@ class IncrementalBufferingGate:
                 "evaluated_count": 0,
                 "accepted_count": 0,
                 "rejected_area_count": 0,
+                "rejected_area_indices": [],
                 "rejected_loss_count": 0,
                 "elapsed_ms": 0.0,
             }
@@ -704,23 +705,31 @@ class IncrementalBufferingGate:
 
         if accepted_idx:
             self.owner._incremental_sizing_cache = None
-        if len(accepted_set) < len(rows):
+        rejected_area_set = {
+            int(i) for i in (eval_result.get("rejected_area_indices") or ())
+        }
+        sta_rejected_specs = [
+            spec_i
+            for spec_i in range(len(rows))
+            if spec_i not in accepted_set and spec_i not in rejected_area_set
+        ]
+        if sta_rejected_specs:
             if is_typed:
                 if self._rejected_typed_actions is None:
                     self._rejected_typed_actions = torch.zeros(
                         state.activation_param.shape, dtype=torch.bool
                     )
-                for spec_i, (row_idx, dtype_id) in enumerate(zip(rows, drive_types, strict=True)):
-                    if spec_i not in accepted_set:
-                        self._rejected_typed_actions[int(row_idx), int(dtype_id)] = True
+                for spec_i in sta_rejected_specs:
+                    self._rejected_typed_actions[
+                        int(rows[spec_i]), int(drive_types[spec_i])
+                    ] = True
             else:
                 if self._rejected_untyped_candidates is None:
                     self._rejected_untyped_candidates = torch.zeros(
                         state.activation_param.shape, dtype=torch.bool
                     )
-                for spec_i, row_idx in enumerate(rows):
-                    if spec_i not in accepted_set:
-                        self._rejected_untyped_candidates[int(row_idx)] = True
+                for spec_i in sta_rejected_specs:
+                    self._rejected_untyped_candidates[int(rows[spec_i])] = True
 
         return filtered, eval_result
 

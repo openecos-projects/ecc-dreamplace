@@ -427,13 +427,148 @@ def _concat_transitions(first, extra_list):
     )
 
 
+def _record_round_area_rejections(
+    cur_state,
+    proposed_transition,
+    report,
+    round_area_blocked,
+):
+    rej_indices = [int(i) for i in (report.get("rejected_area_indices") or ())]
+    if not rej_indices:
+        return round_area_blocked
+    device = cur_state.activation_param.device
+    if round_area_blocked is None:
+        round_area_blocked = torch.zeros(
+            cur_state.activation_param.shape,
+            dtype=torch.bool,
+            device=device,
+        )
+    rows = proposed_transition.selected_candidate_indices.detach().cpu().tolist()
+    if getattr(cur_state, "is_typed_candidate", False):
+        dtypes = proposed_transition.selected_drive_type_ids.detach().cpu().tolist()
+        for spec_i in rej_indices:
+            if 0 <= spec_i < len(rows):
+                round_area_blocked[int(rows[spec_i]), int(dtypes[spec_i])] = True
+    else:
+        for spec_i in rej_indices:
+            if 0 <= spec_i < len(rows):
+                round_area_blocked[int(rows[spec_i])] = True
+    return round_area_blocked
+
+
+_INITIAL_REPORT_KEYS = (
+    "initial_loss",
+    "initial_wns_ps",
+    "initial_tns_ps",
+    "initial_slew_violation_ps",
+    "initial_cap_violation_pf",
+    "initial_area",
+    "cache_hit",
+)
+_SUM_INT_REPORT_KEYS = (
+    "input_count",
+    "evaluated_count",
+    "rejected_area_count",
+    "rejected_loss_count",
+    "skipped_invalid_count",
+)
+_SUM_FLOAT_REPORT_KEYS = (
+    "elapsed_ms",
+    "engine_build_ms",
+    "total_filter_ms",
+)
+
+
+def _offset_spec_indices(tier_reports, key):
+    out = []
+    offset = 0
+    for rep in tier_reports:
+        out.extend(offset + int(i) for i in (rep.get(key) or ()))
+        offset += int(rep.get("input_count", 0))
+    return out
+
+
+def _merge_tier_incremental_reports(
+    tier_reports,
+    *,
+    total_accepted_in_round,
+    round_action_infos,
+    round_dirty_nets,
+):
+    merged = {**tier_reports[0], **tier_reports[-1]}
+    for key in _INITIAL_REPORT_KEYS:
+        if key in tier_reports[0]:
+            merged[key] = tier_reports[0][key]
+    for key in _SUM_INT_REPORT_KEYS:
+        if any(key in rep for rep in tier_reports):
+            merged[key] = sum(int(rep.get(key, 0)) for rep in tier_reports)
+    for key in _SUM_FLOAT_REPORT_KEYS:
+        if any(key in rep for rep in tier_reports):
+            merged[key] = sum(float(rep.get(key, 0.0)) for rep in tier_reports)
+    merged["tier_attempts"] = len(tier_reports)
+    merged["accepted_count"] = int(total_accepted_in_round)
+    if any("accepted_action_infos" in rep for rep in tier_reports):
+        merged["accepted_action_infos"] = list(round_action_infos)
+    if any("dirty_nets" in rep for rep in tier_reports):
+        merged["dirty_nets"] = sorted(round_dirty_nets)
+    for key in ("accepted_indices", "rejected_area_indices"):
+        if any(key in rep for rep in tier_reports):
+            merged[key] = _offset_spec_indices(tier_reports, key)
+    if any("accepted_actions" in rep for rep in tier_reports):
+        acc_actions = []
+        offset = 0
+        for rep in tier_reports:
+            for act in rep.get("accepted_actions") or ():
+                item = dict(act)
+                if "spec_index" in item:
+                    item["spec_index"] = offset + int(item["spec_index"])
+                acc_actions.append(item)
+            offset += int(rep.get("input_count", 0))
+        merged["accepted_actions"] = acc_actions
+    return merged
+
+
+def _record_tier_outcome(
+    state,
+    *,
+    proposed_transition,
+    filtered_transition,
+    report,
+    tier_reports,
+    accepted_transitions,
+    round_area_blocked,
+    round_action_infos,
+    round_accepted_orig_nets,
+    round_dirty_nets,
+):
+    tier_reports.append(report)
+    round_area_blocked = _record_round_area_rejections(
+        state,
+        proposed_transition,
+        report,
+        round_area_blocked,
+    )
+    if filtered_transition.accepted_count > 0:
+        accepted_transitions.append(filtered_transition)
+        with torch.no_grad():
+            state.activation_param.copy_(filtered_transition.next_activations)
+        for info in report.get("accepted_action_infos") or ():
+            round_action_infos.append(info)
+            if info.get("orig_net_id") is not None:
+                round_accepted_orig_nets.add(int(info["orig_net_id"]))
+        round_dirty_nets.update(int(n) for n in (report.get("dirty_nets") or ()))
+    return round_area_blocked
+
+
 def _allowed_mask_for_round_tier(
     cur_state,
     *,
     incremental_gate,
     gate_active,
     round_accepted_orig_nets,
+    round_area_blocked=None,
 ):
+    device = cur_state.activation_param.device
     if getattr(cur_state, "is_typed_candidate", False):
         base_allowed = (
             incremental_gate.allowed_typed_actions(cur_state)
@@ -446,6 +581,13 @@ def _allowed_mask_for_round_tier(
             if gate_active
             else None
         )
+    if round_area_blocked is not None:
+        area_ok = ~round_area_blocked.to(device=device, dtype=torch.bool)
+        base_allowed = (
+            area_ok
+            if base_allowed is None
+            else base_allowed.to(device=device, dtype=torch.bool) & area_ok
+        )
     if not round_accepted_orig_nets:
         return base_allowed
     net_mask = torch.tensor(
@@ -454,7 +596,7 @@ def _allowed_mask_for_round_tier(
             for nid in cur_state.candidate_net_id.detach().cpu().tolist()
         ],
         dtype=torch.bool,
-        device=cur_state.activation_param.device,
+        device=device,
     )
     if base_allowed is None:
         return net_mask
@@ -471,12 +613,14 @@ def _schedule_round_tier_once(
     incremental_gate,
     gate_active,
     round_accepted_orig_nets,
+    round_area_blocked=None,
 ):
     allowed = _allowed_mask_for_round_tier(
         cur_state,
         incremental_gate=incremental_gate,
         gate_active=gate_active,
         round_accepted_orig_nets=round_accepted_orig_nets,
+        round_area_blocked=round_area_blocked,
     )
     if getattr(cur_state, "is_typed_candidate", False):
         return schedule_typed_candidate_gradient_actions(
@@ -662,14 +806,17 @@ def _run_discrete_candidate_buffer_scheduler_impl(
         scheduler_started_at = time.perf_counter()
 
         round_accepted_orig_nets = set()
-        transition = _schedule_round_tier_once(
+        round_area_blocked = None
+        first_trial = _schedule_round_tier_once(
             state,
             raw_grad=raw_grad,
             selection_fraction=round_sel_fraction,
             incremental_gate=incremental_gate,
             gate_active=gate_active,
             round_accepted_orig_nets=round_accepted_orig_nets,
+            round_area_blocked=round_area_blocked,
         )
+        transition = first_trial
         proposed_count = int(transition.accepted_count)
         incremental_report = None
         round_action_infos = []
@@ -678,7 +825,7 @@ def _run_discrete_candidate_buffer_scheduler_impl(
             transition, incremental_report = (
                 incremental_gate.filter_candidate_transition(
                     state,
-                    transition,
+                    first_trial,
                     capacity_override=round_cap,
                 )
             )
@@ -687,31 +834,25 @@ def _run_discrete_candidate_buffer_scheduler_impl(
                 and isinstance(incremental_report, dict)
                 and incremental_report.get("status") == "ok"
             ):
-                tier_attempts = 1
-                total_accepted_in_round = int(transition.accepted_count)
-                total_evaluated = int(incremental_report.get("evaluated_count", 0))
-                total_input = int(incremental_report.get("input_count", 0))
-                total_rej_area = int(incremental_report.get("rejected_area_count", 0))
-                total_rej_loss = int(incremental_report.get("rejected_loss_count", 0))
-                accepted_transitions = (
-                    [transition] if transition.accepted_count > 0 else []
+                tier_reports = []
+                accepted_transitions = []
+                round_area_blocked = _record_tier_outcome(
+                    state,
+                    proposed_transition=first_trial,
+                    filtered_transition=transition,
+                    report=incremental_report,
+                    tier_reports=tier_reports,
+                    accepted_transitions=accepted_transitions,
+                    round_area_blocked=round_area_blocked,
+                    round_action_infos=round_action_infos,
+                    round_accepted_orig_nets=round_accepted_orig_nets,
+                    round_dirty_nets=round_dirty_nets,
                 )
-                for info in incremental_report.get("accepted_action_infos") or ():
-                    round_action_infos.append(info)
-                    if info.get("orig_net_id") is not None:
-                        round_accepted_orig_nets.add(int(info["orig_net_id"]))
-                round_dirty_nets.update(
-                    int(n) for n in (incremental_report.get("dirty_nets") or ())
-                )
-                if transition.accepted_count > 0:
-                    with torch.no_grad():
-                        state.activation_param.copy_(transition.next_activations)
-
                 last_proposed = proposed_count
                 last_accepted = int(transition.accepted_count)
                 last_rep = incremental_report
                 while _can_retry_round_tier(
-                    tier_attempts=tier_attempts,
+                    tier_attempts=len(tier_reports),
                     max_tier_attempts=max_tier_attempts,
                     last_proposed=last_proposed,
                     last_accepted=last_accepted,
@@ -727,11 +868,11 @@ def _run_discrete_candidate_buffer_scheduler_impl(
                         incremental_gate=incremental_gate,
                         gate_active=gate_active,
                         round_accepted_orig_nets=round_accepted_orig_nets,
+                        round_area_blocked=round_area_blocked,
                     )
                     last_proposed = int(next_trial.accepted_count)
                     if last_proposed == 0:
                         break
-                    tier_attempts += 1
                     next_filtered, next_rep = (
                         incremental_gate.filter_candidate_transition(
                             state,
@@ -743,35 +884,29 @@ def _run_discrete_candidate_buffer_scheduler_impl(
                         isinstance(next_rep, dict) and next_rep.get("status") == "ok"
                     ):
                         break
+                    round_area_blocked = _record_tier_outcome(
+                        state,
+                        proposed_transition=next_trial,
+                        filtered_transition=next_filtered,
+                        report=next_rep,
+                        tier_reports=tier_reports,
+                        accepted_transitions=accepted_transitions,
+                        round_area_blocked=round_area_blocked,
+                        round_action_infos=round_action_infos,
+                        round_accepted_orig_nets=round_accepted_orig_nets,
+                        round_dirty_nets=round_dirty_nets,
+                    )
                     last_rep = next_rep
                     last_accepted = int(next_filtered.accepted_count)
-                    total_accepted_in_round += last_accepted
-                    total_evaluated += int(next_rep.get("evaluated_count", 0))
-                    total_input += int(next_rep.get("input_count", 0))
-                    total_rej_area += int(next_rep.get("rejected_area_count", 0))
-                    total_rej_loss += int(next_rep.get("rejected_loss_count", 0))
-                    if last_accepted > 0:
-                        accepted_transitions.append(next_filtered)
-                        with torch.no_grad():
-                            state.activation_param.copy_(
-                                next_filtered.next_activations
-                            )
-                        for info in next_rep.get("accepted_action_infos") or ():
-                            round_action_infos.append(info)
-                            if info.get("orig_net_id") is not None:
-                                round_accepted_orig_nets.add(int(info["orig_net_id"]))
-                        round_dirty_nets.update(
-                            int(n) for n in (next_rep.get("dirty_nets") or ())
-                        )
-                    incremental_report = {
-                        **next_rep,
-                        "tier_attempts": tier_attempts,
-                        "input_count": total_input,
-                        "evaluated_count": total_evaluated,
-                        "accepted_count": total_accepted_in_round,
-                        "rejected_area_count": total_rej_area,
-                        "rejected_loss_count": total_rej_loss,
-                    }
+                if len(tier_reports) > 1:
+                    incremental_report = _merge_tier_incremental_reports(
+                        tier_reports,
+                        total_accepted_in_round=sum(
+                            int(t.accepted_count) for t in accepted_transitions
+                        ),
+                        round_action_infos=round_action_infos,
+                        round_dirty_nets=round_dirty_nets,
+                    )
                 if accepted_transitions:
                     transition = _concat_transitions(
                         accepted_transitions[0], accepted_transitions[1:]

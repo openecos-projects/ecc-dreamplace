@@ -700,6 +700,7 @@ def test_tree_node_side_branch_shielding_and_rejection_rollback():
     # Now evaluate all 3 in sequence.
     report = dict(engine.evaluate_ranked_buffer_candidates(candidates, policy))
     assert report["accepted_indices"] == [2]
+    assert report["rejected_area_indices"] == [0]
     assert report["rejected_area_count"] == 1
     assert report["rejected_loss_count"] == 1
     assert report["accepted_count"] == 1
@@ -795,6 +796,113 @@ def test_incremental_buffering_gate_filters_typed_and_masks_rejected_actions():
     assert filtered_good.next_activations.tolist() == [[0.0, 0.0], [0.0, 1.0]]
     assert rep_good["accepted_count"] == 1
     assert owner._incremental_sizing_cache is None
+
+
+def test_incremental_buffering_gate_does_not_blacklist_area_capped_actions():
+    """Area-capped candidates (rejected_area_indices) must remain eligible in later rounds."""
+    base_cfg, base_policy = _build_chain_netlist(inst_cells=[0, 1], sparse_mode=True)
+    base_policy = {
+        **base_policy,
+        "cell_width": np.array([2.0, 2.0, 2.0, 0.5], dtype=np.float64),
+    }
+    cpp_engine = timing_propagation_cpp.IncrementalSizingEngine(base_cfg)
+
+    owner = SimpleNamespace(
+        params=SimpleNamespace(
+            timing_buffering_incremental_commit=1,
+            critical_endpoint_pruning_mode="off",
+        ),
+        placedb=SimpleNamespace(gr_sizing=None),
+        data=SimpleNamespace(cell_id_2_arc_id_start=torch.arange(5)),
+        _incremental_sizing_cache="cached",
+    )
+    model = SimpleNamespace(
+        hold_objective=None,
+        op_collections=SimpleNamespace(
+            timing_propagation_op=SimpleNamespace(
+                arcs_info=object(),
+                num_pins=5,
+                net2driver_pin_map=torch.zeros(3, dtype=torch.int32),
+            )
+        ),
+    )
+    gate = IncrementalBufferingGate(owner, model, torch.zeros(4), None, 20.0)
+    gate._ensure_engine = lambda: (cpp_engine, False, 0.25)
+    gate._policy = lambda capacity=None: {
+        **base_policy,
+        **({"capacity": float(capacity)} if capacity is not None else {}),
+    }
+
+    state = SimpleNamespace(
+        is_typed_candidate=True,
+        activation_param=torch.zeros((2, 2), dtype=torch.float32),
+        drive_type_cell_ids=torch.tensor([3, 2], dtype=torch.long),  # 0=BUF_SLOW_WIDE, 1=BUF_FAST
+        drive_type_allowed=torch.ones((2, 2), dtype=torch.bool),
+        candidate_net_id=torch.tensor([0, 1], dtype=torch.long),
+        candidate_records=[
+            {
+                "parent_node_id": 0,
+                "child_node_ids": [1],
+                "segment_split_ratio": 0.5,
+            },
+            {
+                "parent_node_id": 2,
+                "child_node_ids": [3],
+                "segment_split_ratio": 0.5,
+            },
+        ],
+    )
+
+    # Initial movable area = 4.0. Under round_cap=4.8:
+    # - spec 0 (row=0, dtype=0 -> cell 3, +0.5 -> 4.5 <= 4.8) is STA-evaluated & loss-rejected;
+    # - spec 1 (row=1, dtype=1 -> cell 2, +2.0 -> 6.0 > 4.8) is skipped due to round_cap.
+    mixed_transition = TypedDiscreteCandidateTransition(
+        next_activations=torch.tensor([[1.0, 0.0], [0.0, 1.0]]),
+        selected_candidate_indices=torch.tensor([0, 1], dtype=torch.long),
+        selected_drive_type_ids=torch.tensor([0, 1], dtype=torch.long),
+        selected_net_indices=torch.tensor([0, 1], dtype=torch.long),
+        selected_candidate_ids=torch.tensor([10, 11], dtype=torch.long),
+        selected_raw_grads=torch.tensor([-1.0, -0.8]),
+        selected_predicted_improvements=torch.tensor([1.0, 0.8]),
+        affected_net_count=2,
+        eligible_net_count=2,
+        prefix_size=2,
+        positive_prefix_count=2,
+    )
+    filtered_r0, rep_r0 = gate.filter_candidate_transition(
+        state,
+        mixed_transition,
+        capacity_override=4.8,
+    )
+    assert filtered_r0.accepted_count == 0
+    assert rep_r0["rejected_loss_count"] == 1
+    assert rep_r0["rejected_area_count"] == 1
+    assert rep_r0["rejected_area_indices"] == [1]
+    # Only STA-rejected [0, 0] may be masked; area-capped [1, 1] stays True!
+    assert gate.allowed_typed_actions(state).tolist() == [[False, True], [True, True]]
+
+    # Round 1 advances round_capacity to 6.5 -> [1, 1] is now evaluated and accepted!
+    r1_transition = TypedDiscreteCandidateTransition(
+        next_activations=torch.tensor([[0.0, 0.0], [0.0, 1.0]]),
+        selected_candidate_indices=torch.tensor([1], dtype=torch.long),
+        selected_drive_type_ids=torch.tensor([1], dtype=torch.long),
+        selected_net_indices=torch.tensor([1], dtype=torch.long),
+        selected_candidate_ids=torch.tensor([11], dtype=torch.long),
+        selected_raw_grads=torch.tensor([-0.8]),
+        selected_predicted_improvements=torch.tensor([0.8]),
+        affected_net_count=2,
+        eligible_net_count=2,
+        prefix_size=1,
+        positive_prefix_count=1,
+    )
+    filtered_r1, rep_r1 = gate.filter_candidate_transition(
+        state,
+        r1_transition,
+        capacity_override=6.5,
+    )
+    assert filtered_r1.accepted_count == 1
+    assert rep_r1["accepted_count"] == 1
+    assert filtered_r1.next_activations.tolist() == [[0.0, 0.0], [0.0, 1.0]]
 
 
 def test_incremental_buffering_gate_checks_dynamic_virtual_count_after_static_cache():

@@ -1127,6 +1127,7 @@ class DiscreteTimingOwner:
         native_action_backward_used = False
         incremental_gate = IncrementalSizingGate(self, model, geometry, capacity)
         total_rounds = int(self.params.timing_opt_sizing_rounds)
+        stop_reason = "max_rounds"
         for round_id in range(1, total_rounds + 1):
             has_next_round = round_id < total_rounds
             self.round_index += 1
@@ -1400,65 +1401,8 @@ class DiscreteTimingOwner:
                 if bool(getattr(self.params, "dump_sizing_round_actions_flag", False)):
                     round_record["actions"] = summary.get("selected_scores", ())
                 rounds.append(round_record)
-                # Consume the no-op attempt while rebuilding the graph for the
-                # next fixed-budget sizing round.
-                if not has_next_round:
-                    continue
-                if self.action_mode == "lut_action":
-                    started_at = time.perf_counter()
-                    loss, action_context = self._action_loss(model, pos)
-                    forward_ms.append((time.perf_counter() - started_at) * 1000.0)
-                    action_build_ms.append(
-                        float(
-                            action_context.mapping_summary.get("build_ms", 0.0) or 0.0
-                        )
-                    )
-                    timing_forward_ms.append(
-                        float(
-                            action_context.mapping_summary.get(
-                                "loss_forward_ms", 0.0
-                            )
-                            or 0.0
-                        )
-                    )
-                    action_table_build_ms.append(
-                        float(
-                            action_context.mapping_summary.get(
-                                "action_table_build_ms", 0.0
-                            )
-                            or 0.0
-                        )
-                    )
-                    action_table_mapping_ms.append(
-                        float(
-                            action_context.mapping_summary.get(
-                                "action_table_mapping_ms", 0.0
-                            )
-                            or 0.0
-                        )
-                    )
-                    action_map_timing.append(
-                        {
-                            "build_ms": float(
-                                action_context.mapping_summary.get("build_ms", 0.0)
-                                or 0.0
-                            ),
-                            "timing_ms": dict(
-                                action_context.mapping_summary.get("timing_ms", {})
-                                or {}
-                            ),
-                            "pair_cache": dict(
-                                action_context.mapping_summary.get("pair_cache", {})
-                                or {}
-                            ),
-                        }
-                    )
-                else:
-                    started_at = time.perf_counter()
-                    loss = self._loss(model, pos)
-                    forward_ms.append((time.perf_counter() - started_at) * 1000.0)
-                    timing_forward_ms.append(forward_ms[-1])
-                continue
+                stop_reason = "no_accepted_action"
+                break
             rows = summary["applied_instance_ids"]
             previous = data.inst_cell_id[rows].detach().cpu().tolist()
             with torch.no_grad():
@@ -1658,6 +1602,7 @@ class DiscreteTimingOwner:
             "initial_loss": initial_loss,
             "best_loss": best_loss,
             "best_round": best_round,
+            "stop_reason": stop_reason,
             "initial_objective": initial_objective,
             "best_objective": best_objective,
             "timing_action_gradient_mode": self.action_mode,

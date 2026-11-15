@@ -657,3 +657,182 @@ def test_candidate_runner_reanchors_best_activation_after_refresh_when_gate_degr
     assert summary.final_projection.projected_buffer_count == 1
     assert summary.iterations == 2
 
+
+def test_candidate_runner_preserves_multi_tier_metrics_and_unlocks_area_capped_in_next_round(
+    tmp_path,
+):
+    """Multi-tier report keeps Tier-1 baseline/timings; area-capped actions unlock next round."""
+    lane = _FakeCandidateLane(tmp_path)
+    lane.state = build_discrete_candidate_state(
+        [
+            _candidate(11, 5, 2, 10),
+            _candidate(22, 7, 4, 20),
+            _candidate(33, 9, 6, 30),
+        ],
+        buffer_main_type_index=4,
+        legal_buffer_count=3,
+        fixed_bsu_index=1,
+    )
+
+    def _ranked_objective(_model):
+        lane.objective_calls += 1
+        act = lane.state.activation_param
+        # Distinct gradients: cid 11 (-3.0), cid 22 (-2.0), cid 33 (-1.0)
+        weights = torch.tensor([3.0, 2.0, 1.0], dtype=act.dtype)
+        loss = -(act * weights).sum()
+        return loss, {"loss": loss.detach(), "tns": -loss.detach(), "wns": -loss.detach()}
+
+    lane.objective = _ranked_objective
+
+    class _AreaAndTierGate:
+        def __init__(self):
+            self.sta_blocked = set()
+            self.last_area = 100.0
+            self.last_loss = 0.0
+            self.proposed_cids_by_call = []
+
+        def check_available(self, preexisting_virtual_count=0):
+            return None
+
+        def current_area(self):
+            return self.last_area
+
+        def allowed_untyped_candidates(self, state):
+            return torch.tensor(
+                [int(cid) not in self.sta_blocked for cid in state.candidate_ids.tolist()],
+                dtype=torch.bool,
+            )
+
+        def filter_candidate_transition(self, state, transition, *, capacity_override=None):
+            from dreamplace.ops.buffer_insertion.discrete_candidate_scheduler import (
+                DiscreteCandidateTransition,
+            )
+
+            call_idx = len(self.proposed_cids_by_call)
+            rows = transition.selected_candidate_indices.detach().cpu().tolist()
+            cids = [int(state.candidate_ids[r].item()) for r in rows]
+            self.proposed_cids_by_call.append(cids)
+
+            area_cost = {11: 8.0, 22: 12.0, 33: 5.0}
+            init_area = self.last_area
+            init_loss = self.last_loss
+            keep = []
+            rej_area = []
+            rej_loss = 0
+            infos = []
+            actions = []
+            dirty = []
+            for spec_i, (row, cid) in enumerate(zip(rows, cids, strict=True)):
+                proposed = self.last_area + area_cost[cid]
+                if capacity_override is not None and proposed > float(capacity_override):
+                    rej_area.append(spec_i)
+                    continue
+                keep.append(spec_i)
+                self.last_area = proposed
+                net_id = int(state.candidate_net_id[row].item())
+                infos.append(
+                    {
+                        "row_idx": int(row),
+                        "candidate_id": cid,
+                        "orig_net_id": net_id,
+                        "active_net": net_id,
+                        "new_net": 100 + net_id,
+                    }
+                )
+                actions.append({"spec_index": spec_i, "active_net": net_id})
+                dirty.extend([net_id, 100 + net_id])
+
+            keep_t = torch.tensor(keep, dtype=torch.long)
+            next_acts = state.activation_param.detach().clone()
+            sel_rows = transition.selected_candidate_indices.index_select(0, keep_t)
+            if keep:
+                next_acts[sel_rows] = 1.0
+            filtered = DiscreteCandidateTransition(
+                next_activations=next_acts,
+                selected_candidate_indices=sel_rows,
+                selected_net_indices=transition.selected_net_indices.index_select(0, keep_t),
+                selected_candidate_ids=transition.selected_candidate_ids.index_select(0, keep_t),
+                selected_raw_grads=transition.selected_raw_grads.index_select(0, keep_t),
+                selected_predicted_improvements=transition.selected_predicted_improvements.index_select(
+                    0, keep_t
+                ),
+                affected_net_count=transition.affected_net_count,
+                eligible_net_count=transition.eligible_net_count,
+                prefix_size=transition.prefix_size,
+                positive_prefix_count=transition.positive_prefix_count,
+            )
+            self.last_loss = init_loss - 5.0 * len(keep)
+            final_loss = self.last_loss
+            is_cold_build = call_idx == 0
+            return filtered, {
+                "status": "ok",
+                "cache_hit": not is_cold_build,
+                "engine_build_ms": 42.0 if is_cold_build else 0.0,
+                "elapsed_ms": 3.0 if is_cold_build else 2.0,
+                "total_filter_ms": 45.0 if is_cold_build else 2.5,
+                "input_count": len(rows),
+                "evaluated_count": len(rows) - len(rej_area),
+                "accepted_count": len(keep),
+                "rejected_area_count": len(rej_area),
+                "rejected_area_indices": rej_area,
+                "rejected_loss_count": rej_loss,
+                "initial_loss": init_loss,
+                "final_loss": final_loss,
+                "initial_wns_ps": -200.0 + init_loss,
+                "final_wns_ps": -200.0 + final_loss,
+                "initial_tns_ps": -1000.0 + init_loss,
+                "final_tns_ps": -1000.0 + final_loss,
+                "initial_area": init_area,
+                "final_area": self.last_area,
+                "accepted_indices": keep,
+                "accepted_actions": actions,
+                "accepted_action_infos": infos,
+                "dirty_nets": sorted(set(dirty)),
+            }
+
+    gate = _AreaAndTierGate()
+    round_caps = {0: 115.0, 1: 130.0}
+    summary = run_discrete_candidate_buffer_scheduler(
+        lane=lane,
+        model=SimpleNamespace(),
+        rounds=2,
+        incremental_gate=gate,
+        selection_fraction=0.6,  # ceil(3 * 0.6) = 2 per tier
+        round_budget_fn=lambda round_idx, **_kw: {
+            "exhausted": False,
+            "selection_fraction": 0.6,
+            "round_capacity": round_caps[round_idx],
+            "min_buffer_area": 5.0,
+        },
+    )
+
+    # Round 0 (cap=115):
+    # - Tier 1 proposes [11 (+8 -> 108, accepted), 22 (+12 -> 120 > 115, area-capped)].
+    # - Remaining cap 7 >= min_buf_area 5 -> Tier 2 skips blocked 22 and accepts [33 (+5 -> 113)].
+    # Round 1 (cap=130):
+    # - Area-capped 22 was NOT permanently blacklisted -> proposed & accepted (+12 -> 125)!
+    assert gate.proposed_cids_by_call == [[11, 22], [33], [22]]
+    assert lane.state.activation_param.detach().tolist() == [1.0, 1.0, 1.0]
+    assert summary.final_projection.projected_buffer_count == 3
+
+    r0_commit = summary.metrics_trace[0]["incremental_commit"]
+    assert r0_commit["tier_attempts"] == 2
+    assert r0_commit["cache_hit"] is False
+    assert r0_commit["engine_build_ms"] == pytest.approx(42.0)
+    assert r0_commit["elapsed_ms"] == pytest.approx(5.0)
+    assert r0_commit["total_filter_ms"] == pytest.approx(47.5)
+    assert r0_commit["initial_loss"] == pytest.approx(0.0)
+    assert r0_commit["final_loss"] == pytest.approx(-10.0)
+    assert r0_commit["initial_area"] == pytest.approx(100.0)
+    assert r0_commit["final_area"] == pytest.approx(113.0)
+    assert r0_commit["input_count"] == 3
+    assert r0_commit["evaluated_count"] == 2
+    assert r0_commit["accepted_count"] == 2
+    assert r0_commit["rejected_area_count"] == 1
+    assert r0_commit["accepted_indices"] == [0, 2]
+    assert r0_commit["rejected_area_indices"] == [1]
+    assert [a["spec_index"] for a in r0_commit["accepted_actions"]] == [0, 2]
+    assert [info["candidate_id"] for info in r0_commit["accepted_action_infos"]] == [11, 33]
+    assert r0_commit["dirty_nets"] == [5, 9, 105, 109]
+
+

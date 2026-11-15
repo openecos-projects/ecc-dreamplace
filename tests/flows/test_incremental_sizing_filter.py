@@ -174,7 +174,7 @@ def test_native_diff_sizing_incremental_commit_matches_placeobj_loss(tmp_path, t
             "timing_sizing_incremental_commit": 1,
             "diff_sizing_timing_rc_mode": timing_rc_mode,
             "diff_sizing_optimization_flows": [
-                ["quad", 3, [500.0, 5.0, 1.0, 1.0], 50.0],
+                ["quad", 10, [500.0, 5.0, 1.0, 1.0], 50.0],
             ],
             "place_io_engine": "ecc",
             "gpugr_backend": "cpu_pr_mt",
@@ -259,7 +259,10 @@ def test_native_diff_sizing_incremental_commit_matches_placeobj_loss(tmp_path, t
 
     sizing = result["diff_sizing"]["sizing"]
     rounds = sizing["rounds"]
-    assert len(rounds) == 3
+    assert 2 <= len(rounds) < 10
+    assert sizing["stop_reason"] == "no_accepted_action"
+    assert rounds[-1]["no_action"] is True
+    assert all(not r.get("no_action", False) for r in rounds[:-1])
     assert sizing["best_loss"] < sizing["initial_loss"]
 
     committed_rounds = [r for r in rounds if not r.get("no_action", False)]

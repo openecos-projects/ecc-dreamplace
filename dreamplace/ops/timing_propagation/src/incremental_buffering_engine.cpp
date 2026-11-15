@@ -1050,6 +1050,7 @@ py::dict IncrementalSizingEngine::evaluateRankedBufferCandidates(
 
   clearBufferUndo();
   std::vector<int> accepted_indices;
+  std::vector<int> rejected_area_indices;
   std::vector<py::dict> accepted_actions;
   std::vector<int> accepted_dirty_nets;
   accepted_indices.reserve(candidates.size());
@@ -1112,6 +1113,7 @@ py::dict IncrementalSizingEngine::evaluateRankedBufferCandidates(
     const double proposed_area = eval.current_area + delta_area;
     if (proposed_area > pol.capacity) {
       ++rejected_area_count;
+      rejected_area_indices.push_back(static_cast<int>(idx));
       continue;
     }
 
@@ -1206,6 +1208,7 @@ py::dict IncrementalSizingEngine::evaluateRankedBufferCandidates(
       static_cast<int>(accepted_indices.size()), rejected_area_count, rejected_loss_count,
       started);
   result["accepted_indices"] = accepted_indices;
+  result["rejected_area_indices"] = rejected_area_indices;
   result["accepted_actions"] = accepted_actions;
   result["dirty_nets"] = accepted_dirty_nets;
   result["skipped_invalid_count"] = skipped_invalid_count;

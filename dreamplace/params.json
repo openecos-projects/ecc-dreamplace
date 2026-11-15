@@ -1028,6 +1028,10 @@
         "default": 1.0,
         "description": "nonnegative Miller-like multiplier applied to cross-net coupling capacitors in SPEF mode"
     },
+    "spef_reconcile_lumped_cap": {
+        "default": 0,
+        "description": "when 1, distribute positive (*D_NET total cap - unscaled *CAP sum) equally across each net's pin nodes to recover omitted pin-node wire capacitance (e.g. OpenROAD SpefWriter)"
+    },
     "diff_sizing_optimization_flows": {
         "default": null,
         "description": "ordered standalone diff_sizing phases: [action, rounds, [wns, tns, slew, cap], selection_percent]; action is quad, up, down, vt, vt_fast, or vt_slow and percent is in (0, 100]; null selects a quad phase; ECC defaults to 50 rounds with diff_sizing_coefficients and a shared 1% budget per round"

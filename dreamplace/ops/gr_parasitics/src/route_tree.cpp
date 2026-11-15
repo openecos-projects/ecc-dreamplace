@@ -336,5 +336,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
         py::arg("driver_pins"),
         py::arg("eligible_nets"),
         py::arg("coupling_cap_scale") = 1.0,
+        py::arg("reconcile_lumped_cap") = false,
         "Prepare SPEF RC trees with series-parallel ladder and shortest-resistance spanning tree reduction");
 }

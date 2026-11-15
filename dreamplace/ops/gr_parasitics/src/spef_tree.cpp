@@ -323,7 +323,20 @@ struct LocalNode {
     double y = 0.0;
     double groundedCap = 0.0;
     double coupledCap = 0.0;
+    double rawCoupledCap = 0.0;
 };
+
+bool designFlowIncludesPinCap(const std::vector<TokenView>& tokens) {
+    for (size_t i = 1; i < tokens.size(); ++i) {
+        std::vector<TokenView> inner;
+        tokenizeLine(tokens[i].text, inner);
+        if (inner.size() >= 2 && toUpper(inner[0].text) == "PIN_CAP" &&
+            toUpper(inner[1].text) != "NONE") {
+            return true;
+        }
+    }
+    return false;
+}
 
 }  // namespace
 
@@ -333,7 +346,8 @@ py::dict prepareSpefTree(const std::string& spefPath,
                          IndexArray pyPinNetArray,
                          IndexArray driverArray,
                          IndexArray eligibleArray,
-                         double couplingCapScale) {
+                         double couplingCapScale,
+                         bool reconcileLumpedCap) {
     if (!std::isfinite(couplingCapScale) || couplingCapScale < 0.0) {
         throw std::runtime_error("SPEF coupling_cap_scale must be finite and nonnegative");
     }
@@ -393,8 +407,10 @@ py::dict prepareSpefTree(const std::string& spefPath,
     int64_t seriesParallelReductions = 0;
     int64_t loopCount = 0;
     int64_t verticesWithCoords = 0;
+    int64_t reconciledNetCount = 0;
     double totalGroundedCapPf = 0.0;
     double totalCoupledCapPf = 0.0;
+    double totalReconciledCapPf = 0.0;
     py::list loopEdgesSample;
 
     // Per-D_NET reusable scratch buffers.
@@ -548,15 +564,36 @@ py::dict prepareSpefTree(const std::string& spefPath,
         const int32_t localCount = static_cast<int32_t>(localNodes.size());
         std::vector<double> nodeCapPf(localCount, 0.0);
         double sumExplicitCap = 0.0;
+        double sumRawExplicitCap = 0.0;
         for (int32_t u = 0; u < localCount; ++u) {
             const double gCap = localNodes[u].groundedCap;
             const double cCap = localNodes[u].coupledCap;
+            const double rawCCap = localNodes[u].rawCoupledCap;
             const double total = std::max(0.0, gCap + cCap);
             nodeCapPf[u] = total;
             sumExplicitCap += total;
+            sumRawExplicitCap += std::max(0.0, gCap + rawCCap);
             totalGroundedCapPf += std::max(0.0, gCap);
             totalCoupledCapPf += std::max(0.0, cCap);
         }
+        auto reconcilePinNodeCap = [&]() {
+            if (!reconcileLumpedCap) return;
+            const double tolPf =
+                std::max(1e-9, 1e-5 * std::max(currentNetLumpedCapPf, sumRawExplicitCap));
+            const double missingCapPf = currentNetLumpedCapPf - sumRawExplicitCap;
+            if (missingCapPf <= tolPf) return;
+            std::vector<int32_t> uniquePinNodes = pinToLocal;
+            std::sort(uniquePinNodes.begin(), uniquePinNodes.end());
+            uniquePinNodes.erase(std::unique(uniquePinNodes.begin(), uniquePinNodes.end()),
+                                 uniquePinNodes.end());
+            const double sharePf = missingCapPf / static_cast<double>(uniquePinNodes.size());
+            for (int32_t u : uniquePinNodes) {
+                nodeCapPf[u] += sharePf;
+            }
+            sumExplicitCap += missingCapPf;
+            totalReconciledCapPf += missingCapPf;
+            ++reconciledNetCount;
+        };
 
         // Handle lumped-only 1-pin net (e.g., dangling driver output load with 0 resistors).
         bool hasAnyEdge = false;
@@ -568,6 +605,9 @@ py::dict prepareSpefTree(const std::string& spefPath,
         }
         if (!hasAnyEdge) {
             if (requiredPins.size() == 1) {
+                if (sumRawExplicitCap > 0.0) {
+                    reconcilePinNodeCap();
+                }
                 const double cap = sumExplicitCap > 0.0
                                        ? sumExplicitCap
                                        : std::max(0.0, currentNetLumpedCapPf);
@@ -687,6 +727,7 @@ py::dict prepareSpefTree(const std::string& spefPath,
                 return;
             }
         }
+        reconcilePinNodeCap();
 
         std::vector<std::vector<int32_t>> localChildren(localCount);
         for (int32_t v = 0; v < localCount; ++v) {
@@ -851,6 +892,14 @@ py::dict prepareSpefTree(const std::string& spefPath,
                     section = Section::kHeader;
                     continue;
                 }
+                if (head == "*DESIGN_FLOW") {
+                    if (reconcileLumpedCap && designFlowIncludesPinCap(tokens)) {
+                        throw std::runtime_error(
+                            "SPEF reconcile_lumped_cap cannot be used when *DESIGN_FLOW includes PIN_CAP");
+                    }
+                    section = Section::kHeader;
+                    continue;
+                }
                 if (head == "*DELIMITER" && tokens.size() >= 2 && !tokens[1].text.empty()) {
                     delimiter = tokens[1].text[0];
                     section = Section::kHeader;
@@ -955,7 +1004,8 @@ py::dict prepareSpefTree(const std::string& spefPath,
                 if (!parseDouble(tokens[3].text, val)) {
                     throw std::runtime_error("Invalid SPEF coupling *CAP value");
                 }
-                const double scaled = val * cScale * couplingCapScale;
+                const double rawCapPf = val * cScale;
+                const double scaled = rawCapPf * couplingCapScale;
                 // In StarRC / IEEE 1481 D_NET blocks, node1 belongs to the current
                 // D_NET while node2 is typically on an aggressor net (which has its
                 // own symmetric D_NET entry). Never create phantom vertices for
@@ -967,10 +1017,14 @@ py::dict prepareSpefTree(const std::string& spefPath,
                     // match ReadParasitics.cpp convention.
                     localNodes[u1].coupledCap += scaled;
                     localNodes[u2].coupledCap += scaled;
+                    localNodes[u1].rawCoupledCap += rawCapPf;
+                    localNodes[u2].rawCoupledCap += rawCapPf;
                 } else if (u1 >= 0) {
                     localNodes[u1].coupledCap += scaled;
+                    localNodes[u1].rawCoupledCap += rawCapPf;
                 } else if (u2 >= 0) {
                     localNodes[u2].coupledCap += scaled;
+                    localNodes[u2].rawCoupledCap += rawCapPf;
                 }
             }
         } else if (section == Section::kRes) {
@@ -1039,8 +1093,11 @@ py::dict prepareSpefTree(const std::string& spefPath,
     model["r_unit_scale_ohm"] = rScale;
     model["c_unit_scale_pf"] = cScale;
     model["coupling_cap_scale"] = couplingCapScale;
+    model["reconcile_lumped_cap"] = reconcileLumpedCap;
     model["grounded_wire_cap_pf"] = totalGroundedCapPf;
     model["coupled_wire_cap_pf"] = totalCoupledCapPf;
+    model["reconciled_wire_cap_pf"] = totalReconciledCapPf;
+    model["reconciled_net_count"] = reconciledNetCount;
     model["parallel_resistor_merges"] = parallelMerges;
     model["series_parallel_reductions"] = seriesParallelReductions;
     model["electrical_reduction_model"] =

@@ -226,3 +226,96 @@ def test_spef_parallel_via_ladder_series_parallel_reduction_and_zero_ohm_tie(tmp
     expected_delay = (20.0 / 3.0) * 0.025 + 0.6
     assert pytest.approx(float(loads["generic"][0]), rel=0, abs=1e-12) == 0.030
     assert pytest.approx(float(delays["generic"][1]), rel=0, abs=1e-10) == expected_delay
+
+
+def test_spef_reconcile_lumped_cap_recovers_omitted_pin_node_wire_cap(tmp_path: Path):
+    """reconcile_lumped_cap distributes (*D_NET - unscaled *CAP) across pin nodes only."""
+    # OpenROAD SpefWriter omits grounded *CAP on *I/*P pin nodes while keeping full C in *D_NET.
+    # Net n0: *D_NET = 20 fF = 8 fF (grid) + 4 fF (coupling) + 8 fF (omitted on 2 pins).
+    spef_path = tmp_path / "ord_omitted_pincap.spef"
+    spef_path.write_text(
+        """*SPEF "ieee 1481-1999"
+*DESIGN "ord_demo"
+*DESIGN_FLOW "NAME_SCOPE LOCAL" "PIN_CAP NONE"
+*DIVIDER /
+*DELIMITER :
+*T_UNIT 1 NS
+*C_UNIT 1 FF
+*R_UNIT 1 OHM
+*D_NET n0 20.0
+*CONN
+*I u0:Y O *D BUF_X1
+*I u1:A I *D INV_X1
+*CAP
+1 n0:1 8.0
+2 n0:1 aggr:1 4.0
+*RES
+1 u0:Y n0:1 10.0
+2 n0:1 u1:A 30.0
+*END
+""",
+        encoding="utf-8",
+    )
+    mapping = PinMapping(
+        pin_names={"u0:Y": 0, "u1:A": 1},
+        net_names={"n0": 0},
+        pin_net=torch.tensor([0, 0], dtype=torch.int32),
+        driver_pin=torch.tensor([0], dtype=torch.int32),
+        eligible_nets=torch.tensor([True], dtype=torch.bool),
+    )
+
+    snap_default = prepare_spef_snapshot(spef_path, mapping, _identity(), dtype=torch.float64)
+    snap_reconciled = prepare_spef_snapshot(
+        spef_path,
+        mapping,
+        _identity(),
+        reconcile_lumped_cap=True,
+        dtype=torch.float64,
+    )
+    snap_reconciled_zero_cc = prepare_spef_snapshot(
+        spef_path,
+        mapping,
+        _identity(),
+        coupling_cap_scale=0.0,
+        reconcile_lumped_cap=True,
+        dtype=torch.float64,
+    )
+
+    assert snap_default.model_report["reconcile_lumped_cap"] is False
+    assert snap_default.model_report["reconciled_net_count"] == 0
+    assert pytest.approx(float(snap_default.wire_cap.sum()), rel=0, abs=1e-12) == 0.012
+
+    # Missing grounded cap = 20 - (8 + 4) = 8 fF -> 4 fF on u0:Y and 4 fF on u1:A.
+    assert snap_reconciled.model_report["reconcile_lumped_cap"] is True
+    assert snap_reconciled.model_report["reconciled_net_count"] == 1
+    assert (
+        pytest.approx(snap_reconciled.model_report["reconciled_wire_cap_pf"], rel=0, abs=1e-12)
+        == 0.008
+    )
+    assert pytest.approx(float(snap_reconciled.wire_cap.sum()), rel=0, abs=1e-12) == 0.020
+    # With coupling_cap_scale=0.0, scaled-out 4 fF coupling cap is not treated as missing C.
+    assert (
+        pytest.approx(
+            snap_reconciled_zero_cc.model_report["reconciled_wire_cap_pf"], rel=0, abs=1e-12
+        )
+        == 0.008
+    )
+    assert pytest.approx(float(snap_reconciled_zero_cc.wire_cap.sum()), rel=0, abs=1e-12) == 0.016
+
+    op = GRParasiticsOp(snap_reconciled)
+    zero_pin_cap = torch.zeros(2, dtype=torch.float64)
+    _, loads, delays, _, _, _ = op(zero_pin_cap, zero_pin_cap, zero_pin_cap)
+    # C(u0:Y)=4fF, C(n0:1)=12fF, C(u1:A)=4fF; R(u0:Y->n0:1)=10, R(n0:1->u1:A)=30
+    # Delay(n0:1) = 10 * (0.012 + 0.004) = 0.16 ps; Delay(u1:A) = 0.16 + 30 * 0.004 = 0.28 ps
+    assert pytest.approx(float(loads["generic"][0]), rel=0, abs=1e-12) == 0.020
+    assert pytest.approx(float(delays["generic"][1]), rel=0, abs=1e-12) == 0.28
+
+    pin_cap_spef = tmp_path / "with_pin_cap.spef"
+    pin_cap_spef.write_text(
+        spef_path.read_text(encoding="utf-8").replace('"PIN_CAP NONE"', '"PIN_CAP TOTAL"'),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="PIN_CAP"):
+        prepare_spef_snapshot(
+            pin_cap_spef, mapping, _identity(), reconcile_lumped_cap=True, dtype=torch.float64
+        )

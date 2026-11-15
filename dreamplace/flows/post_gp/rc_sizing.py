@@ -352,6 +352,7 @@ def prepare_spef_sizing(params, placedb) -> None:
         raise FileNotFoundError(f"SPEF file does not exist: {spef_path}")
 
     coupling_cap_scale = float(getattr(params, "spef_coupling_cap_scale", 1.0))
+    reconcile_lumped_cap = bool(getattr(params, "spef_reconcile_lumped_cap", 0))
     result_dir = Path(params.result_dir) / "spef_parasitics"
     result_dir.mkdir(parents=True, exist_ok=True)
 
@@ -366,6 +367,7 @@ def prepare_spef_sizing(params, placedb) -> None:
         mapping,
         identity,
         coupling_cap_scale=coupling_cap_scale,
+        reconcile_lumped_cap=reconcile_lumped_cap,
         dtype=getattr(torch, params.dtype),
     )
     tree = op.snapshot

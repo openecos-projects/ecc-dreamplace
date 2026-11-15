@@ -15,6 +15,7 @@ pybind11::dict prepareSpefTree(const std::string& spefPath,
                                IndexArray pyPinNetArray,
                                IndexArray driverArray,
                                IndexArray eligibleArray,
-                               double couplingCapScale);
+                               double couplingCapScale,
+                               bool reconcileLumpedCap = false);
 
 }  // namespace gr_parasitics

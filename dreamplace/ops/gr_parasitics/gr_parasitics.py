@@ -31,6 +31,7 @@ class GRParasiticsOp(nn.Module):
         identity,
         *,
         coupling_cap_scale=1.0,
+        reconcile_lumped_cap=False,
         dtype=torch.float32,
     ):
         return cls(
@@ -39,6 +40,7 @@ class GRParasiticsOp(nn.Module):
                 pin_mapping,
                 identity,
                 coupling_cap_scale=coupling_cap_scale,
+                reconcile_lumped_cap=reconcile_lumped_cap,
                 dtype=dtype,
             )
         )

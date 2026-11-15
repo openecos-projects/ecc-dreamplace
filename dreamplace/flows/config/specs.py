@@ -438,6 +438,10 @@ def configure_gr_sizing(params):
     if not math.isfinite(coupling_scale) or coupling_scale < 0.0:
         raise ValueError("spef_coupling_cap_scale must be a finite nonnegative float")
     params.spef_coupling_cap_scale = coupling_scale
+    reconcile_lumped_cap = getattr(params, "spef_reconcile_lumped_cap", 0)
+    if reconcile_lumped_cap not in (0, 1, False, True):
+        raise ValueError("spef_reconcile_lumped_cap must be 0 or 1")
+    params.spef_reconcile_lumped_cap = int(bool(reconcile_lumped_cap))
     params.spef_input = str(getattr(params, "spef_input", "") or "").strip()
     if mode == "placement":
         return

@@ -193,6 +193,7 @@ def prepare_spef_snapshot(
     identity: RouteIdentity,
     *,
     coupling_cap_scale: float = 1.0,
+    reconcile_lumped_cap: bool = False,
     dtype=torch.float32,
 ) -> RouteSnapshot:
     if dtype not in (torch.float32, torch.float64):
@@ -208,6 +209,8 @@ def prepare_spef_snapshot(
         raise ValueError("spef_coupling_cap_scale must be a finite nonnegative float") from exc
     if not math.isfinite(scale) or scale < 0.0:
         raise ValueError("spef_coupling_cap_scale must be a finite nonnegative float")
+    if reconcile_lumped_cap not in (0, 1, False, True):
+        raise ValueError("spef_reconcile_lumped_cap must be 0 or 1")
     resolved_spef = Path(spef_path)
     if not resolved_spef.is_file():
         raise FileNotFoundError(f"SPEF file does not exist: {resolved_spef}")
@@ -219,6 +222,7 @@ def prepare_spef_snapshot(
         _indices(pin_mapping.driver_pin),
         eligible.contiguous().numpy().astype(np.int32),
         scale,
+        bool(reconcile_lumped_cap),
     )
     return _materialize_snapshot(
         packed,

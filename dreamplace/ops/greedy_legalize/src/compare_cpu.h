@@ -92,6 +92,69 @@ struct CompareByNodeNTUPlaceCostFromLeftCPU {
   const T* node_size_y;
 };
 
+template <typename T>
+inline int computeNodeCriticalityTier(int i, const T* wx, const T* wy) {
+  if (!wx || !wy) return 0;
+  double emax = std::max(1.0, std::max((double)wx[i], (double)wy[i]));
+  if (emax < 1.4142135623730951) return 0;
+  return std::min(24, (int)std::floor(2.0 * std::log2(emax)));
+}
+
+template <typename T>
+struct CompareByTieredNTUPlaceCostCPU {
+  CompareByTieredNTUPlaceCostCPU(const T* x, const T* y, const T* size_x,
+                                 const T* size_y, const T* wx, const T* wy)
+      : node_x(x), node_y(y), node_size_x(size_x), node_size_y(size_y),
+        weights_x(wx), weights_y(wy) {}
+
+  bool operator()(const int i, const int j) const {
+    int ti = computeNodeCriticalityTier<T>(i, weights_x, weights_y);
+    int tj = computeNodeCriticalityTier<T>(j, weights_x, weights_y);
+    if (ti != tj) return ti < tj;
+    T wi = 1000 * (node_x[i] + node_size_x[i] / 2) + node_size_x[i] +
+           node_size_y[i];
+    T wj = 1000 * (node_x[j] + node_size_x[j] / 2) + node_size_x[j] +
+           node_size_y[j];
+    return wi < wj || (wi == wj && (node_y[i] < node_y[j] ||
+                                    (node_y[i] == node_y[j] && i < j)));
+  }
+
+  const T* node_x;
+  const T* node_y;
+  const T* node_size_x;
+  const T* node_size_y;
+  const T* weights_x;
+  const T* weights_y;
+};
+
+template <typename T>
+struct CompareByTieredNTUPlaceCostFromLeftCPU {
+  CompareByTieredNTUPlaceCostFromLeftCPU(const T* x, const T* y,
+                                         const T* size_x, const T* size_y,
+                                         const T* wx, const T* wy)
+      : node_x(x), node_y(y), node_size_x(size_x), node_size_y(size_y),
+        weights_x(wx), weights_y(wy) {}
+
+  bool operator()(const int i, const int j) const {
+    int ti = computeNodeCriticalityTier<T>(i, weights_x, weights_y);
+    int tj = computeNodeCriticalityTier<T>(j, weights_x, weights_y);
+    if (ti != tj) return ti < tj;
+    T wi = -1000 * (node_x[i] + node_size_x[i] / 2) + node_size_x[i] +
+           node_size_y[i];
+    T wj = -1000 * (node_x[j] + node_size_x[j] / 2) + node_size_x[j] +
+           node_size_y[j];
+    return wi < wj || (wi == wj && (node_y[i] > node_y[j] ||
+                                    (node_y[i] == node_y[j] && i < j)));
+  }
+
+  const T* node_x;
+  const T* node_y;
+  const T* node_size_x;
+  const T* node_size_y;
+  const T* weights_x;
+  const T* weights_y;
+};
+
 DREAMPLACE_END_NAMESPACE
 
 #endif

@@ -73,6 +73,9 @@ def finalize_discrete_window(
         if not callable(sync_native_sizing):
             raise RuntimeError("S5B1 terminal owner has no native sizing sync")
         summary["native_sizing"] = sync_native_sizing()
+        export_d_map = getattr(engine.placer, "export_d_metric_movable_map", None)
+        if callable(export_d_map):
+            placedb._carried_d_metric_movable_map = export_d_map(params, placedb)
         write_back_movable_lpos(engine.placer.pos[0], params, placedb)
         backend = engine._physical_mutation_backend()
         commit = backend.commit_buffers(request, output_dir=result_dir)
@@ -109,7 +112,10 @@ def finalize_discrete_window(
         )
         validate_materialized_area(physical_area, summary, accepted, area_policy)
         placedb.cooptimization_geometry = None
-        if bool(getattr(params, "repair_buffering_midplace_enable", False)):
+        if (
+            bool(getattr(params, "repair_buffering_midplace_enable", False))
+            or os.environ.get("STAR_DUMP_STAGE_DEFS") == "1"
+        ):
             summary["prelegal_def"] = stem + ".prelegal.def"
             write_native_def(placedb, summary["prelegal_def"])
         frozen_nets = getattr(owner.ops.steiner_topo_op, "frozen_nets", None)
@@ -151,6 +157,17 @@ def finalize_discrete_window(
         summary["final_verilog"] = stem + ".v"
         write_native_def(placedb, summary["final_def"])
         engine.write_verilog(summary["final_verilog"])
+        if (
+            os.environ.get("STAR_DUMP_STAGE_DEFS") == "1"
+            and getattr(new_placer, "_post_lg_pos_tensor", None) is not None
+        ):
+            final_pos_tensor = new_placer.pos[0].detach().clone()
+            write_back_movable_lpos(
+                new_placer._post_lg_pos_tensor, terminal_params, placedb
+            )
+            summary["post_lg_def"] = stem + ".post_lg.def"
+            write_native_def(placedb, summary["post_lg_def"])
+            write_back_movable_lpos(final_pos_tensor, terminal_params, placedb)
         summary.update(status="ok", legal=True, placement_rc_model="DreamPlace_LEF_FLUTE",
                        native_sta_role="diagnostic_no_SPEF", new_gp_steps=0,
                        backend_capabilities=dict(placedb.backend_caps))
@@ -213,6 +230,11 @@ def refresh_committed_topology(engine, control_result):
     mutation_backend = getattr(engine, "last_physical_mutation_backend", None)
     if mutation_backend is None:
         mutation_backend = engine._physical_mutation_backend()
+    export_d_map = getattr(engine.placer, "export_d_metric_movable_map", None)
+    if callable(export_d_map):
+        engine.placedb._carried_d_metric_movable_map = export_d_map(
+            engine.params, engine.placedb
+        )
     refresh_summary = mutation_backend.refresh(
         refresh_mode=refresh_mode,
         rebuild_mode=rebuild_mode,

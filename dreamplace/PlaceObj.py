@@ -729,17 +729,21 @@ class PreconditionOp:
 
     def __init__(
         self, placedb, data_collections, op_collections, precond_pin_count_flag=False,
-        use_net_weights=False,
+        use_net_weights=False, star_runtime_getter=None,
     ):
         self.placedb = placedb
         self.data_collections = data_collections
         self.op_collections = op_collections
         self.precond_pin_count_flag = bool(precond_pin_count_flag)
         self.use_net_weights = bool(use_net_weights)
+        self.star_runtime_getter = star_runtime_getter
         self.iteration = 0
         self.alpha = 1.0
         self.best_overflow = None
         self.overflows = []
+        self._last_d_metric_base = None
+        self._last_d_metric_timing_x = None
+        self._last_d_metric_timing_y = None
         if len(placedb.regions) > 0:
             self.movablenode2fence_region_map_clamp = (
                 data_collections.node2fence_region_map[: placedb.num_movable_nodes]
@@ -822,12 +826,55 @@ class PreconditionOp:
 
         precond = density_precond
         if self.use_net_weights:
-            precond = precond + self.op_collections.pws_op(
+            pin_stiffness = self.op_collections.pws_op(
                 self.data_collections.net_weights
             )
-        elif self.precond_pin_count_flag:
-            # Original DreamPlace pin counts, including zero counts for fillers.
-            precond = precond + self.data_collections.num_pins_in_nodes
+            precond = precond + pin_stiffness
+        else:
+            pin_stiffness = self.data_collections.num_pins_in_nodes
+            if self.precond_pin_count_flag:
+                # Original DreamPlace pin counts, including zero counts for fillers.
+                precond = precond + pin_stiffness
+        star_rt = (
+            self.star_runtime_getter() if callable(self.star_runtime_getter) else None
+        )
+        if (
+            star_rt is not None
+            and star_rt.curvature_precondition_enabled
+            and (
+                star_rt.is_objective_active
+                or getattr(star_rt, "is_macro_field_active", False)
+            )
+        ):
+            curv_2n = star_rt.effective_curvature_2n(
+                fallback_pos=self.data_collections.pos[0],
+                fallback_alpha=1.0,
+            )
+            if curv_2n is not None:
+                timing_curv_2n = getattr(star_rt, "last_timing_curvature_2n", None)
+                if timing_curv_2n is None:
+                    timing_curv_2n = curv_2n
+                d_metric_base = (
+                    density_precond
+                    + pin_stiffness.to(
+                        device=density_precond.device, dtype=density_precond.dtype
+                    )
+                ).clamp(min=1.0)
+                self._last_d_metric_base = d_metric_base.detach()
+                self._last_d_metric_timing_x = (
+                    d_metric_base
+                    + timing_curv_2n[0].to(device=precond.device, dtype=precond.dtype)
+                ).clamp(min=1.0).detach()
+                self._last_d_metric_timing_y = (
+                    d_metric_base
+                    + timing_curv_2n[1].to(device=precond.device, dtype=precond.dtype)
+                ).clamp(min=1.0).detach()
+                precond_2n = (
+                    precond.unsqueeze(0)
+                    + curv_2n.to(device=precond.device, dtype=precond.dtype)
+                ).clamp(min=1.0)
+                star_rt.record_precondition_diagonal(precond_2n)
+                return precond_2n
         return precond.clamp(min=1.0)
 
     def _apply_precondition_to_grad(
@@ -839,8 +886,12 @@ class PreconditionOp:
             + self.placedb.num_movable_nodes : self.placedb.num_nodes
             + self.placedb.num_physical_nodes
         ] = 0
-        grad[0 : self.placedb.num_nodes].div_(precond)
-        grad[self.placedb.num_nodes : self.placedb.num_nodes * 2].div_(precond)
+        if precond.dim() == 2:
+            grad[0 : self.placedb.num_nodes].div_(precond[0])
+            grad[self.placedb.num_nodes : self.placedb.num_nodes * 2].div_(precond[1])
+        else:
+            grad[0 : self.placedb.num_nodes].div_(precond)
+            grad[self.placedb.num_nodes : self.placedb.num_nodes * 2].div_(precond)
         # stop gradients for terminated electric field
         if update_mask is not None:
             grad2 = grad.view(2, -1)
@@ -1112,6 +1163,22 @@ class PlaceObj(nn.Module):
         self.op_collections.precondition_op = self.build_precondition(
             params, placedb, self.data_collections, self.op_collections
         )
+        self.star_tdp_runtime = None
+        if (
+            params.with_sta
+            and (not self._is_size_only_mode())
+            and str(getattr(params, "timing_placement_carrier", "direct_loss") or "direct_loss")
+            == "star_pin_pair"
+        ):
+            from dreamplace.flows.gp.star_tdp_runtime import StarTdpRuntime
+
+            self.star_tdp_runtime = StarTdpRuntime(
+                model=self,
+                params=params,
+                placedb=placedb,
+                data_collections=self.data_collections,
+                op_collections=self.op_collections,
+            )
         self.op_collections.noise_op = self.build_noise(
             params, placedb, self.data_collections
         )
@@ -2493,6 +2560,25 @@ class PlaceObj(nn.Module):
             self._virtual_cell_density_view._density_ops.clear()
         if self._candidate_density_view is not None:
             self._candidate_density_view._density_ops.clear()
+        if getattr(self, "star_tdp_runtime", None) is not None:
+            self.star_tdp_runtime.invalidate_after_geometry_or_sizing_change()
+
+    def refresh_star_timing_snapshot(
+        self,
+        pos,
+        *,
+        iteration,
+        overflow=None,
+        topology_already_rebuilt=False,
+    ):
+        if getattr(self, "star_tdp_runtime", None) is None:
+            raise RuntimeError("StarTdpRuntime is not initialized on PlaceObj")
+        return self.star_tdp_runtime.refresh_snapshot(
+            pos,
+            iteration=iteration,
+            overflow=overflow,
+            topology_already_rebuilt=topology_already_rebuilt,
+        )
 
     @staticmethod
     def _telemetry_scalar(value):
@@ -2778,6 +2864,14 @@ class PlaceObj(nn.Module):
             self.ts = ts
             # logging.info(f"Timing slack: {slack}")
             result = torch.add(result, slack)
+
+        if (
+            (not self._is_size_only_mode())
+            and getattr(self, "star_tdp_runtime", None) is not None
+        ):
+            star_term = self.star_tdp_runtime.objective(objective_pos)
+            if star_term is not None:
+                result = torch.add(result, star_term)
 
         if (
             (not self._is_size_only_mode())
@@ -11164,6 +11258,7 @@ class PlaceObj(nn.Module):
             placedb, data_collections, op_collections,
             precond_pin_count_flag=pin_count_flag,
             use_net_weights=not pin_count_flag,
+            star_runtime_getter=lambda: getattr(self, "star_tdp_runtime", None),
         )
 
     def build_route_utilization_map(self, params, placedb, data_collections):

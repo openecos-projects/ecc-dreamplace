@@ -4,12 +4,13 @@
 # @date   Jun 2018
 #
 
-import math 
+import math
 import torch
 from torch import nn
 from torch.autograd import Function
 
 import dreamplace.ops.greedy_legalize.greedy_legalize_cpp as greedy_legalize_cpp
+
 
 class GreedyLegalizeFunction(Function):
     """ Legalize cells with greedy approach 
@@ -34,7 +35,9 @@ class GreedyLegalizeFunction(Function):
           num_bins_y, 
           num_movable_nodes, 
           num_terminal_NIs, 
-          num_filler_nodes
+          num_filler_nodes,
+          use_node_weights=False,
+          anchor_boost=0.0
           ):
         if pos.is_cuda:
             output = greedy_legalize_cpp.forward(
@@ -56,7 +59,9 @@ class GreedyLegalizeFunction(Function):
                     num_bins_y, 
                     num_movable_nodes, 
                     num_terminal_NIs, 
-                    num_filler_nodes
+                    num_filler_nodes,
+                    bool(use_node_weights),
+                    float(anchor_boost)
                     ).cuda()
         else:
             output = greedy_legalize_cpp.forward(
@@ -78,16 +83,20 @@ class GreedyLegalizeFunction(Function):
                     num_bins_y, 
                     num_movable_nodes, 
                     num_terminal_NIs, 
-                    num_filler_nodes
+                    num_filler_nodes,
+                    bool(use_node_weights),
+                    float(anchor_boost)
                     )
         return output
+
 
 class GreedyLegalize(object):
     """ Legalize cells with greedy approach 
     """
     def __init__(self, node_size_x, node_size_y, node_weights, 
             flat_region_boxes, flat_region_boxes_start, node2fence_region_map, 
-            xl, yl, xh, yh, site_width, row_height, num_bins_x, num_bins_y, num_movable_nodes, num_terminal_NIs, num_filler_nodes):
+            xl, yl, xh, yh, site_width, row_height, num_bins_x, num_bins_y, num_movable_nodes, num_terminal_NIs, num_filler_nodes,
+            use_node_weights=False, anchor_boost=0.0):
         super(GreedyLegalize, self).__init__()
         self.node_size_x = node_size_x
         self.node_size_y = node_size_y
@@ -106,6 +115,9 @@ class GreedyLegalize(object):
         self.num_movable_nodes = num_movable_nodes
         self.num_terminal_NIs = num_terminal_NIs
         self.num_filler_nodes = num_filler_nodes
+        self.use_node_weights = bool(use_node_weights)
+        self.anchor_boost = float(anchor_boost)
+
     def __call__(self, init_pos, pos): 
         """ 
         @param init_pos the reference position for displacement minization
@@ -130,5 +142,7 @@ class GreedyLegalize(object):
                 num_bins_y=self.num_bins_y,
                 num_movable_nodes=self.num_movable_nodes, 
                 num_terminal_NIs=self.num_terminal_NIs, 
-                num_filler_nodes=self.num_filler_nodes
+                num_filler_nodes=self.num_filler_nodes,
+                use_node_weights=self.use_node_weights,
+                anchor_boost=self.anchor_boost
                 )

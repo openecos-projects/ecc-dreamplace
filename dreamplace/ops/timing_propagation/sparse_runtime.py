@@ -83,6 +83,99 @@ class SparseTimingRuntime:
         self._dynamic_checks = torch.nonzero(
             self.schedule.legal & (self.schedule.check_index[:, 2] >= 0)
         ).flatten()
+        pin_to_clock_row = torch.full(
+            (timing.num_pins,), -1, dtype=torch.int64, device=timing.device
+        )
+        if timing.clock_pins is not None and timing.clock_pins.numel():
+            pin_to_clock_row[timing.clock_pins.long()] = torch.arange(
+                timing.clock_pins.numel(), dtype=torch.int64, device=timing.device
+            )
+        seed_pin_to_clock_row = pin_to_clock_row.clone()
+        level_arcs = getattr(timing, "flat_inst_arcs_by_level", None)
+        level_starts = getattr(timing, "flat_inst_arcs_by_level_start", None)
+        clock_arc_end = (
+            int(
+                level_starts[1].item()
+                if torch.is_tensor(level_starts)
+                else level_starts[1]
+            )
+            if level_starts is not None and len(level_starts) > 1
+            else 0
+        )
+        num_clk_rows = (
+            int(timing.clock_pins.numel())
+            if timing.clock_pins is not None
+            else 0
+        )
+        for is_level_arcs, candidate_arcs, width in (
+            (True, level_arcs, 8),
+            (False, getattr(timing, "inst_flat_arcs", None), None),
+        ):
+            if candidate_arcs is None or not candidate_arcs.numel():
+                continue
+            if candidate_arcs.ndim == 2 and candidate_arcs.shape[1] >= 2:
+                arcs_2d = candidate_arcs
+            elif (
+                width is not None
+                and candidate_arcs.ndim == 1
+                and candidate_arcs.numel() % width == 0
+            ):
+                arcs_2d = candidate_arcs.reshape(-1, width)
+            else:
+                continue
+            arc_from = arcs_2d[:, 0].long()
+            arc_to = arcs_2d[:, 1].long()
+            if is_level_arcs and clock_arc_end > 0:
+                end = min(clock_arc_end, int(arc_from.numel()))
+                from_row = torch.full_like(arc_from, -1)
+                clk_idx = arc_from[:end]
+                valid_clk_idx = (clk_idx >= 0) & (clk_idx < num_clk_rows)
+                from_row[:end] = torch.where(valid_clk_idx, clk_idx, -1)
+                if end < int(arc_from.numel()):
+                    tail = arc_from[end:]
+                    valid_pin = (tail >= 0) & (tail < timing.num_pins)
+                    safe_pin = tail.clamp(0, max(timing.num_pins - 1, 0))
+                    from_row[end:] = torch.where(
+                        valid_pin, pin_to_clock_row[safe_pin], -1
+                    )
+            else:
+                valid_pin = (arc_from >= 0) & (arc_from < timing.num_pins)
+                safe_pin = arc_from.clamp(0, max(timing.num_pins - 1, 0))
+                from_row = torch.where(valid_pin, pin_to_clock_row[safe_pin], -1)
+            valid_seq = (
+                (from_row >= 0)
+                & (arc_to >= 0)
+                & (arc_to < timing.num_pins)
+            )
+            if bool(valid_seq.any().item()):
+                dst_pins = arc_to[valid_seq]
+                unset_dst = seed_pin_to_clock_row[dst_pins] < 0
+                if bool(unset_dst.any().item()):
+                    seed_pin_to_clock_row[dst_pins[unset_dst]] = from_row[
+                        valid_seq
+                    ][unset_dst]
+        state_pins = self.schedule.state_pin.long()
+        self._state_clock_row = torch.where(
+            self.schedule.seed.any(dim=1),
+            seed_pin_to_clock_row[state_pins],
+            pin_to_clock_row[state_pins],
+        )
+        if (
+            self._dynamic_checks.numel()
+            and getattr(timing, "endpoints_timing_check_arcs", None) is not None
+            and timing.endpoints_timing_check_arcs.numel()
+        ):
+            dyn_arc_ids = self.schedule.check_index[self._dynamic_checks, 2].long()
+            dyn_arcs = timing.endpoints_timing_check_arcs.index_select(0, dyn_arc_ids)
+            self._dynamic_check_clock_row = pin_to_clock_row[dyn_arcs[:, 0].long()]
+            self._dynamic_check_clock_is_fall = dyn_arcs[:, 5] < 0
+        else:
+            self._dynamic_check_clock_row = torch.empty(
+                0, dtype=torch.int64, device=timing.device
+            )
+            self._dynamic_check_clock_is_fall = torch.empty(
+                0, dtype=torch.bool, device=timing.device
+            )
         timing.last_traversal_pruning_result = None
         timing.last_traversal_pruning_iteration = None
         timing.critical_endpoint_selector = None
@@ -102,6 +195,8 @@ class SparseTimingRuntime:
             for level in self.schedule.levels
         }
         self.last_result = None
+        self._active_smooth_extremum = False
+        self._active_extremum_tau_ps = 1.0
         self.net_provider = SparseNetProvider(timing, self.schedule)
 
     @property
@@ -260,13 +355,25 @@ class SparseTimingRuntime:
                         need_delays=bool(self._need_delays),
                         defer_target_queries=True,
                     )
+                smooth_cell = (
+                    True
+                    if self._active_smooth_extremum
+                    else (
+                        SMOOTH_MAX_ENABLED and not _force_hard_pairwise_max_enabled()
+                    )
+                )
+                alpha_cell = (
+                    1.0 / float(self._active_extremum_tau_ps)
+                    if self._active_smooth_extremum
+                    else SMOOTH_MAX_ALPHA
+                )
                 updates = _CellAat.apply(
                     selected,
                     *lanes,
                     *caps,
                     self._tables,
-                    SMOOTH_MAX_ENABLED and not _force_hard_pairwise_max_enabled(),
-                    SMOOTH_MAX_ALPHA,
+                    smooth_cell,
+                    alpha_cell,
                 )
                 return updates if self._need_delays else updates[:, :4]
             if action_context is not None:
@@ -310,7 +417,7 @@ class SparseTimingRuntime:
         self._active_stage_profiler.add("net_update_ms", started_at)
         return result
 
-    def _check_values(self, lanes):
+    def _check_values(self, lanes, *, clk_pin_tran=None, clk_pin_tran_mask=None):
         timing, model = self.timing, self.schedule
         dynamic = self._dynamic_checks
         checks = model.check_values.new_zeros(model.check_values.size(0))
@@ -319,6 +426,20 @@ class SparseTimingRuntime:
         indices = model.check_index[dynamic]
         slew = torch.stack(lanes[2:], dim=1)[indices[:, 0], indices[:, 3]]
         clock_slew = model.check_values[dynamic, 2]
+        if clk_pin_tran is not None and self._dynamic_check_clock_row.numel():
+            clk_rows = self._dynamic_check_clock_row
+            use_override = clk_rows >= 0
+            if clk_pin_tran_mask is not None:
+                safe_rows = clk_rows.clamp(min=0)
+                use_override = use_override & clk_pin_tran_mask[safe_rows]
+            if bool(use_override.any().item()):
+                safe_rows = clk_rows.clamp(min=0)
+                override_slew = torch.where(
+                    self._dynamic_check_clock_is_fall,
+                    clk_pin_tran[1][safe_rows],
+                    clk_pin_tran[0][safe_rows],
+                )
+                clock_slew = torch.where(use_override, override_slew, clock_slew)
         from .action_check_lut import action_check_values
 
         checks[dynamic] = action_check_values(
@@ -326,6 +447,88 @@ class SparseTimingRuntime:
             indices[:, 2], indices[:, 3], clock_slew, slew,
         )
         return checks
+
+    def _clock_override_inputs(
+        self,
+        *,
+        clk_pin_aat,
+        clk_pin_tran,
+        clk_pin_tran_mask,
+    ):
+        model = self.schedule
+        unreachable = torch.inf if model.early else -2e8
+        initial_arrivals = None
+        required_offset = None
+        seed_slew_override = None
+        clk_rows = self._state_clock_row
+        has_clk_state = clk_rows >= 0
+        safe_state_rows = clk_rows.clamp(min=0)
+        if clk_pin_aat is not None:
+            clk_r_aat, clk_f_aat = clk_pin_aat
+            clk_r_aat = clk_r_aat.to(
+                device=model.reference.device, dtype=model.reference.dtype
+            )
+            clk_f_aat = clk_f_aat.to(
+                device=model.reference.device, dtype=model.reference.dtype
+            )
+            base_arr = tuple(
+                torch.where(
+                    model.seed[:, lane],
+                    model.reference[:, lane]
+                    + torch.where(
+                        has_clk_state,
+                        (clk_r_aat if lane == 0 else clk_f_aat)[safe_state_rows],
+                        0.0,
+                    ),
+                    model.reference.new_full((), unreachable),
+                )
+                for lane in range(2)
+            )
+            initial_arrivals = torch.stack(base_arr)
+            if self._dynamic_checks.numel() and self._dynamic_check_clock_row.numel():
+                dyn_clk_rows = self._dynamic_check_clock_row
+                valid_dyn = dyn_clk_rows >= 0
+                if bool(valid_dyn.any().item()):
+                    safe_dyn = dyn_clk_rows.clamp(min=0)
+                    dyn_offset = torch.where(
+                        valid_dyn,
+                        torch.where(
+                            self._dynamic_check_clock_is_fall,
+                            clk_f_aat[safe_dyn],
+                            clk_r_aat[safe_dyn],
+                        ),
+                        0.0,
+                    ).to(dtype=model.check_values.dtype)
+                    required_offset = model.check_values.new_zeros(
+                        model.check_values.size(0)
+                    )
+                    required_offset = required_offset.index_copy(
+                        0, self._dynamic_checks, dyn_offset
+                    )
+        if clk_pin_tran is not None:
+            clk_rtran, clk_ftran = clk_pin_tran
+            clk_rtran = clk_rtran.to(
+                device=model.reference.device, dtype=model.reference.dtype
+            )
+            clk_ftran = clk_ftran.to(
+                device=model.reference.device, dtype=model.reference.dtype
+            )
+            override_mask = has_clk_state
+            if clk_pin_tran_mask is not None:
+                override_mask = override_mask & clk_pin_tran_mask[safe_state_rows]
+            seed_slew_override = (
+                torch.where(
+                    override_mask,
+                    clk_rtran[safe_state_rows],
+                    model.reference[:, 2],
+                ),
+                torch.where(
+                    override_mask,
+                    clk_ftran[safe_state_rows],
+                    model.reference[:, 3],
+                ),
+            )
+        return initial_arrivals, seed_slew_override, required_offset
 
     def forward(
         self,
@@ -336,6 +539,13 @@ class SparseTimingRuntime:
         surrogate_flags,
         dynamic_net_provider,
         surrogate_mode,
+        clk_pin_aat=None,
+        clk_pin_tran=None,
+        clk_pin_tran_mask=None,
+        smooth_extremum: bool = False,
+        extremum_tau_ps: float = 1.0,
+        at_merge_temperature=None,
+        endpoint_zero_tau_ps=None,
     ):
         timing, model = self.timing, self.schedule
         started = timing._sync_profile_clock()
@@ -345,13 +555,34 @@ class SparseTimingRuntime:
         self._surrogate_flags = surrogate_flags
         self._tables = _tables(timing)
         snapshot_requested = bool(timing._critical_path_snapshot_requested)
+        pin_slack_requested = bool(
+            getattr(timing, "_request_pin_slack_snapshot", False)
+        )
         self._need_delays = (
-            snapshot_requested or not timing._skip_full_rat_propagation_in_fast_loop()
+            snapshot_requested
+            or pin_slack_requested
+            or not timing._skip_full_rat_propagation_in_fast_loop()
         )
         if snapshot_requested and timing._critical_path_snapshot is not None:
             raise RuntimeError("critical path snapshot was captured more than once")
         trace = [] if self._need_delays else None
-        arrival_plan, initial_arrivals = self._arrival_selection()
+        seed_slew_override = None
+        required_offset = None
+        if clk_pin_aat is not None or clk_pin_tran is not None:
+            arrival_plan = None
+            (
+                initial_arrivals,
+                seed_slew_override,
+                required_offset,
+            ) = self._clock_override_inputs(
+                clk_pin_aat=clk_pin_aat,
+                clk_pin_tran=clk_pin_tran,
+                clk_pin_tran_mask=clk_pin_tran_mask,
+            )
+        elif smooth_extremum:
+            arrival_plan, initial_arrivals = None, None
+        else:
+            arrival_plan, initial_arrivals = self._arrival_selection()
         profiler.mark("arrival_selection_ms")
         self.net_provider.bind(dynamic_net_provider)
         profiler.mark("net_provider_bind_ms")
@@ -364,14 +595,29 @@ class SparseTimingRuntime:
         self._active_stage_profiler = profiler if profiler.enabled else None
         action_context = getattr(timing, "_active_discrete_action_context", None)
         model.discrete_action_context = action_context
+        eff_smooth = (
+            True
+            if smooth_extremum
+            else (timing.timing_aggregation_mode == "smooth")
+        )
+        eff_tau_ps = (
+            float(extremum_tau_ps)
+            if smooth_extremum
+            else float(timing.timing_aggregation_tau_ps)
+        )
+        self._active_smooth_extremum = bool(smooth_extremum)
+        self._active_extremum_tau_ps = eff_tau_ps
         try:
             lanes = model.propagate(
                 (),
                 caps,
                 delays,
                 impulses,
-                smooth=timing.timing_aggregation_mode == "smooth",
-                tau_ps=timing.timing_aggregation_tau_ps,
+                smooth=eff_smooth,
+                tau_ps=eff_tau_ps,
+                at_merge_temperature=(
+                    at_merge_temperature if smooth_extremum else None
+                ),
                 cell_updates=(
                     self._profiled_cell_updates
                     if profiler.enabled
@@ -385,8 +631,10 @@ class SparseTimingRuntime:
                 trace=trace,
                 arrival_plan=arrival_plan,
                 initial_arrivals=initial_arrivals,
+                seed_slew_override=seed_slew_override,
             )
         finally:
+            self._active_smooth_extremum = False
             self._active_stage_profiler = None
             model.discrete_action_context = None
         profiler.mark("schedule_propagate_ms")
@@ -401,7 +649,33 @@ class SparseTimingRuntime:
                 base_pin_net_delay_fall=delays[1],
             )
         profiler.mark("dynamic_provider_ms")
-        result = model.reduce_endpoints(lanes, self._check_values(lanes))
+        result = model.reduce_endpoints(
+            lanes,
+            self._check_values(
+                lanes,
+                clk_pin_tran=clk_pin_tran,
+                clk_pin_tran_mask=clk_pin_tran_mask,
+            ),
+            required_offset=required_offset,
+            smooth_extremum=bool(smooth_extremum),
+            smooth_tau_ps=(eff_tau_ps if smooth_extremum else None),
+        )
+        if smooth_extremum and result.soft_endpoint_slack is not None:
+            soft_slack = result.soft_endpoint_slack
+            finite_mask = torch.isfinite(soft_slack)
+            if bool(finite_mask.any().item()):
+                safe_soft = soft_slack[finite_mask]
+                ep_zero_tau = (
+                    eff_tau_ps
+                    if endpoint_zero_tau_ps is None
+                    else max(1e-6, float(endpoint_zero_tau_ps))
+                )
+                timing.last_soft_tns_loss = (
+                    ep_zero_tau
+                    * torch.nn.functional.softplus(-safe_soft / ep_zero_tau)
+                ).sum()
+            else:
+                timing.last_soft_tns_loss = result.lanes[0].sum() * 0.0
         profiler.mark("endpoint_reduce_ms")
         self.last_result = result
         if snapshot_requested:
@@ -413,6 +687,11 @@ class SparseTimingRuntime:
                 endpoint_slack=result.endpoint_slack.detach(),
                 wns=result.wns.detach(),
                 tns=result.tns.detach(),
+                soft_endpoint_slack=(
+                    None
+                    if result.soft_endpoint_slack is None
+                    else result.soft_endpoint_slack.detach()
+                ),
             )
             timing._critical_path_snapshot = SparseTimingSnapshot(
                 detached,
@@ -422,7 +701,10 @@ class SparseTimingRuntime:
                 self.view.semantic_digest,
             )
         profiler.mark("snapshot_ms")
-        full_rat = not timing._skip_full_rat_propagation_in_fast_loop()
+        full_rat = (
+            pin_slack_requested
+            or not timing._skip_full_rat_propagation_in_fast_loop()
+        )
         state_required = (
             propagate_required(timing, model, result, trace) if full_rat else None
         )

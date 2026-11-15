@@ -41,6 +41,10 @@ def diff_tdp_uses_direct_loss(params):
     return timing_placement_carrier(params) == "direct_loss"
 
 
+def diff_tdp_uses_star_pin_pair(params):
+    return timing_placement_carrier(params) == "star_pin_pair"
+
+
 def diff_tdp_uses_gradient_net_weight(params):
     return timing_placement_carrier(params) == "gradient_net_weight"
 

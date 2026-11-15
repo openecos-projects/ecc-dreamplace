@@ -4,7 +4,7 @@
 import time
 from dataclasses import dataclass
 import torch
-from typing import Callable
+from typing import Callable, Optional
 import logging
 from dataclasses import replace
 from dreamplace.flows.gp import l_shape_iteration, topology_refresh as timing_iteration
@@ -161,14 +161,41 @@ class TimingIterationContext:
     refresh_topology: Callable
     carrier: Callable
     reset_weights: Callable
+    uses_star_pin_pair: Callable = lambda _params: False
+    refresh_star_snapshot: Optional[Callable] = None
 
 def update_gate(context, params, placedb, model, pos, iteration,
                 diff_tdp_gate_status, joint_step):
+    star_rt = getattr(model, "star_tdp_runtime", None)
+    if star_rt is not None and context.uses_star_pin_pair(params):
+        star_rt.record_outer_step(
+            iteration=iteration,
+            overflow=diff_tdp_gate_status.get("overflow"),
+        )
+    star_needs_bootstrap = (
+        context.enabled(params)
+        and context.uses_star_pin_pair(params)
+        and context.refresh_star_snapshot is not None
+        and bool(diff_tdp_gate_status.get("timing_objective_active", False))
+        and star_rt is not None
+        and (star_rt.snapshot_generation == 0 or star_rt.geometry_dirty)
+    )
     if (
         context.enabled(params)
-        and diff_tdp_gate_status["topology_refresh_due"]
+        and (diff_tdp_gate_status["topology_refresh_due"] or star_needs_bootstrap)
     ):
-        if context.uses_net_weight(params):
+        if context.uses_star_pin_pair(params) and context.refresh_star_snapshot is not None:
+            context.refresh_star_snapshot(
+                params,
+                placedb,
+                model,
+                pos,
+                iteration=iteration,
+                gate_status=diff_tdp_gate_status,
+                topology_prepared=joint_step.topology_prepared,
+            )
+            model.use_timing_obj = False
+        elif context.uses_net_weight(params):
             context.project_weights(
                 params,
                 placedb,
@@ -201,6 +228,8 @@ def update_gate(context, params, placedb, model, pos, iteration,
         context.enabled(params)
         and not diff_tdp_gate_status["timing_objective_active"]
     ):
+        if star_rt is not None and context.uses_star_pin_pair(params):
+            star_rt.set_gate_active(False)
         context.reset_weights(
             params,
             placedb,

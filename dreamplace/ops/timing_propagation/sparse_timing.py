@@ -12,7 +12,7 @@ import torch
 from .cell_aat_native import _CellAat
 from .hard_scatter_native import scatter_slew_max
 from .net_aat_native import _NetAat
-from .timing_lanes_native import _TimingLanes
+from .timing_lanes_native import _DriftTimingLanes, _TimingLanes
 
 
 @dataclass(frozen=True)
@@ -264,6 +264,7 @@ class SparseTimingResult:
     endpoint_slack: torch.Tensor
     wns: torch.Tensor
     tns: torch.Tensor
+    soft_endpoint_slack: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -448,6 +449,8 @@ class SparseTimingSchedule:
         arrival_plan=None,
         initial_arrivals=None,
         initial_slew=None,
+        seed_slew_override=None,
+        at_merge_temperature=None,
     ):
         """Return state lanes; caps/delays/impulses stay in physical pin domain.
 
@@ -463,8 +466,20 @@ class SparseTimingSchedule:
             sign = -1 if self.early else 1
             return sign * scatter_slew_max(sign * dest, index, sign * src)
 
-        def merge(index, *values):
+        def merge(index, merge_key, *values):
             sign = -1 if self.early else 1
+            if at_merge_temperature is not None and smooth:
+                return tuple(
+                    sign * value
+                    for value in _DriftTimingLanes.apply(
+                        index,
+                        tau_ps,
+                        at_merge_temperature,
+                        merge_key,
+                        self.early,
+                        *(sign * value for value in values),
+                    )
+                )
             return tuple(
                 sign * value
                 for value in _TimingLanes.apply(
@@ -475,7 +490,11 @@ class SparseTimingSchedule:
         lanes = tuple(
             torch.where(
                 self.seed[:, lane % 2],
-                self.reference[:, lane],
+                (
+                    seed_slew_override[lane - 2]
+                    if seed_slew_override is not None and lane >= 2
+                    else self.reference[:, lane]
+                ),
                 self.reference.new_full((), unreachable if lane < 2 else empty_slew),
             )
             for lane in range(4)
@@ -543,6 +562,7 @@ class SparseTimingSchedule:
                     rows = slice(None) if arrival_plan is None else arrival_plan[level_index][0]
                     lanes = merge(
                         arrival_cell[rows, 1],
+                        ("cell_aat", level_index),
                         *lanes,
                         *(arrival_updates[rows, lane] for lane in range(4)),
                     )
@@ -615,6 +635,7 @@ class SparseTimingSchedule:
                 rows = slice(None) if arrival_plan is None else arrival_plan[level_index][1]
                 lanes = merge(
                     net[rows, 1],
+                    ("net_aat", level_index),
                     *lanes,
                     *(value[rows] for value in updates),
                 )
@@ -649,7 +670,15 @@ class SparseTimingSchedule:
             *physical_slew.index_select(1, self.state_slew_group).unbind(),
         )
 
-    def reduce_endpoints(self, lanes, check_lut_values):
+    def reduce_endpoints(
+        self,
+        lanes,
+        check_lut_values,
+        *,
+        required_offset=None,
+        smooth_extremum=False,
+        smooth_tau_ps=None,
+    ):
         """Consume native affine rules and dynamic setup/recovery LUT values.
 
         check_lut_values is one value per exported candidate, including zeros
@@ -658,9 +687,14 @@ class SparseTimingSchedule:
         if check_lut_values.shape != self.check_values[:, 0].shape:
             raise ValueError("sparse check LUT values do not align with native rules")
         required = self.check_values[:, 0] + self.check_values[:, 1] * check_lut_values
+        if required_offset is not None:
+            required = required + required_offset
         arrivals = torch.stack(lanes[:2], dim=1)[self.check_state, self.check_transition]
         slack = required[self.legal] - arrivals
-        if self.aggregation_mode == "smooth":
+
+        def _lse_violation(tau_val: float):
+            if self.endpoint_pins.numel() == 0:
+                return slack.new_empty(0)
             endpoint_ids = self.check_to_endpoint.long()
             maximum = slack.new_full((self.endpoint_pins.numel(),), -torch.inf)
             maximum.scatter_reduce_(
@@ -670,10 +704,13 @@ class SparseTimingSchedule:
                 reduce="amax",
                 include_self=False,
             )
-            shifted = torch.exp((-slack - maximum[endpoint_ids]) / self.aggregation_tau_ps)
+            shifted = torch.exp((-slack - maximum[endpoint_ids]) / tau_val)
             total = slack.new_zeros(self.endpoint_pins.numel())
             total.index_add_(0, endpoint_ids, shifted)
-            maximum_violation = maximum + self.aggregation_tau_ps * torch.log(total)
+            return maximum + tau_val * torch.log(total)
+
+        if self.aggregation_mode == "smooth":
+            maximum_violation = _lse_violation(self.aggregation_tau_ps)
         else:
             maximum_violation = scatter_slew_max(
                 slack.new_full((self.endpoint_pins.numel(),), -2e8),
@@ -682,9 +719,28 @@ class SparseTimingSchedule:
                 include_self=True,
             )
         endpoint_slack = -maximum_violation
+        soft_endpoint_slack = None
+        if smooth_extremum:
+            eff_tau = float(
+                self.aggregation_tau_ps if smooth_tau_ps is None else smooth_tau_ps
+            )
+            if (
+                self.aggregation_mode == "smooth"
+                and abs(eff_tau - self.aggregation_tau_ps) <= 1e-9
+            ):
+                soft_endpoint_slack = endpoint_slack
+            else:
+                soft_endpoint_slack = -_lse_violation(eff_tau)
         zero = lanes[0].sum() * 0
         wns = torch.minimum(endpoint_slack.min(), zero) if endpoint_slack.numel() else zero
         tns = torch.clamp(endpoint_slack, max=0).sum()
         return SparseTimingResult(
-            lanes, required, slack, self.endpoint_pins, endpoint_slack, wns, tns
+            lanes,
+            required,
+            slack,
+            self.endpoint_pins,
+            endpoint_slack,
+            wns,
+            tns,
+            soft_endpoint_slack=soft_endpoint_slack,
         )

@@ -85,6 +85,33 @@ class NesterovAcceleratedGradientOptimizer(Optimizer):
             step_size = torch.clamp(step_size, min=0.0, max=float(self.max_step_size))
         return step_size
 
+    def _star_tdp_runtime(self):
+        owner = getattr(self.obj_and_grad_fn, "__self__", None)
+        return getattr(owner, "star_tdp_runtime", None)
+
+    def _run_with_star_step_context(self, step_fn, closure=None):
+        star_rt = self._star_tdp_runtime()
+        if star_rt is None or getattr(self, "_in_star_step_context", False):
+            return step_fn(closure)
+        group = self.param_groups[0]
+        params = group.get("params", [])
+        if not params:
+            return step_fn(closure)
+        alpha_start = (
+            float(group["alpha_k"][0].detach().item())
+            if group.get("alpha_k")
+            else float(group.get("lr", 1.0))
+        )
+        self._in_star_step_context = True
+        star_rt.begin_nesterov_step(params[0], alpha_start)
+        try:
+            return step_fn(closure)
+        finally:
+            u_next = group["u_k"][0] if group.get("u_k") else None
+            v_next = group["v_k"][0].data if group.get("v_k") else None
+            star_rt.end_nesterov_step(u_next, v_next)
+            self._in_star_step_context = False
+
     def rebase_objective_state(self, *, reason):
         """Re-anchor objective history at the live parameter position."""
         invalidated_fields = (
@@ -97,6 +124,10 @@ class NesterovAcceleratedGradientOptimizer(Optimizer):
             "obj_k_1",
             "v_kp1",
         )
+        star_rt = self._star_tdp_runtime()
+        if star_rt is not None:
+            star_rt.transport_state["carried"] = None
+            star_rt.transport_state["last"] = None
         parameter_count = 0
         obj_eval_count = 0
         for group in self.param_groups:
@@ -110,6 +141,7 @@ class NesterovAcceleratedGradientOptimizer(Optimizer):
             group["v_k"] = parameters
             for field in invalidated_fields:
                 group[field] = []
+            group["star_driver_signature"] = []
             group["v_kp1"] = [None] * len(parameters)
             for parameter in parameters:
                 if parameter.grad is None:
@@ -153,19 +185,24 @@ class NesterovAcceleratedGradientOptimizer(Optimizer):
 
     def step(self, closure=None):
         if self.use_bb:
-            self.step_bb(closure)
+            return self._run_with_star_step_context(self.step_bb, closure)
         else:
-            self.step_nobb(closure)
+            return self._run_with_star_step_context(self.step_nobb, closure)
 
     def step_nobb(self, closure=None):
         """
         @brief Performs a single optimization step.
         @param closure A callable closure function that reevaluates the model and returns the loss.
         """
+        if self._star_tdp_runtime() is not None and not getattr(
+            self, "_in_star_step_context", False
+        ):
+            return self._run_with_star_step_context(self.step_nobb, closure)
         loss = None
         if closure is not None:
             loss = closure()
 
+        star_rt = self._star_tdp_runtime()
         for group in self.param_groups:
             obj_and_grad_fn = self.obj_and_grad_fn
             constraint_fn = self.constraint_fn
@@ -177,14 +214,29 @@ class NesterovAcceleratedGradientOptimizer(Optimizer):
                 if not group['v_k']:
                     # Directly use p as v_k to save memory.
                     group['v_k'].append(p)
+                freshly_initialized_gk = False
                 if not group['g_k']:
                     obj, grad = obj_and_grad_fn(group['v_k'][i])
                     group['g_k'].append(grad.data.clone())  # must clone
                     group['obj_k'].append(obj.data.clone())
+                    freshly_initialized_gk = True
                 u_k = group['u_k'][i]
                 v_k = group['v_k'][i]
                 g_k = group['g_k'][i]
                 obj_k = group['obj_k'][i]
+                if star_rt is not None:
+                    sigs = group.setdefault('star_driver_signature', [])
+                    while len(sigs) <= i:
+                        sigs.append(None)
+                    cur_sig = star_rt.driver_signature
+                    if freshly_initialized_gk:
+                        sigs[i] = cur_sig
+                    elif star_rt.refresh_nesterov_driver and sigs[i] != cur_sig:
+                        fresh_obj, fresh_grad = obj_and_grad_fn(v_k)
+                        g_k.data.copy_(fresh_grad.data)
+                        obj_k.data.copy_(fresh_obj.data)
+                        sigs[i] = cur_sig
+                        group['obj_eval_count'] += 1
                 if not group['a_k']:
                     group['a_k'].append(torch.ones(
                         1, dtype=g_k.dtype, device=g_k.device))
@@ -261,6 +313,8 @@ class NesterovAcceleratedGradientOptimizer(Optimizer):
                 g_k.data.copy_(g_kp1.data)
                 obj_k.data.copy_(f_kp1.data)
                 a_k.data.copy_(a_kp1.data)
+                if star_rt is not None:
+                    group['star_driver_signature'][i] = star_rt.driver_signature
 
                 # although the solution should be u_k
                 # we need the gradient of v_k
@@ -275,6 +329,10 @@ class NesterovAcceleratedGradientOptimizer(Optimizer):
         @brief Performs a single optimization step.
         @param closure A callable closure function that reevaluates the model and returns the loss.
         """
+        if self._star_tdp_runtime() is not None and not getattr(
+            self, "_in_star_step_context", False
+        ):
+            return self._run_with_star_step_context(self.step_bb, closure)
         loss = None
         if closure is not None:
             loss = closure()

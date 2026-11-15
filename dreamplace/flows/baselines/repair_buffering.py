@@ -482,6 +482,9 @@ def reenter_after_repair_buffering(placer, params, placedb):
     from dreamplace.ops.placeio_ecc.timing_carrier import refresh_python_timing_carrier
     from dreamplace.ops.routability.gpugr_context import write_back_movable_lpos
 
+    export_d_map = getattr(placer, "export_d_metric_movable_map", None)
+    if callable(export_d_map):
+        placedb._carried_d_metric_movable_map = export_d_map(params, placedb)
     write_back_movable_lpos(placer.pos[0], params, placedb)
     snapshot = placer.pos[0].detach().cpu().numpy().tobytes()
     stage = run_repair_buffering_stage(

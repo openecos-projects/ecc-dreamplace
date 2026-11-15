@@ -398,9 +398,9 @@ def configure_timing_placement_carrier(params):
         return
     if not getattr(params, "global_place_flag", True):
         return
-    if carrier not in {"direct_loss", "pin2pin", "gradient_net_weight"}:
+    if carrier not in {"direct_loss", "star_pin_pair", "pin2pin", "gradient_net_weight"}:
         raise ValueError(
-            "timing_placement_carrier must be direct_loss, pin2pin, or gradient_net_weight"
+            "timing_placement_carrier must be direct_loss, star_pin_pair, pin2pin, or gradient_net_weight"
         )
     if carrier == "gradient_net_weight":
         return
@@ -417,6 +417,60 @@ def configure_timing_placement_carrier(params):
     for name, value in controls.items():
         setattr(params, name, value)
         setattr(params, f"_{name}_explicit", True)
+    if carrier == "star_pin_pair":
+        star_defaults = {
+            "star_load_geometry": "wa_net",
+            "star_recal_m_eff_scale_fix": 1,
+            "star_restart_history_mode": "selective_sigmoid",
+            "star_restart_beta_tau_mode": "drift",
+            "star_restart_beta_tau_scale": 1.0,
+            "star_restart_beta_min_tau_ps": 1.0,
+            "star_restart_beta_fixed_tau_ps": 40.0,
+            "star_kappa_recalibrate_on_restart": 1,
+            "star_post_restart_max_kappa": 0.20,
+            "star_endpoint_slack_tau_mode": "post_restart_drift",
+            "star_endpoint_slack_tau_scale": 1.0,
+            "macro_exclusion_field_flag": 1,
+            "macro_exclusion_ov_start": 0.2,
+            "macro_exclusion_ov_full": 0.085,
+            "macro_exclusion_beta_max": 1.1,
+            "macro_exclusion_bg_wl_scale": 0.0,
+            "macro_exclusion_wl_gate_scale": 0.35,
+            "macro_exclusion_warmup_iters": 110,
+            "macro_exclusion_ramp_iters": 40,
+            "macro_exclusion_collar_rows": 1.0,
+            "macro_exclusion_distance_blend": 0.15,
+            "macro_exclusion_profile_mode": "tent_rim",
+            "macro_exclusion_ridge_smooth_rows": 3.0,
+            "macro_exclusion_slack_gate_mode": "kappa_evac",
+            "macro_exclusion_slack_margin_ps": 300.0,
+            "macro_exclusion_slack_tau_ps": 100.0,
+            "macro_exclusion_depth_ps_per_um": 2.5,
+            "macro_exclusion_crit_wl_scale": 0.65,
+            "macro_exclusion_ratchet_decay": 1.0,
+            "macro_exclusion_kappa_slack": 1.0,
+            "macro_exclusion_row_margin": 5.0,
+            "macro_exclusion_force_mode": "scalar",
+            "macro_exclusion_escape_slope_mode": "global",
+            "macro_exclusion_gate_release_mode": "ratchet",
+            "macro_exclusion_hyst_kappa_band": 0.75,
+            "macro_exclusion_interior_evac_boost": 0.50,
+            "star_input_history_reference_interval": 0.0,
+            "star_satisfied_release_mode": "off",
+            "star_satisfied_release_threshold_ps": 60.0,
+            "star_satisfied_release_band_ps": 140.0,
+            "star_satisfied_release_tau_mult": 2.0,
+            "star_satisfied_release_half_life": 45.0,
+            "timing_at_merge_vjp_tau_step_norm": 0,
+            "timing_at_merge_vjp_tau_min_horizon_steps": 0.0,
+            "timing_at_merge_vjp_tau_leg_floor_rows": 0.0,
+            "d_metric_legalize_flag": 1,
+            "d_metric_legalize_anchor_boost": 0.5,
+            "d_metric_legalize_max_weight": 64.0,
+        }
+        for name, value in star_defaults.items():
+            if not hasattr(params, name):
+                setattr(params, name, value)
 
 
 def configure_gr_sizing(params):

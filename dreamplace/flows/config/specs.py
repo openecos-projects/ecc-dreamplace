@@ -430,6 +430,13 @@ def configure_timing_placement_carrier(params):
             "star_post_restart_max_kappa": 0.20,
             "star_endpoint_slack_tau_mode": "post_restart_drift",
             "star_endpoint_slack_tau_scale": 1.0,
+            "star_momentum_transport_envelope": 0.0,
+            "star_momentum_transport_timing": (
+                0
+                if float(getattr(params, "star_momentum_transport_envelope", 0.0) or 0.0)
+                >= 1.0
+                else 1
+            ),
             "macro_exclusion_field_flag": 1,
             "macro_exclusion_ov_start": 0.2,
             "macro_exclusion_ov_full": 0.085,

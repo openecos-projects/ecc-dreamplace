@@ -40,6 +40,7 @@ from dreamplace.ops.star_pin_pair import (
     pair_delay_adjoint_from_pin_grads,
     rowsum_hessian,
     summarize_drift_tau_history,
+    timing_transport_factor,
     transport_momentum,
 )
 from dreamplace.ops.star_pin_pair.rc_calibration import (
@@ -341,8 +342,15 @@ class StarTdpRuntime:
             getattr(params, "star_rowsum_full_linear_slope", 1)
         )
         self.momentum_transport_envelope = float(
-            getattr(params, "star_momentum_transport_envelope", 1.05) or 0.0
+            getattr(params, "star_momentum_transport_envelope", 0.0) or 0.0
         )
+        raw_transport_timing = getattr(params, "star_momentum_transport_timing", None)
+        if self.momentum_transport_envelope >= 1.0:
+            self.momentum_transport_timing = False
+        elif raw_transport_timing is None:
+            self.momentum_transport_timing = True
+        else:
+            self.momentum_transport_timing = bool(int(raw_transport_timing))
         self.refresh_nesterov_driver = bool(
             getattr(params, "star_refresh_nesterov_state", 1)
         )
@@ -557,9 +565,14 @@ class StarTdpRuntime:
         self._pending_recal_m_eff = 1.0
 
         self.step_context: Optional[Dict[str, object]] = None
-        self.transport_state: Dict[str, Optional[torch.Tensor]] = {
+        self._step_alpha_start: Optional[float] = None
+        self.transport_state: Dict[str, Any] = {
             "last": None,
             "carried": None,
+            "base": None,
+            "timing": None,
+            "terms": None,
+            "carried_terms": None,
         }
         self._current_outer_iteration = 0
         self._current_outer_overflow: Optional[float] = None
@@ -804,9 +817,16 @@ class StarTdpRuntime:
             min_tau_ps=self.extremum_tau_ps,
         )
 
-    def _prepare_restart_transition(self, *, recalibrate_kappa: bool) -> None:
+    def _reset_transport_state(self) -> None:
         self.transport_state["last"] = None
         self.transport_state["carried"] = None
+        self.transport_state["base"] = None
+        self.transport_state["timing"] = None
+        self.transport_state["terms"] = None
+        self.transport_state["carried_terms"] = None
+
+    def _prepare_restart_transition(self, *, recalibrate_kappa: bool) -> None:
+        self._reset_transport_state()
         self.data_rc_cal_state = None
         self.clock_rc_cal_state = None
         self.rc_next_overflow = None
@@ -1123,8 +1143,7 @@ class StarTdpRuntime:
         was_active = bool(self.gate_active)
         self.gate_active = bool(active)
         if not self.gate_active:
-            self.transport_state["last"] = None
-            self.transport_state["carried"] = None
+            self._reset_transport_state()
             if was_active:
                 self._prepare_restart_transition(
                     recalibrate_kappa=bool(
@@ -2951,19 +2970,51 @@ class StarTdpRuntime:
             self.last_timing_curvature_2n = h_timing * alpha
             return h_total * alpha
 
-    def record_precondition_diagonal(self, precond_2n: torch.Tensor) -> None:
-        if self.momentum_transport_envelope >= 1.0 and (
-            self.is_objective_active or self.is_macro_field_active
-        ):
+    def record_precondition_base_only(self, base_1n: torch.Tensor) -> None:
+        if not (self.momentum_transport_timing or self.momentum_transport_envelope >= 1.0):
+            return
+        base_flat = torch.cat((base_1n, base_1n), dim=0).detach()
+        if self.momentum_transport_envelope >= 1.0:
+            self.transport_state["last"] = base_flat.clamp(min=1.0).clone()
+        if self.momentum_transport_timing:
+            self.transport_state["base"] = base_flat.clone()
+            self.transport_state["timing"] = torch.zeros_like(base_flat)
+
+    def record_precondition_diagonal(
+        self,
+        precond_2n: torch.Tensor,
+        *,
+        base_1n: Optional[torch.Tensor] = None,
+        curv_2n: Optional[torch.Tensor] = None,
+    ) -> None:
+        if not (self.is_objective_active or self.is_macro_field_active):
+            return
+        if self.momentum_transport_envelope >= 1.0 or self.momentum_transport_timing:
             self.transport_state["last"] = precond_2n.reshape(-1).detach().clone()
+        if self.momentum_transport_timing and base_1n is not None and curv_2n is not None:
+            base_flat = torch.cat((base_1n, base_1n), dim=0).detach().clone()
+            curv_flat = (
+                curv_2n.to(device=base_flat.device, dtype=base_flat.dtype)
+                .reshape(-1)
+                .detach()
+                .clone()
+            )
+            self.transport_state["base"] = base_flat
+            self.transport_state["timing"] = curv_flat
 
     def begin_nesterov_step(self, position: torch.Tensor, alpha_start: float) -> None:
+        clean_alpha = (
+            float(alpha_start)
+            if math.isfinite(alpha_start) and alpha_start > 0.0
+            else 1.0
+        )
+        self._step_alpha_start = clean_alpha
         if not (self.is_objective_active or self.is_macro_field_active):
             self.step_context = None
             return
         self.step_context = {
             "position": position.detach().clone(),
-            "alpha": float(alpha_start) if math.isfinite(alpha_start) and alpha_start > 0 else 1.0,
+            "alpha": clean_alpha,
             "timing_hessian": None,
             "hessian": None,
         }
@@ -2971,29 +3022,66 @@ class StarTdpRuntime:
     def end_nesterov_step(
         self, u_next: Optional[torch.Tensor], v_next: Optional[torch.Tensor]
     ) -> None:
+        alpha_start = self._step_alpha_start
         self.step_context = None
-        if self.momentum_transport_envelope < 1.0 or not (
-            self.is_objective_active or self.is_macro_field_active
-        ):
-            self.transport_state["carried"] = None
-            self.transport_state["last"] = None
+        self._step_alpha_start = None
+        if not (self.momentum_transport_timing or self.momentum_transport_envelope >= 1.0):
+            self._reset_transport_state()
             return
-        last = self.transport_state.get("last")
-        carried = self.transport_state.get("carried")
         if (
-            last is not None
-            and carried is not None
-            and u_next is not None
-            and v_next is not None
-            and carried.shape == last.shape
-            and last.numel() == u_next.numel()
+            self.momentum_transport_timing
+            and alpha_start is not None
+            and self.transport_state.get("base") is not None
+            and self.transport_state.get("timing") is not None
         ):
-            with torch.no_grad():
-                transport_momentum(
-                    u_next,
-                    v_next,
-                    carried,
-                    last,
-                    self.momentum_transport_envelope,
+            self.transport_state["terms"] = (
+                self.transport_state["base"],
+                self.transport_state["timing"],
+                float(alpha_start),
+            )
+        if self.is_objective_active or self.is_macro_field_active:
+            if self.momentum_transport_envelope >= 1.0:
+                last = self.transport_state.get("last")
+                carried = self.transport_state.get("carried")
+                if (
+                    last is not None
+                    and carried is not None
+                    and u_next is not None
+                    and v_next is not None
+                    and carried.shape == last.shape
+                    and last.numel() == u_next.numel()
+                ):
+                    with torch.no_grad():
+                        transport_momentum(
+                            u_next,
+                            v_next,
+                            carried,
+                            last,
+                            self.momentum_transport_envelope,
+                        )
+            if (
+                self.momentum_transport_timing
+                and self.transport_state.get("carried_terms") is not None
+                and self.transport_state.get("terms") is not None
+                and u_next is not None
+                and v_next is not None
+            ):
+                (base_used, timing_used, alpha_used), (_, timing_next, alpha_next) = (
+                    self.transport_state["carried_terms"],
+                    self.transport_state["terms"],
                 )
-        self.transport_state["carried"] = last
+                if base_used.numel() == u_next.numel() and timing_next.numel() == u_next.numel():
+                    with torch.no_grad():
+                        factor = timing_transport_factor(
+                            base_used,
+                            timing_used,
+                            alpha_used,
+                            timing_next,
+                            alpha_next,
+                        )
+                        if bool((factor < 1).any()):
+                            u_next.copy_(
+                                v_next - factor.to(u_next.dtype) * (v_next - u_next)
+                            )
+        self.transport_state["carried"] = self.transport_state.get("last")
+        self.transport_state["carried_terms"] = self.transport_state.get("terms")

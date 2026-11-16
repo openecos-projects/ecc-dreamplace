@@ -873,8 +873,19 @@ class PreconditionOp:
                     precond.unsqueeze(0)
                     + curv_2n.to(device=precond.device, dtype=precond.dtype)
                 ).clamp(min=1.0)
-                star_rt.record_precondition_diagonal(precond_2n)
+                try:
+                    star_rt.record_precondition_diagonal(
+                        precond_2n,
+                        base_1n=precond,
+                        curv_2n=curv_2n,
+                    )
+                except TypeError:
+                    star_rt.record_precondition_diagonal(precond_2n)
                 return precond_2n
+        if star_rt is not None and getattr(star_rt, "curvature_precondition_enabled", False):
+            record_base_fn = getattr(star_rt, "record_precondition_base_only", None)
+            if callable(record_base_fn):
+                record_base_fn(precond)
         return precond.clamp(min=1.0)
 
     def _apply_precondition_to_grad(

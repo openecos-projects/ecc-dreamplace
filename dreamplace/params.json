@@ -1445,8 +1445,12 @@
         "default": 1
     },
     "star_momentum_transport_envelope": {
-        "description": "Nesterov velocity damping envelope when 2N precondition diagonal grows (> 1 enables, 0 disables)",
-        "default": 1.05
+        "description": "legacy Nesterov velocity damping envelope when 2N precondition diagonal grows (> 1 enables, 0 disables in favor of star_momentum_transport_timing)",
+        "default": 0.0
+    },
+    "star_momentum_transport_timing": {
+        "description": "whether to apply parameter-free kinetic-energy-preserving Nesterov momentum scaling on Star + macro curvature growth",
+        "default": 1
     },
     "star_refresh_nesterov_state": {
         "description": "whether Nesterov refreshes cached driver gradient g_k at v_k when Star snapshot generation advances",

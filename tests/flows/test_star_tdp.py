@@ -2587,6 +2587,128 @@ def test_macro_exclusion_taylor_kkt_and_tent_bell_modes():
     assert float(xs_m2[int(torch.argmax(v_m2))].item()) < 305.0
 
 
+def test_star_tdp_runtime_metric_consistent_momentum_transport_default():
+    placedb = SimpleNamespace(
+        num_movable_nodes=2,
+        num_terminals=0,
+        num_terminal_NIs=0,
+        num_physical_nodes=2,
+        num_filler_nodes=0,
+        num_nodes=2,
+        num_pins=2,
+        regions=[],
+        dbu=1.0,
+        pin_direct=["OUTPUT", "INPUT"],
+    )
+    dc = SimpleNamespace(
+        pin2net_map=torch.tensor([0, 0], dtype=torch.long),
+        pin2node_map=torch.tensor([0, 1], dtype=torch.long),
+        net2driver_pin_map=torch.tensor([0], dtype=torch.int32),
+        net_flat_arcs=torch.tensor([[0, 1]], dtype=torch.long),
+        net_flat_arcs_start=torch.tensor([0, 1], dtype=torch.long),
+        flat_net2pin_map=torch.tensor([0, 1], dtype=torch.int32),
+        flat_net2pin_start_map=torch.tensor([0, 2], dtype=torch.int32),
+        inst_libcell_offset=torch.tensor([0, 0], dtype=torch.long),
+    )
+
+    class _CallableTiming:
+        clock_pins = torch.empty(0, dtype=torch.long)
+        num_pins = 2
+        device = torch.device("cpu")
+        dtype = torch.float32
+
+        def __call__(self, delays, impulses, loads, **kwargs):
+            d = delays["rise"][1] + delays["fall"][1]
+            tns = -10.0 - d
+            return tns, tns, tns, tns
+
+    elmore_op = RCTiming(r_unit=0.2, c_unit=0.1, scale_factor=1.0, dbu=1.0)
+    model = SimpleNamespace(
+        gamma=torch.tensor(5.0),
+        output_pin_mask=torch.tensor([True, False]),
+        pin_caps_op=lambda _off, _dc: (
+            torch.tensor([0.0, 1.0], dtype=torch.float32),
+            torch.tensor([0.0, 1.0], dtype=torch.float32),
+            torch.tensor([0.0, 1.0], dtype=torch.float32),
+        ),
+        _relaxed_buffer_timing_enabled=lambda: False,
+        _current_timing_surrogate_mode=lambda: "lut_only",
+    )
+    op_cols = SimpleNamespace(
+        timing_propagation_op=_CallableTiming(),
+        elmore_delay_op=elmore_op,
+        pin_pos_op=lambda p: p,
+        wirelength_op=lambda p: (p[1] - p[0]).abs() + (p[3] - p[2]).abs(),
+    )
+    rt_params = SimpleNamespace(
+        timing_placement_carrier="star_pin_pair",
+        _timing_placement_carrier_explicit=True,
+        global_place_flag=1,
+        placement_sizing_mode="place_only",
+        macro_exclusion_field_flag=0,
+        scale_factor=1.0,
+        ignore_net_degree=100,
+        deterministic_flag=True,
+        star_rc_calibration_enabled=1,
+        star_slope_calibration_enabled=0,
+        star_lcb_ff_clock_enabled=0,
+        star_kappa=0.05,
+    )
+    configure_timing_placement_carrier(rt_params)
+    rt = StarTdpRuntime(
+        model=model,
+        params=rt_params,
+        placedb=placedb,
+        data_collections=dc,
+        op_collections=op_cols,
+    )
+    assert rt.momentum_transport_timing is True
+    assert rt.momentum_transport_envelope == 0.0
+
+    pos = torch.tensor([10.0, 90.0, 20.0, 40.0], dtype=torch.float32)
+    # Step 499 (pre-activation): records (base, 0, alpha=2.0)
+    rt.begin_nesterov_step(pos, 2.0)
+    base_499 = torch.tensor([10.0, 10.0], dtype=torch.float32)
+    rt.record_precondition_base_only(base_499)
+    u = torch.tensor([0.0, 0.0, 0.0, 0.0], dtype=torch.float32)
+    v = torch.tensor([10.0, 10.0, 10.0, 10.0], dtype=torch.float32)
+    rt.end_nesterov_step(u, v)
+    assert torch.allclose(u, torch.zeros(4))
+
+    # Step 500 (activation): gate opens, D_base jumps 2x on node 1 (H=0), while node 0 gets H_x = 15 (alpha_next=0.5 -> curv=7.5)
+    rt.set_gate_active(True)
+    rt.refresh_snapshot(pos, iteration=500, overflow=0.30)
+    rt.begin_nesterov_step(pos, 0.5)
+    base_500 = torch.tensor([10.0, 20.0], dtype=torch.float32)
+    curv_500 = torch.tensor([[7.5, 0.0], [0.0, 0.0]], dtype=torch.float32)
+    precond_500 = (base_500.unsqueeze(0) + curv_500).clamp(min=1.0)
+    rt.record_precondition_diagonal(precond_500, base_1n=base_500, curv_2n=curv_500)
+    u = torch.tensor([0.0, 0.0, 0.0, 0.0], dtype=torch.float32)
+    v = torch.tensor([10.0, 10.0, 10.0, 10.0], dtype=torch.float32)
+    rt.end_nesterov_step(u, v)
+
+    # Node 0 x: used = 10 + 0 = 10, hyp = 10 + (2.0 / 0.5) * 7.5 = 40 -> factor = sqrt(10 / 40) = 0.5 -> u[0] = 5.0
+    assert math.isclose(float(u[0].item()), 5.0, rel_tol=1e-5)
+    # Node 1 x & both y coordinates have H=0 -> factor == 1.0 identically despite D_base doubling!
+    assert torch.allclose(u[1:], torch.zeros(3))
+
+    # Legacy opt-in envelope override still works cleanly
+    env_params = SimpleNamespace(**vars(rt_params))
+    delattr(env_params, "star_momentum_transport_timing")
+    env_params.star_momentum_transport_envelope = 1.05
+    configure_timing_placement_carrier(env_params)
+    rt_env = StarTdpRuntime(
+        model=model,
+        params=env_params,
+        placedb=placedb,
+        data_collections=dc,
+        op_collections=op_cols,
+    )
+    assert rt_env.momentum_transport_envelope == 1.05
+    assert rt_env.momentum_transport_timing is False
+
+
+
 
 
 

@@ -241,6 +241,9 @@ class DiffSizingController:
                 for name, field in _COEFFICIENT_FIELDS.items():
                     setattr(model, field, previous_coefficients[name])
                 model.hold_objective = previous_hold_objective
+            from dreamplace.replay_capture import capture_decision
+
+            capture_decision(self.params, "diff_sizing_phase_evaluated", phase_sizing)
             for record in phase_sizing.get("rounds", ()) or ():
                 record["phase"] = index
                 record["phase_action"] = spec.action

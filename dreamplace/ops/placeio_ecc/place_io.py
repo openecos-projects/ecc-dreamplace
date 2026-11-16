@@ -207,6 +207,9 @@ class PlaceIOFunction:
             and int(summary.get("accepted_count", 0) or 0) == len(node_ids)
         ):
             PlaceIOFunction._promote(raw_db, supports_apply_sizing=True)
+            from dreamplace.replay_capture import capture_native_backend
+
+            capture_native_backend(raw_db, "sizing_committed", summary)
         return summary
 
     @staticmethod
@@ -230,8 +233,12 @@ class PlaceIOFunction:
     def refresh(raw_db, *, refresh_mode="full_rebuild", rebuild_mode="full_rebuild"):
         from .refresh import RefreshController
 
-        return RefreshController.refresh(
+        result = RefreshController.refresh(
             raw_db,
             refresh_mode=refresh_mode,
             rebuild_mode=rebuild_mode,
         )
+        from dreamplace.replay_capture import capture_native_backend
+
+        capture_native_backend(raw_db, "topology_refresh_complete")
+        return result

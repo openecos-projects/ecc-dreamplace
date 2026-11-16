@@ -303,6 +303,9 @@ class DiffOptController:
                     float(result["runtime_ms"]) - accounted_ms,
                 )
                 result["phase_runtime_profile"] = phase_runtime_profile
+            from dreamplace.replay_capture import capture_decision
+
+            capture_decision(self.params, "diff_opt_phase_evaluated", result)
             self.trace.append(result)
             self.phase_count += 1
 

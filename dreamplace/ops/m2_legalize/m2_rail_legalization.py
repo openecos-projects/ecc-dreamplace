@@ -4,6 +4,8 @@ import time
 import numpy as np
 import torch
 
+from dreamplace.replay_capture import capture, capture_decision
+
 import dreamplace.ops.abacus_legalize.abacus_legalize as abacus_legalize
 import dreamplace.ops.greedy_legalize.greedy_legalize as greedy_legalize
 import dreamplace.ops.legality_check.legality_check as legality_check
@@ -208,6 +210,8 @@ def build_m2_soft_legalization(self, params, placedb, data_collections):
                 "M2 soft legalization violated ordinary legality; "
                 "rolling back to the legal input placement"
             )
+        capture_decision(params, "m2_soft_result", stats)
+        capture(params, placedb, result, "m2_soft_restore" if rollback else "m2_soft_accepted")
         return result, stats
 
     return build_m2_soft_legalization_op
@@ -385,10 +389,18 @@ def build_legalization(
         retry_ops_for_run,
         row_repair_context=None,
     ):
+        def observed(position, stage, legal):
+            capture_decision(params, "legalizer_" + stage, {"mode": label, "legal": bool(legal)})
+            # Hybrid problems reorder/extend the vectors. Capture their physical
+            # positions only after restore_original_order and the final audit.
+            if legal and label == "ordinary":
+                capture(params, placedb, position, "legalizer_" + stage)
+
         macro_op, greedy_op, abacus_op, check_op = ops
         pos1 = macro_op(pos, pos)
         pos2 = greedy_op(pos1, pos1)
         greedy_legal = bool(check_op(pos2))
+        observed(pos2, "greedy", greedy_legal)
         if not greedy_legal:
             logging.error(
                 "%s legality check failed in greedy legalization",
@@ -399,18 +411,23 @@ def build_legalization(
             )
             retry_pos1 = retry_macro_op(pos, pos)
             retry_pos2 = retry_greedy_op(retry_pos1, retry_pos1)
-            if bool(retry_check_op(retry_pos2)):
+            retry_legal = bool(retry_check_op(retry_pos2))
+            observed(retry_pos2, "greedy_retry", retry_legal)
+            if retry_legal:
                 logging.info(
                     "%s retry Greedy legalization recovered a legal placement",
                     label,
                 )
                 retry_pos3 = retry_abacus_op(retry_pos1, retry_pos2)
-                if bool(retry_check_op(retry_pos3)):
+                retry_abacus_legal = bool(retry_check_op(retry_pos3))
+                observed(retry_pos3, "abacus_retry", retry_abacus_legal)
+                if retry_abacus_legal:
                     return retry_pos3, True
                 logging.info(
                     "%s retry Abacus legalization failed; using retry Greedy result",
                     label,
                 )
+                observed(retry_pos2, "greedy_retry_restore", True)
                 return retry_pos2, True
             logging.error(
                 "%s retry Greedy legalization also failed",
@@ -450,6 +467,7 @@ def build_legalization(
                     float(moved.max().item()),
                     float(moved.sum().item()),
                 )
+                observed(repaired_pos, "row_segment_repair", True)
                 return repaired_pos, True
             logging.error(
                 "%s row-segment repair could not recover a legal placement",
@@ -459,12 +477,14 @@ def build_legalization(
 
         pos3 = abacus_op(pos1, pos2)
         abacus_legal = bool(check_op(pos3))
+        observed(pos3, "abacus", abacus_legal)
         if not abacus_legal:
             logging.error(
                 "%s legality check failed in abacus legalization",
                 label,
             )
             logging.info("%s using legal greedy result", label)
+            observed(pos2, "greedy_restore", True)
             return pos2, True
         return pos3, True
 
@@ -563,6 +583,8 @@ def build_legalization(
                     "cell's minimum rail-overlap area"
                     % hybrid_view.legalization_mode
                 )
+            capture_decision(params, "m2_hybrid_audit", audit)
+            capture(params, placedb, result, "m2_hybrid_accepted")
             return result
 
         result, legal = run_legalizer(
@@ -878,6 +900,8 @@ def build_m2_pa_refine(self, params, placedb, data_collections):
             int(rollback),
             stats["runtime_seconds"],
         )
+        capture_decision(params, "m2_refine_result", stats)
+        capture(params, placedb, refined_pos, "m2_refine_restore" if rollback else "m2_refine_accepted")
         return refined_pos, stats
 
     return build_m2_pa_refine_op

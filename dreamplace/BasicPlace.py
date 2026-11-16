@@ -2167,7 +2167,10 @@ class BasicPlace(nn.Module):
 
         def build_macro_legalization_op(pos):
             logging.info("Start macro legalization")
-            return ml(pos.clone(), pos)
+            result = ml(pos.clone(), pos)
+            from dreamplace.replay_capture import capture
+            capture(params, placedb, result, "macro_legalizer_result")
+            return result
         return build_macro_legalization_op
 
     build_m2_soft_legalization = m2_rail_legalization.build_m2_soft_legalization
@@ -2195,6 +2198,8 @@ class BasicPlace(nn.Module):
         def build_legalization_op(pos):
             for i in range(len(placedb.regions) + 1):
                 pos, pos_ml, pos_gl = legal_ops[i][0](pos)
+                from dreamplace.replay_capture import capture
+                capture(params, placedb, pos, "fence_greedy_%d" % i)
                 pos_ml_list.append(pos_ml)
                 pos_gl_list.append(pos_gl)
             legal = self.op_collections.legality_check_op(pos)
@@ -2205,6 +2210,7 @@ class BasicPlace(nn.Module):
                 # start abacus legalizer
                 for i in range(len(placedb.regions) + 1):
                     pos = legal_ops[i][1](pos, pos_ml_list[i], pos_gl_list[i])
+                    capture(params, placedb, pos, "fence_abacus_%d" % i)
             return pos
 
         def build_individual_legalization_ops(pos, region_id):

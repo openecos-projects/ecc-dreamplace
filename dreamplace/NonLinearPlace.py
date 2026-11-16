@@ -2605,6 +2605,10 @@ class NonLinearPlace(BasicPlace.BasicPlace):
     def _restore_continuous_early_stop_best_state(self, state, reason="continuous_best_state_restore"):
         context = self._early_stop_context()
         result = continuous_early_stop.restore_continuous_early_stop_best_state(context, state, reason)
+        if result.get("restored"):
+            from dreamplace.replay_capture import capture
+
+            capture(self.params, self.placedb, self.pos[0], "best_state_restore")
         if result.get("restored") and "quad_oscillation_state" in state["best_state"]:
             self._quad_oscillation_state = context.oscillation_state
         return result
@@ -3890,7 +3894,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         @param params parameters
         @param placedb placement database
         """
-        from dreamplace.replay_capture import capture as capture_replay
+        from dreamplace.replay_capture import capture as capture_replay, due as replay_sample_due
 
         capture_replay(params, placedb, self.pos[0], "initial_working_state")
         self._validate_sizing_mode(params)
@@ -4082,6 +4086,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     placedb.pending_warm_schedule_state = None
                 self._routability_model = model
                 routability_controller.before_stage(model=model, stage_idx=cur_stage)
+                capture_replay(params, placedb, self.pos[0], "stage_start", iteration)
                 if params.routability_opt_flag:
                     inflation_state = routability_controller.inflation.ensure_inflation_state(
                         params,
@@ -5008,10 +5013,11 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     _profile_t = profile_now()
                     plot_interval = int(getattr(params, "plot_interval", 30) or 30)
                     should_plot_interval = plot_interval > 0 and iteration % plot_interval == 0
-                    replay_due = getattr(params, "_replay_capture", None) is not None and iteration % 30 == 0
+                    replay_due = replay_sample_due(params, iteration)
                     if (params.plot_flag and (should_plot_interval or iteration == 999)) or replay_due:
                         cur_pos = self.pos[0].data.clone().cpu().numpy()
-                        capture_replay(params, placedb, cur_pos, "pre_optimizer_step", iteration)
+                        if replay_due:
+                            capture_replay(params, placedb, cur_pos, "pre_optimizer_step", iteration)
                         if params.plot_flag and (should_plot_interval or iteration == 999):
                             self.plot(params, placedb, iteration, cur_pos)
                     profile_add("plot_ms", _profile_t)
@@ -6002,6 +6008,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                         )
                                 if adjust_area_flag:
                                     routability_controller.record_inflation()
+                                    capture_replay(params, placedb, self.pos[0], "inflation_applied", iteration)
                                     inflation_applied_this_gamma = True
                                     num_area_adjust += 1
                                     if getattr(model, "inflation_state", None) is not None:
@@ -6267,6 +6274,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         getattr(self.data_collections, "inflation_state", None),
                         model,
                     )
+                capture_replay(params, placedb, self.pos[0], "inflation_restored", iteration)
                 if cooptimization is not None:
                     cooptimization.publish_geometry(model)
                 if selected_inflation_round is not None:
@@ -6282,6 +6290,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         "enhanced_inflation_select_metric",
                         "est_shorts",
                     )
+                    capture_replay(params, placedb, self.pos[0], "best_inflation_restore", iteration)
                     selected_metric_value = routability_controller.inflation.get_round_metric(
                         selected_inflation_round,
                         selected_metric_name,

@@ -5,6 +5,8 @@ import os
 
 import numpy as np
 
+from dreamplace.replay_capture import capture, capture_decision
+
 from dreamplace.ops.routability import adaptive_padding_cpp
 from dreamplace.ops.routability.gpugr_context import (
     compute_route_grid_like_xplace,
@@ -120,6 +122,9 @@ def run_iterative_legalization_padding(params, placedb, pos, model):
             before_short = float(result["metrics"]["gr_est_shorts"])
             after_short = float(candidate_result["metrics"]["gr_est_shorts"])
             accepted = np.isfinite(after_short) and after_short < before_short
+        capture_decision(params, "padding_round_result", {"round": round_id, "accepted": bool(accepted), "rollback": bool(stats["rollback"])})
+        if accepted:
+            capture(params, placedb, next_pos, "padding_round_accepted")
         effective = int(np.count_nonzero(proposed > cumulative)) if accepted else 0
         effective_counts.append(effective)
         logging.info(

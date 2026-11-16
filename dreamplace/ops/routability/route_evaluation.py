@@ -5,6 +5,8 @@ import os
 
 import numpy as np
 
+from dreamplace.replay_capture import capture, capture_decision
+
 from dreamplace.ops.routability.gpugr_context import (
     compute_route_grid_like_xplace,
     get_cached_gpugr_operator,
@@ -247,6 +249,8 @@ def run_post_legalization_adaptive_padding(
         "gpugr_overflow_nets_before": metrics["num_overflow_nets"],
         "gpugr_est_shorts_before": metrics["gr_est_shorts"],
     }
+    capture_decision(params, "adaptive_padding_result", telemetry)
+    capture(params, placedb, padded_result, "adaptive_padding_restore" if legalize_stats["rollback"] else "adaptive_padding_accepted")
     return padded_result, telemetry
 
 

@@ -23,8 +23,8 @@ class ReplayCaptureTest(unittest.TestCase):
             capture.sample(params, db, np.array([5, 10, 15, 20]), 'writeback', committed=True)
             frames = [json.loads(p.read_text()) for p in sorted(Path(tmp).glob('*.json'))]
             expected = {
-                'inst:a': {'kind': 'instance', 'name': 'a', 'bbox': [110, 230, 120, 250]},
-                'inst:m': {'kind': 'macro', 'name': 'm', 'bbox': [120, 240, 160, 290]},
+                'inst:a': {'kind': 'instance', 'name': 'a', 'bbox': [110, 230, 120, 250], 'placed': True},
+                'inst:m': {'kind': 'macro', 'name': 'm', 'bbox': [120, 240, 160, 290], 'placed': True},
                 'die': {'kind': 'die', 'name': 'placement region', 'bbox': [100, 200, 300, 400]},
             }
             self.assertEqual([frame['objects'] for frame in frames], [expected, expected])
@@ -37,8 +37,8 @@ class ReplayCaptureTest(unittest.TestCase):
             params = SimpleNamespace(scale_factor=1, shift_factor=[0, 0], macro_only=False)
             db = SimpleNamespace(num_physical_nodes=3, node_names=[b'a', b'obstacle', b'port'],
                                  node_is_hard_macro=[False, False, False],
-                                 num_place_blockages=1, fixed_slice=slice(1, 2),
-                                 pydb=SimpleNamespace(node_size_x=[10, 40, 0], node_size_y=[20, 50, 0]),
+                                 num_place_blockages=1, fixed_slice=slice(1, 2), num_terminal_NIs=1,
+                                 pydb=SimpleNamespace(node_size_x=[10, 40, 8], node_size_y=[20, 50, 8]),
                                  xl=0, yl=0, xh=100, yh=100)
             capture.sample(params, db, np.array([5, 10, 20, 15, 20, 30]), 'iteration')
             frame = json.loads((Path(tmp) / 'dp-000000.json').read_text())

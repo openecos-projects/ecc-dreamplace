@@ -1529,7 +1529,7 @@
         "default": 0.15
     },
     "macro_exclusion_profile_mode": {
-        "description": "obstacle interior profile mode for MacroExclusionField: tent_rim | dome",
+        "description": "obstacle interior profile mode for MacroExclusionField: tent_rim | dome | tent | tent_bell",
         "default": "tent_rim"
     },
     "macro_exclusion_ridge_smooth_rows": {
@@ -1569,8 +1569,8 @@
         "default": 5.0
     },
     "macro_exclusion_force_mode": {
-        "description": "force matching mode for MacroExclusionField: scalar | normal_proj",
-        "default": "scalar"
+        "description": "force matching mode for MacroExclusionField: taylor_kkt | scalar | normal_proj",
+        "default": "taylor_kkt"
     },
     "macro_exclusion_escape_slope_mode": {
         "description": "evacuation delay slope model for MacroExclusionField: global | liberty_cell",
@@ -1587,6 +1587,14 @@
     "macro_exclusion_interior_evac_boost": {
         "description": "smooth deep-interior evacuation boost factor for normal_proj mode",
         "default": 0.50
+    },
+    "macro_exclusion_bell_sigma_rows": {
+        "description": "Gaussian/Bell smoothing kernel sigma in placement rows for macro-neighborhood base potential in profile_mode=tent_bell",
+        "default": 16.0
+    },
+    "macro_exclusion_bell_bias": {
+        "description": "asymmetric ridge-bias strength eta_bell on P_bell in profile_mode=tent_bell",
+        "default": 0.80
     },
     "star_input_history_reference_interval": {
         "description": "reference outer GP interval for step-invariant ZOH InputAccumulator scaling (0 disables)",

@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -366,6 +366,123 @@ def _solve_dirichlet_torsion_multilevel_impl(
     return v.clamp(min=0.0).cpu().numpy()
 
 
+def _solve_weighted_torsion_multilevel(
+    active_np: np.ndarray,
+    cond_np: np.ndarray,
+    in_core_np: np.ndarray,
+    h_g: float,
+    device: torch.device,
+    *,
+    coarse_stride: int = 4,
+    coarse_iters: int = 600,
+    fine_iters: int = 240,
+    rtol: float = 1e-5,
+) -> np.ndarray:
+    """Solve ``-div(cond * grad v) = 1`` on ``active_np`` with Neumann BC on ``in_core_np`` walls
+    and Dirichlet ``v = 0`` on legal core whitespace ``in_core_np & (~active_np)``."""
+    if not active_np.any():
+        return np.zeros_like(active_np, dtype=np.float64)
+    if not bool((in_core_np & (~active_np)).any()):
+        return _solve_dirichlet_torsion_multilevel(
+            active_np,
+            h_g,
+            device,
+            coarse_stride=coarse_stride,
+            coarse_iters=coarse_iters,
+            fine_iters=fine_iters,
+            rtol=rtol,
+        )
+
+    def _solve_single_level(
+        act_m: np.ndarray,
+        c_m: np.ndarray,
+        core_m: np.ndarray,
+        step_h: float,
+        u_init: Optional[torch.Tensor],
+        max_iters: int,
+        tol: float,
+        dev: torch.device,
+    ) -> torch.Tensor:
+        act_t = torch.as_tensor(act_m, device=dev, dtype=torch.float64)
+        w_t = torch.as_tensor(c_m, device=dev, dtype=torch.float64).clamp(min=1e-4)
+        core_t = torch.as_tensor(core_m, device=dev, dtype=torch.bool)
+        wx = 0.5 * (w_t[:, :-1] + w_t[:, 1:]) * (core_t[:, :-1] & core_t[:, 1:]).to(torch.float64)
+        wy = 0.5 * (w_t[:-1, :] + w_t[1:, :]) * (core_t[:-1, :] & core_t[1:, :]).to(torch.float64)
+
+        b = act_t * (step_h * step_h)
+        b_norm_sq = float(torch.sum(b * b).item())
+        if b_norm_sq <= 0.0:
+            return torch.zeros_like(b)
+        tol_sq = (tol * tol) * b_norm_sq
+
+        def matvec(u: torch.Tensor) -> torch.Tensor:
+            u_eff = u * act_t
+            fx = wx * (u_eff[:, :-1] - u_eff[:, 1:])
+            fy = wy * (u_eff[:-1, :] - u_eff[1:, :])
+            out = torch.zeros_like(u_eff)
+            out[:, :-1].add_(fx)
+            out[:, 1:].sub_(fx)
+            out[:-1, :].add_(fy)
+            out[1:, :].sub_(fy)
+            return out * act_t
+
+        v = torch.zeros_like(b) if u_init is None else (u_init * act_t)
+        r = (b - matvec(v)) * act_t
+        p = r.clone()
+        rs_old = float(torch.sum(r * r).item())
+        if rs_old > tol_sq:
+            for _ in range(int(max_iters)):
+                ap = matvec(p)
+                p_ap = float(torch.sum(p * ap).item())
+                if p_ap <= 1e-30:
+                    break
+                alpha = rs_old / p_ap
+                v.add_(p, alpha=alpha)
+                r.add_(ap, alpha=-alpha)
+                rs_new = float(torch.sum(r * r).item())
+                if rs_new <= tol_sq:
+                    break
+                p.mul_(rs_new / rs_old).add_(r)
+                rs_old = rs_new
+        return v.clamp(min=0.0)
+
+    def _run_on_device(dev: torch.device) -> np.ndarray:
+        import torch.nn.functional as F
+
+        ny, nx = active_np.shape
+        if min(ny, nx) < 4 * coarse_stride:
+            return _solve_single_level(
+                active_np, cond_np, in_core_np, h_g, None, max(coarse_iters, fine_iters), rtol, dev
+            ).cpu().numpy()
+
+        act_f = torch.as_tensor(active_np, device=dev, dtype=torch.float64)[None, None]
+        cond_f = torch.as_tensor(cond_np, device=dev, dtype=torch.float64)[None, None]
+        core_f = torch.as_tensor(in_core_np, device=dev, dtype=torch.float64)[None, None]
+        act_c = (F.avg_pool2d(act_f, kernel_size=coarse_stride, stride=coarse_stride)[0, 0] > 0.5).cpu().numpy()
+        core_c = (F.avg_pool2d(core_f, kernel_size=coarse_stride, stride=coarse_stride)[0, 0] > 0.5).cpu().numpy()
+        cond_c = F.avg_pool2d(cond_f, kernel_size=coarse_stride, stride=coarse_stride)[0, 0].cpu().numpy()
+        act_c = act_c & core_c
+        if bool(act_c.any()) and bool((core_c & (~act_c)).any()):
+            vc = _solve_single_level(
+                act_c, cond_c, core_c, h_g * float(coarse_stride), None, coarse_iters, min(rtol, 1e-6), dev
+            )
+            v_init = F.interpolate(
+                vc[None, None], size=(ny, nx), mode="bilinear", align_corners=False
+            )[0, 0]
+        else:
+            v_init = None
+        vf = _solve_single_level(active_np, cond_np, in_core_np, h_g, v_init, fine_iters, rtol, dev)
+        return vf.cpu().numpy()
+
+    try:
+        return _run_on_device(device)
+    except torch.OutOfMemoryError:
+        if device.type != "cpu":
+            torch.cuda.empty_cache()
+            return _run_on_device(torch.device("cpu"))
+        raise
+
+
 def _exact_signed_distance(mask_np: np.ndarray, h_g: float) -> np.ndarray:
     """Signed inward Euclidean distance ``s`` (positive inside ``mask_np``, ``[pos_unit]``)."""
     from scipy.ndimage import distance_transform_edt
@@ -405,14 +522,16 @@ def build_macro_potential_grid(
     smooth_sigma_cells: float = 0.5,
     profile_mode: str = "dome",
     ridge_smooth_rows: float = 3.0,
+    bell_sigma_rows: float = 16.0,
+    bell_bias: float = 0.80,
     max_grid_dim: int = 4096,
-) -> Tuple[Optional[torch.Tensor], Dict[str, float]]:
+) -> Tuple[Optional[torch.Tensor], Dict[str, Any]]:
     """Precompute seamless elliptic-streamline ``psi_M`` grid of shape ``(ny, nx)`` in ``[pos_unit]``."""
     if len(boxes) == 0:
         return None, {"has_obstacles": 0.0}
 
     mode = str(profile_mode or "dome").strip().lower()
-    if mode not in ("dome", "tent", "tent_rim"):
+    if mode not in ("dome", "tent", "tent_rim", "tent_bell"):
         raise ValueError(f"Unsupported macro_exclusion profile_mode={profile_mode!r}")
 
     span_x = max(float(xh - xl), row_height)
@@ -435,6 +554,9 @@ def build_macro_potential_grid(
     s = _exact_signed_distance(mask, h_g)
     delta = max(float(collar_rows) * row_height, 0.5 * h_g)
     theta = float(np.clip(distance_blend, 0.0, 1.0))
+
+    # Exact geometric cell-body overlap depth (positive iff s > -0.5 * row_height)
+    pen_grid_np = np.maximum(s + 0.5 * float(row_height), 0.0).astype(np.float32)
 
     if mode == "dome":
         mask_collar = s > (-1.25 * delta)
@@ -464,6 +586,106 @@ def build_macro_potential_grid(
         u_cut = np.clip((s + 1.5 * delta) / max(0.75 * delta, 1e-6), 0.0, 1.0)
         cutoff = u_cut * u_cut * (3.0 - 2.0 * u_cut)
         psi_smooth = np.where(s <= -1.5 * delta, 0.0, np.maximum(psi_smooth * cutoff, 0.0))
+    elif mode == "tent_bell":
+        ext_shift = 1.60 * delta
+        ramp_width = 1.25 * delta
+        cut_outer = 1.75 * delta
+        cut_span = 0.50 * delta
+        pedestal = 0.25 * h_g
+
+        xs_c = g_xl + (np.arange(nx, dtype=np.float64) + 0.5) * h_g
+        ys_c = g_yl + (np.arange(ny, dtype=np.float64) + 0.5) * h_g
+        in_core = (
+            (ys_c[:, None] >= float(yl))
+            & (ys_c[:, None] <= float(yh))
+            & (xs_c[None, :] >= float(xl))
+            & (xs_c[None, :] <= float(xh))
+        )
+        legal_ws = in_core & (~mask)
+        sigma_bell_cells = max(float(bell_sigma_rows) * float(row_height) / h_g, 1.0)
+        non_legal_f = (~legal_ws).astype(np.float64)
+        p_bell = np.clip(_gaussian_smooth_2d(non_legal_f, sigma_cells=sigma_bell_cells), 0.0, 1.0)
+
+        if bool(legal_ws.any()):
+            from scipy.ndimage import distance_transform_edt
+
+            d_to_legal_px, near_idx = distance_transform_edt(
+                ~legal_ws, return_distances=True, return_indices=True
+            )
+            d_to_legal = d_to_legal_px * h_g
+            d_from_legal = distance_transform_edt(legal_ws) * h_g
+            s_legal = np.where(legal_ws, -(d_from_legal - 0.5 * h_g), d_to_legal - 0.5 * h_g)
+            p_near = p_bell[near_idx[0], near_idx[1]]
+            p_exit_raw = np.clip((p_near - 0.50) / 0.50, 0.0, 1.0)
+            smooth_seam = max(float(ridge_smooth_rows) * float(row_height) / h_g, 2.0)
+            p_exit = np.clip(_gaussian_smooth_2d(p_exit_raw, sigma_cells=smooth_seam), 0.0, 1.0)
+        else:
+            s_legal = s
+            p_exit = p_bell
+
+        m_slope = 1.0 + max(float(bell_bias), 0.0) * p_exit
+        cond = 1.0 / np.square(m_slope)
+
+        active_core = in_core & (s_legal > (-ext_shift))
+        v = _solve_weighted_torsion_multilevel(active_core, cond, in_core, h_g, device=device)
+
+        ix0 = int(np.argmax(xs_c >= float(xl)))
+        ix1 = int(nx - 1 - np.argmax((xs_c <= float(xh))[::-1]))
+        iy0 = int(np.argmax(ys_c >= float(yl)))
+        iy1 = int(ny - 1 - np.argmax((ys_c <= float(yh))[::-1]))
+        if 0 <= iy0 <= iy1 < ny and 0 <= ix0 <= ix1 < nx:
+            v_core = v[iy0 : iy1 + 1, ix0 : ix1 + 1]
+            v = np.pad(
+                v_core,
+                ((iy0, ny - 1 - iy1), (ix0, nx - 1 - ix1)),
+                mode="symmetric",
+            )
+            cond_core = cond[iy0 : iy1 + 1, ix0 : ix1 + 1]
+            cond = np.pad(
+                cond_core,
+                ((iy0, ny - 1 - iy1), (ix0, nx - 1 - ix1)),
+                mode="symmetric",
+            )
+            sl_core = s_legal[iy0 : iy1 + 1, ix0 : ix1 + 1]
+            s_legal_ref = np.pad(
+                sl_core,
+                ((iy0, ny - 1 - iy1), (ix0, nx - 1 - ix1)),
+                mode="symmetric",
+            )
+        else:
+            s_legal_ref = s_legal
+
+        vx = np.zeros_like(v)
+        vy = np.zeros_like(v)
+        vx[:, 1:-1] = (v[:, 2:] - v[:, :-2]) / (2.0 * h_g)
+        vy[1:-1, :] = (v[2:, :] - v[:-2, :]) / (2.0 * h_g)
+        r_ridge = max(float(ridge_smooth_rows) * row_height, 0.5 * h_g)
+        w_grad_sq = cond * (vx * vx + vy * vy)
+        r_sq = r_ridge * r_ridge
+        denom = np.sqrt(np.maximum(2.0 * v + w_grad_sq + r_sq, 1e-12)) + np.sqrt(
+            np.maximum(w_grad_sq + r_sq, 1e-12)
+        )
+        mask_ext = s_legal_ref > (-ext_shift)
+        u_raw = np.where(mask_ext, np.maximum((2.0 * v) / denom - pedestal, 0.0), 0.0)
+
+        psi_raw = np.where(
+            u_raw <= 0.0,
+            0.0,
+            np.where(
+                u_raw < ramp_width,
+                np.square(u_raw) / (2.0 * ramp_width),
+                u_raw - 0.5 * ramp_width,
+            ),
+        )
+        psi_smooth = _gaussian_smooth_2d(psi_raw, sigma_cells=smooth_sigma_cells)
+        u_cut = np.clip((s + cut_outer) / max(cut_span, 1e-6), 0.0, 1.0)
+        cutoff = u_cut * u_cut * (3.0 - 2.0 * u_cut)
+        psi_smooth = np.where(s <= (-cut_outer), 0.0, np.maximum(psi_smooth * cutoff, 0.0))
+        pen_grid_np = np.where(
+            s <= (-0.5 * float(row_height)),
+            0.0,
+            np.maximum(s_legal_ref + 0.5 * float(row_height), 0.0),
+        ).astype(np.float32)
     else:
         ext_shift = 1.60 * delta if mode == "tent_rim" else 1.25 * delta
         ramp_width = 1.25 * delta if mode == "tent_rim" else 2.0 * delta
@@ -504,7 +726,8 @@ def build_macro_potential_grid(
         psi_smooth = np.where(s <= (-cut_outer), 0.0, np.maximum(psi_smooth * cutoff, 0.0))
 
     grid_tensor = torch.as_tensor(psi_smooth, device=device, dtype=torch.float32).contiguous()
-    meta = {
+    pen_tensor = torch.as_tensor(pen_grid_np, device=device, dtype=torch.float32).contiguous()
+    meta: Dict[str, Any] = {
         "has_obstacles": 1.0,
         "profile_mode": mode,
         "ridge_smooth_rows": float(ridge_smooth_rows),
@@ -516,6 +739,7 @@ def build_macro_potential_grid(
         "ny": float(ny),
         "covered_fraction": float(mask[pad : ny - pad, pad : nx - pad].mean()),
         "psi_max": float(psi_smooth.max()),
+        "pen_grid": pen_tensor,
     }
     return grid_tensor, meta
 
@@ -676,11 +900,13 @@ class MacroExclusionField(nn.Module):
         kappa_slack: float = 1.0,
         row_margin: float = 5.0,
         min_macro_rows: float = 2.0,
-        force_mode: str = "scalar",
+        force_mode: str = "taylor_kkt",
         escape_slope_mode: str = "global",
         gate_release_mode: str = "ratchet",
         hyst_kappa_band: float = 0.75,
         interior_evac_boost: float = 0.50,
+        bell_sigma_rows: float = 16.0,
+        bell_bias: float = 0.80,
     ) -> None:
         super().__init__()
         self.num_nodes = int(placedb.num_nodes)
@@ -695,6 +921,8 @@ class MacroExclusionField(nn.Module):
         self.ramp_iters = int(ramp_iters)
         self.profile_mode = str(profile_mode or "dome").strip().lower()
         self.ridge_smooth_rows = float(ridge_smooth_rows)
+        self.bell_sigma_rows = max(float(bell_sigma_rows), 1.0)
+        self.bell_bias = max(float(bell_bias), 0.0)
         self.slack_gate_mode = str(slack_gate_mode or "uniform").strip().lower()
         if self.slack_gate_mode not in (
             "uniform",
@@ -706,8 +934,8 @@ class MacroExclusionField(nn.Module):
             raise ValueError(
                 f"Unsupported macro_exclusion slack_gate_mode={slack_gate_mode!r}"
             )
-        self.force_mode = str(force_mode or "scalar").strip().lower()
-        if self.force_mode not in ("scalar", "normal_proj"):
+        self.force_mode = str(force_mode or "taylor_kkt").strip().lower()
+        if self.force_mode not in ("scalar", "normal_proj", "taylor_kkt"):
             raise ValueError(
                 f"Unsupported macro_exclusion force_mode={force_mode!r}"
             )
@@ -749,12 +977,19 @@ class MacroExclusionField(nn.Module):
             smooth_sigma_cells=smooth_sigma_cells,
             profile_mode=self.profile_mode,
             ridge_smooth_rows=self.ridge_smooth_rows,
+            bell_sigma_rows=self.bell_sigma_rows,
+            bell_bias=self.bell_bias,
         )
+        pen_grid = grid_meta.pop("pen_grid", None)
         self.has_obstacles = grid is not None
         self.metadata = {**box_stats, **grid_meta}
 
         if self.has_obstacles:
             self.register_buffer("grid", grid)
+            self.register_buffer(
+                "pen_grid",
+                pen_grid if pen_grid is not None else torch.zeros_like(grid),
+            )
             supp_np = _build_bspline_support_mask(grid.detach().cpu().numpy())
             self.register_buffer(
                 "support_mask_flat",
@@ -768,6 +1003,7 @@ class MacroExclusionField(nn.Module):
             self.ny = int(grid.shape[0])
         else:
             self.register_buffer("grid", torch.empty(0, device=device, dtype=torch.float32))
+            self.register_buffer("pen_grid", torch.empty(0, device=device, dtype=torch.float32))
             self.register_buffer("support_mask_flat", torch.empty(0, device=device, dtype=torch.bool))
             self.g_xl = 0.0
             self.g_yl = 0.0
@@ -1106,6 +1342,122 @@ class MacroExclusionField(nn.Module):
 
         fallback_t = torch.tensor(fb, device=device, dtype=torch.float32)
         return torch.where(pin_r >= 0.0, pin_r, fallback_t)
+
+    @torch.no_grad()
+    def _sample_penetration_depth(self, cx: torch.Tensor, cy: torch.Tensor) -> torch.Tensor:
+        """Bilinearly sample exact cell-body overlap depth ``d_in`` in ``[pos_unit]`` (0 in legal rows)."""
+        if not self.has_obstacles or self.pen_grid.numel() == 0 or cx.numel() == 0:
+            return torch.zeros_like(cx)
+        ny, nx = int(self.pen_grid.shape[0]), int(self.pen_grid.shape[1])
+        inv_h = 1.0 / float(self.h_g)
+        u = ((cx - float(self.g_xl)) * inv_h - 0.5).clamp(0.0, float(nx - 1) - 1e-5)
+        v = ((cy - float(self.g_yl)) * inv_h - 0.5).clamp(0.0, float(ny - 1) - 1e-5)
+        ix0 = torch.floor(u).long().clamp(0, max(nx - 2, 0))
+        iy0 = torch.floor(v).long().clamp(0, max(ny - 2, 0))
+        tx = (u - ix0.float()).clamp(0.0, 1.0)
+        ty = (v - iy0.float()).clamp(0.0, 1.0)
+        ix1 = (ix0 + 1).clamp(max=nx - 1)
+        iy1 = (iy0 + 1).clamp(max=ny - 1)
+        p00 = self.pen_grid[iy0, ix0]
+        p01 = self.pen_grid[iy0, ix1]
+        p10 = self.pen_grid[iy1, ix0]
+        p11 = self.pen_grid[iy1, ix1]
+        p0 = p00 + tx * (p01 - p00)
+        p1 = p10 + tx * (p11 - p10)
+        return (p0 + ty * (p1 - p0)).clamp(min=0.0)
+
+    @torch.no_grad()
+    def _compute_timing_hessian_and_gamma(
+        self,
+        owner,
+        pos: torch.Tensor,
+        star,
+        coeff: float,
+    ) -> Tuple[torch.Tensor, torch.Tensor, float]:
+        """Return ``(h_time_x[:m], h_time_y[:m], gamma_pos)`` in ``[Objective/pos_unit^2]`` and ``[pos_unit]``."""
+        m = self.num_movable
+        device = pos.device
+        mock_h_fn = getattr(owner, "mock_hessian_and_gamma_fn", None)
+        if callable(mock_h_fn):
+            hx, hy, g_val = mock_h_fn(pos.detach())
+            return (
+                hx[:m].detach().to(device=device, dtype=torch.float32),
+                hy[:m].detach().to(device=device, dtype=torch.float32),
+                max(float(g_val), 1e-6),
+            )
+
+        gamma_pos = 4.0 * float(self.row_height)
+        gamma_fn = getattr(owner, "_segment_timing_cut_effective_smoothing_gamma", None)
+        if callable(gamma_fn):
+            g_raw = gamma_fn()
+            if g_raw is not None:
+                gamma_pos = float(g_raw.detach().reshape(-1)[0].item()) if torch.is_tensor(g_raw) else float(g_raw)
+        elif hasattr(owner, "gamma") or hasattr(getattr(owner, "model", None), "gamma"):
+            g_raw = getattr(owner, "gamma", None)
+            if g_raw is None:
+                g_raw = getattr(getattr(owner, "model", None), "gamma", None)
+            if g_raw is not None:
+                gamma_pos = float(g_raw.detach().reshape(-1)[0].item()) if torch.is_tensor(g_raw) else float(g_raw)
+        gamma_pos = max(float(gamma_pos), 1e-6)
+
+        if (
+            coeff > 0.0
+            and star is not None
+            and int(getattr(star, "snapshot_generation", 0)) > 0
+            and hasattr(owner, "placedb")
+            and hasattr(owner, "op_collections")
+            and callable(getattr(owner.op_collections, "pin_pos_op", None))
+        ):
+            try:
+                from dreamplace.ops.star_pin_pair.rowsum_curvature import (
+                    clock_rowsum_hessian,
+                    rowsum_hessian,
+                )
+
+                params = getattr(owner, "params", None)
+                elmore_axes = int(
+                    getattr(owner, "elmore_rowsum_axes", None)
+                    or getattr(params, "segment_timing_elmore_rowsum_axes", 2)
+                    or 2
+                )
+                full_slope_attr = getattr(owner, "full_linear_slope", None)
+                if full_slope_attr is not None:
+                    full_slope = bool(full_slope_attr)
+                else:
+                    full_slope = (
+                        str(getattr(params, "segment_timing_rowsum_linear_slope", "full") or "full")
+                        .strip()
+                        .lower()
+                        == "full"
+                    )
+                h_xy, g_calc = rowsum_hessian(
+                    owner,
+                    pos.detach(),
+                    elmore_axes=elmore_axes,
+                    full_slope=full_slope,
+                )
+                if g_calc is not None and float(g_calc) > 0.0:
+                    gamma_pos = float(g_calc)
+                if bool(getattr(owner, "lcb_ff_clock_enabled", True)) and bool(
+                    getattr(params, "segment_timing_clock_curvature_precondition", 1)
+                ):
+                    h_xy = h_xy + clock_rowsum_hessian(
+                        owner,
+                        pos.detach(),
+                        gamma=gamma_pos,
+                        elmore_axes=elmore_axes,
+                        full_slope=full_slope,
+                    )
+                return (
+                    h_xy[0, :m].detach().to(device=device, dtype=torch.float32),
+                    h_xy[1, :m].detach().to(device=device, dtype=torch.float32),
+                    max(float(gamma_pos), 1e-6),
+                )
+            except Exception:
+                pass
+
+        zeros = torch.zeros(m, device=device, dtype=torch.float32)
+        return zeros, zeros.clone(), gamma_pos
 
     @torch.no_grad()
     def _compute_total_pull_grad_xy(
@@ -1623,6 +1975,7 @@ class MacroExclusionField(nn.Module):
         nx_cand: Optional[torch.Tensor] = None
         ny_cand: Optional[torch.Tensor] = None
         grad_norm_cand: Optional[torch.Tensor] = None
+        d_in_cand: Optional[torch.Tensor] = None
         if cand_idx.numel() > 0:
             cx = pos[cand_idx].detach().float() + self.movable_half_w[cand_idx]
             cy = (
@@ -1632,6 +1985,7 @@ class MacroExclusionField(nn.Module):
             psi_cand, gx_psi, gy_psi = _eval_cubic_bspline_2d(
                 self.grid, cx, cy, self.g_xl, self.g_yl, self.h_g
             )
+            d_in_cand = self._sample_penetration_depth(cx, cy)
             grad_norm_cand = torch.sqrt(gx_psi * gx_psi + gy_psi * gy_psi)
             denom_n = grad_norm_cand.clamp(min=1e-8)
             nx_cand = -gx_psi / denom_n
@@ -1646,7 +2000,10 @@ class MacroExclusionField(nn.Module):
         ):
             depth_um = torch.zeros(m, device=device, dtype=torch.float32)
             if cand_idx.numel() > 0 and psi_cand is not None:
-                raw_depth_um = psi_cand.clamp(min=0.0) / pos_per_um
+                if self.profile_mode == "tent_bell" and d_in_cand is not None:
+                    raw_depth_um = d_in_cand / pos_per_um
+                else:
+                    raw_depth_um = psi_cand.clamp(min=0.0) / pos_per_um
                 if self.slack_gate_mode in ("kappa_evac", "kappa_evac_elmore2"):
                     depth_um[cand_idx] = raw_depth_um
                 else:
@@ -1670,11 +2027,12 @@ class MacroExclusionField(nn.Module):
 
             pin_slack, node_slack, _ = self._extract_pin_and_movable_slack_ps(owner, device)
             med_dtau_in_macro = 0.0
-            wall_um = (
-                (0.725 * float(self.delta)) / pos_per_um
-                if self.profile_mode == "tent_rim"
-                else (0.375 * float(self.delta)) / pos_per_um
-            )
+            if self.profile_mode == "tent_bell":
+                wall_um = (0.5 * float(self.row_height)) / pos_per_um
+            elif self.profile_mode == "tent_rim":
+                wall_um = (0.725 * float(self.delta)) / pos_per_um
+            else:
+                wall_um = (0.375 * float(self.delta)) / pos_per_um
             in_obs_mask = depth_um > wall_um
             s_th: Optional[torch.Tensor] = None
             dtau_min_ps: Optional[torch.Tensor] = None
@@ -1752,7 +2110,7 @@ class MacroExclusionField(nn.Module):
                 gamma_slack = torch.zeros_like(chi)
             del alpha_cell, pin_slack
 
-            if self.force_mode == "normal_proj" and node_slack is not None:
+            if self.force_mode in ("normal_proj", "taylor_kkt") and node_slack is not None:
                 gamma_inst = gamma_slack
             else:
                 gamma_inst = torch.maximum(gamma_slack, chi)
@@ -1781,7 +2139,48 @@ class MacroExclusionField(nn.Module):
                 if self.slack_gate_mode in ("kappa_evac", "kappa_evac_elmore2")
                 else float(self.crit_wl_scale)
             )
-            if self.force_mode == "normal_proj":
+            if self.force_mode == "taylor_kkt":
+                gate_mult = float(self.bg_wl_scale) * (1.0 - gamma_mem) + gamma_mem
+                gx_mov, gy_mov = self._compute_total_pull_grad_xy(
+                    owner, pos, star, coeff, pair_slope, geom, drv, snk
+                )
+                h_tx, h_ty, gamma_pos = self._compute_timing_hessian_and_gamma(
+                    owner, pos, star, coeff
+                )
+                base_pull = 0.5 * gate_mult * torch.sqrt(gx_mov * gx_mov + gy_mov * gy_mov)
+                if (
+                    cand_idx.numel() > 0
+                    and d_in_cand is not None
+                    and nx_cand is not None
+                    and ny_cand is not None
+                    and grad_norm_cand is not None
+                ):
+                    f_in_raw = gx_mov[cand_idx] * nx_cand + gy_mov[cand_idx] * ny_cand
+                    h_wl_cand = (eff_crit_wl * p_wl[cand_idx]) / max(float(gamma_pos), 1e-6)
+                    h_n_cand = (
+                        h_wl_cand
+                        + h_tx[cand_idx] * (nx_cand * nx_cand)
+                        + h_ty[cand_idx] * (ny_cand * ny_cand)
+                    )
+                    f_cap_cand = torch.maximum(
+                        f_in_raw.clamp(min=0.0),
+                        eff_crit_wl * p_wl[cand_idx] + f_time[cand_idx],
+                    )
+                    f_kkt_cand = torch.minimum(
+                        (f_in_raw + h_n_cand * d_in_cand).clamp(min=0.0),
+                        f_cap_cand,
+                    )
+                    f_kkt_cand = torch.where(
+                        grad_norm_cand > 1e-8, f_kkt_cand, torch.zeros_like(f_kkt_cand)
+                    )
+                    t_in = (d_in_cand / max(1.5 * float(self.delta), 1e-6)).clamp(0.0, 1.0)
+                    u_in = t_in * t_in * (3.0 - 2.0 * t_in)
+                    eff_norm = (1.0 - u_in) + u_in * grad_norm_cand.clamp(min=0.35)
+                    base_pull[cand_idx] = gate_mult[cand_idx] * (f_kkt_cand / eff_norm)
+                    del f_in_raw, h_wl_cand, h_n_cand, f_cap_cand, f_kkt_cand, t_in, u_in, eff_norm
+                chi_pwl_term = eff_crit_wl * gamma_mem * p_wl
+                del gate_mult, gx_mov, gy_mov, h_tx, h_ty
+            elif self.force_mode == "normal_proj":
                 gate_mult = float(self.bg_wl_scale) * (1.0 - gamma_mem) + gamma_mem
                 gx_mov, gy_mov = self._compute_total_pull_grad_xy(
                     owner, pos, star, coeff, pair_slope, geom, drv, snk
@@ -1856,7 +2255,47 @@ class MacroExclusionField(nn.Module):
                     self.last_slack_gate_stats["median_dtau_in_macro_ps"],
                 )
         else:
-            if self.force_mode == "normal_proj":
+            if self.force_mode == "taylor_kkt":
+                gx_mov, gy_mov = self._compute_total_pull_grad_xy(
+                    owner, pos, star, coeff, pair_slope, geom, drv, snk
+                )
+                h_tx, h_ty, gamma_pos = self._compute_timing_hessian_and_gamma(
+                    owner, pos, star, coeff
+                )
+                gate_u = float(self.bg_wl_scale) + float(self.wl_gate_scale) * chi
+                base_pull = 0.5 * gate_u * torch.sqrt(gx_mov * gx_mov + gy_mov * gy_mov)
+                if (
+                    cand_idx.numel() > 0
+                    and d_in_cand is not None
+                    and nx_cand is not None
+                    and ny_cand is not None
+                    and grad_norm_cand is not None
+                ):
+                    f_in_raw = gx_mov[cand_idx] * nx_cand + gy_mov[cand_idx] * ny_cand
+                    h_wl_cand = (0.75 * p_wl[cand_idx]) / max(float(gamma_pos), 1e-6)
+                    h_n_cand = (
+                        h_wl_cand
+                        + h_tx[cand_idx] * (nx_cand * nx_cand)
+                        + h_ty[cand_idx] * (ny_cand * ny_cand)
+                    )
+                    f_cap_cand = torch.maximum(
+                        f_in_raw.clamp(min=0.0),
+                        0.75 * p_wl[cand_idx] + f_time[cand_idx],
+                    )
+                    f_kkt_cand = torch.minimum(
+                        (f_in_raw + h_n_cand * d_in_cand).clamp(min=0.0),
+                        f_cap_cand,
+                    )
+                    f_kkt_cand = torch.where(
+                        grad_norm_cand > 1e-8, f_kkt_cand, torch.zeros_like(f_kkt_cand)
+                    )
+                    t_in = (d_in_cand / max(1.5 * float(self.delta), 1e-6)).clamp(0.0, 1.0)
+                    u_in = t_in * t_in * (3.0 - 2.0 * t_in)
+                    eff_norm = (1.0 - u_in) + u_in * grad_norm_cand.clamp(min=0.35)
+                    base_pull[cand_idx] = gate_u[cand_idx] * (f_kkt_cand / eff_norm)
+                chi_pwl_term = float(self.wl_gate_scale) * chi * p_wl
+                del gx_mov, gy_mov, h_tx, h_ty, gate_u
+            elif self.force_mode == "normal_proj":
                 gx_mov, gy_mov = self._compute_total_pull_grad_xy(
                     owner, pos, star, coeff, pair_slope, geom, drv, snk
                 )
@@ -1864,7 +2303,6 @@ class MacroExclusionField(nn.Module):
                 base_pull = 0.5 * gate_u * torch.sqrt(gx_mov * gx_mov + gy_mov * gy_mov)
                 if (
                     cand_idx.numel() > 0
-                    and nx_cand is not None
                     and nx_cand is not None
                     and ny_cand is not None
                     and grad_norm_cand is not None
@@ -1885,7 +2323,7 @@ class MacroExclusionField(nn.Module):
                     + float(self.wl_gate_scale) * chi * p_wl
                 )
                 chi_pwl_term = float(self.wl_gate_scale) * chi * p_wl
-        del psi_cand, nx_cand, ny_cand, grad_norm_cand, pin_pos, geom, pair_slope, wire_slope, drv, snk, drv_mov, snk_mov
+        del psi_cand, d_in_cand, nx_cand, ny_cand, grad_norm_cand, pin_pos, geom, pair_slope, wire_slope, drv, snk, drv_mov, snk_mov
         self.movable_base_pull.copy_(base_pull)
 
         nz = torch.nonzero(base_pull > 1e-9, as_tuple=False).reshape(-1)

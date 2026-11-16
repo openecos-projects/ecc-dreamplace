@@ -618,7 +618,7 @@ class StarTdpRuntime:
                     getattr(params, "macro_exclusion_row_margin", 5.0)
                 ),
                 force_mode=str(
-                    getattr(params, "macro_exclusion_force_mode", "scalar")
+                    getattr(params, "macro_exclusion_force_mode", "taylor_kkt")
                 ),
                 escape_slope_mode=str(
                     getattr(params, "macro_exclusion_escape_slope_mode", "global")
@@ -631,6 +631,12 @@ class StarTdpRuntime:
                 ),
                 interior_evac_boost=float(
                     getattr(params, "macro_exclusion_interior_evac_boost", 0.50)
+                ),
+                bell_sigma_rows=float(
+                    getattr(params, "macro_exclusion_bell_sigma_rows", 16.0)
+                ),
+                bell_bias=float(
+                    getattr(params, "macro_exclusion_bell_bias", 0.80)
                 ),
             )
             op_collections.macro_exclusion_field_op = self.macro_exclusion_field

@@ -707,9 +707,8 @@ def test_apply_flow_defaults_allows_explicit_star_pin_pair_with_all_on_s5b1():
         "l_shape_use_ggr_topology": 0,
         "adjust_gpugr_area_flag": 1,
         "timing_opt_enabled": 1,
-        "buffering_mode": "segment",
-        "buffering_segment_strategy": "discrete_net_gradient",
-        "buffering_fixed_buffer_master": "BUFX1H7L",
+        "buffering_mode": "candidate",
+        "buffering_candidate_strategy": "discrete_net_gradient",
         "with_sta": 1,
         "diff_timing_driven_placement": 1,
         "differentiable_timing_obj": 1,
@@ -725,7 +724,7 @@ def test_apply_flow_defaults_allows_explicit_star_pin_pair_with_all_on_s5b1():
     assert params.star_recal_m_eff_scale_fix == 1
     assert params.star_restart_history_mode == "selective_sigmoid"
     assert params.macro_exclusion_field_flag == 1
-    assert params.macro_exclusion_force_mode == "scalar"
+    assert params.macro_exclusion_force_mode == "taylor_kkt"
     assert params.star_kappa_recalibrate_on_restart == 1
     assert math.isclose(params.star_post_restart_max_kappa, 0.20, rel_tol=1e-6)
     assert params.star_endpoint_slack_tau_mode == "post_restart_drift"
@@ -734,7 +733,7 @@ def test_apply_flow_defaults_allows_explicit_star_pin_pair_with_all_on_s5b1():
     assert params.l_shape_routability_flag == 1
     assert params.adjust_gpugr_area_flag == 1
     assert params.timing_opt_enabled == 1
-    assert params.buffering_mode == "segment"
+    assert params.buffering_mode == "candidate"
 
 
 def test_input_accumulator_max_carry_ratio_bounds_cold_start_spike():
@@ -2466,6 +2465,127 @@ def test_wa_net_curvature_diagonal_strict_psd_majorization():
         diag_full = torch.diag(torch.cat((fdx[:5], fdy[:5])))
         assert torch.linalg.eigvalsh(diag_full - h_full).min().item() >= -1e-10
         assert torch.linalg.eigvalsh(diag_full + h_full).min().item() >= -1e-10
+
+
+def test_macro_exclusion_taylor_kkt_and_tent_bell_modes():
+    """Verify K5a taylor_kkt interior-equilibrium push + legal-row zero false repulsion, and K5b tent_bell ridge shift."""
+    import numpy as np
+    from dreamplace.ops.macro_exclusion_field import (
+        MacroExclusionField,
+        build_macro_potential_grid,
+    )
+    from dreamplace.ops.macro_exclusion_field.macro_exclusion_field import (
+        _eval_cubic_bspline_2d,
+    )
+
+    rows = [(0.0, float(r * 10), 2000.0, float((r + 1) * 10)) for r in range(144)]
+    sx = torch.tensor([10.0, 10.0, 10.0, 600.0], dtype=torch.float32)
+    sy = torch.tensor([10.0, 10.0, 10.0, 600.0], dtype=torch.float32)
+    # Macro [500, 1100] x [400, 1000]:
+    # c0: deep inside macro (x_center=950, gx=0 interior equilibrium)
+    # c1: legal Row 1 outside right wall (x_center=1105, d_in==0, gx=-3 away from macro)
+    # c2: shallow inside macro (x_center=1090, strong natural outward pull gx=-50)
+    pos = torch.tensor(
+        [945.0, 1100.0, 1085.0, 500.0, 695.0, 695.0, 695.0, 400.0],
+        dtype=torch.float32,
+    )
+    placedb = SimpleNamespace(
+        num_nodes=4,
+        num_movable_nodes=3,
+        num_terminals=1,
+        row_height=10.0,
+        site_width=1.0,
+        xl=0.0,
+        yl=0.0,
+        xh=2000.0,
+        yh=1440.0,
+        rows=rows,
+        node_size_x=sx,
+        node_size_y=sy,
+        node_names=[b"c0_eq", b"c1_row1", b"c2_exit", b"u_macro"],
+    )
+    dc = SimpleNamespace(
+        node_size_x=sx,
+        node_size_y=sy,
+        pin2node_map=torch.tensor([0, 1, 2, 3, 3, 3], dtype=torch.long),
+        sum_pin_weights_in_nodes=torch.full((4,), 4.0, dtype=torch.float32),
+    )
+    field_k4a = MacroExclusionField(placedb, dc, pos, force_mode="normal_proj")
+    field_k5a = MacroExclusionField(placedb, dc, pos)
+    assert field_k5a.force_mode == "taylor_kkt"
+
+    fake_tp = SimpleNamespace(
+        timing_state_generation=1,
+        pin_rslack_live_snapshot=torch.full((6,), -40.0, dtype=torch.float32),
+        pin_fslack_live_snapshot=torch.full((6,), -40.0, dtype=torch.float32),
+    )
+    fake_star = SimpleNamespace(
+        snapshot_generation=1,
+        num_nets=3,
+        pair_net_ids=torch.tensor([0, 1, 2], dtype=torch.long),
+        coordinate_to_um=1.0,
+        r_unit=0.5,
+        c_unit=0.00016,
+        driver_pin_ids=torch.tensor([0, 1, 2], dtype=torch.long),
+        sink_pin_ids=torch.tensor([3, 4, 5], dtype=torch.long),
+        frozen_weight=torch.tensor([2.0, 2.0, 2.0], dtype=torch.float32),
+        frozen_load_length_weight=torch.tensor([1.0, 1.0, 1.0], dtype=torch.float32),
+        geometry=lambda _p: {
+            "raw_dx": torch.tensor([450.0, -295.0, -410.0], dtype=torch.float32),
+            "raw_dy": torch.zeros(3, dtype=torch.float32),
+            "length_um": torch.tensor([450.0, 295.0, 410.0], dtype=torch.float32),
+        },
+    )
+    owner = SimpleNamespace(
+        _star_pin_pair_op=lambda: fake_star,
+        _driver_sink_star_base_cap_map=lambda: {"generic": torch.full((6,), 0.004, dtype=torch.float32)},
+        segment_timing_coefficient=1.0,
+        mock_pull_grad_fn=lambda _p: (
+            torch.tensor([0.0, -3.0, -50.0], dtype=torch.float32),
+            torch.zeros(3, dtype=torch.float32),
+        ),
+        mock_hessian_and_gamma_fn=lambda _p: (
+            torch.tensor([0.15, 0.15, 0.15], dtype=torch.float32),
+            torch.tensor([0.15, 0.15, 0.15], dtype=torch.float32),
+            20.0,
+        ),
+        data_collections=dc,
+        op_collections=SimpleNamespace(
+            pin_pos_op=lambda p: p,
+            timing_propagation_op=fake_tp,
+        ),
+    )
+    field_k4a.refresh_criticality_pulls(owner, pos)
+    field_k5a.refresh_criticality_pulls(owner, pos)
+    # K4a stalls at interior equilibrium (0.0), whereas K5a pushes strongly via H_n * d_in (capped cleanly at F_cap):
+    assert float(field_k4a.movable_base_pull[0].item()) == 0.0
+    assert float(field_k5a.movable_base_pull[0].item()) > 4.0
+    # Legal Row 1 cell and self-exiting cell both receive identically 0.0 false repulsion:
+    assert float(field_k5a.movable_base_pull[1].item()) == 0.0
+    assert float(field_k5a.movable_base_pull[2].item()) == 0.0
+
+    # Opt-in tent_bell reflects die-edge wall and shifts macro ridge toward cramped 6-row alley:
+    boxes = np.array([[0.0, 200.0, 200.0, 600.0], [212.0, 200.0, 412.0, 600.0]], dtype=np.float64)
+    g_rim, m_rim = build_macro_potential_grid(
+        boxes, 0.0, 0.0, 1200.0, 800.0, 2.0, torch.device("cpu"), profile_mode="tent_rim"
+    )
+    g_bell, m_bell = build_macro_potential_grid(
+        boxes, 0.0, 0.0, 1200.0, 800.0, 2.0, torch.device("cpu"), profile_mode="tent_bell"
+    )
+    _, gx_rim, _ = _eval_cubic_bspline_2d(
+        g_rim, torch.tensor([30.0]), torch.tensor([400.0]), m_rim["g_xl"], m_rim["g_yl"], m_rim["h_g"]
+    )
+    _, gx_bell, _ = _eval_cubic_bspline_2d(
+        g_bell, torch.tensor([30.0]), torch.tensor([400.0]), m_bell["g_xl"], m_bell["g_yl"], m_bell["h_g"]
+    )
+    assert float(gx_rim[0].item()) > 0.5
+    assert float(gx_bell[0].item()) < -0.2
+    xs_m2 = torch.linspace(220.0, 404.0, 185)
+    v_m2, _, _ = _eval_cubic_bspline_2d(
+        g_bell, xs_m2, torch.full_like(xs_m2, 400.0), m_bell["g_xl"], m_bell["g_yl"], m_bell["h_g"]
+    )
+    assert float(xs_m2[int(torch.argmax(v_m2))].item()) < 305.0
+
 
 
 

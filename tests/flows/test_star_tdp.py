@@ -2664,6 +2664,8 @@ def test_star_tdp_runtime_metric_consistent_momentum_transport_default():
     )
     assert rt.momentum_transport_timing is True
     assert rt.momentum_transport_envelope == 0.0
+    assert rt.distance_model == "lse"
+    assert rt._segment_timing_cut_distance_model() == "lse"
 
     pos = torch.tensor([10.0, 90.0, 20.0, 40.0], dtype=torch.float32)
     # Step 499 (pre-activation): records (base, 0, alpha=2.0)
@@ -2706,6 +2708,63 @@ def test_star_tdp_runtime_metric_consistent_momentum_transport_default():
     )
     assert rt_env.momentum_transport_envelope == 1.05
     assert rt_env.momentum_transport_timing is False
+
+
+def test_lse_rowsum_secant_curvature_and_rcwl_majorizer():
+    pin2node_map = torch.tensor([0, 1, 1, 2], dtype=torch.long)
+    star = StarPinPair(
+        net2driver_pin_map=torch.tensor([0, 2], dtype=torch.long),
+        timing_net_flat_arcs=torch.tensor([[0, 1], [2, 3]], dtype=torch.long),
+        timing_net_flat_arcs_start=torch.tensor([0, 1, 2], dtype=torch.long),
+        num_pins=4,
+        r_unit=2.535e-3,
+        c_unit=0.16e-3,
+    ).to(dtype=torch.float64)
+    star.frozen_weight = torch.tensor([2.5, 4.0], dtype=torch.float64)
+    star.frozen_load_length_weight = torch.tensor([0.6, 1.1], dtype=torch.float64)
+    star.frozen_curvature_load_length_weight = star.frozen_load_length_weight.clone()
+    star.snapshot_generation = 1
+    star.pair_weight_generation = 1
+    c_vec = torch.tensor([0.002, 0.003, 0.002, 0.004], dtype=torch.float64)
+    caps = {"generic": c_vec, "rise": c_vec, "fall": c_vec}
+
+    p0 = torch.tensor([10.0, 90.0, 90.0, 260.0, 20.0, 70.0, 70.0, 190.0], dtype=torch.float64, requires_grad=True)
+    g_elm = torch.autograd.grad(
+        star.structured_delay_objective(p0, base_caps=caps, distance_model="lse", smoothing_gamma=12.0), p0
+    )[0]
+    p0_r = p0.detach().clone().requires_grad_(True)
+    g_rcwl = torch.autograd.grad(
+        star.rcwl_linear_objective(p0_r, base_caps=caps, distance_model="lse", smoothing_gamma=12.0), p0_r
+    )[0]
+    assert torch.allclose(g_elm, g_rcwl, rtol=1e-12, atol=1e-12)
+
+    placedb = SimpleNamespace(num_movable_nodes=2, num_nodes=3)
+    dc = SimpleNamespace(pin2node_map=pin2node_map)
+    op_cols = SimpleNamespace(pin_pos_op=lambda p: torch.cat([p[:3][pin2node_map], p[3:][pin2node_map]]))
+    pos_zero = torch.tensor([50.0, 50.0, 50.0, 40.0, 40.0, 40.0], dtype=torch.float64)
+    owner_wa = SimpleNamespace(
+        placedb=placedb,
+        data_collections=dc,
+        op_collections=op_cols,
+        segment_timing_coefficient=1.0,
+        _star_pin_pair_op=lambda: star,
+        _segment_timing_star_load_curvature=lambda: True,
+        _segment_timing_cut_effective_smoothing_gamma=lambda: 10.0,
+        _segment_timing_cut_distance_model=lambda: "wa",
+        _segment_timing_star_pair_objective=lambda: "elmore",
+        _driver_sink_star_base_cap_map=lambda: caps,
+    )
+    owner_lse05 = SimpleNamespace(
+        **{
+            **vars(owner_wa),
+            "_segment_timing_cut_effective_smoothing_gamma": lambda: 5.0,
+            "_segment_timing_cut_distance_model": lambda: "lse",
+        }
+    )
+    h_wa, _ = rowsum_hessian(owner_wa, pos_zero, elmore_axes=2, full_slope=True)
+    h_lse05, _ = rowsum_hessian(owner_lse05, pos_zero, elmore_axes=2, full_slope=True)
+    assert torch.allclose(h_wa, h_lse05, rtol=1e-12, atol=1e-12)
+
 
 
 

@@ -196,6 +196,17 @@ def rowsum_hessian(owner, pos, *, elmore_axes=1, full_slope=False):
     pair_objective = (
         str(pair_objective_fn()) if callable(pair_objective_fn) else "elmore"
     )
+    distance_model_fn = getattr(
+        owner, "_segment_timing_cut_distance_model", None
+    )
+    distance_model = (
+        str(distance_model_fn()).strip().lower()
+        if callable(distance_model_fn)
+        else "wa"
+    )
+    # Zero-normalized LSE phi(d) = 2*gamma*log(cosh(d/(2*gamma))) has secant bound
+    # phi'(d)/d = tanh(d/(2*gamma))/d <= 1/max(|d|, 2*gamma).
+    curv_gamma = 2.0 * gamma if distance_model == "lse" else gamma
     if pair_objective == "efftdp_quadratic":
         diagonal = quadratic_rowsum_diagonal(
             weight,
@@ -203,7 +214,7 @@ def rowsum_hessian(owner, pos, *, elmore_axes=1, full_slope=False):
             torch.stack((geometry["raw_dx"], geometry["raw_dy"])),
             coefficient=coefficient,
             coordinate_to_um=star.coordinate_to_um,
-            gamma=gamma,
+            gamma=curv_gamma,
             driver_nodes=driver_nodes,
             sink_nodes=sink_nodes,
             movable_count=movable_count,
@@ -223,18 +234,31 @@ def rowsum_hessian(owner, pos, *, elmore_axes=1, full_slope=False):
             diagonal = diagonal + torch.stack((wa_dx, wa_dy))
         return diagonal, gamma
     base_caps = owner._driver_sink_star_base_cap_map()
-    h_elmore = elmore_rowsum_diagonal(
-        weight,
-        coefficient=coefficient,
-        r_unit=star.r_unit,
-        c_unit=star.c_unit,
-        coordinate_to_um=star.coordinate_to_um,
-        driver_nodes=driver_nodes,
-        sink_nodes=sink_nodes,
-        movable_count=movable_count,
-        node_count=node_count,
-        axes=elmore_axes,
-    )
+    if pair_objective == "rcwl_linear":
+        h_elmore = pos.new_zeros((2, node_count))
+        if callable(getattr(star, "get_or_set_rcwl_anchor_length", None)):
+            anchor_len = star.get_or_set_rcwl_anchor_length(
+                pin_pos,
+                distance_model=distance_model,
+                smoothing_gamma=(None if distance_model == "l1" else gamma),
+            )
+        else:
+            anchor_len = geometry["length_um"]
+        slope_len_um = anchor_len.detach()
+    else:
+        h_elmore = elmore_rowsum_diagonal(
+            weight,
+            coefficient=coefficient,
+            r_unit=star.r_unit,
+            c_unit=star.c_unit,
+            coordinate_to_um=star.coordinate_to_um,
+            driver_nodes=driver_nodes,
+            sink_nodes=sink_nodes,
+            movable_count=movable_count,
+            node_count=node_count,
+            axes=elmore_axes,
+        )
+        slope_len_um = geometry["length_um"] if full_slope else None
     relative_xy = torch.stack((geometry["raw_dx"], geometry["raw_dy"]))
     sink_cap = base_caps["generic"][star.sink_pin_ids]
     h_linear = linear_length_diagonal(
@@ -245,13 +269,13 @@ def rowsum_hessian(owner, pos, *, elmore_axes=1, full_slope=False):
         coefficient=coefficient,
         r_unit=star.r_unit,
         coordinate_to_um=star.coordinate_to_um,
-        gamma=gamma,
+        gamma=curv_gamma,
         driver_nodes=driver_nodes,
         sink_nodes=sink_nodes,
         movable_count=movable_count,
         node_count=node_count,
         c_unit=star.c_unit,
-        length_um=geometry["length_um"] if full_slope else None,
+        length_um=slope_len_um,
     )
     total_diag = h_elmore + h_linear
     if is_wa_net_load and bool((load != 0).any().item()) and coefficient > 0.0:
@@ -291,18 +315,46 @@ def clock_rowsum_hessian(owner, pos, *, gamma, elmore_axes=1, full_slope=False):
     base_caps = owner._lcb_ff_clock_base_cap_map()
     load = getattr(star, "frozen_load_length_weight", None)
     load = weight.new_empty(0) if load is None else load.detach()
-    h_elmore = elmore_rowsum_diagonal(
-        weight,
-        coefficient=coefficient,
-        r_unit=star.r_unit,
-        c_unit=star.c_unit,
-        coordinate_to_um=star.coordinate_to_um,
-        driver_nodes=driver_nodes,
-        sink_nodes=sink_nodes,
-        movable_count=movable_count,
-        node_count=node_count,
-        axes=elmore_axes,
+    pair_objective_fn = getattr(
+        owner, "_segment_timing_star_pair_objective", None
     )
+    pair_objective = (
+        str(pair_objective_fn()) if callable(pair_objective_fn) else "elmore"
+    )
+    distance_model_fn = getattr(
+        owner, "_segment_timing_cut_distance_model", None
+    )
+    distance_model = (
+        str(distance_model_fn()).strip().lower()
+        if callable(distance_model_fn)
+        else "wa"
+    )
+    curv_gamma = 2.0 * gamma if distance_model == "lse" else gamma
+    if pair_objective == "rcwl_linear":
+        h_elmore = pos.new_zeros((2, node_count))
+        if callable(getattr(star, "get_or_set_rcwl_anchor_length", None)):
+            anchor_len = star.get_or_set_rcwl_anchor_length(
+                compact,
+                distance_model=distance_model,
+                smoothing_gamma=(None if distance_model == "l1" else gamma),
+            )
+        else:
+            anchor_len = geometry["length_um"]
+        slope_len_um = anchor_len.detach()
+    else:
+        h_elmore = elmore_rowsum_diagonal(
+            weight,
+            coefficient=coefficient,
+            r_unit=star.r_unit,
+            c_unit=star.c_unit,
+            coordinate_to_um=star.coordinate_to_um,
+            driver_nodes=driver_nodes,
+            sink_nodes=sink_nodes,
+            movable_count=movable_count,
+            node_count=node_count,
+            axes=elmore_axes,
+        )
+        slope_len_um = geometry["length_um"] if full_slope else None
     h_linear = linear_length_diagonal(
         weight,
         load if load.numel() == weight.numel() else weight.new_empty(0),
@@ -311,13 +363,13 @@ def clock_rowsum_hessian(owner, pos, *, gamma, elmore_axes=1, full_slope=False):
         coefficient=coefficient,
         r_unit=star.r_unit,
         coordinate_to_um=star.coordinate_to_um,
-        gamma=gamma,
+        gamma=curv_gamma,
         driver_nodes=driver_nodes,
         sink_nodes=sink_nodes,
         movable_count=movable_count,
         node_count=node_count,
         c_unit=star.c_unit,
-        length_um=geometry["length_um"] if full_slope else None,
+        length_um=slope_len_um,
     )
     return (h_elmore + h_linear).to(pos.dtype)
 

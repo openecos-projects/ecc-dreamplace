@@ -756,6 +756,86 @@ class StarPinPair(nn.Module):
             smoothing_gamma=smoothing_gamma,
         )
 
+    def get_or_set_rcwl_anchor_length(
+        self,
+        pin_pos: torch.Tensor,
+        *,
+        distance_model="l1",
+        smoothing_gamma=None,
+        surrogate_length_um: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Return frozen surrogate anchor length for the active snapshot generation."""
+        model = self._normalize_distance_model(distance_model)
+        gamma_val = (
+            float(smoothing_gamma.detach().reshape(-1)[0].item())
+            if torch.is_tensor(smoothing_gamma)
+            else (None if smoothing_gamma is None else float(smoothing_gamma))
+        )
+        cache_key = (int(self.snapshot_generation), str(model), gamma_val)
+        anchor_len = getattr(self, "frozen_surrogate_length_um", None)
+        pair_count = int(self.sink_pin_ids.numel())
+        if (
+            getattr(self, "_rcwl_anchor_cache_key", None) != cache_key
+            or not torch.is_tensor(anchor_len)
+            or int(anchor_len.numel()) != pair_count
+        ):
+            if surrogate_length_um is None:
+                surrogate_length_um = self.surrogate_geometry(
+                    pin_pos,
+                    distance_model=model,
+                    smoothing_gamma=smoothing_gamma,
+                )["length_um"]
+            anchor_len = surrogate_length_um.detach().clone()
+            self.frozen_surrogate_length_um = anchor_len
+            self._rcwl_anchor_cache_key = cache_key
+        return anchor_len
+
+    def rcwl_linear_objective(
+        self,
+        pin_pos: torch.Tensor,
+        frozen_weight: Optional[torch.Tensor] = None,
+        *,
+        base_caps: Mapping[str, torch.Tensor],
+        distance_model="l1",
+        smoothing_gamma=None,
+    ) -> torch.Tensor:
+        """Anchor-linearized pure first-order Star RCWL objective."""
+        geometry = self.surrogate_geometry(
+            pin_pos,
+            distance_model=distance_model,
+            smoothing_gamma=smoothing_gamma,
+        )
+        weight = self.frozen_weight if frozen_weight is None else frozen_weight
+        pair_count = int(geometry["length_um"].numel())
+        if int(weight.numel()) != pair_count:
+            raise RuntimeError(
+                "star rcwl objective requires a published adjoint per pair"
+            )
+        if weight.device != geometry["length_um"].device:
+            raise RuntimeError(
+                "star frozen delay adjoints must reside on the geometry device"
+            )
+        if pair_count == 0:
+            return geometry["length_um"].new_zeros(())
+        anchor_len = self.get_or_set_rcwl_anchor_length(
+            pin_pos,
+            distance_model=distance_model,
+            smoothing_gamma=smoothing_gamma,
+            surrogate_length_um=geometry["length_um"],
+        )
+        anchor_slope = self.elmore_length_slope(anchor_len.detach(), base_caps)
+        pair_delay_linear = (
+            anchor_slope.detach().to(dtype=geometry["length_um"].dtype)
+            * geometry["length_um"]
+        )
+        return self._weighted_pair_delay_objective(
+            pair_delay_linear,
+            geometry["length_um"],
+            weight,
+            pin_pos=pin_pos,
+            smoothing_gamma=smoothing_gamma,
+        )
+
     def _weighted_pair_delay_objective(
         self,
         pair_delay: torch.Tensor,
@@ -1901,6 +1981,8 @@ class StarPinPair(nn.Module):
         self._timing_precondition_cache_key = None
         self._timing_precondition_cache_x = None
         self._timing_precondition_cache_y = None
+        self._rcwl_anchor_cache_key = None
+        self.frozen_surrogate_length_um = None
         return dict(metadata)
 
     def read_snapshot_metadata(self) -> Dict[str, object]:

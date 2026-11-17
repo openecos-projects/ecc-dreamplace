@@ -182,7 +182,7 @@ class StarTdpRuntime:
         self.num_pins = int(placedb.num_pins)
 
         self.distance_model = (
-            str(getattr(params, "star_distance_model", "wa") or "wa").strip().lower()
+            str(getattr(params, "star_distance_model", "lse") or "lse").strip().lower()
         )
         if self.distance_model not in ("l1", "wa", "lse"):
             raise ValueError(
@@ -1028,6 +1028,9 @@ class StarTdpRuntime:
 
     def _segment_timing_star_pair_objective(self) -> str:
         return "elmore"
+
+    def _segment_timing_cut_distance_model(self) -> str:
+        return self.distance_model
 
     def _segment_timing_cut_effective_smoothing_gamma(self) -> float:
         gamma = getattr(self.model, "gamma", None)

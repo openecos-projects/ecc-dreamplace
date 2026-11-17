@@ -1365,8 +1365,8 @@
         "default": null
     },
     "star_distance_model": {
-        "description": "Star TDP pair distance surrogate: wa | l1 | lse",
-        "default": "wa"
+        "description": "Star TDP pair distance surrogate: lse | wa | l1",
+        "default": "lse"
     },
     "star_timing_loss_mode": {
         "description": "timing scalar differentiated at Star TDP snapshot refresh: tns_only | combined",

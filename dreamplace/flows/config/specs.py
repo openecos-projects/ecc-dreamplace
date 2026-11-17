@@ -419,6 +419,7 @@ def configure_timing_placement_carrier(params):
         setattr(params, f"_{name}_explicit", True)
     if carrier == "star_pin_pair":
         star_defaults = {
+            "star_distance_model": "lse",
             "star_load_geometry": "wa_net",
             "star_recal_m_eff_scale_fix": 1,
             "star_restart_history_mode": "selective_sigmoid",

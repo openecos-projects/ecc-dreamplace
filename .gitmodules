@@ -11,6 +11,6 @@
 [submodule "xplace"]
 	path = thirdparty/xplace
 	url = https://github.com/zhaoxueyan1/Xplace.git
-	branch = yell/ics55_v2
+	branch = main
 	shallow = true
 	ignore = untracked

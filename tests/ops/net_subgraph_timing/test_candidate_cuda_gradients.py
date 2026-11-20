@@ -1,14 +1,9 @@
-"""CUDA candidate reverse pass must preserve every RC and buffer derivative."""
-
-from types import SimpleNamespace
-
 import pytest
 import torch
 from dreamplace.ops.buffer_insertion.discrete_candidate_buffer_runner import (
     _typed_candidate_objective_gradient,
 )
 from dreamplace.ops.buffer_insertion.drive_type_table import (
-    EXPECTED_DRIVE_TYPE_MASTERS,
     write_case_drive_type_table,
 )
 from dreamplace.ops.buffer_insertion.optimization_state import (
@@ -25,6 +20,18 @@ from dreamplace.ops.net_subgraph_timing.segment_transfer.data.sampler import (
     default_fake_buffer_device,
 )
 from dreamplace.ops.net_subgraph_timing.segment_transfer.schema import BufferDeviceLut
+
+
+EXPECTED_DRIVE_TYPE_MASTERS = ("BUFX8_9TLVT", "BUFX12_9TLVT", "BUFX16_9TLVT", "BUFX24_9TLVT")
+DRIVE_STRENGTHS = [
+    {"master": name, "strength": strength}
+    for name, strength in zip(EXPECTED_DRIVE_TYPE_MASTERS, (8, 12, 16, 24))
+]
+
+"""CUDA candidate reverse pass must preserve every RC and buffer derivative."""
+
+from types import SimpleNamespace
+
 
 
 @pytest.fixture(autouse=True, params=[False, True])
@@ -291,7 +298,7 @@ def test_four_drive_candidate_gradients_match_cpu_reference_and_finite_differenc
         }
         for i, name in enumerate(EXPECTED_DRIVE_TYPE_MASTERS)
     }
-    table = write_case_drive_type_table(tmp_path / "drive.json", buffer_library=library)
+    table = write_case_drive_type_table(tmp_path / "drive.json", drive_strengths=DRIVE_STRENGTHS, buffer_library=library)
     base = default_fake_buffer_device()
     buffer_device = BufferDeviceLut(
         input_cap_by_size=torch.tensor([0.1, 0.2, 0.3, 0.4], dtype=torch.float64),

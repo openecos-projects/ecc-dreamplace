@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 import pytest
 import torch
 from dreamplace.ops.buffer_insertion.buffering_lane import BufferingOptimizationLane
@@ -9,6 +7,16 @@ from dreamplace.ops.buffer_insertion.candidate_geometry import (
     remap_candidate_state,
 )
 from torch import nn
+
+
+EXPECTED_DRIVE_TYPE_MASTERS = ("BUFX8_9TLVT", "BUFX12_9TLVT", "BUFX16_9TLVT", "BUFX24_9TLVT")
+DRIVE_STRENGTHS = [
+    {"master": name, "strength": strength}
+    for name, strength in zip(EXPECTED_DRIVE_TYPE_MASTERS, (8, 12, 16, 24))
+]
+
+from types import SimpleNamespace
+
 
 
 def _segment(candidate_id, ratio=0.5):
@@ -357,8 +365,7 @@ def test_active_refresh_reuses_full_candidate_domain_without_changing_timing(
         build_buffering_state_for_model,
     )
     from dreamplace.ops.buffer_insertion.drive_type_table import (
-        EXPECTED_DRIVE_TYPE_MASTERS,
-        write_case_drive_type_table,
+            write_case_drive_type_table,
     )
     from dreamplace.ops.net_subgraph_timing.dynamic_provider import RelaxedBufferDynamicNetProvider
 
@@ -403,7 +410,7 @@ def test_active_refresh_reuses_full_candidate_domain_without_changing_timing(
         for index, name in enumerate(EXPECTED_DRIVE_TYPE_MASTERS)
     }
     table = tmp_path / "types.json"
-    write_case_drive_type_table(table, buffer_library=library)
+    write_case_drive_type_table(table, drive_strengths=DRIVE_STRENGTHS, buffer_library=library)
     config = SimpleNamespace(
         mode="candidate",
         candidate_strategy="discrete_net_gradient",

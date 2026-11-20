@@ -24,6 +24,8 @@ def inflation_window_params():
     params.fromJson({key: metadata["default"] for key, metadata in template.items()})
     params._global_place_stages_explicit = True
     params.flow_kind = "placement"
+    params.buffering_fixed_buffer_master = "fixture_buffer"
+    params._buffering_fixed_buffer_master_explicit = True
     params.timing_opt_enabled = 1
     params.l_shape_use_ggr_topology = 0
     return params

@@ -325,7 +325,7 @@ def build_arg_parser():
     parser.add_argument("--timing-gradient-net-weight-max", type=float)
     parser.add_argument(
         "--openroad-vt-suffixes",
-        help="Comma-separated OpenROAD VT suffixes, for example H7H,H7R,H7L.",
+        help="Comma-separated OpenROAD VT suffixes, for example _9THVT,_9TSVT,_9TLVT.",
     )
     parser.add_argument("--discrete-gradient-topk-up-percent", type=float)
     parser.add_argument("--discrete-gradient-topk-down-percent", type=float)

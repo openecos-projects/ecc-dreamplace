@@ -1,11 +1,18 @@
-from types import SimpleNamespace
-
 import torch
 
 from dreamplace.ops.buffer_insertion.drive_type_table import (
-    EXPECTED_DRIVE_TYPE_MASTERS,
     write_case_drive_type_table,
 )
+
+
+EXPECTED_DRIVE_TYPE_MASTERS = ("BUFX8_9TLVT", "BUFX12_9TLVT", "BUFX16_9TLVT", "BUFX24_9TLVT")
+DRIVE_STRENGTHS = [
+    {"master": name, "strength": strength}
+    for name, strength in zip(EXPECTED_DRIVE_TYPE_MASTERS, (8, 12, 16, 24))
+]
+
+from types import SimpleNamespace
+
 
 
 def _fixture():
@@ -236,7 +243,7 @@ def test_state_builder_four_strength_table_builds_typed_one_hot_state(tmp_path):
         for index, name in enumerate(EXPECTED_DRIVE_TYPE_MASTERS)
     }
     table_path = tmp_path / "drive_strength.json"
-    write_case_drive_type_table(table_path, buffer_library=buffer_library)
+    write_case_drive_type_table(table_path, drive_strengths=DRIVE_STRENGTHS, buffer_library=buffer_library)
     model = SimpleNamespace(
         data_collections=SimpleNamespace(
             buffering_nets=nets,

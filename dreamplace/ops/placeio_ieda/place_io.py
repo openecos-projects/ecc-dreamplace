@@ -6,11 +6,7 @@ from dataclasses import dataclass
 from .backend_caps import DEFAULT_BACKEND_CAPS
 
 
-DEFAULT_VT_CONFIG = [
-    ("H7H", "HVT"),
-    ("H7L", "LVT"),
-    ("H7R", "RVT"),
-]
+DEFAULT_VT_CONFIG = []
 
 IEDAIO = None
 IEDASta = None

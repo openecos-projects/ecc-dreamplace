@@ -391,7 +391,7 @@ def test_joint_flow_cli_applies_segment_count_direct_profile_defaults(tmp_path):
     assert params.joint_segment_buffering_rounds == 1
     assert params.joint_segment_buffering_selection_fraction == 0.001
     assert params.joint_segment_pin2pin_rebootstrap_enabled == 1
-    assert params.buffering_fixed_buffer_master == "BUFX1H7L"
+    assert params.buffering_fixed_buffer_master == "BUFX1_9TLVT"
     assert params.buffering_fixed_bsu_index is None
 
 

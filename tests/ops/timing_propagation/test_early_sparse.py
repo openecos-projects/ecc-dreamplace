@@ -14,7 +14,10 @@ from sparse_fixtures import sparse_view
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("groups", [(0, 1, 2), (2, 0, 1)])
 @pytest.mark.parametrize("native", [False, True])
-def test_input_slew_uses_group_identity_and_preserves_wire_derivative(device, groups, native):
+@pytest.mark.parametrize("check_type", [0, 8])
+def test_input_slew_uses_group_identity_and_preserves_wire_derivative(
+    device, groups, native, check_type
+):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA runtime is unavailable")
     view, _ = sparse_view()
@@ -47,9 +50,10 @@ def test_input_slew_uses_group_identity_and_preserves_wire_derivative(device, gr
         lut_entry_vectorized=lambda cell, clock, data, arc, lut: torch.zeros_like(clock),
     )
     context = HoldContext(
-        start_pin=0, native_start_pin=0, launch_pin=-1, endpoint_pin=2, capture_pin=-1,
+        start_pin=0, native_start_pin=0, launch_pin=-1, endpoint_pin=2,
+        capture_pin=0 if check_type else -1,
         launch_clock="sys", capture_clock="sys", path_tag="sys", source_type=1,
-        check_type=0, data_transition=1, launch_transition=1, capture_transition=1,
+        check_type=check_type, data_transition=1, launch_transition=1, capture_transition=1,
         capture_pin_transition=1, arrival_ps=10, required_ps=5, data_slew_ps=0.2,
         launch_time_ps=0, launch_clock_arrival_ps=0, launch_clock_slew_ps=0,
         capture_edge_ps=0, capture_arrival_ps=0, capture_slew_ps=0, check_time_ps=0,
@@ -76,6 +80,7 @@ def test_input_slew_uses_group_identity_and_preserves_wire_derivative(device, gr
     result = EarlyPropagation(data, use_native=native).forward(
         timing, (zero, zero), (impulse, impulse), (zero, zero)
     )
+    torch.testing.assert_close(result.context_slack, zero.new_tensor([5, 4, 15, 13]))
     # Both domains reach the same physical endpoint. The faster input slew is
     # 0.2 ps; the wire contributes 9 ps^2, regardless of group numbering.
     expected = impulse.new_tensor(9.04).sqrt()

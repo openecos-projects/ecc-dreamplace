@@ -9,7 +9,6 @@ from .sparse_timing_schema import SparseTimingView, read_sparse_timing_view
 from .timing_schema import validate_timing_schema
 
 HOLD_SCHEMA_VERSION = 2
-TIMING_CHECK_CLASS_CLOCK_GATING_HOLD = 8
 
 
 @dataclass(frozen=True)
@@ -51,11 +50,7 @@ class HoldContext:
     @property
     def runtime_required_base_ps(self):
         """Required time after removing the live Liberty check value."""
-        return self.required_ps - self.check_time_ps if self.has_liberty_check else self.required_ps
-
-    @property
-    def has_liberty_check(self):
-        return self.check_type in (2, 4)
+        return self.required_ps - self.check_time_ps
 
     @property
     def launch_key(self):
@@ -142,9 +137,7 @@ def _read_context(row, pin_count, clocks):
             continue
         if not 0 <= value < pin_count:
             raise RuntimeError(f"ECC hold context {name} is outside the design pin domain")
-    if context.source_type not in (1, 2) or context.check_type not in (
-        0, 2, 4, TIMING_CHECK_CLASS_CLOCK_GATING_HOLD
-    ):
+    if context.source_type not in (1, 2) or context.check_type not in (0, 2, 4):
         raise RuntimeError("ECC hold context has an invalid source/check class")
     if any(
         getattr(context, name) not in (-1, 1)
@@ -156,15 +149,8 @@ def _read_context(row, pin_count, clocks):
     for name in HoldContext.__dataclass_fields__:
         if name.endswith("_ps") and not math.isfinite(float(getattr(context, name))):
             raise RuntimeError(f"ECC hold context has a nonfinite {name}")
-    # The native gate window can also have a path-delay/multicycle override.
-    # Its unadjusted rule retains the capture/margin decomposition.
-    required = (
-        context.normal_required_ps
-        if context.check_type == TIMING_CHECK_CLASS_CLOCK_GATING_HOLD
-        else context.required_ps
-    )
     if context.check_type and not math.isclose(
-        required,
+        context.required_ps,
         context.required_base_ps + context.check_time_ps,
         rel_tol=1e-9,
         abs_tol=0.01,
@@ -244,7 +230,7 @@ def read_hold_timing_schema(pydb):
         edge = 0 if context.data_transition == 1 else 1
         if not valid_by_pin[context.endpoint_pin, edge]:
             raise RuntimeError("ECC hold context refers to an unqualified endpoint/edge")
-        if context.has_liberty_check and (
+        if context.check_type and (
             context.capture_pin, context.endpoint_pin, context.check_type, edge
         ) not in qualified_checks:
             raise RuntimeError("ECC hold context has no matching qualified min check")

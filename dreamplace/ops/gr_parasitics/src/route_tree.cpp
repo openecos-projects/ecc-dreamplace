@@ -208,10 +208,11 @@ py::dict prepareTree(const py::dict& route, const py::dict& pinNames, const py::
             edge(pinMap[targetPin], gridMap[targetPin], resistance, capacitance, -1);
             ++attachmentCount; attachmentLength += length;
             attachmentResistance += resistance; attachmentCap += capacitance;
-            if (pinDriver[p]) {
+            // Timing arcs identify output-enabled INOUT pins that LEF-only
+            // routing cannot mark. Physical drivers also cover dangling outputs
+            // without timing arcs; contradictory driver identities still fail.
+            if (pinDriver[p] || drivers[target] == targetPin) {
                 ++driverCount;
-                // PyDB derives drivers from timing arcs. A dangling output has
-                // no timing arc, but its physical RC tree still has a driver.
                 if (drivers[target] >= 0 && drivers[target] != targetPin) fail("native/PyDB driver mismatch");
                 root = pinMap[targetPin];
             }

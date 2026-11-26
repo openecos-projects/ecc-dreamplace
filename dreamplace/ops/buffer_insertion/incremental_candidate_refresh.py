@@ -541,14 +541,22 @@ class IncrementalCandidateSession:
                     vp = vpin_v[vk]
                     if vp in buf_by_pin_in:
                         buf = buf_by_pin_in[vp]
-                        buf_compact = add_compact_node(
+                        junction = add_compact_node(
                             curr_parent,
                             total_r * rem_ratio,
                             total_c * rem_ratio,
                             0.0,
                             -1,
                         )
-                        local_compact_of_gv[v_gv] = buf_compact
+                        local_compact_of_gv[v_gv] = junction
+                        buf_compact = junction
+                        if children_gv[v_gv]:
+                            # Same-subnet wire branches stay on the input side.
+                            buf_compact = add_compact_node(junction, 0.0, 0.0, 0.0, -1)
+                            queue.append(v_gv)
+                        # Another insertion upstream can move this input to a new subnet.
+                        buf.upstream_subnet = int(cid)
+                        buf.record["cpp_net_id"] = int(cid)
                         dt_id = buf.drive_type_id
                         allowed = [idx == dt_id for idx in range(num_dtypes)]
                         net_candidates.append(
@@ -561,12 +569,7 @@ class IncrementalCandidateSession:
                             stitch_subnet(child_cid, buf_compact)
                     else:
                         is_orig_pin = 0 <= vp < self.orig_num_pins
-                        is_sink = (
-                            len(children_gv[v_gv]) == 0
-                            and vp >= 0
-                            and vp != drv_pin_id
-                            and vp < self.orig_num_pins
-                        )
+                        is_sink = is_orig_pin and vp != drv_pin_id
                         ncap = float(self.orig_pin_cap.get(vp, 0.0)) if is_sink else 0.0
                         v_compact = add_compact_node(
                             curr_parent,

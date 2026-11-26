@@ -293,9 +293,11 @@ class BufferFamilyContract:
             if self.candidate_drive_type_mode == FAST_BUFFERS_MODE:
                 master_names = fast_buffer_master_names(self.metadata)
             else:
-                from .drive_type_table import EXPECTED_DRIVE_TYPE_MASTERS
+                from .drive_type_table import resolve_drive_type_masters_for_library
 
-                master_names = EXPECTED_DRIVE_TYPE_MASTERS
+                master_names = resolve_drive_type_masters_for_library(
+                    _as_list(getattr(self.metadata, "flat_libcell_names", []))
+                )
             legal_table, typed_reasons = self._typed_legal_table(master_names)
             unsupported_reasons = list(typed_reasons)
             if legal_table is not None:

@@ -22,10 +22,10 @@ def _initial_three_net_fixture():
     """Build compact payload & typed candidate state with non-contiguous orig_net_ids [2, 7, 15].
 
     Simulates skipped clock/tie/1-pin nets so orig_net_id != net_idx and 15 >= len(orig_net_ids).
-    Each net has: root(0) -> split(1) -> sink(2).
+    Net 7 has an extra branch with a physical pin in its interior.
     """
     orig_net_ids = [2, 7, 15]
-    # Pins: net 2: drv=1, sink=2; net 7: drv=3, sink=4; net 15: drv=5, sink=6
+    # Pins: net 2: drv=1, sink=2; net 7: drv=3, sinks=4/7/8; net 15: drv=5, sink=6.
     records = [
         {
             "candidate_id": 101,
@@ -125,27 +125,26 @@ def _initial_three_net_fixture():
         legal_buffer_count=2,
         drive_type_table=table,
     )
-    # Match buffering_state_builder: state.candidate_node_id holds compact node indices [1, 4, 7].
-    state.candidate_node_id = torch.tensor([1, 4, 7], dtype=torch.long)
+    state.candidate_node_id = torch.tensor([1, 4, 9], dtype=torch.long)
 
     payload = {
-        "net_flat_topo_sort": torch.arange(9, dtype=torch.long),
-        "net_flat_topo_sort_start": torch.tensor([0, 3, 6, 9], dtype=torch.long),
-        "pin_fa": torch.tensor([-1, 0, 1, -1, 3, 4, -1, 6, 7], dtype=torch.long),
+        "net_flat_topo_sort": torch.arange(11, dtype=torch.long),
+        "net_flat_topo_sort_start": torch.tensor([0, 3, 8, 11], dtype=torch.long),
+        "pin_fa": torch.tensor([-1, 0, 1, -1, 3, 4, 3, 6, -1, 8, 9], dtype=torch.long),
         "flat_pin_to_start": torch.tensor(
-            [0, 1, 2, 2, 3, 4, 4, 5, 6, 6], dtype=torch.long
+            [0, 1, 2, 2, 4, 5, 5, 6, 6, 7, 8, 8], dtype=torch.long
         ),
-        "flat_pin_to": torch.tensor([1, 2, 4, 5, 7, 8], dtype=torch.long),
+        "flat_pin_to": torch.tensor([1, 2, 4, 6, 5, 7, 9, 10], dtype=torch.long),
         "edge_resistance": torch.tensor(
-            [0.0, 5.0, 5.0, 0.0, 10.0, 10.0, 0.0, 8.0, 8.0], dtype=torch.float32
+            [0.0, 5.0, 5.0, 0.0, 10.0, 10.0, 6.0, 2.0, 0.0, 8.0, 8.0], dtype=torch.float32
         ),
         "edge_capacitance": torch.tensor(
-            [0.0, 1.0, 1.0, 0.0, 2.0, 2.0, 0.0, 1.5, 1.5], dtype=torch.float32
+            [0.0, 1.0, 1.0, 0.0, 2.0, 2.0, 1.2, 0.5, 0.0, 1.5, 1.5], dtype=torch.float32
         ),
         "node_capacitance": torch.tensor(
-            [0.0, 0.0, 3.0, 0.0, 0.0, 4.0, 0.0, 0.0, 5.0], dtype=torch.float32
+            [0.0, 0.0, 3.0, 0.0, 0.0, 4.0, 0.5, 0.75, 0.0, 0.0, 5.0], dtype=torch.float32
         ),
-        "candidate_node_id": torch.tensor([1, 4, 7], dtype=torch.long),
+        "candidate_node_id": torch.tensor([1, 4, 9], dtype=torch.long),
         "candidate_net_id": torch.tensor([2, 7, 15], dtype=torch.long),
         "candidate_bu": torch.zeros(3, dtype=torch.float32),
         "buffer_input_cap": torch.zeros(3, dtype=torch.float32),
@@ -162,14 +161,14 @@ def _initial_three_net_fixture():
         ),
         "driver_arrival": torch.zeros(3, dtype=torch.float32),
         "driver_slew": torch.ones(3, dtype=torch.float32),
-        # NOTE: sink_net_index holds design-level orig_net_id [2, 7, 15]!
-        "sink_node_id": torch.tensor([2, 5, 8], dtype=torch.long),
-        "sink_net_index": torch.tensor([2, 7, 15], dtype=torch.long),
-        "sink_pin_id": torch.tensor([2, 4, 6], dtype=torch.long),
-        "static_rc_edge_mask": torch.zeros(9, dtype=torch.bool),
+        # sink_net_index holds design-level original net IDs.
+        "sink_node_id": torch.tensor([2, 5, 6, 7, 10], dtype=torch.long),
+        "sink_net_index": torch.tensor([2, 7, 7, 7, 15], dtype=torch.long),
+        "sink_pin_id": torch.tensor([2, 4, 7, 8, 6], dtype=torch.long),
+        "static_rc_edge_mask": torch.zeros(11, dtype=torch.bool),
         "metadata": {
             "net_ids": orig_net_ids,
-            "compact_node_to_original": [1, -1, 2, 3, -1, 4, 5, -1, 6],
+            "compact_node_to_original": [1, -1, 2, 3, -1, 4, 7, 8, 5, -1, 6],
         },
     }
     validate_compact_payload_invariants(
@@ -208,7 +207,7 @@ class _StubGate:
 
 
 def test_refresh_round_preserves_noncontiguous_orig_net_sink_and_compact_candidate_contracts():
-    """Refreshing net 7 must keep sink_net_index=[2, 7, 15] and valid compact candidate_node_id."""
+    """Keep physical input-side branches, sink alignment, and current subnet ownership."""
     orig_net_ids, payload, state = _initial_three_net_fixture()
     lane = _StubLane(state, payload)
     placedb = SimpleNamespace(
@@ -221,6 +220,8 @@ def test_refresh_round_preserves_noncontiguous_orig_net_sink_and_compact_candida
             "u7_sink:A",
             "u15:Z",
             "u15_sink:A",
+            "u7_tap:A",
+            "u7_tail:A",
         ],
     )
     model = SimpleNamespace(data_collections=None, placedb=placedb, op_collections=None)
@@ -232,19 +233,19 @@ def test_refresh_round_preserves_noncontiguous_orig_net_sink_and_compact_candida
         buffering_candidate_drive_type_mode="single_fixed",
     )
 
-    # Round 0 splits net 7 (drv=3 -> buf_in=20) and new net 100 (buf_out=21 -> sink=4).
+    # FLUTE visits the surviving tap and tail via the buffer input vertex on net 7.
     round0_trees = [
         {
             "net_id": 7,
             "driver_pin_id": 3,
             "root_vertex": 0,
-            "topo": [0, 1],
-            "parent": [-1, 0],
-            "edge_r": [0.0, 4.0],
-            "edge_c": [0.0, 0.8],
-            "vertex_x_dbu": [0.0, 1000.0],
-            "vertex_y_dbu": [0.0, 0.0],
-            "vertex_pin_id": [3, 20],
+            "topo": [0, 1, 2, 3],
+            "parent": [-1, 0, 1, 2],
+            "edge_r": [0.0, 4.0, 2.0, 1.0],
+            "edge_c": [0.0, 0.8, 0.4, 0.2],
+            "vertex_x_dbu": [0.0, 1000.0, 1500.0, 1800.0],
+            "vertex_y_dbu": [0.0] * 4,
+            "vertex_pin_id": [3, 20, 7, 8],
         },
         {
             "net_id": 100,
@@ -259,7 +260,7 @@ def test_refresh_round_preserves_noncontiguous_orig_net_sink_and_compact_candida
             "vertex_pin_id": [21, 4],
         },
     ]
-    # Round 1 inserts a second buffer UPSTREAM on net 7 (drv=3 -> buf2_in=22 -> buf1_in=20).
+    # Round 1 inserts before the first buffer, moving its input and the tap to net 101.
     round1_trees = [
         {
             "net_id": 7,
@@ -277,20 +278,20 @@ def test_refresh_round_preserves_noncontiguous_orig_net_sink_and_compact_candida
             "net_id": 101,
             "driver_pin_id": 23,
             "root_vertex": 0,
-            "topo": [0, 1],
-            "parent": [-1, 0],
-            "edge_r": [0.0, 2.0],
-            "edge_c": [0.0, 0.4],
-            "vertex_x_dbu": [500.0, 1000.0],
-            "vertex_y_dbu": [0.0, 0.0],
-            "vertex_pin_id": [23, 20],
+            "topo": [0, 1, 2, 3],
+            "parent": [-1, 0, 1, 2],
+            "edge_r": [0.0, 2.0, 2.0, 1.0],
+            "edge_c": [0.0, 0.4, 0.4, 0.2],
+            "vertex_x_dbu": [500.0, 1000.0, 1500.0, 1800.0],
+            "vertex_y_dbu": [0.0] * 4,
+            "vertex_pin_id": [23, 20, 7, 8],
         },
     ]
     gate = _StubGate([round0_trees, round1_trees])
     session = IncrementalCandidateSession(
         lane=lane, model=model, params=params, incremental_gate=gate
     )
-    assert session.orig_sinks_by_net == {2: {2}, 7: {4}, 15: {6}}
+    assert session.orig_sinks_by_net == {2: {2}, 7: {4, 7, 8}, 15: {6}}
 
     rep0 = session.refresh_round(
         accepted_action_infos=[
@@ -317,8 +318,33 @@ def test_refresh_round_preserves_noncontiguous_orig_net_sink_and_compact_candida
     validate_compact_payload_invariants(
         orig_net_ids=orig_net_ids, payload=refreshed_payload, state=refreshed_state
     )
-    assert refreshed_payload["sink_net_index"].tolist() == [2, 7, 15]
-    assert refreshed_payload["sink_pin_id"].tolist() == [2, 4, 6]
+    assert refreshed_payload["sink_net_index"].tolist() == [2, 7, 7, 7, 15]
+    assert refreshed_payload["sink_pin_id"].tolist() == [2, 4, 7, 8, 6]
+    sink_nodes = dict(zip(
+        refreshed_payload["sink_pin_id"].tolist(),
+        refreshed_payload["sink_node_id"].tolist(),
+        strict=True,
+    ))
+    parents = refreshed_payload["pin_fa"].tolist()
+    locked_row = refreshed_state.candidate_ids.tolist().index(102)
+    locked_node = int(refreshed_state.candidate_node_id[locked_row])
+    junction = parents[locked_node]
+    assert junction >= 0
+
+    def ancestors(node):
+        path = []
+        while parents[node] >= 0:
+            node = parents[node]
+            path.append(node)
+        return path
+
+    assert locked_node in ancestors(sink_nodes[4])
+    assert junction in ancestors(sink_nodes[7])
+    assert sink_nodes[7] in ancestors(sink_nodes[8])
+    assert locked_node not in ancestors(sink_nodes[8])
+    assert refreshed_payload["node_capacitance"][sink_nodes[7]] == 0.5
+    assert refreshed_payload["edge_resistance"][locked_node] == 0
+    assert refreshed_payload["edge_capacitance"][locked_node] == 0
 
     # RelaxedBufferDynamicNetProvider must keep non-empty sink_indices for shifted net 15!
     provider = RelaxedBufferDynamicNetProvider(
@@ -328,13 +354,15 @@ def test_refresh_round_preserves_noncontiguous_orig_net_sink_and_compact_candida
     view_15 = provider._active_view((15,))
     assert int(view_15["sink_indices_cpu"].numel()) == 1
     view_7 = provider._active_view((7,))
-    assert int(view_7["sink_indices_cpu"].numel()) == 1
+    assert int(view_7["sink_indices_cpu"].numel()) == 3
 
     # Round 1: pick an upstream candidate on net 7 (cpp_net_id == 7) and insert upstream of buf1.
     upstream_row, upstream_rec = next(
         (idx, rec)
         for idx, rec in enumerate(refreshed_state.candidate_records)
-        if rec.get("cpp_net_id") == 7 and int(rec["candidate_id"]) != 102
+        if rec.get("cpp_net_id") == 7
+        and rec.get("cpp_child_vertices") == (1,)
+        and int(rec["candidate_id"]) != 102
     )
     rep1 = session.refresh_round(
         accepted_action_infos=[
@@ -361,5 +389,8 @@ def test_refresh_round_preserves_noncontiguous_orig_net_sink_and_compact_candida
     downstream_locked = by_cid[102]
     assert upstream_locked["segment_tree_depth"] == 0
     assert downstream_locked["segment_tree_depth"] == 1
-    assert upstream_locked["downstream_pin_names"] == ("u7_sink:A",)
+    assert upstream_locked["downstream_pin_names"] == ("u7_sink:A", "u7_tap:A", "u7_tail:A")
     assert downstream_locked["downstream_pin_names"] == ("u7_sink:A",)
+    assert downstream_locked["cpp_net_id"] == 101
+    downstream_row = final_state.candidate_ids.tolist().index(102)
+    assert int(final_state.net_ids[final_state.candidate_net_index[downstream_row]]) == 101

@@ -224,3 +224,28 @@ def test_typed_projection_forwards_selected_master_to_coordinate_commit(tmp_path
     assert bridge.actions[0][0]["drive_type_id"] == 3
     assert bridge.actions[0][0]["buffer_master_name"] == "BUFX20H7L"
     assert bridge.actions[0][0]["buffer_master_id"] == 103
+
+
+def test_build_and_load_asap7_drive_type_table(tmp_path):
+    from dreamplace.ops.buffer_insertion.drive_type_table import (
+        ASAP7_DRIVE_TYPE_MASTERS,
+        build_drive_strength_table,
+    )
+
+    payload = build_drive_strength_table(
+        "asap7", list(ASAP7_DRIVE_TYPE_MASTERS), "/tmp/asap7"
+    )
+    path = tmp_path / "asap7_drive.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    library = {
+        index: {
+            "master_name": name,
+            "cell_id": 200 + index,
+            "buffer_main_type_index": 7,
+        }
+        for index, name in enumerate(ASAP7_DRIVE_TYPE_MASTERS)
+    }
+
+    table = load_drive_type_table(path, buffer_library=library)
+
+    assert table.master_names == ASAP7_DRIVE_TYPE_MASTERS

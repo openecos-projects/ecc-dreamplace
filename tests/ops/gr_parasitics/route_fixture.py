@@ -3,7 +3,7 @@
 import importlib.util
 
 
-def make_route_fixture(xplace, *, small_pins=False, pin_layer="M2"):
+def make_route_fixture(xplace, *, small_pins=False, pin_layer="M2", output_pad=False):
     path = xplace / "cpp_to_py/gpugr/cpu_route_toy_fixture.py"
     spec = importlib.util.spec_from_file_location("cpu_route_toy_fixture", path)
     fixture = importlib.util.module_from_spec(spec)
@@ -64,4 +64,9 @@ END {layer}
   + LAYER M2 ( 500 500 ) ( 1250 1250 ) + PLACED ( 1000 1000 ) N ;""",
         )
         design = design.replace("( U0 Y )", "( PIN IN )")
+    if output_pad:
+        lef = lef.replace("PIN Y\n    DIRECTION OUTPUT", "PIN PAD\n    DIRECTION INOUT")
+        lef = lef.replace("END Y", "END PAD")
+        design = design.replace("IN + NET N1 + DIRECTION INPUT", "OUT + NET N1 + DIRECTION OUTPUT")
+        design = design.replace("( PIN IN ) ( U1 A ) ( U3 A )", "( U1 PAD ) ( PIN OUT )")
     return lef, design

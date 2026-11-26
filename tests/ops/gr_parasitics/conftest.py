@@ -6,12 +6,15 @@ from dreamplace.ops.gpugr.xplace_backend import XplaceGPUGR
 from route_fixture import make_route_fixture
 
 
-def route_fixture(directory, *, small_pins=False, pin_layer="M2"):
+def route_fixture(directory, *, small_pins=False, pin_layer="M2", output_pad=False):
     backend = XplaceGPUGR(None, None)
     _, gr, *_ = backend._import_xplace_modules()
     xplace = backend._ensure_xplace_python_path()
     from cpp_to_py import io_parser as io
-    lef, design = make_route_fixture(xplace, small_pins=small_pins, pin_layer=pin_layer)
+
+    lef, design = make_route_fixture(
+        xplace, small_pins=small_pins, pin_layer=pin_layer, output_pad=output_pad
+    )
     if small_pins:
         # Separate physical cells, two loads sharing one coarse gcell.
         design = design.replace("( 8000 5000 )", "( 8000 3000 )")
@@ -56,6 +59,11 @@ def route_fixture(directory, *, small_pins=False, pin_layer="M2"):
 @pytest.fixture(scope="module")
 def native_route(tmp_path_factory):
     return route_fixture(tmp_path_factory.mktemp("gr_native_tree"))
+
+
+@pytest.fixture(scope="module")
+def native_output_pad_route(tmp_path_factory):
+    return route_fixture(tmp_path_factory.mktemp("gr_native_output_pad"), output_pad=True)
 
 
 @pytest.fixture(scope="module")

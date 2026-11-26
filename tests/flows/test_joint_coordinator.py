@@ -65,6 +65,8 @@ class FakeBufferingLane:
 def _params():
     return SimpleNamespace(
         flow_kind="joint",
+        buffering_fixed_buffer_master="fixture_buffer",
+        _buffering_fixed_buffer_master_explicit=True,
         placement_sizing_mode="joint",
         joint_buffer_overflow_gate=0.2,
         joint_buffer_commit_period=100,

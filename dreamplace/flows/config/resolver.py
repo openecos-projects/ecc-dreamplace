@@ -82,7 +82,7 @@ def _set_default_if_missing(params, name, value):
 
 def _normalize_openroad_vt_suffixes(params):
     """Normalize the configured OpenROAD VT suffix list for bridge input."""
-    raw = getattr(params, "openroad_vt_suffixes", ("H7H", "H7R", "H7L"))
+    raw = getattr(params, "openroad_vt_suffixes", ())
     if isinstance(raw, str):
         raw = raw.replace(";", ",").split(",")
     try:
@@ -90,8 +90,6 @@ def _normalize_openroad_vt_suffixes(params):
     except TypeError as exc:
         raise ValueError("openroad_vt_suffixes must be a list or comma-separated string") from exc
     values = list(dict.fromkeys(value for value in values if value))
-    if not values:
-        raise ValueError("openroad_vt_suffixes must contain at least one non-empty suffix")
     params.openroad_vt_suffixes = tuple(values)
 
 
@@ -169,6 +167,8 @@ def _resolve_size_parameterization_defaults(params):
 
 def _set_flow_default(params, name, value, *, force):
     if getattr(params, f"_{name}_explicit", False):
+        return
+    if name in {"buffering_fixed_buffer_master", "buffering_fixed_bsu_index"} and getattr(params, name, None) not in (None, ""):
         return
     if name in {
         "buffering_mode",
@@ -476,6 +476,7 @@ def _apply_discrete_net_gradient_defaults(params, flow_kind):
         )
     if (
         candidate_drive_type_mode == "single_fixed"
+        and not (inflation_placement and not _param_enabled(params, "timing_opt_buffering_enabled"))
         and getattr(params, "buffering_fixed_bsu_index", None) is None
         and not str(
             getattr(params, "buffering_fixed_buffer_master", "") or ""

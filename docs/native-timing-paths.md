@@ -85,3 +85,19 @@ WNS and TNS were exactly equal at both states. Source, frozen runtime,
 build commands, tests, full logs, final DEF/Verilog and timing summaries are
 archived under `/nfs/share/home/zhaoxueyan/dataset_cx55_ecc_workspace/ecc-native-cpu-qualified-20261014.tt6z9_mh/`. The latest binary repeat averaged 408.339 ms
 (median 255.921 ms), with the same final DEF/Verilog hashes.
+
+## Inferred combinational clock gates
+
+ECC-Tools exports these checks as native gate-window rules, not fake Liberty
+LUTs. Sparse setup rows use a constant required-time intercept
+(`endpoint_arc = -1`, coefficient zero). Hold contexts retain native check
+class 8, capture pin/clock/edge and exception-adjusted required time. Early
+propagation evaluates their live data arrival without querying a hold LUT;
+ordinary hold/removal checks still query the real tables. Gate hold deficits
+remain in hold metrics and gradients. This requires both the updated
+ECC-Tools exporter and this consumer; an older consumer rejects check class 8.
+
+The clock window, uncertainty and timing exceptions are owned by iSTA. No
+clock constraints are removed, no timing mode is disabled and no clock edge
+is guessed in Python. Structural timing still requires ideal clocks. A
+successful import means the gate is checked, not that its slack is nonnegative.

@@ -97,7 +97,10 @@ def pydb():
 def test_min_only_endpoint_and_signed_check_keep_paired_state(pydb):
     result = read_hold_timing_schema(pydb)
     expected = dict(pydb.hold_contexts[0])
-    expected.update(capture_pin_transition=1, capture_edge_index=-1, selected_check_arc_idx=-1, normal_required_ps=0.0)
+    expected.update(
+        capture_pin_transition=1, capture_edge_index=-1,
+        selected_check_arc_idx=-1, normal_required_ps=0.0,
+    )
     assert asdict(result.contexts[0]) == expected
     assert result.contexts[0].required_base_ps == 21.0
     np.testing.assert_array_equal(result.endpoint_valid, [[True, False]])
@@ -116,7 +119,10 @@ def test_multiple_capture_contexts_are_not_collapsed_to_one_arrival(pydb):
     result = read_hold_timing_schema(pydb)
     expected = [dict(row) for row in pydb.hold_contexts]
     for row in expected:
-        row.update(capture_pin_transition=1, capture_edge_index=-1, selected_check_arc_idx=-1, normal_required_ps=0.0)
+        row.update(
+            capture_pin_transition=1, capture_edge_index=-1,
+            selected_check_arc_idx=-1, normal_required_ps=0.0,
+        )
     assert [asdict(context) for context in result.contexts] == expected
 
 
@@ -177,7 +183,10 @@ def test_each_min_check_group_requires_its_own_capture_context(pydb):
     actual = read_hold_timing_schema(pydb)
     expected = [dict(row) for row in pydb.hold_contexts]
     for row in expected:
-        row.update(capture_pin_transition=1, capture_edge_index=-1, selected_check_arc_idx=-1, normal_required_ps=0.0)
+        row.update(
+            capture_pin_transition=1, capture_edge_index=-1,
+            selected_check_arc_idx=-1, normal_required_ps=0.0,
+        )
     assert [asdict(context) for context in actual.contexts] == expected
 
 
@@ -189,3 +198,24 @@ def test_known_inactive_min_domain_has_empty_contexts(pydb, endpoint_reason, che
     pydb.endpoints_timing_check_min_reason = [[check_reason, check_reason]]
     pydb.hold_contexts = []
     assert read_hold_timing_schema(pydb).contexts == ()
+
+
+@pytest.mark.parametrize("required, margin", [(21.0, 0.0), (7.0, 0.0), (23.5, 2.5), (7.0, 2.5)])
+def test_inferred_gate_window_retains_native_required_without_liberty_lut(
+    pydb, required, margin
+):
+    pydb.endpoints_timing_check_arcs = []
+    pydb.endpoints_timing_check_max_valid = []
+    pydb.endpoints_timing_check_max_reason = []
+    pydb.endpoints_timing_check_min_valid = []
+    pydb.endpoints_timing_check_min_reason = []
+    pydb.hold_contexts[0].update(
+        check_type=8, required_ps=required,
+        normal_required_ps=21.0 + margin, check_time_ps=margin,
+        capture_transition=-1, capture_pin_transition=1, capture_edge_index=1,
+    )
+    result = read_hold_timing_schema(pydb)
+    assert asdict(result.contexts[0]) == pydb.hold_contexts[0]
+    assert result.contexts[0].runtime_required_base_ps == required
+    assert not result.contexts[0].has_liberty_check
+    np.testing.assert_array_equal(result.endpoint_valid, [[True, False]])

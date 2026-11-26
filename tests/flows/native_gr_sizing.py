@@ -65,7 +65,10 @@ def run(output, phase):
             },
         }
     )
-    config_path = output / "dreamplace.json"
+    # DreamPlace reads each step's own config, <step dir>/config/dreamplace_ecc.json.
+    step_dir = output / StepEnum.PLACEMENT.value
+    config_path = step_dir / "config" / "dreamplace_ecc.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     materialized = params.toJson()
     config_path.write_text(
         json.dumps(resolve_flow_config(materialized, explicit_keys=tuple(materialized)))
@@ -83,6 +86,7 @@ def run(output, phase):
     )
     step = EccStep(
         name=StepEnum.PLACEMENT.value,
+        directory=step_dir,
         data=EccData(steps={StepEnum.PLACEMENT.value: output / "result"}),
     )
     wrapper = DreamplaceModule(

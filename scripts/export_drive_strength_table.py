@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export the fixed ICS55 four-buffer strength table from a case PDK JSON."""
+"""Export explicitly configured buffer strengths from a PDK description."""
 
 import argparse
 import json
@@ -12,7 +12,8 @@ def export_table(pdk_path, output_path):
     pdk_path = Path(pdk_path)
     payload = json.loads(pdk_path.read_text())
     result = build_drive_strength_table(
-        payload.get("name", "ics55"), payload.get("buffers", ()), pdk_path
+        payload["family_id"], payload["cells"]["buffers"], pdk_path,
+        drive_strengths=payload["tools"]["buffering"]["drive_strengths"],
     )
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

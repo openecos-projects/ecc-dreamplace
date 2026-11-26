@@ -362,7 +362,10 @@ def test_joint_flow_cli_applies_staged_smoke_profile_defaults(tmp_path):
 
 def test_joint_flow_cli_applies_segment_count_direct_profile_defaults(tmp_path):
     params_path = tmp_path / "params.json"
-    params_path.write_text(json.dumps({"design_name": "unit"}), encoding="utf-8")
+    params_path.write_text(
+        json.dumps({"design_name": "unit", "buffering_fixed_buffer_master": "BUFX1_9TLVT"}),
+        encoding="utf-8",
+    )
 
     args = placer_cli.build_arg_parser().parse_args(
         [
@@ -391,7 +394,7 @@ def test_joint_flow_cli_applies_segment_count_direct_profile_defaults(tmp_path):
     assert params.joint_segment_buffering_rounds == 1
     assert params.joint_segment_buffering_selection_fraction == 0.001
     assert params.joint_segment_pin2pin_rebootstrap_enabled == 1
-    assert params.buffering_fixed_buffer_master == "BUFX1H7L"
+    assert params.buffering_fixed_buffer_master == "BUFX1_9TLVT"
     assert params.buffering_fixed_bsu_index is None
 
 
@@ -442,6 +445,7 @@ def test_segment_direct_joint_profile_inherits_the_placement_gpu_for_timing(tmp_
         json.dumps(
             {
                 "design_name": "unit",
+                "buffering_fixed_buffer_master": "BUFX1_9TLVT",
                 # Legacy benchmark configs commonly pin this to CPU. The
                 # canonical GPU profile owns the default runtime policy.
                 "timing_propagation_device": "cpu",
@@ -469,7 +473,10 @@ def test_segment_direct_joint_profile_inherits_the_placement_gpu_for_timing(tmp_
 
 def test_segment_direct_joint_profile_honors_explicit_timing_device_override(tmp_path):
     params_path = tmp_path / "params.json"
-    params_path.write_text(json.dumps({"design_name": "unit"}), encoding="utf-8")
+    params_path.write_text(
+        json.dumps({"design_name": "unit", "buffering_fixed_buffer_master": "BUFX1_9TLVT"}),
+        encoding="utf-8",
+    )
 
     args = placer_cli.build_arg_parser().parse_args(
         [
@@ -533,7 +540,10 @@ def test_segment_count_direct_profile_accepts_named_milestone_budget_overrides(
     tmp_path,
 ):
     params_path = tmp_path / "params.json"
-    params_path.write_text(json.dumps({"design_name": "unit"}), encoding="utf-8")
+    params_path.write_text(
+        json.dumps({"design_name": "unit", "buffering_fixed_buffer_master": "BUFX1_9TLVT"}),
+        encoding="utf-8",
+    )
     args = placer_cli.build_arg_parser().parse_args(
         [
             str(params_path),
@@ -570,7 +580,10 @@ def test_segment_count_direct_profile_accepts_named_milestone_budget_overrides(
 
 def test_segment_count_direct_profile_allows_timing_only_density_ablation(tmp_path):
     params_path = tmp_path / "params.json"
-    params_path.write_text(json.dumps({"design_name": "unit"}), encoding="utf-8")
+    params_path.write_text(
+        json.dumps({"design_name": "unit", "buffering_fixed_buffer_master": "BUFX1_9TLVT"}),
+        encoding="utf-8",
+    )
 
     args = placer_cli.build_arg_parser().parse_args(
         [
@@ -590,7 +603,10 @@ def test_segment_count_direct_profile_allows_timing_only_density_ablation(tmp_pa
 
 def test_segment_count_direct_profile_allows_sizing_ablation(tmp_path):
     params_path = tmp_path / "params.json"
-    params_path.write_text(json.dumps({"design_name": "unit"}), encoding="utf-8")
+    params_path.write_text(
+        json.dumps({"design_name": "unit", "buffering_fixed_buffer_master": "BUFX1_9TLVT"}),
+        encoding="utf-8",
+    )
 
     args = placer_cli.build_arg_parser().parse_args(
         [
@@ -612,7 +628,10 @@ def test_segment_count_direct_profile_allows_sizing_ablation(tmp_path):
 
 def test_segment_count_direct_profile_allows_controlled_placement_only_arm(tmp_path):
     params_path = tmp_path / "params.json"
-    params_path.write_text(json.dumps({"design_name": "unit"}), encoding="utf-8")
+    params_path.write_text(
+        json.dumps({"design_name": "unit", "buffering_fixed_buffer_master": "BUFX1_9TLVT"}),
+        encoding="utf-8",
+    )
 
     args = placer_cli.build_arg_parser().parse_args(
         [
@@ -674,7 +693,10 @@ def test_segment_count_direct_profile_rejects_multiple_milestone_outer_loops(tmp
 
 def test_segment_count_direct_profile_allows_explicit_no_commit_diagnostic(tmp_path):
     params_path = tmp_path / "params.json"
-    params_path.write_text(json.dumps({"design_name": "unit"}), encoding="utf-8")
+    params_path.write_text(
+        json.dumps({"design_name": "unit", "buffering_fixed_buffer_master": "BUFX1_9TLVT"}),
+        encoding="utf-8",
+    )
 
     args = placer_cli.build_arg_parser().parse_args(
         [
@@ -1105,7 +1127,10 @@ def test_explicit_placement_flow_disables_timing_state_from_legacy_params(tmp_pa
 
 def test_joint_cli_explicitly_disables_differentiable_placement_timing(tmp_path):
     params_path = tmp_path / "params.json"
-    params_path.write_text(json.dumps({"design_name": "unit"}), encoding="utf-8")
+    params_path.write_text(
+        json.dumps({"design_name": "unit", "buffering_fixed_buffer_master": "BUFX1_9TLVT"}),
+        encoding="utf-8",
+    )
 
     args = placer_cli.build_arg_parser().parse_args(
         [

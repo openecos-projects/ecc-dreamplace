@@ -122,6 +122,43 @@ def test_removal_uses_clock_then_data_axes_and_stays_outside_hold_objective(circ
 
 
 @pytest.mark.parametrize("mode", ["hard", "smooth"])
+def test_inferred_gate_window_has_live_arrival_gradient_without_a_check_lut(circuit, mode):
+    timing, data = circuit
+    timing.endpoints_timing_check_arcs = torch.empty((0, 8), dtype=torch.long)
+    contexts = tuple(
+        replace(
+            c, check_type=8, required_ps=45, normal_required_ps=45,
+            capture_arrival_ps=42.5, check_time_ps=2.5,
+        )
+        for c in data.contexts
+    )
+    data = replace(data, contexts=contexts, check_valid=np.empty((0, 2), bool))
+
+    def no_gate_lut(cell, clock, data, arc, lut):
+        assert not len(arc), "an inferred gate must not query a Liberty constraint LUT"
+        return torch.zeros_like(clock)
+
+    timing.lut_entry_vectorized = no_gate_lut
+    cap = torch.zeros(5, dtype=torch.float64, requires_grad=True)
+    result = evaluate((timing, data), cap, mode=mode)
+    torch.testing.assert_close(result.context_slack, cap.new_tensor([-15, -13]))
+    assert float(result.hold_wns.detach()) < 0
+    assert int(result.hold_violations) == 1
+    (gradient,) = torch.autograd.grad(sum(result.deficits(0)), cap)
+    assert gradient[1] < 0 and gradient[3] < 0
+    eps = 1e-5
+    for pin in (1, 3):
+        plus, minus = cap.detach().clone(), cap.detach().clone()
+        plus[pin] += eps
+        minus[pin] -= eps
+        difference = (
+            sum(evaluate((timing, data), plus, mode=mode).deficits(0))
+            - sum(evaluate((timing, data), minus, mode=mode).deficits(0))
+        ) / (2 * eps)
+        torch.testing.assert_close(gradient[pin], difference)
+
+
+@pytest.mark.parametrize("mode", ["hard", "smooth"])
 def test_hold_deficit_gradient_and_finite_difference_agree(circuit, mode):
     cap = torch.full((5,), 0.2, dtype=torch.float64, requires_grad=True)
     result = evaluate(circuit, cap, mode=mode)

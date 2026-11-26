@@ -213,7 +213,9 @@ class EarlyPropagation:
             arcs[:, 0] = timing.clock_pins[arcs[:, 0].long()]
             outputs = torch.tensor([s.start_pin for s in seeds], device=timing.device)
             selected = torch.isin(arcs[:, 1], outputs)
-            global_rows = torch.arange(int(offsets[0]), int(offsets[1]), device=timing.device)[selected]
+            global_rows = torch.arange(
+                int(offsets[0]), int(offsets[1]), device=timing.device
+            )[selected]
             arcs = arcs[selected]
             lanes = _cell_lanes(timing, arcs, slews, caps, clock=True, surrogate=surrogate)
             from .early_actions import attach_cell_probes
@@ -305,7 +307,10 @@ class EarlyPropagation:
             old_slews = slews
             for key, arrival in domains.items():
                 native = None
-                if self.use_native and getattr(timing, "_active_discrete_action_context", None) is None:
+                if (
+                    self.use_native
+                    and getattr(timing, "_active_discrete_action_context", None) is None
+                ):
                     from .early_native import cell_early_native
 
                     native = cell_early_native(
@@ -320,7 +325,9 @@ class EarlyPropagation:
                         )
                     from .early_actions import attach_cell_probes
 
-                    global_rows = torch.arange(int(offsets[level]), int(offsets[level + 1]), device=timing.device)
+                    global_rows = torch.arange(
+                        int(offsets[level]), int(offsets[level + 1]), device=timing.device
+                    )
                     action_lanes = attach_cell_probes(
                         timing, arcs, lanes, old_slews, caps, global_rows,
                         latch_data_arcs=self.latch_data_arcs,
@@ -351,13 +358,13 @@ class EarlyPropagation:
         )
         self._capture_slew = reference.new_tensor([c.capture_slew_ps for c in contexts])
         self._removal = tensor([c.check_type == 4 for c in contexts]).bool()
-        self._has_check = tensor([c.check_type != 0 for c in contexts]).bool()
+        self._has_check = tensor([c.has_liberty_check for c in contexts]).bool()
         rows_by_check = {}
         for row, arc in enumerate(checks.detach().cpu().tolist()):
             rows_by_check.setdefault((arc[0], arc[1], arc[6]), []).append((row, arc[5]))
         context_rows, check_rows = [], []
         for i, context in enumerate(contexts):
-            if context.check_type == 0:
+            if not context.has_liberty_check:
                 continue
             edge = 0 if context.data_transition == 1 else 1
             identity = context.capture_pin, context.endpoint_pin, context.check_type
@@ -374,7 +381,9 @@ class EarlyPropagation:
         self._check_rows = tensor(check_rows)
         self._check_signature = signature
 
-    def _evaluate(self, timing, domains, slews, reference, *, surrogate=False, context_arrival=None):
+    def _evaluate(
+        self, timing, domains, slews, reference, *, surrogate=False, context_arrival=None
+    ):
         self._prepare_checks(timing, reference, sparse=context_arrival is not None)
         if surrogate and self._check_model is None:
             if getattr(timing, "cell_modeling_op", None) is None:
@@ -418,7 +427,8 @@ class EarlyPropagation:
                     timing, self._check_rows[selected], rows, check, first, second, lut,
                 )
             live_check = live_check.scatter_reduce(0, ids, check, reduce="amin")
-        # IO rows have a complete constant reference; register checks are live.
+        # IO and inferred gate-window rows have complete constant required
+        # rules. Only Liberty hold/removal margins depend on the live slew.
         if not bool(torch.isfinite(live_check[self._has_check]).all()):
             raise RuntimeError("live hold check produced unavailable timing values")
         live_check = torch.where(self._has_check, live_check, torch.zeros_like(live_check))

@@ -133,7 +133,9 @@ class BufferFamilyContract:
         backend="unknown",
         preferred_master_name="",
         candidate_drive_type_mode="single_fixed",
+        drive_strength_table="",
     ):
+        self.drive_strength_table = drive_strength_table
         self.metadata = metadata
         self.backend = backend
         self.preferred_master_name = str(preferred_master_name or "").strip()
@@ -145,6 +147,7 @@ class BufferFamilyContract:
     def from_buffering_params(cls, metadata, params, backend="unknown"):
         return cls(
             metadata,
+            drive_strength_table=getattr(params, "buffering_candidate_drive_strength_table", ""),
             backend=backend,
             preferred_master_name=getattr(
                 params,
@@ -159,7 +162,7 @@ class BufferFamilyContract:
         )
 
     def _typed_legal_table(self, typed_masters):
-        """Build a typed master table even when OpenSTA exposes separate families.
+        """Build a configured master table even when OpenSTA exposes separate families.
 
         The legacy contract intentionally requires one equivalent-cell family.
         Typed candidate buffering is different: each table row names its own
@@ -292,6 +295,12 @@ class BufferFamilyContract:
         if self.candidate_drive_type_mode in TYPED_DRIVE_TYPE_MODES:
             if self.candidate_drive_type_mode == FAST_BUFFERS_MODE:
                 master_names = fast_buffer_master_names(self.metadata)
+            elif self.drive_strength_table:
+                import json
+                from pathlib import Path
+
+                payload = json.loads(Path(self.drive_strength_table).read_text())
+                master_names = [row["master_name"] for row in payload["buffers"]]
             else:
                 from .drive_type_table import resolve_drive_type_masters_for_library
 

@@ -264,13 +264,13 @@ class FlowConfigTest(unittest.TestCase):
 
         self.assertEqual(("H7H", "H7R", "H7L"), params.openroad_vt_suffixes)
 
-    def test_openroad_vt_suffixes_default_is_ics55_configuration(self):
+    def test_openroad_vt_suffixes_default_is_explicit_empty_configuration(self):
         from dreamplace.flows.config.resolver import apply_flow_defaults
 
         params = types.SimpleNamespace(flow_kind="sizing")
         apply_flow_defaults(params)
 
-        self.assertEqual(("H7H", "H7R", "H7L"), params.openroad_vt_suffixes)
+        self.assertEqual((), params.openroad_vt_suffixes)
 
     def test_openroad_vt_suffixes_custom_value_survives_explicit_placement_flow(self):
         from dreamplace.flows.config.resolver import apply_flow_defaults

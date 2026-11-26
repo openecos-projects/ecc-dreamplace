@@ -191,7 +191,16 @@ def ecc_schema3_carrier_harness():
             )
         }
         return write_case_drive_type_table(
-            tmp_dir / "drive_strength.json", buffer_library=library
+            tmp_dir / "drive_strength.json",
+            buffer_library=library,
+            drive_strengths=[
+                {"master": name, "strength": strength}
+                for name, strength in zip(
+                    ("BUFX8H7L", "BUFX12H7L", "BUFX16H7L", "BUFX20H7L"),
+                    (8.0, 12.0, 16.0, 20.0),
+                    strict=True,
+                )
+            ],
         )
 
     placedb.write_placement_back = write_placement_back

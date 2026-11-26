@@ -1,6 +1,6 @@
 """Drive-strength table loading for typed discrete candidate buffering.
 
-The table is an input contract for the four candidate buffer masters.  Liberty
+The table is an input contract for the configured candidate buffer masters.  Liberty
 timing data remains owned by the native metadata/buffer library; this module
 only validates the external type identity and maps each master to its legal
 family-local BSU index.
@@ -44,21 +44,39 @@ def _spec_for_pdk(pdk_name):
     return spec
 
 
-def build_drive_strength_table(pdk_name, buffer_masters, source_pdk):
-    spec = _spec_for_pdk(pdk_name)
-    missing = [name for name, _strength in spec if name not in buffer_masters]
-    if missing:
-        raise ValueError(f"case PDK is missing approved buffers: {missing}")
+def build_drive_strength_table(pdk_name, buffer_masters, source_pdk, *, drive_strengths=None):
+    if drive_strengths is None:
+        spec = _spec_for_pdk(pdk_name)
+        missing = [name for name, _strength in spec if name not in buffer_masters]
+        if missing:
+            raise ValueError(f"case PDK is missing approved buffers: {missing}")
+        rows = [
+            {"drive_type_id": index, "master_name": name, "drive_strength": strength}
+            for index, (name, strength) in enumerate(spec)
+        ]
+    else:
+        rows = []
+        seen = set()
+        for entry in drive_strengths:
+            name = str(entry["master"])
+            strength = float(entry["strength"])
+            if name not in buffer_masters:
+                raise ValueError(f"configured buffer is not in the legal buffer list: {name}")
+            if name in seen or not math.isfinite(strength) or strength <= 0:
+                raise ValueError(f"invalid or duplicate buffer strength: {name}")
+            seen.add(name)
+            rows.append(
+                {"drive_type_id": len(rows), "master_name": name, "drive_strength": strength}
+            )
+        if not rows:
+            raise ValueError("explicit drive_strengths are required for candidate buffering")
     return {
         "schema": DRIVE_TYPE_TABLE_SCHEMA,
         "source": "case-pdk-buffer-list",
         "library": str(pdk_name),
         "units": {"drive_strength": "relative"},
         "source_pdk": str(source_pdk),
-        "buffers": [
-            {"drive_type_id": index, "master_name": name, "drive_strength": strength}
-            for index, (name, strength) in enumerate(spec)
-        ],
+        "buffers": rows,
     }
 
 
@@ -182,14 +200,10 @@ def load_drive_type_table(
     rows = payload.get("buffers")
     if not isinstance(rows, list):
         raise ValueError("drive-strength table requires a buffers list")
+    if not rows:
+        raise ValueError("drive-strength table must contain at least one buffer")
     if expected_masters is None:
-        library_name = str(payload.get("library") or "ics55").strip().lower()
-        spec = PDK_DRIVE_TYPE_SPECS.get(library_name)
-        expected_masters = (
-            tuple(name for name, _strength in spec)
-            if spec is not None
-            else EXPECTED_DRIVE_TYPE_MASTERS
-        )
+        expected_masters = [row.get("master_name", "") for row in rows if isinstance(row, dict)]
     expected_masters = tuple(str(name) for name in expected_masters)
     if len(rows) != len(expected_masters):
         raise ValueError(
@@ -288,13 +302,8 @@ def load_drive_type_table(
     )
 
 
-def write_case_drive_type_table(path, *, buffer_library, source="case-buffer-list"):
-    """Write the fixed ICS55 four-master table for a case preflight artifact.
-
-    This helper is deliberately explicit: it does not infer arbitrary strength
-    types from suffixes.  It only emits the four approved masters and uses the
-    known drive-strength values as the external table's ordering contract.
-    """
+def write_case_drive_type_table(path, *, buffer_library, drive_strengths, library_name="", source="case-buffer-list"):
+    """Write a validated table from explicitly configured masters and strengths."""
 
     by_master = {
         str(entry.get("master_name", "")): (int(bsu), dict(entry))
@@ -302,7 +311,7 @@ def write_case_drive_type_table(path, *, buffer_library, source="case-buffer-lis
     }
     rows = []
     for drive_type_id, (master_name, strength) in enumerate(
-        zip(EXPECTED_DRIVE_TYPE_MASTERS, (8.0, 12.0, 16.0, 20.0))
+        ((entry["master"], entry["strength"]) for entry in drive_strengths)
     ):
         if master_name not in by_master:
             raise ValueError(f"missing approved case buffer: {master_name}")
@@ -324,7 +333,7 @@ def write_case_drive_type_table(path, *, buffer_library, source="case-buffer-lis
     payload = {
         "schema": DRIVE_TYPE_TABLE_SCHEMA,
         "source": str(source),
-        "library": "ics55",
+        "library": library_name,
         "units": {"drive_strength": "relative", "capacitance": "library"},
         "buffers": rows,
     }

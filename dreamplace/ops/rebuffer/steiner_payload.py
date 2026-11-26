@@ -18,8 +18,7 @@ ARTIFACT = "rebuffer_openroad_steiner_payload"
 ARTIFACT_VERSION = 1
 
 
-def _pin_coordinates(pydb, *, use_pin_offset=True):
-    pin2node = np.asarray(pydb.pin2node_map, dtype=np.int64)
+def _pin_coordinates(pydb, pin2node, *, use_pin_offset=True):
     node_x = np.asarray(pydb.node_x, dtype=np.float64)
     node_y = np.asarray(pydb.node_y, dtype=np.float64)
     x, y = node_x[pin2node], node_y[pin2node]
@@ -29,6 +28,21 @@ def _pin_coordinates(pydb, *, use_pin_offset=True):
     x = np.rint(x).astype(np.int64)
     y = np.rint(y).astype(np.int64)
     return x, y
+
+
+def _is_external_pad_link(pins, pin2node, pin_names, fixed_nodes, port_nodes):
+    if len(pins) != 2:
+        return False
+    pad, port = pins
+    pad_node, port_node = int(pin2node[pad]), int(pin2node[port])
+    if pad_node > port_node:
+        pad, pad_node, port_node = port, port_node, pad_node
+    if pad_node not in fixed_nodes or port_node not in port_nodes:
+        return False
+    name = pin_names[pad]
+    if isinstance(name, bytes):
+        name = name.decode()
+    return name.endswith((":PAD", "/PAD"))
 
 
 def steiner_input_identity(pydb, *, dbu, r_unit, c_unit, scale_factor, use_pin_offset):
@@ -65,6 +79,9 @@ def steiner_input_identity(pydb, *, dbu, r_unit, c_unit, scale_factor, use_pin_o
     for field in ("out_rcaps", "out_fcaps"):
         digest.update(field.encode())
         digest.update(np.asarray(getattr(pydb, field, ()), dtype=np.float64).tobytes())
+    for field in ("num_terminals", "num_terminal_NIs"):
+        digest.update(field.encode())
+        digest.update(np.int64(getattr(pydb, field, 0)).tobytes())
     for field in ("node_names", "pin_names", "net_names"):
         digest.update(json.dumps([str(value) for value in getattr(pydb, field)]).encode())
     return {
@@ -106,7 +123,8 @@ def build_openroad_steiner_payload(pydb, *, r_unit=None, dbu=None, use_pin_offse
 
     Pin nodes keep their global pin ids.  Synthetic Steiner nodes are
     allocated above ``len(pydb.pin_names)``.  Pins that share a coordinate are
-    connected to the primary pin with zero-length edges.
+    connected to the primary pin with zero-length edges. Direct package
+    port-to-PAD links retain their net slots but have no placement RC tree.
     """
 
     if pydb is None:
@@ -118,12 +136,19 @@ def build_openroad_steiner_payload(pydb, *, r_unit=None, dbu=None, use_pin_offse
     if dbu <= 0:
         return _empty_payload(pydb, "invalid_dbu")
 
-    num_pins = len(pydb.pin_names)
+    pin_names = pydb.pin_names
+    num_pins = len(pin_names)
     num_nets = len(pydb.net_names)
     if num_pins <= 0 or num_nets <= 0:
         return _empty_payload(pydb, "empty_design")
 
-    pin_x, pin_y = _pin_coordinates(pydb, use_pin_offset=use_pin_offset)
+    pin2node = np.asarray(pydb.pin2node_map, dtype=np.int64)
+    pin_x, pin_y = _pin_coordinates(pydb, pin2node, use_pin_offset=use_pin_offset)
+    num_nodes = len(pydb.node_x)
+    port_begin = num_nodes - int(getattr(pydb, "num_terminal_NIs", 0))
+    fixed_begin = port_begin - int(getattr(pydb, "num_terminals", 0))
+    fixed_nodes = range(fixed_begin, port_begin)
+    port_nodes = range(port_begin, num_nodes)
     flat_map = np.asarray(pydb.flat_net2pin_map, dtype=np.int64)
     flat_start = np.asarray(pydb.flat_net2pin_start_map, dtype=np.int64)
     drivers = np.asarray(pydb.net2driver_pin_map, dtype=np.int64)
@@ -135,21 +160,24 @@ def build_openroad_steiner_payload(pydb, *, r_unit=None, dbu=None, use_pin_offse
     children = defaultdict(list)
     edge_resistance = {}
     topo = []
-    topo_start = [0]
-    net_ids = []
+    topo_start = []
     next_steiner = steiner_base
 
     for net_id in range(num_nets):
+        topo_start.append(len(topo))
         begin = int(flat_start[net_id])
         end = int(flat_start[net_id + 1])
         pins = [int(value) for value in flat_map[begin:end]]
         if len(pins) < 2:
-            topo_start.append(len(topo))
-            net_ids.append(net_id)
             continue
         driver = int(drivers[net_id])
-        if driver not in pins:
+        external_pad = _is_external_pad_link(
+            pins, pin2node, pin_names, fixed_nodes, port_nodes
+        )
+        if driver not in pins and not (driver == -1 and external_pad):
             return _empty_payload(pydb, "driver_not_in_net")
+        if external_pad:
+            continue
         driver_index = pins.index(driver)
         xs = [int(pin_x[pin]) for pin in pins]
         ys = [int(pin_y[pin]) for pin in pins]
@@ -216,8 +244,7 @@ def build_openroad_steiner_payload(pydb, *, r_unit=None, dbu=None, use_pin_offse
                 length = abs(node_x[node] - node_x[child]) + abs(node_y[node] - node_y[child])
                 edge_resistance[child] = float(length) / float(dbu) * float(r_unit)
         topo.extend(order)
-        topo_start.append(len(topo))
-        net_ids.append(net_id)
+    topo_start.append(len(topo))
 
     max_node = max(node_x) if node_x else num_pins - 1
     size = max_node + 1
@@ -244,7 +271,7 @@ def build_openroad_steiner_payload(pydb, *, r_unit=None, dbu=None, use_pin_offse
         "status": "ok",
         "provider": "openroad_stt",
         "steiner_node_base": steiner_base,
-        "net_ids": net_ids,
+        "net_ids": list(range(num_nets)),
         "net_flat_topo_sort_start": topo_start,
         "net_flat_topo_sort": topo,
         "pin_fa": pin_fa,

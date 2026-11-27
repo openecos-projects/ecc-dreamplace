@@ -61,10 +61,6 @@ target_compile_features(${OP_NAME}_steiner_cpp PRIVATE cxx_std_20)
 
 install(TARGETS ${OP_NAME}_steiner_cpp DESTINATION dreamplace/ops/${OP_NAME})
 install(TARGETS ${OP_NAME}_cpp DESTINATION dreamplace/ops/${OP_NAME})
-install(
-  DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/data
-  DESTINATION dreamplace/ops/${OP_NAME}
-)
 
 file(GLOB INSTALL_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/*.py)
 install(FILES ${INSTALL_SRCS} DESTINATION dreamplace/ops/${OP_NAME})

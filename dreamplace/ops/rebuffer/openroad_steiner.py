@@ -9,7 +9,7 @@ from pathlib import Path
 ARTIFACT = "openroad_placement_steiner"
 ARTIFACT_VERSION = 1
 
-_DATA_DIR = Path(__file__).resolve().parent / "data" / "openroad_flute"
+_DATA_DIR = Path(__file__).resolve().parents[3] / "thirdparty" / "xplace" / "thirdparty" / "flute"
 _POST_LUT = _DATA_DIR / "POST9.dat"
 _POWV_LUT = _DATA_DIR / "POWV9.dat"
 

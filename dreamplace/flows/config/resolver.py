@@ -793,10 +793,13 @@ def apply_flow_defaults(params):
                 }
             })
         elif (
-            str(getattr(params, "timing_placement_carrier", "direct_loss") or "direct_loss")
-            == "star_pin_pair"
+            str(
+                getattr(params, "timing_placement_carrier", "star_pin_pair")
+                or "star_pin_pair"
+            )
+            == "direct_loss"
         ):
-            window_defaults["timing_placement_carrier"] = "star_pin_pair"
+            window_defaults["timing_placement_carrier"] = "direct_loss"
         for name, value in window_defaults.items():
             candidate_buffering_mode = (
                 str(getattr(params, "buffering_mode", "segment") or "segment")

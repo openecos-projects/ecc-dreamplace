@@ -1,7 +1,7 @@
 {
     "timing_placement_carrier": {
         "description": "coordinate timing method; explicit direct_loss, star_pin_pair, or pin2pin selects mutually exclusive GP controls; gradient_net_weight retains gradient projection",
-        "default": "direct_loss"
+        "default": "star_pin_pair"
     },
     "timing_topology_refresh_interval": {
         "description": "GP steps between full timing topology refreshes",

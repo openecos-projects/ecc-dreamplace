@@ -392,9 +392,21 @@ def is_legacy_timing_opt_name(name):
 
 
 def configure_timing_placement_carrier(params):
-    carrier = getattr(params, "timing_placement_carrier", "direct_loss")
+    carrier = getattr(params, "timing_placement_carrier", "star_pin_pair")
     selected = getattr(params, "_timing_placement_carrier_explicit", False)
-    if not (selected or carrier == "pin2pin"):
+    legacy_pin2pin = bool(getattr(params, "pin2pin_net_weighting", 0)) or (
+        str(getattr(params, "net_weighting_scheme", "") or "").lower() == "pin2pin"
+    )
+    timing_active = (
+        not legacy_pin2pin
+        and bool(getattr(params, "with_sta", 0))
+        and (
+            bool(getattr(params, "differentiable_timing_obj", 0))
+            or bool(getattr(params, "diff_timing_driven_placement", 0))
+            or bool(getattr(params, "timing_opt_enabled", 0))
+        )
+    )
+    if not (selected or carrier == "pin2pin" or (carrier == "star_pin_pair" and timing_active)):
         return
     if not getattr(params, "global_place_flag", True):
         return

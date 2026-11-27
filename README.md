@@ -6,26 +6,10 @@ GPU/CPU analytical placement foundation from DREAMPlace and extends it for the
 ECC physical-design data flow, differentiable timing analysis, timing-aware
 net weighting, and ECC early-global-routing driven routability optimization.
 
-Built upon the GPU-accelerated global placer [DREAMPlace](https://doi.org/10.1109/TCAD.2020.3003843) and detailed placer [ABCDPlace](https://doi.org/10.1109/TCAD.2020.2971531),
-AutoDMP adds simultaneous macro and standard cell placement enhancements.
-
-* Simultaneous Macro and Standard Cell Placement Animations
-
-| MemPool Group | Ariane |
-| -------- | ----------- |
-| ![MemPool Group](images/mempool.gif) | ![Ariane](images/ariane.gif) |
-
-# Publications
-
-* Anthony Agnesina, Puranjay Rajvanshi, Tian Yang, Geraldo Pradipta, Austin Jiao, Ben Keller, Brucek Khailany, and Haoxing Ren, 
-  "**AutoDMP: Automated DREAMPlace-based Macro Placement**", 
-  International Symposium on Physical Design (ISPD), Virtual Event, Mar 26-29, 2023 ([preprint](https://research.nvidia.com/publication/2023-03_autodmp-automated-dreamplace-based-macro-placement)) ([blog](https://developer.nvidia.com/blog/autodmp-optimizes-macro-placement-for-chip-design-with-ai-and-gpus/))
-
 This repository is packaged as a Python wheel for the
 [ECOS Studio](https://github.com/openecos-projects/ecos-studio) silicon design
 platform. Upstream documentation is available in the
-[DREAMPlace repository](https://github.com/limbo018/DREAMPlace) and
-[AutoDMP repository](https://github.com/NVlabs/AutoDMP).
+[DREAMPlace repository](https://github.com/limbo018/DREAMPlace).
 
 ## What Is New Compared with DREAMPlace?
 
@@ -221,10 +205,6 @@ dist/ecc_dreamplace-*
 
 The uv build runs the package build defined by `pyproject.toml`.
 
-# Physical Design Flow
-
-The physical design flow requires RTL, Python, and Tcl files from the [TILOS-MacroPlacement](https://github.com/TILOS-AI-Institute/MacroPlacement) repository. Only the codes that we have added and modified are provided in [scripts](scripts). 
-
 ## Repository Pointers
 
 | Path | Description |
@@ -268,10 +248,6 @@ works:
   [[DOI: 10.23919/DATE64628.2025.10993273](https://doi.org/10.23919/DATE64628.2025.10993273)]
   [[PDF](https://www.lamda.nju.edu.cn/qianc/DATE_25_TDP_final.pdf)]
   [[Code](https://github.com/lamda-bbo/Efficient-TDP)]
-- A. Agnesina, P. Rajvanshi, T. Yang, G. Pradipta, A. Jiao, B. Keller,
-  B. Khailany, and H. Ren,
-  "AutoDMP: Automated DREAMPlace-based Macro Placement," ISPD 2023.
-  [[NVIDIA Research](https://research.nvidia.com/publication/2023-03_autodmp-automated-dreamplace-based-macro-placement)]
 - iEDA project,
   "iEDA: An Open-Source Intelligent Physical Implementation Toolkit and
   Library," 2023.

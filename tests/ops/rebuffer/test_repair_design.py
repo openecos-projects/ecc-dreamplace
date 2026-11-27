@@ -317,7 +317,7 @@ def test_placement_profile_enables_openroad_repair_design_order_by_default():
     assert DEFAULT_CONFIG["repair_design_reverse_topological"] is True
     assert DEFAULT_CONFIG["repair_design_local_update"] is True
     assert DEFAULT_CONFIG["repair_design_load_slew_annotation"] is True
-    assert DEFAULT_CONFIG["repair_design_resize_to_target_slew"] is True
+    assert DEFAULT_CONFIG["repair_design_resize_to_target_slew"] is False
     # repair_design has no global action budget; the tree DP keeps a
     # per-net safety bound under a separate name.
     assert "max_actions" not in DEFAULT_CONFIG

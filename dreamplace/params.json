@@ -671,7 +671,7 @@
     },
     "repair_buffering_midplace_bounded_steps": {
         "description": "stop the experimental lane after this many post-repair steps; zero continues the remaining full budget",
-        "default": 20
+        "default": 0
     },
     "repair_buffering_midplace_artifact": {
         "description": "handoff artifact filename under the design's placement result directory",

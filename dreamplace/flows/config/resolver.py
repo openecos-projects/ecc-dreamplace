@@ -783,6 +783,14 @@ def apply_flow_defaults(params):
                 raise ValueError(f"{name} must be an integer in [1, {upper_bound}]")
             setattr(params, name, int(value))
         window_defaults = dict(INFLATION_S5B1_DEFAULTS)
+        if (
+            _param_enabled(params, "repair_buffering_enable")
+            or _param_enabled(params, "openroad_handoff_enable")
+            or str(getattr(params, "place_io_engine", "ecc") or "ecc") != "ecc"
+            or not getattr(params, "global_place_flag", True)
+            or _param_enabled(params, "macro_place_flag")
+        ):
+            window_defaults["repair_buffering_midplace_enable"] = False
         if _pin2pin_timing_placement_enabled(params):
             window_defaults.update({
                 name: value for name, value in _PIN2PIN_TIMING_PLACEMENT_DEFAULTS

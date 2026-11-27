@@ -37,9 +37,9 @@ DEFAULT_CONFIG = {
     "repair_design_load_slew_annotation": True,
     "repair_design_openroad_driver_resize": True,
     "repair_design_fanout_repair": True,
-    # OpenROAD placement-parasitics repair design normalizes every logic
-    # driver to its target load before checking slew/cap violations.
-    "repair_design_resize_to_target_slew": True,
+    # Opt-in OpenROAD placement-parasitics target-slew normalization for every
+    # logic driver before checking slew/cap violations (disabled by default).
+    "repair_design_resize_to_target_slew": False,
     "repair_design_target_cell_math": True,
     "repair_design_target_cell_selection": True,
     "repair_design_openroad_repeater_resize": True,

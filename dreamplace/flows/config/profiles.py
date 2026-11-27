@@ -134,6 +134,8 @@ INFLATION_S5B1_DEFAULTS = PLACEMENT_RECIPE_DEFAULTS + TIMING_OBJECTIVE_DEFAULTS 
     ("buffering_discrete_count_proximal_lambda", 0.0),
     ("relaxed_buffer_timing_integration_mode", "dynamic_net_provider"),
     ("joint_segment_virtual_density_enabled", 1),
+    ("repair_buffering_midplace_enable", True),
+    ("repair_buffering_midplace_bounded_steps", 0),
 )
 
 

@@ -68,7 +68,18 @@ def _validate_native_endpoint_slew_contract(timing):
         )
 
 
-def calculate_recovery_rat(timing, pin_rRAT, pin_fRAT, pin_rtran, pin_ftran, scatter_timing_min):
+def calculate_recovery_rat(
+    timing,
+    pin_rRAT,
+    pin_fRAT,
+    pin_rtran,
+    pin_ftran,
+    scatter_timing_min,
+    *,
+    clk_pin_aat=None,
+    clk_pin_tran=None,
+    clk_pin_tran_mask=None,
+):
     """Recompute max recovery RAT from live data slew and check LUTs."""
     arcs = timing.endpoints_timing_check_arcs
     if arcs is None or arcs.numel() == 0 or arcs.shape[1] <= 6:
@@ -94,10 +105,30 @@ def calculate_recovery_rat(timing, pin_rRAT, pin_fRAT, pin_rtran, pin_ftran, sca
 
     clock_r = torch.zeros(timing.num_pins, device=timing.device, dtype=timing.dtype)
     clock_f = torch.zeros_like(clock_r)
-    clock_r[timing.clock_pins.long()] = timing.clk_pin_rtran
-    clock_f[timing.clock_pins.long()] = timing.clk_pin_ftran
+    base_clk_rtran = timing.clk_pin_rtran
+    base_clk_ftran = timing.clk_pin_ftran
+    if clk_pin_tran is not None:
+        if clk_pin_tran_mask is not None:
+            base_clk_rtran = torch.where(clk_pin_tran_mask, clk_pin_tran[0], base_clk_rtran)
+            base_clk_ftran = torch.where(clk_pin_tran_mask, clk_pin_tran[1], base_clk_ftran)
+        else:
+            base_clk_rtran = clk_pin_tran[0]
+            base_clk_ftran = clk_pin_tran[1]
+    clock_r[timing.clock_pins.long()] = base_clk_rtran
+    clock_f[timing.clock_pins.long()] = base_clk_ftran
     clock_r_slew = torch.where(clock_type < 0, clock_f[clock_pins], clock_r[clock_pins])
     clock_f_slew = torch.where(clock_type < 0, clock_f[clock_pins], clock_r[clock_pins])
+    clock_aat_offset = None
+    if clk_pin_aat is not None:
+        clk_aat_r_by_pin = torch.zeros(timing.num_pins, device=timing.device, dtype=timing.dtype)
+        clk_aat_f_by_pin = torch.zeros_like(clk_aat_r_by_pin)
+        clk_aat_r_by_pin[timing.clock_pins.long()] = clk_pin_aat[0]
+        clk_aat_f_by_pin[timing.clock_pins.long()] = clk_pin_aat[1]
+        clock_aat_offset = torch.where(
+            clock_type < 0,
+            clk_aat_f_by_pin[clock_pins],
+            clk_aat_r_by_pin[clock_pins],
+        )
 
     if capture_deadline:
         from . import timing_propagation_cpp
@@ -126,6 +157,9 @@ def calculate_recovery_rat(timing, pin_rRAT, pin_fRAT, pin_rtran, pin_ftran, sca
         setup_valid = getattr(timing, "endpoints_constraint_max_valid", None)
         if setup_valid is None:
             setup_valid = torch.ones((setup.size(0), 2), dtype=torch.bool, device=rows.device)
+        if clock_aat_offset is not None:
+            rise_check = rise_check - clock_aat_offset
+            fall_check = fall_check - clock_aat_offset
         return tuple(
             timing_propagation_cpp.recovery_rat_from_capture_deadline(
                 pin_rRAT,
@@ -166,6 +200,9 @@ def calculate_recovery_rat(timing, pin_rRAT, pin_fRAT, pin_rtran, pin_ftran, sca
     # Max required time is capture anchor - check time, including recovery.
     capture_r = pin_rRAT[endpoint_pins] + native_check_r
     capture_f = pin_fRAT[endpoint_pins] + native_check_f
+    if clock_aat_offset is not None:
+        capture_r = capture_r + clock_aat_offset
+        capture_f = capture_f + clock_aat_offset
 
     from .action_check_lut import action_check_values
 

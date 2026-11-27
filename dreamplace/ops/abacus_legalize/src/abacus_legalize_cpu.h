@@ -77,24 +77,6 @@ void sortNodesInRow(const T* host_x, const T* host_y,
         T x2 = host_x[node_id2] + host_node_size_x[node_id2]/2;
         return x1 < x2 || (x1 == x2 && node_id1 < node_id2);
         });
-
-    // for (int j = 1, je = nodes_in_row.size(); j < je; ++j) {
-    //   int node_id1 = nodes_in_row.at(j - 1);
-    //   int node_id2 = nodes_in_row.at(j);
-    //   T xl1 = host_x[node_id1]; 
-    //   T xl2 = host_x[node_id2];
-    //   T width1 = host_node_size_x[node_id1]; 
-    //   T width2 = host_node_size_x[node_id2]; 
-    //   T xh1 = xl1 + width1; 
-    //   T xh2 = xl2 + width2; 
-    //   T yl1 = host_y[node_id1]; 
-    //   T yl2 = host_y[node_id2]; 
-    //   T yh1 = yl1 + host_node_size_y[node_id1]; 
-    //   T yh2 = yl2 + host_node_size_y[node_id2]; 
-    //   // dreamplaceAssertMsg(xl1 < xl2 && xh1 < xh2, 
-    //   //     "node %d (%g, %g, %g, %g) overlaps with node %d (%g, %g, %g, %g)", 
-    //   //     node_id1, xl1, yl1, xh1, yh1, node_id2, xl2, yl2, xh2, yh2);
-    // }
   }
 }
 
@@ -141,13 +123,10 @@ void distributeMovableAndFixedCells2BinsCPU(
       // fixed nodes may distribute to multiple bins
       int node_id = i;
       int bin_id_xl = std::max((x[node_id] - xl) / bin_size_x, (T)0);
-      // tricky to control the tolerance in x direction, because bin_size_x is rather large 
-      // not setting it properly will cause missing fixed nodes in the bin_cells 
       int bin_id_xh = std::min(
           (int)ceilDiv(x[node_id] + node_size_x[node_id] - xl, bin_size_x, NumericTolerance<T>::rtol * site_width / bin_size_x),
           num_bins_x);
       int bin_id_yl = std::max((y[node_id] - yl) / bin_size_y, (T)0);
-      // the problem above usually does not appear in y direction, because bin_size_y is row height 
       int bin_id_yh = std::min(
           (int)ceilDiv(y[node_id] + node_size_y[node_id] - yl, bin_size_y),
           num_bins_y);
@@ -176,8 +155,17 @@ bool abacusPlaceRowCPU(const T* init_x, const T* node_size_x,
                        int* row_nodes, AbacusCluster<T>* clusters,
                        const int num_row_nodes) {
   // a very large number
-  T M = std::pow(10, ceilDiv(std::log((xh - xl) * num_row_nodes), log(10)));
-  // dreamplacePrint(kDEBUG, "M = %g\n", M);
+  T max_w = (T)1.0;
+  if (node_weights != nullptr) {
+    for (int i = 0; i < num_row_nodes; ++i) {
+      int nid = row_nodes[i];
+      if (nid < num_movable_nodes) {
+        T wi = std::min((T)64.0, std::max((T)1.0, node_weights[nid]));
+        if (wi > max_w) max_w = wi;
+      }
+    }
+  }
+  T M = std::pow(10, ceilDiv(std::log((xh - xl) * num_row_nodes * max_w), log(10)));
   bool ret_flag = true;
 
   // merge two clusters
@@ -219,11 +207,7 @@ bool abacusPlaceRowCPU(const T* init_x, const T* node_size_x,
       dreamplaceAssert(cur_cluster_id < num_row_nodes);
       cluster = &clusters[cur_cluster_id];
       cluster->x = cluster->q / cluster->e;
-      // make sure cluster >= range_xl, so fixed nodes will not be moved
-      // in illegal case, cluster+w > range_xh may occur, but it is OK.
-      // We can collect failed clusters later
       cluster->x = std::max(std::min(cluster->x, range_xh - cluster->w), range_xl);
-      // there may be numeric precision issues
       dreamplaceAssertMsg(cluster->x + site_width * NumericTolerance<T>::rtol >= range_xl 
           && cluster->x + cluster->w <= range_xh + site_width * NumericTolerance<T>::rtol, 
                        "%.6f >= %.6f && %.6f + %.6f <= %.6f", 
@@ -255,7 +239,9 @@ bool abacusPlaceRowCPU(const T* init_x, const T* node_size_x,
     cluster.end_row_node_id = i;
     cluster.e =
         (node_id < num_movable_nodes && node_size_y[node_id] <= row_height)
-            ? 1.0 /*node_weights[node_id]*/
+            ? (node_weights != nullptr
+                   ? std::min((T)64.0, std::max((T)1.0, node_weights[node_id]))
+                   : (T)1.0)
             : M;
     cluster.q = cluster.e * init_x[node_id];
     cluster.w = node_size_x[node_id];
@@ -344,8 +330,6 @@ void abacusLegalizeRowCPU(
   for (unsigned int i = 0; i < bin_cells.size(); i += 1) {
     auto& row2nodes = bin_cells.at(i);
 
-    // sort bin cells from left to right
-    // a quick fix from cpp branch... may heavily affect results on ICCAD2015.
     sortNodesInRow(x, y, 
         node_size_x, node_size_y, 
         num_movable_nodes, row2nodes);
@@ -354,7 +338,6 @@ void abacusLegalizeRowCPU(
     int num_row_nodes = row2nodes.size();
 
     int bin_id_x = i / num_bins_y;
-    // int bin_id_y = i-bin_id_x*num_bins_y;
 
     T bin_xl = xl + bin_size_x * bin_id_x;
     T bin_xh = std::min(bin_xl + bin_size_x, xh);
@@ -383,7 +366,6 @@ void abacusLegalizationCPU(const T* init_x, const T* init_y,
   // adjust bin sizes
   T bin_size_x = (xh - xl) / num_bins_x;
   T bin_size_y = row_height;
-  // num_bins_x = ceilDiv(xh - xl, bin_size_x);
   num_bins_y = ceilDiv(yh - yl, bin_size_y);
 
   // include both movable and fixed nodes
@@ -404,7 +386,6 @@ void abacusLegalizationCPU(const T* init_x, const T* init_y,
       num_bins_x, num_bins_y, num_nodes, num_movable_nodes, 
       bin_cells, bin_clusters);
   // need to align nodes to sites
-  // this also considers cell width which is not integral times of site_width
   for (auto const& cells : bin_cells) {
     T xxl = xl;
     for (auto node_id : cells) {
@@ -417,13 +398,6 @@ void abacusLegalizationCPU(const T* init_x, const T* init_y,
       }
     }
   }
-  // align2SiteCPU(
-  //        node_size_x,
-  //        x,
-  //        xl, xh,
-  //        site_width,
-  //        num_movable_nodes
-  //        );
 }
 
 DREAMPLACE_END_NAMESPACE

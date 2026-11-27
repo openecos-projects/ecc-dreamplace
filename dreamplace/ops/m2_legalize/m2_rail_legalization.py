@@ -14,6 +14,7 @@ from dreamplace.ops.m2_legalize.m2_pg_rail_hybrid_legalization import (
     M2PgRailHybridLegalizationView,
 )
 from dreamplace.ops.m2_legalize.row_segment_repair import repair_row_segments
+from dreamplace.row_gap_blockage import row_gap_blockages
 
 
 def _resolve_boolean_like_flag(params, name, default=0):
@@ -355,28 +356,80 @@ def build_legalization(
         )
         return macro_op, greedy_op, abacus_op, check_op
 
+    gaps = row_gap_blockages(placedb, data_collections)
+    sizes = data_collections if gaps is None else gaps
+    if gaps is None:
+        ordinary_check_op = self.op_collections.legality_check_op
+    else:
+        ordinary_check_op = legality_check.LegalityCheck(
+            node_size_x=gaps.node_size_x,
+            node_size_y=gaps.node_size_y,
+            flat_region_boxes=data_collections.flat_region_boxes,
+            flat_region_boxes_start=data_collections.flat_region_boxes_start,
+            node2fence_region_map=gaps.node2fence_region_map,
+            fp_info=data_collections.fp_info,
+            num_terminals=gaps.num_terminals,
+            num_movable_nodes=placedb.num_movable_nodes,
+        )
+
     ordinary_ops = build_legalizer_ops(
-        node_size_x=data_collections.node_size_x,
-        node_size_y=data_collections.node_size_y,
-        node_weights=data_collections.num_pins_in_nodes,
-        node2fence_region_map=data_collections.node2fence_region_map,
+        node_size_x=sizes.node_size_x,
+        node_size_y=sizes.node_size_y,
+        node_weights=sizes.num_pins_in_nodes,
+        node2fence_region_map=sizes.node2fence_region_map,
         num_movable_nodes=placedb.num_movable_nodes,
         num_terminal_NIs=placedb.num_terminal_NIs,
         num_filler_nodes=placedb.num_filler_nodes,
-        check_op=self.op_collections.legality_check_op,
+        check_op=ordinary_check_op,
     )
 
     retry_ops = build_legalizer_ops(
-        node_size_x=data_collections.node_size_x,
-        node_size_y=data_collections.node_size_y,
-        node_weights=data_collections.num_pins_in_nodes,
-        node2fence_region_map=data_collections.node2fence_region_map,
+        node_size_x=sizes.node_size_x,
+        node_size_y=sizes.node_size_y,
+        node_weights=sizes.num_pins_in_nodes,
+        node2fence_region_map=sizes.node2fence_region_map,
         num_movable_nodes=placedb.num_movable_nodes,
         num_terminal_NIs=placedb.num_terminal_NIs,
         num_filler_nodes=placedb.num_filler_nodes,
-        check_op=self.op_collections.legality_check_op,
+        check_op=ordinary_check_op,
         greedy_num_bins_x=max(1, min(int(placedb.num_bins_x), 64)),
     )
+
+    def configure_d_metric_ops(ops_tuple, base_weights, pos_dtype, use_gaps=None):
+        _, greedy_op, abacus_op, _ = ops_tuple
+        d_weights = (
+            getattr(data_collections, "d_metric_legalize_weights", None)
+            if _resolve_boolean_like_flag(params, "d_metric_legalize_flag", default=0)
+            else None
+        )
+        if d_weights is not None:
+            e_x, e_y = d_weights
+            if use_gaps is not None:
+                ones = torch.ones(
+                    (use_gaps.count,), dtype=e_x.dtype, device=e_x.device
+                )
+                e_x = use_gaps.insert(e_x, ones)
+                e_y = use_gaps.insert(e_y, ones)
+            w_dev = base_weights.device
+            greedy_op.node_weights = (
+                torch.cat([e_x, e_y], dim=0)
+                .to(dtype=pos_dtype, device=w_dev)
+                .contiguous()
+            )
+            greedy_op.use_node_weights = True
+            greedy_op.anchor_boost = float(
+                getattr(params, "d_metric_legalize_anchor_boost", 0.5)
+            )
+            abacus_op.node_weights = (
+                e_x.to(dtype=pos_dtype, device=w_dev).contiguous()
+            )
+            abacus_op.use_node_weights = True
+        else:
+            greedy_op.node_weights = base_weights
+            greedy_op.use_node_weights = False
+            greedy_op.anchor_boost = 0.0
+            abacus_op.node_weights = base_weights
+            abacus_op.use_node_weights = False
 
     def run_legalizer(
         pos,
@@ -565,13 +618,23 @@ def build_legalization(
                 )
             return result
 
+        configure_d_metric_ops(
+            ordinary_ops, sizes.num_pins_in_nodes, pos.dtype, use_gaps=gaps
+        )
+        configure_d_metric_ops(
+            retry_ops, sizes.num_pins_in_nodes, pos.dtype, use_gaps=gaps
+        )
+        pos_in = pos if gaps is None else gaps.extend(pos)
+        row_repair_ctx = (placedb, data_collections) if gaps is None else None
         result, legal = run_legalizer(
-            pos,
+            pos_in,
             ordinary_ops,
             "ordinary",
             retry_ops,
-            row_repair_context=(placedb, data_collections),
+            row_repair_context=row_repair_ctx,
         )
+        if gaps is not None:
+            result = gaps.strip(result)
         if not legal:
             raise RuntimeError(
                 "ordinary legalization failed before M2 soft legalization"

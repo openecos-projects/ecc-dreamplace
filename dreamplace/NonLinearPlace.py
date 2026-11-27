@@ -197,6 +197,7 @@ from dreamplace.flows.gp.timing_carriers import (
     diff_tdp_gate_status,
     diff_tdp_uses_direct_loss,
     diff_tdp_uses_gradient_net_weight,
+    diff_tdp_uses_star_pin_pair,
     freeze_diff_tdp_step_status,
     legacy_net_weight_gate_status,
     net_weighting_nendpoints,
@@ -436,7 +437,172 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         )
         self._egr_padding_state = None
 
+    @staticmethod
+    def _decode_node_name(raw_name) -> str:
+        if isinstance(raw_name, (bytes, np.bytes_)):
+            return raw_name.decode("utf-8", errors="ignore")
+        return str(raw_name)
+
+    def export_d_metric_movable_map(self, params, placedb):
+        if not bool(getattr(params, "d_metric_legalize_flag", 0)):
+            return None
+        model = getattr(self, "_routability_model", None)
+        precond = getattr(
+            getattr(model, "op_collections", None), "precondition_op", None
+        )
+        d_base = getattr(precond, "_last_d_metric_base", None)
+        d_tx = getattr(precond, "_last_d_metric_timing_x", None)
+        d_ty = getattr(precond, "_last_d_metric_timing_y", None)
+        if d_base is None or d_tx is None or d_ty is None:
+            return None
+        raw_names = getattr(placedb, "node_names", None)
+        m_cnt = int(placedb.num_movable_nodes)
+        if raw_names is None or len(raw_names) < m_cnt or m_cnt <= 0:
+            return None
+        with torch.no_grad():
+            max_w = float(getattr(params, "d_metric_legalize_max_weight", 64.0))
+            n_use = min(m_cnt, int(d_base.numel()), int(d_tx.numel()), int(d_ty.numel()))
+            if n_use <= 0:
+                return None
+            denom = d_base[:n_use].detach().float().clamp(min=1.0)
+            ex = (d_tx[:n_use].detach().float() / denom).clamp(1.0, max_w)
+            ey = (d_ty[:n_use].detach().float() / denom).clamp(1.0, max_w)
+            e_iso = torch.maximum(ex, ey).cpu()
+            names = [self._decode_node_name(raw_names[i]) for i in range(n_use)]
+            known_names = set(names)
+            nz = torch.nonzero(e_iso > (1.0 + 1e-6), as_tuple=False).reshape(-1).tolist()
+            node_map = {names[idx]: float(e_iso[idx].item()) for idx in nz}
+            return {
+                "node_map": node_map,
+                "known_names": known_names,
+                "max_weight": max_w,
+                "anchor_boost": float(
+                    getattr(params, "d_metric_legalize_anchor_boost", 0.5)
+                ),
+                "source_movable_count": int(n_use),
+            }
+
+    def _prepare_d_metric_legalize_weights(self, params, placedb) -> None:
+        self.data_collections.d_metric_legalize_weights = None
+        carried = getattr(placedb, "_carried_d_metric_movable_map", None)
+        if carried is not None:
+            placedb._carried_d_metric_movable_map = None
+        if not bool(getattr(params, "d_metric_legalize_flag", 0)):
+            return
+
+        m_cnt = int(placedb.num_movable_nodes)
+        n_total = int(placedb.num_nodes)
+        max_w = float(getattr(params, "d_metric_legalize_max_weight", 64.0))
+        anchor_boost = float(getattr(params, "d_metric_legalize_anchor_boost", 0.5))
+
+        model = getattr(self, "_routability_model", None)
+        precond = getattr(
+            getattr(model, "op_collections", None), "precondition_op", None
+        )
+        d_base = getattr(precond, "_last_d_metric_base", None)
+        d_tx = getattr(precond, "_last_d_metric_timing_x", None)
+        d_ty = getattr(precond, "_last_d_metric_timing_y", None)
+
+        if d_base is not None and d_tx is not None and d_ty is not None:
+            with torch.no_grad():
+                denom = d_base.detach().float().clamp(min=1.0)
+                ex = (d_tx.detach().float() / denom).clamp(1.0, max_w)
+                ey = (d_ty.detach().float() / denom).clamp(1.0, max_w)
+                if int(ex.numel()) < n_total:
+                    pad = torch.ones(
+                        (n_total - int(ex.numel()),),
+                        dtype=torch.float32,
+                        device=ex.device,
+                    )
+                    ex = torch.cat([ex, pad], dim=0)
+                    ey = torch.cat([ey, pad], dim=0)
+                else:
+                    ex = ex[:n_total].clone()
+                    ey = ey[:n_total].clone()
+                ex[m_cnt:] = 1.0
+                ey[m_cnt:] = 1.0
+                e_iso = torch.maximum(ex, ey).cpu()
+                self.data_collections.d_metric_legalize_weights = (e_iso, e_iso)
+                emax_m = e_iso[:m_cnt]
+                tier_cnt = int((emax_m >= 1.41421356).sum().item())
+                logging.info(
+                    "D-metric legalization active: tier>=1 movable=%d/%d, max_ex=%.2f, max_ey=%.2f, anchor_boost=%.2f",
+                    tier_cnt,
+                    m_cnt,
+                    float(ex[:m_cnt].max().item()) if m_cnt > 0 else 1.0,
+                    float(ey[:m_cnt].max().item()) if m_cnt > 0 else 1.0,
+                    anchor_boost,
+                )
+            return
+
+        if isinstance(carried, dict) and m_cnt > 0:
+            raw_names = getattr(placedb, "node_names", None)
+            if raw_names is None or len(raw_names) < m_cnt:
+                return
+            node_map = carried.get("node_map") or {}
+            known_names = carried.get("known_names") or set()
+            with torch.no_grad():
+                e_full = torch.ones((n_total,), dtype=torch.float32)
+                new_movable_mask = torch.zeros((m_cnt,), dtype=torch.bool)
+                for idx in range(m_cnt):
+                    name = self._decode_node_name(raw_names[idx])
+                    if name in node_map:
+                        e_full[idx] = float(node_map[name])
+                    elif known_names and name not in known_names:
+                        new_movable_mask[idx] = True
+                new_cnt = int(new_movable_mask.sum().item())
+                if new_cnt > 0:
+                    p2node = getattr(self.data_collections, "pin2node_map", None)
+                    p2net = getattr(self.data_collections, "pin2net_map", None)
+                    if torch.is_tensor(p2node) and torch.is_tensor(p2net):
+                        p2node_c = p2node.detach().cpu().long().reshape(-1)
+                        p2net_c = p2net.detach().cpu().long().reshape(-1)
+                        n_p = min(int(p2node_c.numel()), int(p2net_c.numel()))
+                        p2node_c, p2net_c = p2node_c[:n_p], p2net_c[:n_p]
+                        valid_p = (p2node_c >= 0) & (p2node_c < m_cnt) & (p2net_c >= 0)
+                        if bool(valid_p.any()):
+                            vp_nodes = p2node_c[valid_p]
+                            vp_nets = p2net_c[valid_p]
+                            num_nets = int(vp_nets.max().item()) + 1
+                            e_mov = e_full[:m_cnt]
+                            cur_known = ~new_movable_mask
+                            for _ in range(2):
+                                km = cur_known[vp_nodes]
+                                np_m = new_movable_mask[vp_nodes]
+                                if not (bool(km.any()) and bool(np_m.any())):
+                                    break
+                                net_max_e = torch.ones((num_nets,), dtype=torch.float32)
+                                net_max_e.scatter_reduce_(
+                                    0,
+                                    vp_nets[km],
+                                    e_mov[vp_nodes[km]],
+                                    reduce="amax",
+                                    include_self=True,
+                                )
+                                e_mov.scatter_reduce_(
+                                    0,
+                                    vp_nodes[np_m],
+                                    net_max_e[vp_nets[np_m]],
+                                    reduce="amax",
+                                    include_self=True,
+                                )
+                                cur_known = cur_known | (e_mov > (1.0 + 1e-6))
+                e_full.clamp_(1.0, max_w)
+                e_full[m_cnt:] = 1.0
+                self.data_collections.d_metric_legalize_weights = (e_full, e_full)
+                emax_m = e_full[:m_cnt]
+                tier_cnt = int((emax_m >= 1.41421356).sum().item())
+                logging.info(
+                    "D-metric legalization active (carried): tier>=1 movable=%d/%d (new_buf=%d), max_e=%.2f, anchor_boost=%.2f",
+                    tier_cnt,
+                    m_cnt,
+                    new_cnt,
+                    float(emax_m.max().item()) if m_cnt > 0 else 1.0,
+                    anchor_boost,
+                )
+
     def _run_standard_legalization(self, params, placedb, iteration, all_metrics):
+        self._prepare_d_metric_legalize_weights(params, placedb)
         controller = self._routability_controller
         if controller is not None:
             controller.before_legalization(model=self._routability_model, position=self.pos[0])
@@ -1430,6 +1596,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
     def _diff_tdp_uses_direct_loss(self, params):
         return diff_tdp_uses_direct_loss(params)
 
+    def _diff_tdp_uses_star_pin_pair(self, params):
+        return diff_tdp_uses_star_pin_pair(params)
+
     def _diff_tdp_uses_gradient_net_weight(self, params):
         return diff_tdp_uses_gradient_net_weight(params)
 
@@ -1495,19 +1664,36 @@ class NonLinearPlace(BasicPlace.BasicPlace):
     def _diff_tdp_gate_status(self, params, iteration, overflow):
         return diff_tdp_gate_status(params, iteration, overflow)
 
-    def _freeze_diff_tdp_step_status(self, params, iteration, overflow):
+    def _freeze_diff_tdp_step_status(
+        self, params, iteration, overflow, *, model=None
+    ):
         previous_status = getattr(self, "_diff_tdp_step_status", None) or {}
         summary = getattr(self, "_diff_tdp_gate_summary", None)
         already_activated = bool(
             isinstance(summary, dict)
             and summary.get("first_timing_active_iteration") is not None
         )
+        active_model = (
+            model
+            if model is not None
+            else getattr(self, "last_global_place_model", None)
+        )
+        star_rt = (
+            getattr(active_model, "star_tdp_runtime", None)
+            if active_model is not None
+            else None
+        )
+        topology_initialized = (
+            bool(star_rt is not None and star_rt.snapshot_generation > 0)
+            if self._diff_tdp_uses_star_pin_pair(params)
+            else getattr(self, "_live_timing_topology_initialized", False)
+        )
         status = freeze_diff_tdp_step_status(
             params,
             iteration,
             overflow,
             previous_status,
-            getattr(self, "_live_timing_topology_initialized", False),
+            topology_initialized,
             already_activated=already_activated,
         )
         self._diff_tdp_step_status = dict(status)
@@ -1553,6 +1739,13 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         return copy.deepcopy(state)
 
     def _reset_timing_grad_balance_for_restart(self, model, params, *, iteration):
+        star_rt = getattr(model, "star_tdp_runtime", None)
+        if star_rt is not None:
+            star_rt.reset_for_restart(
+                recalibrate_kappa=bool(
+                    getattr(params, "star_kappa_recalibrate_on_restart", 0)
+                )
+            )
         if not bool(
             getattr(params, "timing_grad_balance_reset_on_restart", True)
         ):
@@ -2176,6 +2369,45 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             self.joint_buffer_commit_trace = trace
         trace.append(dict(result))
 
+    def _refresh_star_tdp_snapshot(
+        self,
+        params,
+        placedb,
+        model,
+        pos,
+        *,
+        iteration,
+        gate_status,
+        topology_prepared=False,
+    ):
+        runtime = getattr(model, "star_tdp_runtime", None)
+        if runtime is None and callable(getattr(model, "_ensure_star_tdp_runtime", None)):
+            runtime = model._ensure_star_tdp_runtime()
+        if (
+            not topology_prepared
+            and runtime is not None
+            and runtime.needs_live_topology_refresh(
+                pos.detach(), overflow=gate_status.get("overflow")
+            )
+        ):
+            with torch.no_grad():
+                self._refresh_live_timing_topology(pos.detach())
+            topology_prepared = True
+        summary = model.refresh_star_timing_snapshot(
+            pos,
+            iteration=iteration,
+            overflow=gate_status.get("overflow"),
+            topology_already_rebuilt=bool(topology_prepared),
+        )
+        if getattr(model, "wns", None) is not None and getattr(model, "tns", None) is not None:
+            self._record_timing_metrics(
+                model.wns,
+                model.tns,
+                getattr(model, "ws", None),
+                getattr(model, "ts", None),
+            )
+        return summary
+
     def _timing_iteration_context(self):
         return timing_iteration.TimingIterationContext(
             enabled=self._diff_tdp_enabled,
@@ -2184,6 +2416,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             refresh_topology=self._refresh_live_timing_topology,
             carrier=self._timing_placement_carrier,
             reset_weights=self._reset_diff_tdp_net_weights_if_needed,
+            uses_star_pin_pair=self._diff_tdp_uses_star_pin_pair,
+            refresh_star_snapshot=self._refresh_star_tdp_snapshot,
         )
 
     def _prepare_segment_direct_joint_iteration(
@@ -4893,6 +5127,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         params,
                         iteration,
                         model.overflow,
+                        model=model,
                     )
                     if self._diff_tdp_controls_direct_timing_objective(params):
                         model.use_timing_obj = bool(
@@ -4924,6 +5159,25 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                             model, pos, optimizer, cur_metric, eval_ops,
                             iteration=iteration, stage=cur_stage,
                         )
+                        star_rt = getattr(model, "star_tdp_runtime", None)
+                        if (
+                            star_rt is not None
+                            and self._diff_tdp_uses_star_pin_pair(params)
+                            and bool(diff_tdp_gate_status.get("timing_objective_active", False))
+                            and star_rt.geometry_dirty
+                        ):
+                            self._refresh_star_tdp_snapshot(
+                                params,
+                                placedb,
+                                model,
+                                pos,
+                                iteration=iteration,
+                                gate_status={
+                                    **diff_tdp_gate_status,
+                                    "overflow": model.overflow,
+                                },
+                                topology_prepared=False,
+                            )
                         if midplace is not None and callable(
                             getattr(midplace, "after_timing_window_step", None)
                         ):
@@ -4940,6 +5194,20 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     iteration,
                                 ),
                             )
+
+                    star_rt = getattr(model, "star_tdp_runtime", None)
+                    if (
+                        star_rt is not None
+                        and star_rt.refresh_count > 0
+                        and getattr(model, "wns", None) is not None
+                        and getattr(model, "tns", None) is not None
+                    ):
+                        self._update_metric_timing(
+                            cur_metric,
+                            model.wns,
+                            model.tns,
+                            getattr(model, "ws", None),
+                        )
 
                     self._initialize_timing_grad_balance_if_needed(
                         params,
@@ -7314,6 +7582,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         if params.dump_legalize_solution_flag:
             self.dump(params, placedb, self.pos[0].cpu(
             ), "%s.dp.pklz" % (params.design_name()))
+        if os.environ.get("STAR_DUMP_STAGE_DEFS") == "1":
+            self._post_lg_pos_tensor = self.pos[0].detach().clone()
 
         # detailed placement
         if params.detailed_place_flag:

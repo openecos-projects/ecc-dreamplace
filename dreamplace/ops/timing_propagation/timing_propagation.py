@@ -4274,7 +4274,10 @@ class TimingPropagation(nn.Module):
     def calculate_clk2q_aat(self,
                         pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
                         pin_net_cap_rise, pin_net_cap_fall,
-                        use_surrogate=False):
+                        use_surrogate=False,
+                        clk_pin_aat=None,
+                        clk_pin_tran=None,
+                        clk_pin_tran_mask=None):
         device = pin_rAAT.device
 
         # --- 数据准备部分 (与您的风格完全一致) ---
@@ -4295,8 +4298,23 @@ class TimingPropagation(nn.Module):
         # Level-0 clk->Q arcs should use exported clock-pin slew, not the
         # runtime data-pin transition tensor. The latter is uninitialized for
         # clock pins during AAT forward propagation and collapses clk2q delay.
-        pin_r_slew_in = self.clk_pin_rtran[arc_in_pins]
-        pin_f_slew_in = self.clk_pin_ftran[arc_in_pins]
+        clk_rtran_src = self.clk_pin_rtran
+        clk_ftran_src = self.clk_pin_ftran
+        if clk_pin_tran is not None:
+            if clk_pin_tran_mask is not None:
+                clk_rtran_src = torch.where(clk_pin_tran_mask, clk_pin_tran[0], clk_rtran_src)
+                clk_ftran_src = torch.where(clk_pin_tran_mask, clk_pin_tran[1], clk_ftran_src)
+            else:
+                clk_rtran_src = clk_pin_tran[0]
+                clk_ftran_src = clk_pin_tran[1]
+        pin_r_slew_in = clk_rtran_src[arc_in_pins]
+        pin_f_slew_in = clk_ftran_src[arc_in_pins]
+        if clk_pin_aat is not None:
+            pin_r_aat_in = clk_pin_aat[0][arc_in_pins]
+            pin_f_aat_in = clk_pin_aat[1][arc_in_pins]
+        else:
+            pin_r_aat_in = None
+            pin_f_aat_in = None
         pin_r_load_out = pin_net_cap_rise[arc_out_pins]
         pin_f_load_out = pin_net_cap_fall[arc_out_pins]
 
@@ -4341,7 +4359,9 @@ class TimingPropagation(nn.Module):
                     use_surrogate=use_surrogate,
                 )
                 # cell_arc_rr_delays[scatter_indices[sub_mask_rr]] = delay_rr
-                r_aat_updates[sub_mask_rr] = 0 + delay_rr
+                r_aat_updates[sub_mask_rr] = (
+                    (0 if pin_r_aat_in is None else pin_r_aat_in[sub_mask_rr]) + delay_rr
+                )
                 r_trans[sub_mask_rr] = tran_rr
 
             # Path 2: Fall->Fall (triggered by falling or both edge)
@@ -4364,7 +4384,9 @@ class TimingPropagation(nn.Module):
                     use_surrogate=use_surrogate,
                 )
                 # cell_arc_ff_delays[scatter_indices[sub_mask_ff]] = delay_ff
-                f_aat_updates[sub_mask_ff] = 0 + delay_ff
+                f_aat_updates[sub_mask_ff] = (
+                    (0 if pin_f_aat_in is None else pin_f_aat_in[sub_mask_ff]) + delay_ff
+                )
                 f_trans[sub_mask_ff] = tran_ff
 
         # B. Negative Unate (clk->QN)
@@ -4391,7 +4413,9 @@ class TimingPropagation(nn.Module):
                     use_surrogate=use_surrogate,
                 )
                 # cell_arc_rf_delays[scatter_indices[sub_mask_rf]] = delay_rf
-                f_aat_updates[sub_mask_rf] = 0 + delay_rf
+                f_aat_updates[sub_mask_rf] = (
+                    (0 if pin_r_aat_in is None else pin_r_aat_in[sub_mask_rf]) + delay_rf
+                )
                 f_trans[sub_mask_rf] = tran_rf
 
             # Path 2: Fall->Rise (triggered by falling or both edge)
@@ -4414,7 +4438,9 @@ class TimingPropagation(nn.Module):
                     use_surrogate=use_surrogate,
                 )
                 # cell_arc_fr_delays[scatter_indices[sub_mask_fr]] = delay_fr
-                r_aat_updates[sub_mask_fr] = 0 + delay_fr
+                r_aat_updates[sub_mask_fr] = (
+                    (0 if pin_f_aat_in is None else pin_f_aat_in[sub_mask_fr]) + delay_fr
+                )
                 r_trans[sub_mask_fr] = tran_fr
 
         # C. Non-Unate
@@ -4447,8 +4473,9 @@ class TimingPropagation(nn.Module):
                 )
                 # cell_arc_rr_delays[scatter_indices[sub_mask_re]] = delay_rr
                 # cell_arc_rf_delays[scatter_indices[sub_mask_re]] = delay_rf
-                aat_rr_re[sub_mask_re] = 0 + delay_rr
-                aat_rf_re[sub_mask_re] = 0+ delay_rf
+                re_offset = 0 if pin_r_aat_in is None else pin_r_aat_in[sub_mask_re]
+                aat_rr_re[sub_mask_re] = re_offset + delay_rr
+                aat_rf_re[sub_mask_re] = re_offset + delay_rf
                 tran_rr_re[sub_mask_re] = self.r_tran_entry(
                     lib_cell_idxs[sub_mask_re],
                     pin_r_slew_in[sub_mask_re],
@@ -4491,8 +4518,9 @@ class TimingPropagation(nn.Module):
                 )
                 # cell_arc_fr_delays[scatter_indices[sub_mask_fe]] = delay_fr
                 # cell_arc_ff_delays[scatter_indices[sub_mask_fe]] = delay_ff
-                aat_fr_fe[sub_mask_fe] = 0 + delay_fr
-                aat_ff_fe[sub_mask_fe] = 0 + delay_ff
+                fe_offset = 0 if pin_f_aat_in is None else pin_f_aat_in[sub_mask_fe]
+                aat_fr_fe[sub_mask_fe] = fe_offset + delay_fr
+                aat_ff_fe[sub_mask_fe] = fe_offset + delay_ff
                 tran_fr_fe[sub_mask_fe] = self.r_tran_entry(
                     lib_cell_idxs[sub_mask_fe],
                     pin_f_slew_in[sub_mask_fe],
@@ -4890,7 +4918,17 @@ class TimingPropagation(nn.Module):
         #     ) <= 1e8, "Negative r_rat_updates detected after scatter_reduce"
         return pin_rRAT, pin_fRAT
 
-    def calculate_setup_rat(self, pin_rRAT, pin_fRAT, clk_pin_rtran, clk_pin_ftran, pin_rtran, pin_ftran):
+    def calculate_setup_rat(
+        self,
+        pin_rRAT,
+        pin_fRAT,
+        clk_pin_rtran,
+        clk_pin_ftran,
+        pin_rtran,
+        pin_ftran,
+        *,
+        clk_pin_aat=None,
+    ):
 
         if getattr(self, "_critical_path_snapshot_requested", False):
             self._critical_path_constraint_state = None
@@ -4902,6 +4940,11 @@ class TimingPropagation(nn.Module):
         lib_cell_idxs = self.endpoints_constraint_arcs[:, 2]
         lib_arc_idxs = self.endpoints_constraint_arcs[:, 3]
         timing_senses = self.endpoints_constraint_arcs[:, 4]
+        clock_types = (
+            self.endpoints_constraint_arcs[:, 5]
+            if self.endpoints_constraint_arcs.shape[1] > 5
+            else timing_senses
+        )
 
         pin_clk_rtran_in = clk_pin_rtran[arc_in_pins]
         pin_clk_ftran_in = clk_pin_ftran[arc_in_pins]
@@ -4939,13 +4982,21 @@ class TimingPropagation(nn.Module):
 
         rise_rat_candidates = pin_rRAT[arc_out_pins] - r_setup_time
         fall_rat_candidates = pin_fRAT[arc_out_pins] - f_setup_time
+        if clk_pin_aat is not None:
+            cap_clk_aat = torch.where(
+                clock_types < 0,
+                clk_pin_aat[1][arc_in_pins],
+                clk_pin_aat[0][arc_in_pins],
+            )
+            rise_rat_candidates = rise_rat_candidates + cap_clk_aat
+            fall_rat_candidates = fall_rat_candidates + cap_clk_aat
+        max_valid = getattr(self, "endpoints_constraint_max_valid", None)
         rise_rat_candidates, fall_rat_candidates = qualify_check_candidates(
             rise_rat_candidates, fall_rat_candidates,
-            getattr(self, "endpoints_constraint_max_valid", None),
+            max_valid,
         )
         if getattr(self, "_critical_path_snapshot_requested", False):
-            qualified_rows = getattr(self, "endpoints_constraint_max_valid", None)
-            qualified_rows = torch.ones_like(arc_out_pins, dtype=torch.bool) if qualified_rows is None else qualified_rows.any(dim=1)
+            qualified_rows = torch.ones_like(arc_out_pins, dtype=torch.bool) if max_valid is None else max_valid.any(dim=1)
             self._critical_path_constraint_state = {
                 "endpoint_pins": arc_out_pins[qualified_rows].detach(),
                 "test_ids": torch.arange(
@@ -4959,6 +5010,34 @@ class TimingPropagation(nn.Module):
 
         # assert pin_rRAT[arc_out_pins].min(
         # ) >= 0, "Negative r_rat_updates detected"
+        if clk_pin_aat is not None:
+            r_valid = (
+                torch.ones_like(arc_out_pins, dtype=torch.bool)
+                if max_valid is None
+                else max_valid[:, 0]
+            )
+            f_valid = (
+                torch.ones_like(arc_out_pins, dtype=torch.bool)
+                if max_valid is None
+                else max_valid[:, 1]
+            )
+            pin_rRAT = scatter_timing_min(
+                pin_rRAT,
+                arc_out_pins[r_valid],
+                rise_rat_candidates[r_valid],
+                include_self=False,
+                mode=self.timing_aggregation_mode,
+                tau_ps=self.timing_aggregation_tau_ps,
+            )
+            pin_fRAT = scatter_timing_min(
+                pin_fRAT,
+                arc_out_pins[f_valid],
+                fall_rat_candidates[f_valid],
+                include_self=False,
+                mode=self.timing_aggregation_mode,
+                tau_ps=self.timing_aggregation_tau_ps,
+            )
+            return pin_rRAT, pin_fRAT
 
         pin_rRAT = scatter_timing_min(
             pin_rRAT,
@@ -4979,7 +5058,17 @@ class TimingPropagation(nn.Module):
 
         return pin_rRAT, pin_fRAT
 
-    def calculate_recovery_rat(self, pin_rRAT, pin_fRAT, pin_rtran, pin_ftran):
+    def calculate_recovery_rat(
+        self,
+        pin_rRAT,
+        pin_fRAT,
+        pin_rtran,
+        pin_ftran,
+        *,
+        clk_pin_aat=None,
+        clk_pin_tran=None,
+        clk_pin_tran_mask=None,
+    ):
         return calculate_recovery_rat_checks(
             self,
             pin_rRAT,
@@ -4987,6 +5076,9 @@ class TimingPropagation(nn.Module):
             pin_rtran,
             pin_ftran,
             scatter_timing_min,
+            clk_pin_aat=clk_pin_aat,
+            clk_pin_tran=clk_pin_tran,
+            clk_pin_tran_mask=clk_pin_tran_mask,
         )
 
     def forward_affected(self, previous, schedule, delays, impulses, caps):
@@ -5010,11 +5102,19 @@ class TimingPropagation(nn.Module):
         dynamic_net_subgraph_inputs=None,
         dynamic_net_provider=None,
         early_rc_inputs=None,
+        clk_pin_aat=None,
+        clk_pin_tran=None,
+        clk_pin_tran_mask=None,
+        smooth_extremum: bool = False,
+        extremum_tau_ps: float = 1.0,
+        at_merge_temperature=None,
+        endpoint_zero_tau_ps=None,
     ):
         if self.timing_model_lease is not None:
             self.timing_model_lease.require_current()
         start_time = time.time()
         self.last_evaluation = None
+        self.last_soft_tns_loss = None
         if self.early_propagation is not None and early_rc_inputs is None:
             raise RuntimeError("hold propagation requires min RC from the current forward")
 
@@ -5097,6 +5197,23 @@ class TimingPropagation(nn.Module):
         pin_net_impulse_fall = self._forward_input_tensor(pin_net_impulses['fall'])
         pin_net_cap_rise = self._forward_input_tensor(pin_net_caps['rise'])
         pin_net_cap_fall = self._forward_input_tensor(pin_net_caps['fall'])
+        resolved_clk_aat = None
+        if clk_pin_aat is not None:
+            resolved_clk_aat = (
+                self._forward_input_tensor(clk_pin_aat[0]),
+                self._forward_input_tensor(clk_pin_aat[1]),
+            )
+        resolved_clk_tran = None
+        if clk_pin_tran is not None:
+            resolved_clk_tran = (
+                self._forward_input_tensor(clk_pin_tran[0]),
+                self._forward_input_tensor(clk_pin_tran[1]),
+            )
+        resolved_clk_tran_mask = (
+            clk_pin_tran_mask.to(device=self.device, dtype=torch.bool)
+            if clk_pin_tran_mask is not None
+            else None
+        )
         action_context = getattr(self, "_active_discrete_action_context", None)
         if action_context is not None:
             pin_net_cap_rise, pin_net_cap_fall = action_context.maybe_apply_drive_load(
@@ -5122,6 +5239,13 @@ class TimingPropagation(nn.Module):
                 surrogate_flags=(clk2q_use_surrogate, cell_use_surrogate),
                 dynamic_net_provider=dynamic_net_provider,
                 surrogate_mode=surrogate_mode,
+                clk_pin_aat=resolved_clk_aat,
+                clk_pin_tran=resolved_clk_tran,
+                clk_pin_tran_mask=resolved_clk_tran_mask,
+                smooth_extremum=smooth_extremum,
+                extremum_tau_ps=extremum_tau_ps,
+                at_merge_temperature=at_merge_temperature,
+                endpoint_zero_tau_ps=endpoint_zero_tau_ps,
             )
             hold_result = self._run_early_evaluation(
                 early_rc_inputs,
@@ -5187,7 +5311,11 @@ class TimingPropagation(nn.Module):
             dtype=self.dtype,
         )
 
-        skip_full_rat = self._skip_full_rat_propagation_in_fast_loop()
+        pin_slack_requested = bool(getattr(self, "_request_pin_slack_snapshot", False))
+        skip_full_rat = (
+            not pin_slack_requested
+            and self._skip_full_rat_propagation_in_fast_loop()
+        )
         need_cell_arc_delay_cache = (
             not skip_full_rat
             or getattr(self, "_critical_path_snapshot_requested", False)
@@ -5218,10 +5346,17 @@ class TimingPropagation(nn.Module):
 
         if getattr(self, "log_stage_progress", True):
             logging.info("TimingPropagation stage: clk2q")
+        clk2q_kwargs = {"use_surrogate": clk2q_use_surrogate}
+        if resolved_clk_aat is not None or resolved_clk_tran is not None:
+            clk2q_kwargs.update(
+                clk_pin_aat=resolved_clk_aat,
+                clk_pin_tran=resolved_clk_tran,
+                clk_pin_tran_mask=resolved_clk_tran_mask,
+            )
         cur_nets, pin_rAAT, pin_fAAT, pin_rtran, pin_ftran = self.calculate_clk2q_aat(
             pin_rAAT, pin_fAAT, pin_rtran, pin_ftran,
             pin_net_cap_rise, pin_net_cap_fall,
-            use_surrogate=clk2q_use_surrogate,
+            **clk2q_kwargs,
         )
         stage_started_at = record_stage("clk2q_aat", stage_started_at)
 
@@ -5374,10 +5509,43 @@ class TimingPropagation(nn.Module):
 
         if getattr(self, "log_stage_progress", True):
             logging.info("TimingPropagation stage: setup_rat")
+        eff_clk_rtran = self.clk_pin_rtran
+        eff_clk_ftran = self.clk_pin_ftran
+        if resolved_clk_tran is not None:
+            if resolved_clk_tran_mask is not None:
+                eff_clk_rtran = torch.where(
+                    resolved_clk_tran_mask, resolved_clk_tran[0], eff_clk_rtran
+                )
+                eff_clk_ftran = torch.where(
+                    resolved_clk_tran_mask, resolved_clk_tran[1], eff_clk_ftran
+                )
+            else:
+                eff_clk_rtran = resolved_clk_tran[0]
+                eff_clk_ftran = resolved_clk_tran[1]
+        setup_rat_kwargs = {}
+        recovery_rat_kwargs = {}
+        if resolved_clk_aat is not None or resolved_clk_tran is not None:
+            setup_rat_kwargs["clk_pin_aat"] = resolved_clk_aat
+            recovery_rat_kwargs.update(
+                clk_pin_aat=resolved_clk_aat,
+                clk_pin_tran=resolved_clk_tran,
+                clk_pin_tran_mask=resolved_clk_tran_mask,
+            )
         pin_rRAT, pin_fRAT = self.calculate_setup_rat(
-            pin_rRAT, pin_fRAT, self.clk_pin_rtran, self.clk_pin_ftran, pin_rtran, pin_ftran)
+            pin_rRAT,
+            pin_fRAT,
+            eff_clk_rtran,
+            eff_clk_ftran,
+            pin_rtran,
+            pin_ftran,
+            **setup_rat_kwargs,
+        )
         pin_rRAT, pin_fRAT = self.calculate_recovery_rat(
-            pin_rRAT, pin_fRAT, pin_rtran, pin_ftran
+            pin_rRAT,
+            pin_fRAT,
+            pin_rtran,
+            pin_ftran,
+            **recovery_rat_kwargs,
         )
         stage_started_at = record_stage("setup_rat", stage_started_at)
 
@@ -5444,6 +5612,38 @@ class TimingPropagation(nn.Module):
             mode=self.timing_aggregation_mode,
             tau_ps=self.timing_aggregation_tau_ps,
         )
+        if smooth_extremum:
+            eff_tau = float(extremum_tau_ps)
+            soft_slack = aggregate_endpoint_slack(
+                endpoint_rslack,
+                endpoint_fslack,
+                mode="smooth",
+                tau_ps=eff_tau,
+            )
+            finite_soft = torch.isfinite(soft_slack)
+            zero_loss = pin_net_cap_rise.sum() * 0
+            if bool(torch.any(finite_soft).detach().item()):
+                safe_soft = torch.where(
+                    finite_soft, soft_slack, torch.zeros_like(soft_slack)
+                )
+                ep_zero_tau = (
+                    eff_tau
+                    if endpoint_zero_tau_ps is None
+                    else max(1e-6, float(endpoint_zero_tau_ps))
+                )
+                soft_terms = ep_zero_tau * torch.nn.functional.softplus(
+                    -safe_soft / ep_zero_tau
+                )
+                self.last_soft_tns_loss = (
+                    torch.where(
+                        finite_soft, soft_terms, torch.zeros_like(soft_terms)
+                    ).sum()
+                    + zero_loss
+                )
+            else:
+                self.last_soft_tns_loss = zero_loss
+            if return_device is not None and torch.is_tensor(self.last_soft_tns_loss):
+                self.last_soft_tns_loss = self.last_soft_tns_loss.to(return_device)
         RAT_THRESHOLD = 8e7 
         # valid_mask = (pin_rRAT < RAT_THRESHOLD) & (pin_fRAT < RAT_THRESHOLD)
         # all_valid_slacks = slack[valid_mask]

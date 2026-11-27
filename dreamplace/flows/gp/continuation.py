@@ -11,6 +11,10 @@ import torch
 from dataclasses import dataclass
 from dataclasses import field
 
+from dreamplace.flows.gp.timing_carriers import (
+    diff_tdp_controls_direct_timing_objective,
+)
+
 
 class TimingOptWindowSchedule:
     def __init__(self, milestones, max_windows):
@@ -435,6 +439,7 @@ class MidplaceSchedule:
     use_timing_obj: bool = False
     timing_coeff_state: tuple | None = None
     timing_grad_balance_state: dict | None = None
+    star_tdp_state: dict | None = None
     enable_l_shape_routability: bool = False
     use_l_shape_routability: bool = False
     l_shape_state: dict = field(default_factory=dict)
@@ -570,6 +575,9 @@ class MidplaceSchedule:
         if balance is None:
             balance = getattr(model, "timing_grad_balance_summary", None)
         self.timing_grad_balance_state = copy.deepcopy(balance)
+        star_rt = getattr(model, "star_tdp_runtime", None)
+        if star_rt is not None:
+            self.star_tdp_state = copy.deepcopy(star_rt.export_midplace_state())
         self.enable_l_shape_routability = bool(
             getattr(model, "enable_l_shape_routability", False)
         )
@@ -646,10 +654,21 @@ class MidplaceSchedule:
             placer._legacy_net_weight_update_count = int(
                 self.legacy_net_weight_update_count
             )
-        if self.use_timing_obj or bool(
-            (self.diff_tdp_step_status or {}).get("timing_objective_active", False)
+        if self.use_timing_obj or (
+            diff_tdp_controls_direct_timing_objective(params)
+            and bool((self.diff_tdp_step_status or {}).get("timing_objective_active", False))
         ):
             model.use_timing_obj = True
+        if (
+            self.star_tdp_state is not None
+            and getattr(model, "star_tdp_runtime", None) is not None
+        ):
+            model.star_tdp_runtime.restore_midplace_state(
+                self.star_tdp_state,
+                recalibrate_kappa=bool(
+                    getattr(params, "star_kappa_recalibrate_on_restart", 0)
+                ),
+            )
         if self.timing_coeff_state is not None:
             base, multiplier, wns_coeff, tns_coeff = self.timing_coeff_state
             model._timing_coeff_growth_base = base

@@ -416,19 +416,20 @@ def configure_timing_placement_carrier(params):
         )
     if carrier == "gradient_net_weight":
         return
-    pin2pin = carrier == "pin2pin"
-    controls = {
-        "with_sta": 1,
-        "timing_eval_flag": 1,
-        "diff_timing_driven_placement": int(not pin2pin),
-        "differentiable_timing_obj": int(not pin2pin),
-        "enable_net_weighting": int(pin2pin),
-        "pin2pin_net_weighting": int(pin2pin),
-        "net_weighting_scheme": "pin2pin" if pin2pin else "lilith",
-    }
-    for name, value in controls.items():
-        setattr(params, name, value)
-        setattr(params, f"_{name}_explicit", True)
+    if selected or carrier == "pin2pin":
+        pin2pin = carrier == "pin2pin"
+        controls = {
+            "with_sta": 1,
+            "timing_eval_flag": 1,
+            "diff_timing_driven_placement": int(not pin2pin),
+            "differentiable_timing_obj": int(not pin2pin),
+            "enable_net_weighting": int(pin2pin),
+            "pin2pin_net_weighting": int(pin2pin),
+            "net_weighting_scheme": "pin2pin" if pin2pin else "lilith",
+        }
+        for name, value in controls.items():
+            setattr(params, name, value)
+            setattr(params, f"_{name}_explicit", True)
     if carrier == "star_pin_pair":
         star_defaults = {
             "star_distance_model": "lse",

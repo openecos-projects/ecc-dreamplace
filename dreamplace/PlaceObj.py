@@ -1175,12 +1175,7 @@ class PlaceObj(nn.Module):
             params, placedb, self.data_collections, self.op_collections
         )
         self.star_tdp_runtime = None
-        if (
-            params.with_sta
-            and (not self._is_size_only_mode())
-            and str(getattr(params, "timing_placement_carrier", "direct_loss") or "direct_loss")
-            == "star_pin_pair"
-        ):
+        if self._should_build_star_tdp_runtime(params, placedb):
             from dreamplace.flows.gp.star_tdp_runtime import StarTdpRuntime
 
             self.star_tdp_runtime = StarTdpRuntime(
@@ -2248,6 +2243,22 @@ class PlaceObj(nn.Module):
 
     def _is_size_only_mode(self):
         return getattr(self.params, "placement_sizing_mode", "place_only") == "size_only"
+
+    @staticmethod
+    def _should_build_star_tdp_runtime(params, placedb):
+        from dreamplace.flows.gp.timing_carriers import (
+            diff_tdp_enabled,
+            diff_tdp_uses_star_pin_pair,
+        )
+
+        return (
+            diff_tdp_enabled(params)
+            and bool(getattr(params, "global_place_flag", 1))
+            and not bool(getattr(params, "build_model_only", False))
+            and str(getattr(params, "flow_kind", "placement") or "placement") != "sta"
+            and getattr(placedb, "gr_sizing", None) is None
+            and diff_tdp_uses_star_pin_pair(params)
+        )
 
     def _use_targeted_sizing_backward(self):
         flag = getattr(self.params, "targeted_sizing_backward", False)

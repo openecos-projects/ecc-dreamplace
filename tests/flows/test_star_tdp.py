@@ -2766,8 +2766,52 @@ def test_lse_rowsum_secant_curvature_and_rcwl_majorizer():
     assert torch.allclose(h_wa, h_lse05, rtol=1e-12, atol=1e-12)
 
 
+def test_placeobj_skips_star_tdp_runtime_for_non_tdp_and_gr_sta_evaluations():
+    import copy
+    from dreamplace.PlaceObj import PlaceObj
+    from dreamplace.Params import Params
+    from dreamplace.flows.config.profiles import TIMING_DRIVEN_PLACEMENT_DEFAULTS
+    from dreamplace.flows.config.resolver import apply_flow_defaults
+    from dreamplace.flows.config.specs import configure_gr_sizing
 
+    place_params = Params()
+    for key, value in TIMING_DRIVEN_PLACEMENT_DEFAULTS:
+        setattr(place_params, key, copy.deepcopy(value))
+    place_params.flow_kind = "placement"
+    apply_flow_defaults(place_params)
+    assert PlaceObj._should_build_star_tdp_runtime(
+        place_params, SimpleNamespace(gr_sizing=None)
+    )
 
+    sizing_params = Params()
+    sizing_params.flow_kind = "sizing"
+    sizing_params.timing_rc_mode = "gr"
+    sizing_params.place_io_engine = "ecc"
+    sizing_params.gpu = 0
+    apply_flow_defaults(sizing_params)
+    gr_placedb = SimpleNamespace(gr_sizing=object())
+    assert not PlaceObj._should_build_star_tdp_runtime(sizing_params, gr_placedb)
 
+    terminal_params = copy.deepcopy(sizing_params)
+    terminal_params.flow_kind = "placement"
+    terminal_params.placement_sizing_mode = "place_only"
+    terminal_params.sizing_parameterization = "logits"
+    terminal_params.global_place_flag = 0
+    terminal_params.legalize_flag = 1
+    terminal_params.detailed_place_flag = 0
+    terminal_params.differentiable_timing_obj = 0
+    terminal_params.diff_timing_driven_placement = 0
+    terminal_params.timing_opt_enabled = 0
+    terminal_params.timing_action_gradient_mode = "off"
+    terminal_params.timing_surrogate_mode = "lut_only"
+    assert not PlaceObj._should_build_star_tdp_runtime(terminal_params, gr_placedb)
+    assert not PlaceObj._should_build_star_tdp_runtime(
+        terminal_params, SimpleNamespace(gr_sizing=None)
+    )
 
+    final_sta_params = copy.deepcopy(sizing_params)
+    final_sta_params.flow_kind = "sta"
+    configure_gr_sizing(final_sta_params)
+    apply_flow_defaults(final_sta_params)
+    assert not PlaceObj._should_build_star_tdp_runtime(final_sta_params, gr_placedb)
 

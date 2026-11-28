@@ -135,7 +135,19 @@ INFLATION_S5B1_DEFAULTS = PLACEMENT_RECIPE_DEFAULTS + TIMING_OBJECTIVE_DEFAULTS 
     ("relaxed_buffer_timing_integration_mode", "dynamic_net_provider"),
     ("joint_segment_virtual_density_enabled", 1),
     ("repair_buffering_midplace_enable", True),
+    ("repair_buffering_midplace_overflow", 0.4),
+    ("repair_buffering_midplace_mode", "repair_design"),
+    ("repair_buffering_midplace_once", True),
+    ("repair_buffering_midplace_resume_policy", "cold"),
+    ("repair_buffering_midplace_continue", True),
+    ("repair_buffering_midplace_objectives_after_repair", False),
+    ("repair_buffering_midplace_timing_enable", False),
+    ("repair_buffering_midplace_max_passes", 20),
+    ("repair_buffering_midplace_max_buffer_fraction", 0.001),
+    ("repair_buffering_midplace_initial_policy", "first_stable_step"),
+    ("repair_buffering_midplace_pending_policy", "defer"),
     ("repair_buffering_midplace_bounded_steps", 0),
+    ("repair_buffering_midplace_artifact", "midplace_handoff.json"),
 )
 
 

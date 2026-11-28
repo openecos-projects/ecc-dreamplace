@@ -47,14 +47,16 @@ class MidplaceConfig:
     @classmethod
     def from_params(cls, params):
         config = cls(
-            overflow=float(params.repair_buffering_midplace_overflow),
-            mode=str(params.repair_buffering_midplace_mode),
-            resume_policy=str(params.repair_buffering_midplace_resume_policy),
-            continue_placement=resolve_flag(params, "repair_buffering_midplace_continue"),
-            max_passes=int(params.repair_buffering_midplace_max_passes),
-            bounded_steps=int(params.repair_buffering_midplace_bounded_steps),
-            artifact=str(params.repair_buffering_midplace_artifact),
-            max_buffer_fraction=float(params.repair_buffering_midplace_max_buffer_fraction),
+            overflow=float(getattr(params, "repair_buffering_midplace_overflow", 0.4)),
+            mode=str(getattr(params, "repair_buffering_midplace_mode", "repair_design")),
+            resume_policy=str(getattr(params, "repair_buffering_midplace_resume_policy", "cold")),
+            continue_placement=resolve_flag(params, "repair_buffering_midplace_continue", default=1),
+            max_passes=int(getattr(params, "repair_buffering_midplace_max_passes", 20)),
+            bounded_steps=int(getattr(params, "repair_buffering_midplace_bounded_steps", 0)),
+            artifact=str(getattr(params, "repair_buffering_midplace_artifact", "midplace_handoff.json")),
+            max_buffer_fraction=float(
+                getattr(params, "repair_buffering_midplace_max_buffer_fraction", 0.001)
+            ),
         )
         if not math.isfinite(config.overflow) or config.overflow <= 0:
             raise ValueError("midplace overflow must be finite and positive")
@@ -69,11 +71,14 @@ class MidplaceConfig:
             raise ValueError("midplace resume policy must be cold or warm_schedule")
         if config.bounded_steps < 0 or config.max_passes < 1:
             raise ValueError("midplace requires bounded_steps >= 0 and max_passes >= 1")
-        if not resolve_flag(params, "repair_buffering_midplace_once"):
+        if not resolve_flag(params, "repair_buffering_midplace_once", default=1):
             raise ValueError("midplace currently requires once per placement session")
-        if params.repair_buffering_midplace_initial_policy != "first_stable_step":
+        if (
+            getattr(params, "repair_buffering_midplace_initial_policy", "first_stable_step")
+            != "first_stable_step"
+        ):
             raise ValueError("midplace initial policy must be first_stable_step")
-        if params.repair_buffering_midplace_pending_policy != "defer":
+        if getattr(params, "repair_buffering_midplace_pending_policy", "defer") != "defer":
             raise ValueError("midplace pending policy must be defer")
         if config.mode == "repair_design_then_timing" and not resolve_flag(
             params, "repair_buffering_midplace_timing_enable"

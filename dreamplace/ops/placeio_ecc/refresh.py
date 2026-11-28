@@ -1,9 +1,56 @@
 """Full native ECC timing refresh after a committed database mutation."""
 
+import os
 from dataclasses import asdict, replace
 
 from .place_io import PlaceIOFunction
 from .timing_schema import validate_timing_schema
+
+
+def _export_pydb(raw_db, summary=None):
+    summary = dict(summary or {})
+    timing_inputs = dict(getattr(raw_db, "timing_inputs", {}) or {})
+    timing_model_only = (
+        str(summary.get("mode") or timing_inputs.get("timing_mode", "model_only"))
+        == "model_only"
+    )
+    dm_inst = raw_db.module.get_dmInst_ptr()
+    new_pydb = raw_db.module.pydb(
+        dm_inst,
+        raw_db.route_num_bins_x,
+        raw_db.route_num_bins_y,
+        raw_db.with_routability,
+        with_sta=True,
+        timing_model_only=timing_model_only,
+        **asdict(raw_db.export_options),
+    )
+    return dm_inst, new_pydb
+
+
+def _reload_from_committed_def(raw_db):
+    """Rebuild STA from a committed DEF when in-memory refresh duplicates endpoints."""
+
+    module = raw_db.module
+    native = getattr(module, "ecc", module)
+    if not callable(getattr(module, "refresh_place_timing", None)):
+        raise RuntimeError("ECC module has no refresh_place_timing for DEF fallback")
+    workspace = str(raw_db.workspace or ".")
+    os.makedirs(workspace, exist_ok=True)
+    def_path = os.path.join(workspace, "committed_refresh.def")
+    module.def_save(def_path)
+    destroy_sta = getattr(native, "destroy_sta", None)
+    if callable(destroy_sta):
+        destroy_sta()
+    if native.def_init(def_path) is not True:
+        raise RuntimeError(f"ECC failed to reload committed DEF: {def_path}")
+    # ``refresh_place_timing`` destroys the active STA first.  The caller
+    # already destroyed it before re-reading the DEF, so clear the wrapper's
+    # bookkeeping to avoid a second destroy on an uninitialized instance.
+    if hasattr(module, "_place_timing_active"):
+        module._place_timing_active = False
+    summary = dict(module.refresh_place_timing(raw_db.timing_inputs) or {})
+    dm_inst, new_pydb = _export_pydb(raw_db, summary)
+    return new_pydb, dm_inst, summary, def_path
 
 
 class RefreshController:
@@ -21,22 +68,22 @@ class RefreshController:
         old_pydb = raw_db.pydb
         raw_db.timing_enabled = False
         try:
-            summary = dict(raw_db.module.refresh_place_timing(raw_db.timing_inputs) or {})
-            dm_inst = raw_db.module.get_dmInst_ptr()
-            new_pydb = raw_db.module.pydb(
-                dm_inst,
-                raw_db.route_num_bins_x,
-                raw_db.route_num_bins_y,
-                raw_db.with_routability,
-                with_sta=True,
-                timing_model_only=str(
-                    summary.get("mode") or raw_db.timing_inputs.get("timing_mode", "model_only")
+            try:
+                summary = dict(
+                    raw_db.module.refresh_place_timing(raw_db.timing_inputs) or {}
                 )
-                == "model_only",
-                **asdict(raw_db.export_options),
-            )
-            sparse_timing_view = validate_timing_schema(new_pydb)
-            if raw_db.hold_enabled:
+                dm_inst, new_pydb = _export_pydb(raw_db, summary)
+                sparse_timing_view = validate_timing_schema(new_pydb)
+            except RuntimeError as error:
+                if "endpoint identities are invalid" not in str(error):
+                    raise
+                new_pydb, dm_inst, summary, def_path = _reload_from_committed_def(raw_db)
+                sparse_timing_view = validate_timing_schema(new_pydb)
+                summary["refresh_path"] = "committed_def_reload"
+                summary["committed_def_path"] = def_path
+            else:
+                summary["refresh_path"] = "native_in_memory"
+            if getattr(raw_db, "hold_enabled", False):
                 from .hold_schema import read_hold_timing_schema
 
                 read_hold_timing_schema(new_pydb)

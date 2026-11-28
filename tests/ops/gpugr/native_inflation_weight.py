@@ -10,7 +10,7 @@ import math
 from pathlib import Path
 
 import dreamplace.PlaceObj as place_obj
-from dreamplace.flows.flow_config import resolve_flow_config
+from dreamplace.flows.config.resolver import resolve_flow_config
 from dreamplace.ops.routability.routability_controller import RoutabilityController
 from native_refresh_route import make_engine
 

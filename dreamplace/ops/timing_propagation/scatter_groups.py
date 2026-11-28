@@ -35,7 +35,7 @@ def scatter_groups(index, destinations):
     owner = index
     while owner._base is not None:
         owner = owner._base
-    version = index._version
+    version = 0 if getattr(owner, "_pin_topology_static", False) else index._version
     cache = getattr(owner, "_timing_scatter_groups", None)
     if cache is None or cache.version != version:
         cache = _GroupCache(version, {})

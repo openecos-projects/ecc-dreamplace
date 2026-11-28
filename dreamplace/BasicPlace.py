@@ -51,6 +51,7 @@ import dreamplace.ops.independent_set_matching.independent_set_matching as indep
 import dreamplace.ops.pin_weight_sum.pin_weight_sum as pws
 import dreamplace.ops.irt_egr.irt_egr as irt_egr
 import dreamplace.ops.m2_legalize.m2_rail_legalization as m2_rail_legalization
+from dreamplace.row_gap_blockage import row_gap_blockages
 # import dreamplace.ops.pin_weight_sum.pin_weight_sum as pws
 # import dreamplace.ops.timing.timing as timingimport
 import dreamplace.ops.steiner_topo.steiner_topo as steiner_topo
@@ -2125,14 +2126,21 @@ class BasicPlace(nn.Module):
         @param data_collections a collection of all data and variables required for constructing the ops
         @param device cpu or cuda
         """
+        gaps = row_gap_blockages(placedb, data_collections)
+        check = self._legality_check(placedb, data_collections, gaps)
+        return check if gaps is None else (lambda pos: check(gaps.extend(pos)))
+
+    def _legality_check(self, placedb, data_collections, gaps):
+        """Legality check in the layout of ``gaps`` (row-gap blockages as fixed nodes), or native positions."""
+        sizes = data_collections if gaps is None else gaps
         return legality_check.LegalityCheck(
-            node_size_x=data_collections.node_size_x,
-            node_size_y=data_collections.node_size_y,
+            node_size_x=sizes.node_size_x,
+            node_size_y=sizes.node_size_y,
             flat_region_boxes=data_collections.flat_region_boxes,
             flat_region_boxes_start=data_collections.flat_region_boxes_start,
-            node2fence_region_map=data_collections.node2fence_region_map,
+            node2fence_region_map=sizes.node2fence_region_map,
             fp_info=data_collections.fp_info,
-            num_terminals=placedb.num_terminals,
+            num_terminals=placedb.num_terminals if gaps is None else gaps.num_terminals,
             num_movable_nodes=placedb.num_movable_nodes,
         )
 

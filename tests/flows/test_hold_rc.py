@@ -3,8 +3,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
-from dreamplace.flows.hold_objective import HoldObjective
-from dreamplace.flows.hold_rc import HoldRC
+from dreamplace.flows.gp.hold_timing import HoldObjective
+from dreamplace.flows.gp.hold_timing import HoldRC
 
 
 class TestModel:

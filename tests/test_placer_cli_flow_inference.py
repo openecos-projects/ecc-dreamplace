@@ -4,7 +4,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from dreamplace.flows.flow_config import FlowKind, infer_flow_kind
+from dreamplace.flows.config.resolver import FlowKind, infer_flow_kind
 from dreamplace.placer_cli import build_arg_parser, build_effective_params_from_args
 
 

@@ -35,7 +35,8 @@ class AbacusLegalizeFunction(Function):
         num_bins_y,
         num_movable_nodes,
         num_terminal_NIs,
-        num_filler_nodes
+        num_filler_nodes,
+        use_node_weights=False
     ):
         if pos.is_cuda:
             output = abacus_legalize_cpp.forward(
@@ -57,7 +58,8 @@ class AbacusLegalizeFunction(Function):
                 num_bins_y,
                 num_movable_nodes,
                 num_terminal_NIs,
-                num_filler_nodes
+                num_filler_nodes,
+                bool(use_node_weights)
             ).cuda()
         else:
             output = abacus_legalize_cpp.forward(
@@ -79,7 +81,8 @@ class AbacusLegalizeFunction(Function):
                 num_bins_y,
                 num_movable_nodes,
                 num_terminal_NIs,
-                num_filler_nodes
+                num_filler_nodes,
+                bool(use_node_weights)
             )
         return output
 
@@ -90,7 +93,8 @@ class AbacusLegalize(object):
 
     def __init__(self, node_size_x, node_size_y, node_weights,
                  flat_region_boxes, flat_region_boxes_start, node2fence_region_map,
-                 xl, yl, xh, yh, site_width, row_height, num_bins_x, num_bins_y, num_movable_nodes, num_terminal_NIs, num_filler_nodes):
+                 xl, yl, xh, yh, site_width, row_height, num_bins_x, num_bins_y, num_movable_nodes, num_terminal_NIs, num_filler_nodes,
+                 use_node_weights=False):
         super(AbacusLegalize, self).__init__()
         self.node_size_x = node_size_x
         self.node_size_y = node_size_y
@@ -109,6 +113,7 @@ class AbacusLegalize(object):
         self.num_movable_nodes = num_movable_nodes
         self.num_terminal_NIs = num_terminal_NIs
         self.num_filler_nodes = num_filler_nodes
+        self.use_node_weights = bool(use_node_weights)
 
     def __call__(self, init_pos, pos):
         """ 
@@ -135,4 +140,5 @@ class AbacusLegalize(object):
             num_movable_nodes=self.num_movable_nodes,
             num_terminal_NIs=self.num_terminal_NIs,
             num_filler_nodes=self.num_filler_nodes,
+            use_node_weights=self.use_node_weights,
         )

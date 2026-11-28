@@ -11,23 +11,24 @@ template <typename T>
 void legalizeBinCPU(
         const T* init_x, const T* init_y, 
         const T* node_size_x, const T* node_size_y, 
-        std::vector<std::vector<Blank<T> > >& bin_blanks, // blanks in each bin, sorted from low to high, left to right 
-        std::vector<std::vector<int> >& bin_cells, // unplaced cells in each bin 
+        std::vector<std::vector<Blank<T> > >& bin_blanks,
+        std::vector<std::vector<int> >& bin_cells,
         T* x, T* y, 
         int num_bins_x, int num_bins_y, int blank_num_bins_y, 
         T bin_size_x, T bin_size_y, T blank_bin_size_y, 
         T site_width, T row_height, 
         T xl, T yl, T xh, T yh,
-        T alpha, // a parameter to tune anchor initial locations and current locations 
-        T beta, // a parameter to tune space reserving 
-        bool lr_flag, // from left to right 
-        int* num_unplaced_cells 
+        T alpha,
+        T beta,
+        bool lr_flag,
+        int* num_unplaced_cells,
+        const T* weights_x,
+        const T* weights_y,
+        T anchor_boost
         ) 
 {
     for (int i = 0; i < num_bins_x*num_bins_y; i += 1) 
     {
-        //int num_cells = 0; 
-        //T total_displace = 0; 
         int bin_id_x = i/num_bins_y; 
         int bin_id_y = i-bin_id_x*num_bins_y; 
         int blank_num_bins_per_bin = roundDiv(bin_size_y, blank_bin_size_y);
@@ -37,31 +38,48 @@ void legalizeBinCPU(
         // cells in this bin 
         std::vector<int>& cells = bin_cells.at(i);
 
-        // sort cells according to width 
-        // from large to small 
-        //std::sort(cells.begin(), cells.end(), CompareByNodeNTUPlaceCostCPU<T>(init_x, init_y, node_size_x, node_size_y));
-        if (lr_flag)
+        if (weights_x && weights_y)
         {
-            std::sort(cells.begin(), cells.end(), CompareByNodeNTUPlaceCostFromLeftCPU<T>(init_x, init_y, node_size_x, node_size_y));
+            if (lr_flag)
+            {
+                std::sort(cells.begin(), cells.end(), CompareByTieredNTUPlaceCostFromLeftCPU<T>(init_x, init_y, node_size_x, node_size_y, weights_x, weights_y));
+            }
+            else
+            {
+                std::sort(cells.begin(), cells.end(), CompareByTieredNTUPlaceCostCPU<T>(init_x, init_y, node_size_x, node_size_y, weights_x, weights_y));
+            }
         }
-        else 
+        else
         {
-            std::sort(cells.begin(), cells.end(), CompareByNodeNTUPlaceCostCPU<T>(init_x, init_y, node_size_x, node_size_y));
+            if (lr_flag)
+            {
+                std::sort(cells.begin(), cells.end(), CompareByNodeNTUPlaceCostFromLeftCPU<T>(init_x, init_y, node_size_x, node_size_y));
+            }
+            else 
+            {
+                std::sort(cells.begin(), cells.end(), CompareByNodeNTUPlaceCostCPU<T>(init_x, init_y, node_size_x, node_size_y));
+            }
         }
 
         for (int ci = bin_cells.at(i).size()-1; ci >= 0; --ci)
         {
             int node_id = cells.at(ci); 
-            // align to site 
-            //T init_xl = floorDiv((init_x[node_id]-xl), site_width)*site_width+xl;
-            //T init_yl = init_y[node_id];
-            T init_xl = floorDiv(((alpha*init_x[node_id]+(1-alpha)*x[node_id])-xl), site_width)*site_width+xl;
-            T init_yl = (alpha*init_y[node_id]+(1-alpha)*y[node_id]);
+            T eff_alpha = alpha;
+            if (weights_x && weights_y && lr_flag && anchor_boost > (T)0.0)
+            {
+                double emax = std::max(1.0, std::max((double)weights_x[node_id], (double)weights_y[node_id]));
+                T pass1_disp = fabs(x[node_id] - init_x[node_id]) + fabs(y[node_id] - init_y[node_id]);
+                if (emax > 1.0 && pass1_disp <= (T)8.0 * row_height)
+                {
+                    eff_alpha = (T)(1.0 - (1.0 - (double)alpha) / std::pow(emax, (double)anchor_boost));
+                }
+            }
+            T init_xl = floorDiv(((eff_alpha*init_x[node_id]+(1-eff_alpha)*x[node_id])-xl), site_width)*site_width+xl;
+            T init_yl = (eff_alpha*init_y[node_id]+(1-eff_alpha)*y[node_id]);
             T width = ceilDiv(node_size_x[node_id], site_width)*site_width;
             T height = node_size_y[node_id];
 
-
-            int num_node_rows = ceilDiv(height, row_height); // may take multiple rows 
+            int num_node_rows = ceilDiv(height, row_height);
             int blank_index_offset[num_node_rows]; 
             std::fill(blank_index_offset, blank_index_offset+num_node_rows, 0);
 
@@ -82,12 +100,7 @@ void legalizeBinCPU(
                 {
                     continue; 
                 }
-                //T bin_xl = xl+bin_id_x*bin_size_x; 
-                //T bin_xh = std::min(bin_xl+bin_size_x, xh);
-                //T bin_yl = yl+blank_bin_id_y*blank_bin_size_y; 
-                //T bin_yh = std::min(bin_yl+blank_bin_size_y, yh);
                 int blank_bin_id = bin_id_x*blank_num_bins_y+blank_bin_id_y; 
-                // blanks in this bin 
                 const std::vector<Blank<T> >& blanks = bin_blanks.at(blank_bin_id);
 
                 int row_best_blank_bi[num_node_rows]; 
@@ -100,8 +113,6 @@ void legalizeBinCPU(
                 {
                     const Blank<T>& blank = blanks[bi];
 
-                    // for multi-row height cells, check blanks in upper rows  
-                    // find blanks with maximum intersection 
                     blank_index_offset[0] = bi; 
                     std::fill(blank_index_offset+1, blank_index_offset+num_node_rows, -1); 
 
@@ -125,7 +136,7 @@ void legalizeBinCPU(
                                     break; 
                                 }
                             }
-                            if (next_bi == bin_blanks.at(next_blank_bin_id).size()) // not found 
+                            if (next_bi == bin_blanks.at(next_blank_bin_id).size())
                             {
                                 intersect_blank.xl = intersect_blank.xh = 0; 
                                 break; 
@@ -134,10 +145,8 @@ void legalizeBinCPU(
                         T intersect_blank_width = intersect_blank.xh-intersect_blank.xl;
                         if (intersect_blank_width >= width)
                         {
-                            // compute displacement 
                             T target_xl = init_xl; 
                             T target_yl = blank.yl; 
-                            // alow tolerance to avoid more dead space 
                             T beta = 4; 
                             T tolerance = std::min(beta*width, intersect_blank_width/beta); 
                             if (target_xl <= intersect_blank.xl + tolerance)
@@ -148,8 +157,7 @@ void legalizeBinCPU(
                             {
                                 target_xl = (intersect_blank.xh-width);
                             }
-                            T cost = fabs(target_xl-init_xl)+fabs(target_yl-init_yl); 
-                            // update best cost 
+                            T cost = fabs(target_xl-init_xl) + fabs(target_yl-init_yl); 
                             if (cost < row_best_cost)
                             {
                                 std::copy(blank_index_offset, blank_index_offset+num_node_rows, row_best_blank_bi); 
@@ -157,16 +165,16 @@ void legalizeBinCPU(
                                 row_best_xl = target_xl; 
                                 row_best_yl = target_yl; 
                             }
-                            else // early exit since we iterate within rows from left to right
+                            else
                             {
                                 search_flag = false; 
                             }
                         }
-                        else // not found 
+                        else
                         {
                             break; 
                         }
-                        if (num_node_rows < 2) // for single-row height cells 
+                        if (num_node_rows < 2)
                         {
                             break; 
                         }
@@ -180,7 +188,7 @@ void legalizeBinCPU(
                     best_xl = row_best_xl; 
                     best_yl = row_best_yl; 
                 }
-                else if (best_cost+row_height < bin_id_offset_y*row_height) // early exit since we iterate from close row to far-away row 
+                else if (best_cost+row_height < bin_id_offset_y*row_height)
                 {
                     break; 
                 }
@@ -191,11 +199,9 @@ void legalizeBinCPU(
             {
                 x[node_id] = best_xl; 
                 y[node_id] = best_yl; 
-                // update cell position and blank 
                 for (int row_offset = 0; row_offset < num_node_rows; ++row_offset)
                 {
                     dreamplaceAssert(best_blank_bi[row_offset] >= 0); 
-                    // blanks in this bin 
                     int best_blank_bin_id = bin_id_x*blank_num_bins_y+best_blank_bin_id_y+row_offset; 
                     std::vector<Blank<T> >& blanks = bin_blanks.at(best_blank_bin_id);
                     Blank<T>& blank = blanks.at(best_blank_bi[row_offset]); 
@@ -203,7 +209,6 @@ void legalizeBinCPU(
                     dreamplaceAssert(best_yl+row_height*row_offset == blank.yl);
                     if (best_xl == blank.xl)
                     {
-                        // update blank 
                         blank.xl += width; 
                         if (floorDiv((blank.xl-xl), site_width)*site_width != blank.xl-xl)
                         {
@@ -216,7 +221,6 @@ void legalizeBinCPU(
                     }
                     else if (best_xl+width == blank.xh)
                     {
-                        // update blank 
                         blank.xh -= width; 
                         if (floorDiv((blank.xh-xl), site_width)*site_width != blank.xh-xl)
                         {
@@ -229,7 +233,6 @@ void legalizeBinCPU(
                     }
                     else 
                     {
-                        // need to update current blank and insert one more blank 
                         Blank<T> new_blank; 
                         new_blank.xl = best_xl+width; 
                         new_blank.xh = blank.xh; 
@@ -247,7 +250,6 @@ void legalizeBinCPU(
                     }
                 }
 
-                // remove from cells 
                 bin_cells.at(i).erase(bin_cells.at(i).begin()+ci);
             }
         }
@@ -268,7 +270,10 @@ template void legalizeBinCPU<float>(
         float alpha,
         float beta,
         bool lr_flag,
-        int* num_unplaced_cells
+        int* num_unplaced_cells,
+        const float* weights_x,
+        const float* weights_y,
+        float anchor_boost
         );
 
 template void legalizeBinCPU<double>(
@@ -284,30 +289,33 @@ template void legalizeBinCPU<double>(
         double alpha,
         double beta,
         bool lr_flag,
-        int* num_unplaced_cells
+        int* num_unplaced_cells,
+        const double* weights_x,
+        const double* weights_y,
+        double anchor_boost
         );
 
 void instantiateLegalizeBinCPU(
         const float* init_x, const float* init_y, 
         const float* node_size_x, const float* node_size_y, 
-        std::vector<std::vector<Blank<float> > >& bin_blanks, // blanks in each bin, sorted from low to high, left to right 
-        std::vector<std::vector<int> >& bin_cells, // unplaced cells in each bin 
+        std::vector<std::vector<Blank<float> > >& bin_blanks,
+        std::vector<std::vector<int> >& bin_cells,
         float* x, float* y, 
         int num_bins_x, int num_bins_y, int blank_num_bins_y, 
         float bin_size_x, float bin_size_y, float blank_bin_size_y, 
         float site_width, float row_height, 
         float xl, float yl, float xh, float yh,
-        float alpha, // a parameter to tune anchor initial locations and current locations 
-        float beta, // a parameter to tune space reserving 
-        bool lr_flag, // from left to right 
+        float alpha,
+        float beta,
+        bool lr_flag,
         int* num_unplaced_cells 
         ) 
 {
     legalizeBinCPU(
             init_x, init_y, 
             node_size_x, node_size_y, 
-            bin_blanks, // blanks in each bin, sorted from low to high, left to right 
-            bin_cells, // unplaced cells in each bin 
+            bin_blanks,
+            bin_cells,
             x, y, 
             num_bins_x, num_bins_y, blank_num_bins_y, 
             bin_size_x, bin_size_y, blank_bin_size_y, 
@@ -323,24 +331,24 @@ void instantiateLegalizeBinCPU(
 void instantiateLegalizeBinCPU(
         const double* init_x, const double* init_y, 
         const double* node_size_x, const double* node_size_y, 
-        std::vector<std::vector<Blank<double> > >& bin_blanks, // blanks in each bin, sorted from low to high, left to right 
-        std::vector<std::vector<int> >& bin_cells, // unplaced cells in each bin 
+        std::vector<std::vector<Blank<double> > >& bin_blanks,
+        std::vector<std::vector<int> >& bin_cells,
         double* x, double* y, 
         int num_bins_x, int num_bins_y, int blank_num_bins_y, 
         double bin_size_x, double bin_size_y, double blank_bin_size_y, 
         double site_width, double row_height, 
         double xl, double yl, double xh, double yh,
-        double alpha, // a parameter to tune anchor initial locations and current locations 
-        double beta, // a parameter to tune space reserving 
-        bool lr_flag, // from left to right 
+        double alpha,
+        double beta,
+        bool lr_flag,
         int* num_unplaced_cells 
         ) 
 {
     legalizeBinCPU(
             init_x, init_y, 
             node_size_x, node_size_y, 
-            bin_blanks, // blanks in each bin, sorted from low to high, left to right 
-            bin_cells, // unplaced cells in each bin 
+            bin_blanks,
+            bin_cells,
             x, y, 
             num_bins_x, num_bins_y, blank_num_bins_y, 
             bin_size_x, bin_size_y, blank_bin_size_y, 

@@ -25,7 +25,10 @@ int greedyLegalizationCPU(
         const T site_width, const T row_height, 
         int num_bins_x, int num_bins_y, 
         const int num_nodes, 
-        const int num_movable_nodes
+        const int num_movable_nodes,
+        const T* weights_x,
+        const T* weights_y,
+        T anchor_boost
         )
 {
     float milliseconds = 0; 
@@ -38,11 +41,9 @@ int greedyLegalizationCPU(
         num_bins_y = 1;
         // adjust bin sizes 
         T bin_size_x = div((xh-xl), num_bins_x); 
-        //bin_size_x = std::max(floorDiv(bin_size_x, site_width)*site_width, site_width); 
         T bin_size_y = div((yh-yl), num_bins_y); 
         bin_size_y = std::max((T)(ceilDiv(bin_size_y, row_height)*row_height), (T)row_height);
 
-        //num_bins_x = ceilDiv((xh-xl), bin_size_x);
         num_bins_y = ceilDiv((yh-yl), bin_size_y);
 
         // bin dimension in y direction for blanks is different from that for cells 
@@ -65,7 +66,6 @@ int greedyLegalizationCPU(
                 num_nodes, num_movable_nodes, 
                 bin_cells
                 );
-
 
         // allocate bin fixed cells 
         std::vector<std::vector<int> > bin_fixed_cells (num_bins_x*num_bins_y); 
@@ -99,14 +99,12 @@ int greedyLegalizationCPU(
                 ); 
 
         int num_unplaced_cells_host;
-        // minimum width in sites 
         int min_unplaced_node_size_x_host;
         int num_iters = floor(log((T)std::min(num_bins_x, num_bins_y))/log(2.0))+1;
         for (int iter = 0; iter < num_iters; ++iter)
         {
             dreamplacePrint(kDEBUG, "%s iteration %d with %dx%d bins\n", "Standard cell legalization", iter, num_bins_x, num_bins_y);
             num_unplaced_cells_host = 0; 
-            //countBinObjects(bin_cells);
             dreamplacePrint(kDEBUG, "%s #bin_blanks\n", "Standard cell legalization");
             countBinObjects(bin_blanks);
 
@@ -114,8 +112,8 @@ int greedyLegalizationCPU(
             legalizeBinCPU<T>(
                     init_x, init_y, 
                     node_size_x, node_size_y, 
-                    bin_blanks, // blanks in each bin, sorted from low to high, left to right 
-                    bin_cells, // unplaced cells in each bin 
+                    bin_blanks,
+                    bin_cells,
                     x, y, 
                     num_bins_x, num_bins_y, blank_num_bins_y, 
                     bin_size_x, bin_size_y, blank_bin_size_y, 
@@ -124,14 +122,15 @@ int greedyLegalizationCPU(
                     0.5, 
                     4.0, 
                     i%2,  
-                    &num_unplaced_cells_host
+                    &num_unplaced_cells_host,
+                    weights_x,
+                    weights_y,
+                    anchor_boost
                     );
             milliseconds = (clock()-milliseconds)/CLOCKS_PER_SEC*1000; 
             dreamplacePrint(kINFO, "%s legalizeBin takes %.3f ms\n", "Standard cell legalization", milliseconds);
 
             dreamplacePrint(kDEBUG, "%s num_unplaced_cells = %d\n", "Standard cell legalization", num_unplaced_cells_host); 
-            //countBinObjects(bin_cells);
-            //countBinObjects(bin_blanks);
 
             if (num_unplaced_cells_host == 0 || iter+1 == num_iters)
             {
@@ -152,7 +151,6 @@ int greedyLegalizationCPU(
             dreamplacePrint(kINFO, "%s minNodeSize takes %.3f ms\n", "Standard cell legalization", milliseconds);
             dreamplacePrint(kDEBUG, "%s minimum unplaced node_size_x %d sites\n", "Standard cell legalization", min_unplaced_node_size_x_host);
 
-            // ceil(num_bins_x/2), ceil(num_bins_y/2)
             int dst_num_bins_x = (num_bins_x>>1)+(num_bins_x&1); 
             int dst_num_bins_y = (num_bins_y>>1)+(num_bins_y&1); 
             int scale_ratio_x = (num_bins_x == dst_num_bins_x)? 1 : num_bins_x/dst_num_bins_x; 
@@ -165,8 +163,8 @@ int greedyLegalizationCPU(
                     );
             mergeBinCellsCPU(
                     bin_cells, 
-                    num_bins_x, num_bins_y, // dimensions for the src
-                    bin_cells_copy, // ceil(src_num_bins_x/2) * ceil(src_num_bins_y/2)
+                    num_bins_x, num_bins_y,
+                    bin_cells_copy,
                     dst_num_bins_x, dst_num_bins_y, 
                     scale_ratio_x, scale_ratio_y
                     );
@@ -179,8 +177,8 @@ int greedyLegalizationCPU(
                     );
             mergeBinBlanksCPU(
                     bin_blanks, 
-                    num_bins_x, blank_num_bins_y, // dimensions for the src
-                    bin_blanks_copy, // ceil(src_num_bins_x/2) * ceil(src_num_bins_y/2)
+                    num_bins_x, blank_num_bins_y,
+                    bin_blanks_copy,
                     dst_num_bins_x, blank_num_bins_y, 
                     scale_ratio_x, 
                     min_unplaced_node_size_x_host*site_width

@@ -84,3 +84,51 @@ def test_dbu_rounding_deduplicates_and_never_exceeds_k():
 def test_nonpositive_candidate_count_is_rejected(k):
     with pytest.raises(ValueError, match="max_candidates_per_segment must be positive"):
         _sample((0, 0), (4, 0), k=k)
+
+
+def _branch_tree():
+    # Driver 0 -> Steiner 5 -> sink pins 1 and 2.
+    return {
+        "status": "ok",
+        "net_id": 10,
+        "root_node_id": 0,
+        "sink_pin_ids": [1, 2],
+        "node_ids": [0, 1, 2, 5],
+        "coordinates": {0: (0, 0), 5: (1000, 0), 1: (1000, 400), 2: (1800, 0)},
+        "children_by_node": {0: [5], 5: [1, 2], 1: [], 2: []},
+        "parent_by_node": {0: None, 5: 0, 1: 5, 2: 5},
+    }
+
+
+def _rebuffer_sites(tree):
+    return sample_buffer_candidates(
+        tree,
+        buffer_main_type_index=7,
+        dbu=1000,
+        candidate_generation_policy="rebuffer_sites",
+    )
+
+
+def test_rebuffer_sites_isolate_each_branch_at_the_shared_parent():
+    rows = _rebuffer_sites(_branch_tree())
+
+    assert sorted(
+        (row["parent_node_id"], row["child_node_ids"][0], row["segment_split_ratio"])
+        for row in rows
+    ) == [
+        (0, 5, 0.001),
+        (0, 5, 0.5),
+        (0, 5, 0.999),
+        (5, 1, 0.0025),
+        (5, 1, 0.5),
+        (5, 2, 0.00125),
+        (5, 2, 0.5),
+    ]
+    parent_end = [row for row in rows if row["parent_node_id"] == 5 and row["segment_split_ratio"] < 0.5]
+    assert {(row["x_dbu"], row["y_dbu"]) for row in parent_end} == {(1000, 1), (1001, 0)}
+
+
+def test_rebuffer_sites_cap_the_parent_end_ratio_on_short_edges():
+    rows = _rebuffer_sites({**_tree((0, 0), (40, 0)), "sink_pin_ids": [1]})
+
+    assert [row["segment_split_ratio"] for row in rows] == [0.01, 0.5]

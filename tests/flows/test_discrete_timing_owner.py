@@ -4,11 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from dreamplace.flows import discrete_timing_owner as discrete_timing_owner_module
-from dreamplace.flows.candidate_refresh import (
-    collect_owner_candidate_dirty_nets,
-)
-from dreamplace.flows.discrete_timing_owner import DiscreteTimingOwner
+from dreamplace.flows.discrete import owner as discrete_timing_owner_module
+from dreamplace.flows.discrete.buffering_filter import collect_owner_candidate_dirty_nets
+from dreamplace.flows.discrete.owner import DiscreteTimingOwner
 from dreamplace.ops.buffer_insertion import discrete_candidate_buffer_runner
 from dreamplace.ops.buffer_insertion.buffering_lane import BufferingOptimizationLane
 

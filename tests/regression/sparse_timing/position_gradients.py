@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from dreamplace.flows.hold_objective import HoldObjective
+from dreamplace.flows.gp.hold_timing import HoldObjective
 
 
 def verify_position_gradients(

@@ -3054,7 +3054,7 @@ class SegmentCountDynamicNetProvider(DynamicNetProvider):
     def virtual_buffer_drv_tensors(self):
         if self.backend_used != "cpp_cpu_segment_transfer_explicit_autograd":
             return None
-        return self._virtual_slew_violation / 1000.0, self._virtual_cap_violation
+        return self._virtual_slew_violation, self._virtual_cap_violation * 1000.0
 
     @staticmethod
     def _level_net_ids(level_view, *, device):

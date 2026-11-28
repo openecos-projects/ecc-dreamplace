@@ -803,6 +803,27 @@ class CellModelingTimingHookTest(unittest.TestCase):
         self.assertEqual(profile["fallback_lut_f_trans_entry_count"], 3)
         self.assertEqual(profile["fallback_lut_r_trans_entry_count"], 0)
 
+    def test_lazy_cell_modeling_factory_skips_lut_only_and_builds_once_for_surrogate(self):
+        tp, _, _ = self._build_tp()
+        tp.cell_modeling_op = None
+        calls = {"count": 0}
+        built = FakeCellModeling()
+
+        def factory():
+            calls["count"] += 1
+            return built
+
+        tp._cell_modeling_factory = factory
+
+        self.assertEqual(tp._resolve_surrogate_mode("lut_only"), (False, False))
+        self.assertEqual(calls["count"], 0)
+        self.assertIsNone(tp.cell_modeling_op)
+
+        self.assertEqual(tp._resolve_surrogate_mode("mixed"), (False, True))
+        self.assertEqual(tp._resolve_surrogate_mode("surrogate_only"), (True, True))
+        self.assertEqual(calls["count"], 1)
+        self.assertIs(tp.cell_modeling_op, built)
+
 
 class TimingViolationStatsTest(unittest.TestCase):
     def test_cap_violation_uses_shared_prefix_when_graph_suffix_exists(self):
@@ -829,7 +850,7 @@ class TimingViolationStatsTest(unittest.TestCase):
             torch.tensor([100.0, 130.0, 1.0], dtype=torch.float32),
         )
 
-        self.assertAlmostEqual(total_violation, 0.04)
+        self.assertAlmostEqual(total_violation, 40.0)
 
 
 if __name__ == "__main__":

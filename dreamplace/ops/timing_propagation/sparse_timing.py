@@ -12,7 +12,7 @@ import torch
 from .cell_aat_native import _CellAat
 from .hard_scatter_native import scatter_slew_max
 from .net_aat_native import _NetAat
-from .timing_lanes_native import _TimingLanes
+from .timing_lanes_native import _DriftTimingLanes, _TimingLanes
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,227 @@ class _SparseTimingLevel:
     slew_index: torch.Tensor
     slew_destinations: torch.Tensor
     adjustment: torch.Tensor
+    cell_arrival_mask: torch.Tensor | None = None
+    net_arrival_mask: torch.Tensor | None = None
+
+
+class _MutableStateWorkspace:
+    __slots__ = ("arr_data", "slew_data", "arr_grad", "slew_grad", "token")
+
+    def __init__(self, arrivals: torch.Tensor, physical_slew: torch.Tensor):
+        if torch.is_grad_enabled():
+            self.arr_data = arrivals.detach().clone()
+            self.slew_data = physical_slew.detach().clone()
+            self.arr_grad: torch.Tensor | None = None
+            self.slew_grad: torch.Tensor | None = None
+            self.token: torch.Tensor | None = _StateInit.apply(
+                self,
+                arrivals,
+                physical_slew,
+                arrivals.new_zeros((), requires_grad=True),
+            )
+        else:
+            self.arr_data = arrivals.clone()
+            self.slew_data = physical_slew.clone()
+            self.arr_grad = None
+            self.slew_grad = None
+            self.token = None
+
+    def read_level(self, states: torch.Tensor, slew_groups: torch.Tensor):
+        if self.token is not None:
+            ra, fa, rs, fs, self.token = _StateReadLevel.apply(
+                self, states, slew_groups, self.token
+            )
+            return (ra, fa, rs, fs)
+        return (
+            *self.arr_data.index_select(1, states).unbind(),
+            *self.slew_data.index_select(1, slew_groups).unbind(),
+        )
+
+    def write_arrivals_and_read_slew(
+        self,
+        arrival_states: torch.Tensor,
+        arrival_destinations: torch.Tensor,
+        ra_lane: torch.Tensor,
+        fa_lane: torch.Tensor,
+        slew_destinations: torch.Tensor,
+    ):
+        if self.token is not None:
+            dest_r, dest_f, self.token = _StateWriteArrAndReadSlew.apply(
+                self,
+                arrival_states,
+                arrival_destinations,
+                ra_lane,
+                fa_lane,
+                slew_destinations,
+                self.token,
+            )
+            return dest_r, dest_f
+        self.arr_data[0].index_copy_(
+            0, arrival_states, ra_lane.index_select(0, arrival_destinations)
+        )
+        self.arr_data[1].index_copy_(
+            0, arrival_states, fa_lane.index_select(0, arrival_destinations)
+        )
+        slew_dest = self.slew_data.index_select(1, slew_destinations)
+        return slew_dest[0], slew_dest[1]
+
+    def write_slew(
+        self,
+        slew_destinations: torch.Tensor,
+        slew_val_r: torch.Tensor,
+        slew_val_f: torch.Tensor,
+    ):
+        if self.token is not None:
+            self.token = _StateWriteSlew.apply(
+                self, slew_destinations, slew_val_r, slew_val_f, self.token
+            )
+        else:
+            self.slew_data[0].index_copy_(0, slew_destinations, slew_val_r)
+            self.slew_data[1].index_copy_(0, slew_destinations, slew_val_f)
+
+    def finalize(self):
+        if self.token is not None:
+            return _StateFinalizeAll.apply(self, self.token)
+        return self.arr_data, self.slew_data
+
+
+class _StateInit(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, workspace: _MutableStateWorkspace, arrivals: torch.Tensor, physical_slew: torch.Tensor, token: torch.Tensor):
+        ctx.workspace = workspace
+        return token.clone()
+
+    @staticmethod
+    def backward(ctx, grad_token):
+        workspace = ctx.workspace
+        grad_arr = workspace.arr_grad if ctx.needs_input_grad[1] else None
+        grad_slew = workspace.slew_grad if ctx.needs_input_grad[2] else None
+        workspace.arr_grad = None
+        workspace.slew_grad = None
+        return None, grad_arr, grad_slew, None
+
+
+class _StateReadLevel(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, workspace: _MutableStateWorkspace, states: torch.Tensor, slew_groups: torch.Tensor, token: torch.Tensor):
+        ctx.workspace = workspace
+        ctx.save_for_backward(states, slew_groups)
+        arr = workspace.arr_data.index_select(1, states)
+        slew = workspace.slew_data.index_select(1, slew_groups)
+        return arr[0], arr[1], slew[0], slew[1], token.clone()
+
+    @staticmethod
+    def backward(ctx, grad_ra, grad_fa, grad_rs, grad_fs, grad_token):
+        workspace = ctx.workspace
+        states, slew_groups = ctx.saved_tensors
+        arr_grad = workspace.arr_grad
+        slew_grad = workspace.slew_grad
+        if arr_grad is not None:
+            if grad_ra is not None:
+                arr_grad[0].index_add_(0, states, grad_ra)
+            if grad_fa is not None:
+                arr_grad[1].index_add_(0, states, grad_fa)
+        if slew_grad is not None:
+            if grad_rs is not None:
+                slew_grad[0].index_add_(0, slew_groups, grad_rs)
+            if grad_fs is not None:
+                slew_grad[1].index_add_(0, slew_groups, grad_fs)
+        return None, None, None, grad_token
+
+
+class _StateWriteArrAndReadSlew(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        workspace: _MutableStateWorkspace,
+        arrival_states: torch.Tensor,
+        arrival_destinations: torch.Tensor,
+        ra_lane: torch.Tensor,
+        fa_lane: torch.Tensor,
+        slew_destinations: torch.Tensor,
+        token: torch.Tensor,
+    ):
+        ctx.workspace = workspace
+        ctx.lane_len = int(ra_lane.numel())
+        ctx.save_for_backward(arrival_states, arrival_destinations, slew_destinations)
+        workspace.arr_data[0].index_copy_(
+            0, arrival_states, ra_lane.detach().index_select(0, arrival_destinations)
+        )
+        workspace.arr_data[1].index_copy_(
+            0, arrival_states, fa_lane.detach().index_select(0, arrival_destinations)
+        )
+        slew_dest = workspace.slew_data.index_select(1, slew_destinations)
+        return slew_dest[0], slew_dest[1], token.clone()
+
+    @staticmethod
+    def backward(ctx, grad_slew_dest_r, grad_slew_dest_f, grad_token):
+        workspace = ctx.workspace
+        arrival_states, arrival_destinations, slew_destinations = ctx.saved_tensors
+        slew_grad = workspace.slew_grad
+        if slew_grad is not None:
+            if grad_slew_dest_r is not None:
+                slew_grad[0].index_add_(0, slew_destinations, grad_slew_dest_r)
+            if grad_slew_dest_f is not None:
+                slew_grad[1].index_add_(0, slew_destinations, grad_slew_dest_f)
+        arr_grad = workspace.arr_grad
+        grad_ra = grad_fa = None
+        if arr_grad is not None:
+            grad_ra = arr_grad.new_zeros((ctx.lane_len,))
+            grad_fa = arr_grad.new_zeros((ctx.lane_len,))
+            grad_ra.index_copy_(0, arrival_destinations, arr_grad[0].index_select(0, arrival_states))
+            grad_fa.index_copy_(0, arrival_destinations, arr_grad[1].index_select(0, arrival_states))
+            arr_grad[0].index_fill_(0, arrival_states, 0.0)
+            arr_grad[1].index_fill_(0, arrival_states, 0.0)
+        return None, None, None, grad_ra, grad_fa, None, grad_token
+
+
+class _StateWriteSlew(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        workspace: _MutableStateWorkspace,
+        slew_destinations: torch.Tensor,
+        slew_val_r: torch.Tensor,
+        slew_val_f: torch.Tensor,
+        token: torch.Tensor,
+    ):
+        ctx.workspace = workspace
+        ctx.save_for_backward(slew_destinations)
+        workspace.slew_data[0].index_copy_(0, slew_destinations, slew_val_r.detach())
+        workspace.slew_data[1].index_copy_(0, slew_destinations, slew_val_f.detach())
+        return token.clone()
+
+    @staticmethod
+    def backward(ctx, grad_token):
+        workspace = ctx.workspace
+        (slew_destinations,) = ctx.saved_tensors
+        slew_grad = workspace.slew_grad
+        grad_r = grad_f = None
+        if slew_grad is not None:
+            grad_r = slew_grad[0].index_select(0, slew_destinations)
+            grad_f = slew_grad[1].index_select(0, slew_destinations)
+            slew_grad[0].index_fill_(0, slew_destinations, 0.0)
+            slew_grad[1].index_fill_(0, slew_destinations, 0.0)
+        return None, None, grad_r, grad_f, grad_token
+
+
+class _StateFinalizeAll(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, workspace: _MutableStateWorkspace, token: torch.Tensor):
+        ctx.workspace = workspace
+        return workspace.arr_data.clone(), workspace.slew_data.clone()
+
+    @staticmethod
+    def backward(ctx, grad_arr, grad_slew):
+        workspace = ctx.workspace
+        workspace.arr_grad = (
+            grad_arr.clone() if grad_arr is not None else torch.zeros_like(workspace.arr_data)
+        )
+        workspace.slew_grad = (
+            grad_slew.clone() if grad_slew is not None else torch.zeros_like(workspace.slew_data)
+        )
+        return None, workspace.arr_data.new_zeros(())
 
 
 @dataclass(frozen=True)
@@ -43,6 +264,7 @@ class SparseTimingResult:
     endpoint_slack: torch.Tensor
     wns: torch.Tensor
     tns: torch.Tensor
+    soft_endpoint_slack: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -98,6 +320,28 @@ class SparseTimingSchedule:
         self.levels = self._levels(
             arrays, np.asarray(base_cell_arcs, dtype=np.int64).reshape(-1, 8)
         )
+        self._mask_cache_version = None
+        self._cell_arrival_masks = ()
+        self._net_arrival_masks = ()
+
+    def _arrival_masks(self):
+        version = (self.valid.data_ptr(), self.valid._version)
+        if version != self._mask_cache_version:
+            self._cell_arrival_masks = tuple(
+                self.valid[level.states[level.cell[: level.arrival_cell_count, 1]]]
+                & level.cell_arrival_mask
+                if level.cell_arrival_mask is not None
+                else None
+                for level in self.levels
+            )
+            self._net_arrival_masks = tuple(
+                self.valid[level.states[level.net[:, 1]]] & level.net_arrival_mask
+                if level.net_arrival_mask is not None
+                else None
+                for level in self.levels
+            )
+            self._mask_cache_version = version
+        return self._cell_arrival_masks, self._net_arrival_masks
 
     def _levels(self, arrays, base_cell):
         def index(value):
@@ -152,18 +396,31 @@ class SparseTimingSchedule:
                     np.concatenate((cell[:arrival_cell_count, 1], net[:, 1]))
                 )
                 adjustment = adjustments[int(groups[1][1][level]) : int(groups[1][1][level + 1])]
+                states_tensor = index(states)
+                cell_tensor = index(cell)
+                cell_tensor._pin_topology_static = True
+                net_tensor = index(net)
+                net_tensor._pin_topology_static = True
+                net_mask_tensor = index(
+                    groups[1][3][int(groups[1][1][level]) : int(groups[1][1][level + 1])]
+                )
+                arrival_cell = cell_tensor[:arrival_cell_count]
+                cell_arrival_mask = torch.stack(
+                    (arrival_cell[:, 8] & 5 != 0, arrival_cell[:, 8] & 10 != 0), dim=1
+                )
+                net_arrival_mask = torch.stack(
+                    (net_mask_tensor & 1 != 0, net_mask_tensor & 8 != 0), dim=1
+                )
                 levels.append(
                     _SparseTimingLevel(
-                        states=index(states),
+                        states=states_tensor,
                         pins=index(arrays["state_pin"][states]),
                         slew_groups=index(arrays["state_slew_group"][states]),
-                        cell=index(cell),
+                        cell=cell_tensor,
                         base_cells=index(base_cells),
                         arrival_cell_count=arrival_cell_count,
-                        net=index(net),
-                        net_transition_mask=index(
-                            groups[1][3][int(groups[1][1][level]) : int(groups[1][1][level + 1])]
-                        ),
+                        net=net_tensor,
+                        net_transition_mask=net_mask_tensor,
                         arrival_destinations=index(arrival_destinations),
                         arrival_states=index(states[arrival_destinations]),
                         slew_index=index(slew_index),
@@ -171,6 +428,8 @@ class SparseTimingSchedule:
                         adjustment=torch.as_tensor(
                             adjustment, device=self.device, dtype=self.dtype
                         ),
+                        cell_arrival_mask=cell_arrival_mask,
+                        net_arrival_mask=net_arrival_mask,
                     )
                 )
         return tuple(levels)
@@ -190,6 +449,8 @@ class SparseTimingSchedule:
         arrival_plan=None,
         initial_arrivals=None,
         initial_slew=None,
+        seed_slew_override=None,
+        at_merge_temperature=None,
     ):
         """Return state lanes; caps/delays/impulses stay in physical pin domain.
 
@@ -205,8 +466,20 @@ class SparseTimingSchedule:
             sign = -1 if self.early else 1
             return sign * scatter_slew_max(sign * dest, index, sign * src)
 
-        def merge(index, *values):
+        def merge(index, merge_key, *values):
             sign = -1 if self.early else 1
+            if at_merge_temperature is not None and smooth:
+                return tuple(
+                    sign * value
+                    for value in _DriftTimingLanes.apply(
+                        index,
+                        tau_ps,
+                        at_merge_temperature,
+                        merge_key,
+                        self.early,
+                        *(sign * value for value in values),
+                    )
+                )
             return tuple(
                 sign * value
                 for value in _TimingLanes.apply(
@@ -217,7 +490,11 @@ class SparseTimingSchedule:
         lanes = tuple(
             torch.where(
                 self.seed[:, lane % 2],
-                self.reference[:, lane],
+                (
+                    seed_slew_override[lane - 2]
+                    if seed_slew_override is not None and lane >= 2
+                    else self.reference[:, lane]
+                ),
                 self.reference.new_full((), unreachable if lane < 2 else empty_slew),
             )
             for lane in range(4)
@@ -239,16 +516,15 @@ class SparseTimingSchedule:
                 else torch.maximum(physical_slew, initial_slew)
             )
         arrivals = torch.stack(lanes[:2]) if initial_arrivals is None else initial_arrivals
+        workspace = _MutableStateWorkspace(arrivals, physical_slew)
+        cell_masks, net_masks = self._arrival_masks()
         for level_index, level in enumerate(self.levels):
             cell, net = level.cell, level.net
             arrival_cell_count = level.arrival_cell_count
             # GBA electrical slew is shared across launch/exception states.
             # False paths still participate in electrical propagation, while
             # endpoint legality selects which arrival states can score slack.
-            lanes = (
-                *arrivals.index_select(1, level.states).unbind(),
-                *physical_slew.index_select(1, level.slew_groups).unbind(),
-            )
+            lanes = workspace.read_level(level.states, level.slew_groups)
             slew_updates = []
             cell_delays = net_delays = None
             if cell.numel():
@@ -269,10 +545,12 @@ class SparseTimingSchedule:
                         -torch.inf,
                     ).detach()
                 arrival_updates = updates[:arrival_cell_count]
-                mask = self.valid[level.states[arrival_cell[:, 1]]]
-                mask = mask & torch.stack(
-                    (arrival_cell[:, 8] & 5 != 0, arrival_cell[:, 8] & 10 != 0), dim=1
-                )
+                mask = cell_masks[level_index]
+                if mask is None:
+                    mask = self.valid[level.states[arrival_cell[:, 1]]]
+                    mask = mask & torch.stack(
+                        (arrival_cell[:, 8] & 5 != 0, arrival_cell[:, 8] & 10 != 0), dim=1
+                    )
                 arrival_updates = torch.cat(
                     (
                         torch.where(mask, arrival_updates[:, :2], unreachable),
@@ -284,6 +562,7 @@ class SparseTimingSchedule:
                     rows = slice(None) if arrival_plan is None else arrival_plan[level_index][0]
                     lanes = merge(
                         arrival_cell[rows, 1],
+                        ("cell_aat", level_index),
                         *lanes,
                         *(arrival_updates[rows, lane] for lane in range(4)),
                     )
@@ -333,10 +612,12 @@ class SparseTimingSchedule:
                         ),
                         dim=1,
                     )
-                mask = self.valid[level.states[net[:, 1]]]
-                mask = mask & torch.stack(
-                    (level.net_transition_mask & 1 != 0, level.net_transition_mask & 8 != 0), dim=1
-                )
+                mask = net_masks[level_index]
+                if mask is None:
+                    mask = self.valid[level.states[net[:, 1]]]
+                    mask = mask & torch.stack(
+                        (level.net_transition_mask & 1 != 0, level.net_transition_mask & 8 != 0), dim=1
+                    )
                 updates = (
                     tuple(
                         torch.where(mask[:, lane], value, unreachable)
@@ -354,39 +635,50 @@ class SparseTimingSchedule:
                 rows = slice(None) if arrival_plan is None else arrival_plan[level_index][1]
                 lanes = merge(
                     net[rows, 1],
+                    ("net_aat", level_index),
                     *lanes,
                     *(value[rows] for value in updates),
                 )
                 slew_updates.append(updates[2:])
-            arrivals = arrivals.index_copy(
-                1,
+            slew_dest_r, slew_dest_f = workspace.write_arrivals_and_read_slew(
                 level.arrival_states,
-                torch.stack(lanes[:2]).index_select(1, level.arrival_destinations),
-            )
-            slew_destinations = physical_slew.index_select(1, level.slew_destinations)
-            slew_values = torch.stack(
-                tuple(
-                    scatter_slew(
-                        value,
-                        level.slew_index,
-                        torch.cat(tuple(update[lane] for update in slew_updates)),
-                    )
-                    for lane, value in enumerate(slew_destinations.unbind())
-                )
-            )
-            physical_slew = physical_slew.index_copy(
-                1,
+                level.arrival_destinations,
+                lanes[0],
+                lanes[1],
                 level.slew_destinations,
-                slew_values,
+            )
+            slew_src_r = (
+                slew_updates[0][0]
+                if len(slew_updates) == 1
+                else torch.cat(tuple(update[0] for update in slew_updates))
+            )
+            slew_src_f = (
+                slew_updates[0][1]
+                if len(slew_updates) == 1
+                else torch.cat(tuple(update[1] for update in slew_updates))
+            )
+            workspace.write_slew(
+                level.slew_destinations,
+                scatter_slew(slew_dest_r, level.slew_index, slew_src_r),
+                scatter_slew(slew_dest_f, level.slew_index, slew_src_f),
             )
             if trace is not None:
                 trace.append(SparseTimingTrace(level, cell_delays, net_delays))
+        arrivals, physical_slew = workspace.finalize()
         return (
             *arrivals.unbind(),
             *physical_slew.index_select(1, self.state_slew_group).unbind(),
         )
 
-    def reduce_endpoints(self, lanes, check_lut_values):
+    def reduce_endpoints(
+        self,
+        lanes,
+        check_lut_values,
+        *,
+        required_offset=None,
+        smooth_extremum=False,
+        smooth_tau_ps=None,
+    ):
         """Consume native affine rules and dynamic setup/recovery LUT values.
 
         check_lut_values is one value per exported candidate, including zeros
@@ -395,9 +687,14 @@ class SparseTimingSchedule:
         if check_lut_values.shape != self.check_values[:, 0].shape:
             raise ValueError("sparse check LUT values do not align with native rules")
         required = self.check_values[:, 0] + self.check_values[:, 1] * check_lut_values
+        if required_offset is not None:
+            required = required + required_offset
         arrivals = torch.stack(lanes[:2], dim=1)[self.check_state, self.check_transition]
         slack = required[self.legal] - arrivals
-        if self.aggregation_mode == "smooth":
+
+        def _lse_violation(tau_val: float):
+            if self.endpoint_pins.numel() == 0:
+                return slack.new_empty(0)
             endpoint_ids = self.check_to_endpoint.long()
             maximum = slack.new_full((self.endpoint_pins.numel(),), -torch.inf)
             maximum.scatter_reduce_(
@@ -407,10 +704,13 @@ class SparseTimingSchedule:
                 reduce="amax",
                 include_self=False,
             )
-            shifted = torch.exp((-slack - maximum[endpoint_ids]) / self.aggregation_tau_ps)
+            shifted = torch.exp((-slack - maximum[endpoint_ids]) / tau_val)
             total = slack.new_zeros(self.endpoint_pins.numel())
             total.index_add_(0, endpoint_ids, shifted)
-            maximum_violation = maximum + self.aggregation_tau_ps * torch.log(total)
+            return maximum + tau_val * torch.log(total)
+
+        if self.aggregation_mode == "smooth":
+            maximum_violation = _lse_violation(self.aggregation_tau_ps)
         else:
             maximum_violation = scatter_slew_max(
                 slack.new_full((self.endpoint_pins.numel(),), -2e8),
@@ -419,9 +719,28 @@ class SparseTimingSchedule:
                 include_self=True,
             )
         endpoint_slack = -maximum_violation
+        soft_endpoint_slack = None
+        if smooth_extremum:
+            eff_tau = float(
+                self.aggregation_tau_ps if smooth_tau_ps is None else smooth_tau_ps
+            )
+            if (
+                self.aggregation_mode == "smooth"
+                and abs(eff_tau - self.aggregation_tau_ps) <= 1e-9
+            ):
+                soft_endpoint_slack = endpoint_slack
+            else:
+                soft_endpoint_slack = -_lse_violation(eff_tau)
         zero = lanes[0].sum() * 0
         wns = torch.minimum(endpoint_slack.min(), zero) if endpoint_slack.numel() else zero
         tns = torch.clamp(endpoint_slack, max=0).sum()
         return SparseTimingResult(
-            lanes, required, slack, self.endpoint_pins, endpoint_slack, wns, tns
+            lanes,
+            required,
+            slack,
+            self.endpoint_pins,
+            endpoint_slack,
+            wns,
+            tns,
+            soft_endpoint_slack=soft_endpoint_slack,
         )

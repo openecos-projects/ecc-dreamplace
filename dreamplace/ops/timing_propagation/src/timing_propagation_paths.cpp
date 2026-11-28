@@ -1,4 +1,6 @@
 #include "timing_propagation_paths.h"
+#include "timing_setup_paths.h"
+#include "timing_legacy_paths.h"
 #include "../../utility/src/torch.h"
 
 #include <ATen/ATen.h>
@@ -248,182 +250,34 @@ CriticalPathBatch SetupCriticalPathExtractor::extract(
                   static_cast<int64_t>(delay_ff.size()) == num_cell_arcs_,
               "cell delay tensor length must equal number of flat cell arcs");
 
-  struct EndpointState {
-    int64_t pin;
-    int64_t test_id;
-    int64_t transition;
-    double slack;
-  };
-  std::vector<EndpointState> states;
-  states.reserve(endpoints.size() * 2);
+  std::vector<timing::SetupPathState> endpoint_states;
+  endpoint_states.reserve(endpoints.size() * 2);
   for (size_t idx = 0; idx < endpoints.size(); ++idx) {
-    if (std::isfinite(rise_slacks[idx]) && rise_slacks[idx] < 0.0) {
-      states.push_back({endpoints[idx], test_ids[idx], 0, rise_slacks[idx]});
+    timing::appendSetupPathStates(endpoint_states, endpoints[idx], test_ids[idx],
+                                 rise_slacks[idx], fall_slacks[idx]);
+  }
+  const timing::SetupPathTimingView view{
+      rise_aat.data(), fall_aat.data(), net_delay_rise.data(), net_delay_fall.data(),
+      delay_rr.data(), delay_fr.data(), delay_rf.data(), delay_ff.data()};
+  auto visit_predecessors = [&](int64_t pin, const auto& visit) {
+    const auto begin = predecessor_offsets_[static_cast<size_t>(pin)];
+    const auto end = predecessor_offsets_[static_cast<size_t>(pin + 1)];
+    for (auto edge = begin; edge < end; ++edge) {
+      const auto arc = predecessor_arc_ids_[static_cast<size_t>(edge)];
+      visit(timing::SetupPathPredecessor{
+          predecessor_pins_[static_cast<size_t>(edge)], arc,
+          arc < 0 ? 0 : arc_senses_[static_cast<size_t>(arc)],
+          arc < 0 ? std::pair<int64_t, int64_t>{-1, -1}
+                  : std::pair<int64_t, int64_t>{0, arc},
+          predecessor_transition_masks_[static_cast<size_t>(edge)]});
     }
-    if (std::isfinite(fall_slacks[idx]) && fall_slacks[idx] < 0.0) {
-      states.push_back({endpoints[idx], test_ids[idx], 1, fall_slacks[idx]});
-    }
-  }
-  std::sort(states.begin(), states.end(), [](const auto& lhs, const auto& rhs) {
-    return std::tie(lhs.slack, lhs.transition, lhs.pin, lhs.test_id) <
-           std::tie(rhs.slack, rhs.transition, rhs.pin, rhs.test_id);
-  });
-  const int64_t failing_state_count = static_cast<int64_t>(states.size());
-  if (global_k > 0 && static_cast<int64_t>(states.size()) > global_k) {
-    states.resize(static_cast<size_t>(global_k));
-  }
-
-  if (max_depth <= 0) {
-    max_depth = std::max<int64_t>(1, num_pins_);
-  }
-
-  struct BacktraceResult {
-    std::vector<int64_t> pins;
-    std::vector<int64_t> transitions;
-    std::vector<int64_t> arc_ids;
-    uint8_t valid {0};
-    int64_t invalid_reason {0};
-    double max_residual_ps {0.0};
   };
-  std::vector<BacktraceResult> results(states.size());
-
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static)
-#endif
-  for (int64_t state_idx = 0;
-       state_idx < static_cast<int64_t>(states.size());
-       ++state_idx) {
-    const auto& state = states[static_cast<size_t>(state_idx)];
-    auto& result = results[static_cast<size_t>(state_idx)];
-    int64_t current_pin = state.pin;
-    int64_t current_transition = state.transition;
-    result.pins.push_back(current_pin);
-    result.transitions.push_back(current_transition);
-    std::unordered_set<int64_t> visited;
-    visited.insert(current_pin);
-
-    bool reached_start = false;
-    for (int64_t depth = 0; depth <= max_depth; ++depth) {
-      const bool current_is_start =
-          is_start_pin_[static_cast<size_t>(current_pin)] != 0;
-      if (depth == max_depth) {
-        if (current_is_start) {
-          reached_start = true;
-        } else {
-          result.invalid_reason = 3;
-        }
-        break;
-      }
-
-      const int64_t edge_begin = predecessor_offsets_[static_cast<size_t>(current_pin)];
-      const int64_t edge_end = predecessor_offsets_[static_cast<size_t>(current_pin + 1)];
-      struct Candidate {
-        bool defined {false};
-        int64_t pred_pin {-1};
-        int64_t pred_transition {-1};
-        int64_t arc_id {-2};
-        double aat {-std::numeric_limits<double>::infinity()};
-        double residual {std::numeric_limits<double>::infinity()};
-      } best;
-      const double current_aat = current_transition == 0
-          ? rise_aat[static_cast<size_t>(current_pin)]
-          : fall_aat[static_cast<size_t>(current_pin)];
-
-      auto consider = [&](int64_t pred_pin,
-                          int64_t pred_transition,
-                          int64_t arc_id,
-                          double candidate_aat) {
-        if (!std::isfinite(candidate_aat)) {
-          return;
-        }
-        const double residual = std::abs(current_aat - candidate_aat);
-        const double epsilon = 1.0e-12;
-        const bool better = !best.defined ||
-            candidate_aat > best.aat + epsilon ||
-            (std::abs(candidate_aat - best.aat) <= epsilon &&
-             std::tie(residual, arc_id, pred_pin, pred_transition) <
-             std::tie(best.residual, best.arc_id, best.pred_pin,
-                      best.pred_transition));
-        if (better) {
-          best = {true, pred_pin, pred_transition, arc_id,
-                  candidate_aat, residual};
-        }
-      };
-
-      for (int64_t edge_idx = edge_begin; edge_idx < edge_end; ++edge_idx) {
-        const int64_t pred_pin = predecessor_pins_[static_cast<size_t>(edge_idx)];
-        const int64_t arc_id = predecessor_arc_ids_[static_cast<size_t>(edge_idx)];
-        const int64_t mask = predecessor_transition_masks_[static_cast<size_t>(edge_idx)];
-        if (arc_id == -1) {
-          if (!(mask & (1 << (3 * current_transition)))) continue;
-          const double pred_aat = current_transition == 0
-              ? rise_aat[static_cast<size_t>(pred_pin)]
-              : fall_aat[static_cast<size_t>(pred_pin)];
-          const double net_delay = current_transition == 0
-              ? net_delay_rise[static_cast<size_t>(current_pin)]
-              : net_delay_fall[static_cast<size_t>(current_pin)];
-          consider(pred_pin, current_transition, arc_id, pred_aat + net_delay);
-          continue;
-        }
-
-        const int64_t sense = arc_senses_[static_cast<size_t>(arc_id)];
-        if (current_transition == 0) {
-          if (sense >= 0 && (mask & 1)) {
-            consider(pred_pin, 0, arc_id,
-                     rise_aat[static_cast<size_t>(pred_pin)] +
-                         delay_rr[static_cast<size_t>(arc_id)]);
-          }
-          if (sense <= 0 && (mask & 4)) {
-            consider(pred_pin, 1, arc_id,
-                     fall_aat[static_cast<size_t>(pred_pin)] +
-                         delay_fr[static_cast<size_t>(arc_id)]);
-          }
-        } else {
-          if (sense >= 0 && (mask & 8)) {
-            consider(pred_pin, 1, arc_id,
-                     fall_aat[static_cast<size_t>(pred_pin)] +
-                         delay_ff[static_cast<size_t>(arc_id)]);
-          }
-          if (sense <= 0 && (mask & 2)) {
-            consider(pred_pin, 0, arc_id,
-                     rise_aat[static_cast<size_t>(pred_pin)] +
-                         delay_rf[static_cast<size_t>(arc_id)]);
-          }
-        }
-      }
-
-      // A sequential output is only a path start when its launch state is not
-      // explained by an in-graph async control arc for this transition.
-      if (current_is_start &&
-          (!best.defined || best.residual > residual_tolerance_ps)) {
-        reached_start = true;
-        break;
-      }
-      if (!best.defined) {
-        result.invalid_reason = 1;
-        break;
-      }
-      if (visited.find(best.pred_pin) != visited.end()) {
-        result.invalid_reason = 2;
-        break;
-      }
-      result.max_residual_ps = std::max(result.max_residual_ps, best.residual);
-      if (best.residual > residual_tolerance_ps && result.invalid_reason == 0) {
-        result.invalid_reason = 4;
-      }
-      result.pins.push_back(best.pred_pin);
-      result.transitions.push_back(best.pred_transition);
-      result.arc_ids.push_back(best.arc_id);
-      visited.insert(best.pred_pin);
-      current_pin = best.pred_pin;
-      current_transition = best.pred_transition;
-    }
-
-    result.valid = reached_start && result.invalid_reason == 0;
-    std::reverse(result.pins.begin(), result.pins.end());
-    std::reverse(result.transitions.begin(), result.transitions.end());
-    std::reverse(result.arc_ids.begin(), result.arc_ids.end());
-  }
+  const auto extracted = timing::extractSetupPaths(
+      std::move(endpoint_states), view, num_pins_, global_k, max_depth,
+      residual_tolerance_ps, visit_predecessors,
+      [&](int64_t pin) { return is_start_pin_[static_cast<size_t>(pin)] != 0; });
+  const auto& states = extracted.states;
+  const auto& results = extracted.traces;
 
   std::vector<int64_t> path_offsets;
   std::vector<int64_t> path_pins;
@@ -469,7 +323,7 @@ CriticalPathBatch SetupCriticalPathExtractor::extract(
   batch.path_valid = bool_tensor_from_vector(path_valid);
   batch.invalid_reason = i64_tensor_from_vector(invalid_reasons);
   batch.max_residual_ps = double_tensor_from_vector(max_residuals);
-  batch.failing_state_count = failing_state_count;
+  batch.failing_state_count = extracted.failing_state_count;
   batch.selected_state_count = static_cast<int64_t>(states.size());
   batch.valid_path_count = valid_path_count;
   batch.invalid_path_count = static_cast<int64_t>(states.size()) - valid_path_count;
@@ -1050,92 +904,21 @@ extract_critical_paths(
 #pragma omp parallel for schedule(static)
 #endif
   for (int64_t eid = 0; eid < num_endpoints; ++eid) {
-    int32_t sink = endpoints_ptr[eid];
-    std::vector<int64_t> path;
-    std::vector<int64_t> arcs;
-
-    if (sink >= 0 && sink < num_pins) {
-      bool use_rise = rslack_ptr[sink] <= fslack_ptr[sink];
-      double current_slack = use_rise ? rslack_ptr[sink] : fslack_ptr[sink];
-      int32_t current_pin = sink;
-
-      path.push_back(static_cast<int64_t>(current_pin));
-      std::unordered_set<int32_t> visited;
-      visited.insert(current_pin);
-
-      int64_t steps = 0;
-      while (steps < max_depth) {
-        if (current_pin < 0 || current_pin >= num_pins) {
-          break;
-        }
-        if (!is_start.empty() && is_start[current_pin]) {
-          break;
-        }
-
-        int32_t begin = rev_offsets_ptr[current_pin];
-        int32_t end = rev_offsets_ptr[current_pin + 1];
-        if (begin >= end) {
-          break;
-        }
-
-        int32_t best_pred = -1;
-        int64_t best_arc = -1;
-        double best_slack = std::numeric_limits<double>::infinity();
-        double best_gap = std::numeric_limits<double>::infinity();
-        double best_arrival = -std::numeric_limits<double>::infinity();
-
-        for (int32_t idx = begin; idx < end; ++idx) {
-          int32_t pred = rev_edges_ptr[idx];
-          if (pred < 0 || pred >= num_pins) {
-            continue;
+    auto result = timing::traceLegacySlackPath(
+        endpoints_ptr[eid], num_pins, max_depth, slack_epsilon,
+        [&](int64_t pin, const auto& visit) {
+          for (int32_t edge = rev_offsets_ptr[pin]; edge < rev_offsets_ptr[pin + 1]; ++edge) {
+            visit(rev_edges_ptr[edge]);
           }
-          if (visited.count(pred)) {
-            continue;
-          }
-
-          double pred_slack = use_rise ? rslack_ptr[pred] : fslack_ptr[pred];
-          double slack_gap = std::abs(pred_slack - current_slack);
-          double arrival = use_rise ? rAAT_ptr[pred] : fAAT_ptr[pred];
-
-          bool improved = false;
-          if (pred_slack < best_slack - slack_epsilon) {
-            improved = true;
-          } else if (std::abs(pred_slack - best_slack) <= slack_epsilon) {
-            if (slack_gap < best_gap - slack_epsilon) {
-              improved = true;
-            } else if (std::abs(slack_gap - best_gap) <= slack_epsilon &&
-                       arrival > best_arrival + slack_epsilon) {
-              improved = true;
-            }
-          }
-
-          if (improved) {
-            best_pred = pred;
-            best_slack = pred_slack;
-            best_gap = slack_gap;
-            best_arrival = arrival;
-            best_arc = query_arc_index(arc_lookup, arc_indices_ptr, pred, current_pin);
-          }
-        }
-
-        if (best_pred < 0) {
-          break;
-        }
-
-        path.push_back(static_cast<int64_t>(best_pred));
-        arcs.push_back(best_arc);
-        visited.insert(best_pred);
-        current_pin = best_pred;
-        current_slack = best_slack;
-        ++steps;
-      }
-
-      std::reverse(path.begin(), path.end());
-      std::reverse(arcs.begin(), arcs.end());
-    }
-
-    path_results[eid] = std::move(path);
-    arc_results[eid] = std::move(arcs);
+        },
+        [&](int64_t pin) { return !is_start.empty() && is_start[pin]; },
+        [&](int64_t pin, bool rise) { return rise ? rslack_ptr[pin] : fslack_ptr[pin]; },
+        [&](int64_t pin, bool rise) { return rise ? rAAT_ptr[pin] : fAAT_ptr[pin]; },
+        [&](int64_t source, int64_t sink) {
+          return query_arc_index(arc_lookup, arc_indices_ptr, source, sink);
+        });
+    path_results[eid] = std::move(result.pins);
+    arc_results[eid] = std::move(result.arc_ids);
   }
 
   return std::make_tuple(std::move(path_results), std::move(arc_results));

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from dreamplace.flows.discrete_timing_owner import DiscreteTimingOwner
+from dreamplace.flows.discrete.owner import DiscreteTimingOwner
 from dreamplace.ops.discrete_gradient_topk import ACTION_NAMES
 from dreamplace.ops.timing_propagation.timing_propagation import TimingPropagation
 from dreamplace.PlaceObj import PlaceObj
@@ -73,13 +73,13 @@ def test_negative_actions_include_limit_and_measured_value_derivatives():
         )
 
     beta = torch.zeros((1, 4), dtype=torch.float64, requires_grad=True)
-    # size_down: (5 - (-20))/1000 ns and -.004 - (-.01) pF.
-    # VT slowdown: (-2 - (-10))/1000 ns and -.003 - (-.005) pF.
+    # size_down: 5 - (-20) ps and (-.004 - (-.01))*1000 fF.
+    # VT slowdown: -2 - (-10) ps and (-.003 - (-.005))*1000 fF.
     jacobian = torch.autograd.functional.jacobian(evaluate, beta).squeeze(1)
     expected = torch.tensor(
         [
-            [-0.02, 0.025, 0.008, -0.01],
-            [-0.02, 0.006, 0.002, -0.01],
+            [-20.0, 25.0, 8.0, -10.0],
+            [-20.0, 6.0, 2.0, -10.0],
         ],
         dtype=torch.float64,
     )
@@ -123,5 +123,102 @@ def test_limit_gradients_enter_weighted_objective_only(objective):
     loss = owner._loss(model, torch.zeros(2, dtype=torch.float64), context)
     score = context.score_loss if context.score_loss is not None else loss
     gradient = torch.autograd.grad(score, context.beta)[0]
-    expected = [[-0.04, 0.03, 0.015, -0.02]] if objective == "loss" else [[0.0] * 4]
+    expected = [[-40.0, 30.0, 15.0, -20.0]] if objective == "loss" else [[0.0] * 4]
     torch.testing.assert_close(gradient, context.beta.new_tensor(expected), atol=1e-12, rtol=0)
+
+
+def test_timing_obj_impl_keeps_lut_only_active_until_limits_are_computed(monkeypatch):
+    import dreamplace.PlaceObj as place_obj_module
+
+    def fail_soft_interpolation(*args, **kwargs):
+        raise AssertionError("lut_only call must not use soft size/VT limit interpolation")
+
+    monkeypatch.setattr(
+        place_obj_module,
+        "compute_size_interpolated_pin_properties",
+        fail_soft_interpolation,
+    )
+    import dreamplace.ops.timing_propagation.action_cell_aat as action_cell_aat
+
+    monkeypatch.setattr(
+        action_cell_aat,
+        "refresh_action_valid_instances",
+        lambda context: None,
+    )
+    model = _model()
+    model.params = SimpleNamespace(
+        timing_surrogate_mode="surrogate_only",
+        timing_objective_lane="timing_slew_cap",
+        critical_endpoint_pruning_mode="off",
+        timing_action_pin_cap_gradient=0,
+        export_pin_violation_csv=False,
+    )
+    model.placedb = SimpleNamespace(gr_sizing=None)
+    model.invoke_timing_count = 0
+    model.pin2libpin_flat_ids = torch.tensor([0])
+    model.inst_pins_mask = torch.tensor([True])
+    model.output_pin_mask = torch.tensor([True])
+    model._should_write_timing_obj_profile = lambda iteration: False
+    model._should_write_timing_artifacts = lambda iteration: False
+    model._should_write_pin_violation_detail = lambda iteration: False
+    model._production_fast_loop_enabled = lambda: True
+    model._timing_obj_profile_interval = lambda: 0
+    model._should_use_active_cone_aux_pin_masks = lambda: False
+    model._should_reuse_zero_slew_aux = lambda timing_op: False
+    model._should_copy_pin_slack_after_timing = lambda enabled: False
+    model._should_refresh_debug_pin_caps_base = lambda base, enabled: False
+    model._timing_rc_cap_input_tensor = lambda tensor: tensor
+    model._maybe_write_rc_root_load_probe = lambda **kwargs: None
+    model._relaxed_buffer_timing_enabled = lambda: False
+    model._should_compute_timing_aux_tensor = lambda name: False
+    model._timing_geometry_for_pos = lambda pos: (pos, pos[:1], pos[1:])
+    model.pin_caps_op = lambda offset, data: (
+        torch.tensor([0.01], dtype=torch.float64),
+        torch.tensor([0.01], dtype=torch.float64),
+        torch.tensor([0.01], dtype=torch.float64),
+    )
+    model.data_collections.inst_libcell_offset = torch.tensor([0])
+    model.data_collections.net_flat_topo_sort = torch.tensor([0])
+    model.data_collections.net_flat_topo_sort_start = torch.tensor([0, 1])
+    model.data_collections.pin_fa = torch.tensor([0])
+    model.data_collections.flat_pin_to_start = torch.tensor([0, 1])
+    model.data_collections.flat_pin_to = torch.tensor([0])
+    model.data_collections.flat_pin_from = torch.tensor([0])
+
+    timing = TimingPropagation.__new__(TimingPropagation)
+    torch.nn.Module.__init__(timing)
+    timing.log_top_violations = False
+    timing.pin_rtran_live = torch.tensor([130.0], dtype=torch.float64)
+    timing.pin_ftran_live = torch.tensor([125.0], dtype=torch.float64)
+    timing.pin_net_cap_rise_live = torch.tensor([0.05], dtype=torch.float64)
+    timing.pin_net_cap_fall_live = torch.tensor([0.049], dtype=torch.float64)
+    timing.forward = lambda delays, impulses, loads, **kwargs: (
+        torch.tensor(-10.0, dtype=torch.float64),
+        torch.tensor(-20.0, dtype=torch.float64),
+        torch.tensor(0.0, dtype=torch.float64),
+        torch.tensor(0.0, dtype=torch.float64),
+    )
+    z = torch.tensor([0.0], dtype=torch.float64)
+    model.op_collections = SimpleNamespace(
+        elmore_delay_op=lambda *args: (z, z, z, z, z, z),
+        timing_propagation_op=timing,
+    )
+    context = model._active_discrete_action_context
+    context.beta = torch.zeros((1, 4), dtype=torch.float64, requires_grad=True)
+    model.timing_obj(
+        torch.zeros(2, dtype=torch.float64),
+        surrogate_mode="lut_only",
+        discrete_action_context=context,
+    )
+    assert model._active_timing_surrogate_mode is None
+    grad = torch.autograd.grad(
+        timing.last_total_slew_violation_tensor + timing.last_total_cap_violation_tensor,
+        context.beta,
+    )[0]
+    torch.testing.assert_close(
+        grad,
+        torch.tensor([[-40.0, 30.0, 15.0, -20.0]], dtype=torch.float64),
+        atol=1e-12,
+        rtol=0,
+    )
+

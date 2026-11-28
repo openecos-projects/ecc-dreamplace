@@ -866,6 +866,83 @@ class CellModelingPiecewiseFastPathTest(unittest.TestCase):
         self.assertTrue(torch.equal(seen_vt_slots[0], torch.tensor([0, 0, 1])))
         self.assertTrue(torch.allclose(result, torch.tensor([10.0, 20.5])))
 
+    def test_build_piecewise_state_vectorized_sorts_deduplicates_and_handles_empty(self):
+        model = CellModeling.__new__(CellModeling)
+        nn.Module.__init__(model)
+        model.device = torch.device("cpu")
+
+        # Duplicate (main_id=0, arc_offset=1, vt=10, size=2.0) keeps the last arc index (3),
+        # and distinct sizes are sorted ascending within each bucket.
+        state = model._build_piecewise_state(
+            libcell_main_ids=torch.tensor([0, 0, 0, 0, 1], dtype=torch.long),
+            arc_offsets=torch.tensor([1, 1, 1, 1, 0], dtype=torch.long),
+            sizes=torch.tensor([2.0, 4.0, 1.0, 2.0, 3.0], dtype=torch.float32),
+            vts=torch.tensor([10.0, 10.0, 10.0, 10.0, 20.0], dtype=torch.float32),
+            num_main_ids=2,
+            max_arc_offset=2,
+            vt_order=[10, 20],
+        )
+
+        self.assertEqual(tuple(state["size_table"].shape), (2, 2, 2, 3))
+        self.assertTrue(
+            torch.equal(state["size_count"], torch.tensor([[[0, 0], [3, 0]], [[0, 1], [0, 0]]]))
+        )
+        self.assertTrue(
+            torch.equal(
+                state["vt_available"],
+                torch.tensor([[[False, False], [True, False]], [[False, True], [False, False]]]),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                state["size_table"][0, 1, 0],
+                torch.tensor([1.0, 2.0, 4.0], dtype=torch.float32),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                state["arc_index_table"][0, 1, 0],
+                torch.tensor([2, 3, 1], dtype=torch.long),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                state["size_table"][1, 0, 1],
+                torch.tensor([3.0, float("inf"), float("inf")], dtype=torch.float32),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                state["arc_index_table"][1, 0, 1],
+                torch.tensor([4, -1, -1], dtype=torch.long),
+            )
+        )
+        self.assertIn("_size_table_flat", state)
+
+        empty_state = model._build_piecewise_state(
+            libcell_main_ids=torch.empty(0, dtype=torch.long),
+            arc_offsets=torch.empty(0, dtype=torch.long),
+            sizes=torch.empty(0, dtype=torch.float32),
+            vts=torch.empty(0, dtype=torch.float32),
+            num_main_ids=2,
+            max_arc_offset=1,
+            vt_order=[10, 20],
+        )
+        self.assertEqual(tuple(empty_state["size_table"].shape), (2, 1, 2, 1))
+        self.assertTrue(torch.all(empty_state["size_count"] == 0))
+        self.assertFalse(bool(empty_state["vt_available"].any()))
+
+        with self.assertRaises(KeyError):
+            model._build_piecewise_state(
+                libcell_main_ids=torch.tensor([0], dtype=torch.long),
+                arc_offsets=torch.tensor([0], dtype=torch.long),
+                sizes=torch.tensor([1.0], dtype=torch.float32),
+                vts=torch.tensor([99.0], dtype=torch.float32),
+                num_main_ids=1,
+                max_arc_offset=1,
+                vt_order=[10, 20],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

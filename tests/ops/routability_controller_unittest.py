@@ -327,6 +327,73 @@ class RoutabilityControllerTest(unittest.TestCase):
 
         self.assertTrue(model.enable_l_shape_routability)
 
+    def test_l_shape_policy_timing_opt_pause_waits_for_descending_overflow(self):
+        model = SimpleNamespace(
+            use_l_shape_routability=True,
+            enable_l_shape_routability=True,
+            reset_l_shape_weight_state=lambda: None,
+        )
+        policy = LShapePolicy(
+            SimpleNamespace(l_shape_overflow_threshold=0.3, timing_opt_enabled=True)
+        )
+        policy.reset_reenable_state(model)
+        policy.disable_for_recovery(
+            model,
+            iteration=100,
+            reason="inflation",
+            update_threshold=True,
+            inflation_round=1,
+        )
+
+        # Rising overflow right after inflation (< 0.3 initially, then > 0.3) must stay paused.
+        for ov in (0.17, 0.22, 0.35, 0.55):
+            policy.maybe_reenable(model, ov)
+            self.assertFalse(model.enable_l_shape_routability)
+
+        # Descending overflow only reenables once streak >= 5 and ov < 0.3.
+        for ov in (0.50, 0.45, 0.40, 0.35, 0.31):
+            policy.maybe_reenable(model, ov)
+            self.assertFalse(model.enable_l_shape_routability)
+        policy.maybe_reenable(model, 0.29)
+        self.assertTrue(model.enable_l_shape_routability)
+        self.assertFalse(model._l_shape_paused_for_inflation)
+
+        # If overflow rebounds >= threshold again while active, pause immediately.
+        model.use_l_shape_routability = True
+        policy.maybe_pause_for_overflow(model, 0.32, iteration=120)
+        self.assertFalse(model.use_l_shape_routability)
+        self.assertFalse(model.enable_l_shape_routability)
+        self.assertTrue(model._l_shape_paused_for_inflation)
+
+    def test_l_shape_policy_forced_inflation_recovery_pauses_fresh_restart_model(self):
+        # Fresh model on MidplaceRestart starts inactive (use_l_shape_routability=False)
+        # while the prior session had L-shape active before inflation triggered.
+        model = SimpleNamespace(
+            use_l_shape_routability=False,
+            enable_l_shape_routability=False,
+            reset_l_shape_weight_state=lambda: None,
+        )
+        policy = LShapePolicy(
+            SimpleNamespace(l_shape_overflow_threshold=0.3, timing_opt_enabled=True)
+        )
+        policy.reset_reenable_state(model)
+        policy.disable_for_recovery(
+            model,
+            iteration=100,
+            reason="inflation",
+            update_threshold=True,
+            inflation_round=2,
+            force=True,
+        )
+
+        self.assertFalse(model.use_l_shape_routability)
+        self.assertFalse(model.enable_l_shape_routability)
+        self.assertTrue(model._l_shape_paused_for_inflation)
+        # Even when initial post-restart overflow is still below threshold (< 0.3),
+        # L-shape must stay paused until overflow establishes a descending streak.
+        policy.maybe_reenable(model, 0.17)
+        self.assertFalse(model.enable_l_shape_routability)
+
 
 if __name__ == "__main__":
     unittest.main()

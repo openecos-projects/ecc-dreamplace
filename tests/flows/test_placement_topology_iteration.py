@@ -4,12 +4,16 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from dreamplace.flows.joint_iteration import JointStepState
-from dreamplace.flows.timing_iteration import TimingIterationContext
-from dreamplace.flows.timing_objective_policy import diff_tdp_gate_status
+from dreamplace.flows.baselines.joint_runtime import JointStepState
+from dreamplace.flows.gp.topology_refresh import TimingIterationContext
+from dreamplace.flows.gp.timing_carriers import diff_tdp_gate_status
+from dreamplace.ops.routability.l_shape_policy import LShapePolicy
 from dreamplace.ops.steiner_topo.steiner_topo import SteinerTopo
 
-from dreamplace.flows import l_shape_iteration, placement_topology_iteration
+from dreamplace.flows.gp import (
+    l_shape_iteration,
+    topology_refresh as placement_topology_iteration,
+)
 
 
 @pytest.mark.parametrize("lane", ["timing", "route", "combined", "joint_frozen"])
@@ -58,7 +62,7 @@ def test_refresh_once_and_both_consumers_follow_live_geometry(monkeypatch, lane)
         use_timing_obj=lane != "route",
     )
     metric = SimpleNamespace(overflow=torch.tensor([0.1]))
-    policy = SimpleNamespace(maybe_reenable=lambda *args: None)
+    policy = LShapePolicy(params)
     monkeypatch.setattr(
         l_shape_iteration,
         "_prepare_l_shape_inputs_from_gpugr",

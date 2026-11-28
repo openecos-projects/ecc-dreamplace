@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from dreamplace.flows.discrete_timing_common import timing_sizing_action_mask
+from dreamplace.flows.discrete.common import timing_sizing_action_mask
 from dreamplace.ops.discrete_gradient_topk import (
     apply_quad_gradient_from_action_scores,
     apply_quad_gradient_from_data_collections,

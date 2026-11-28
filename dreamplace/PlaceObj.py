@@ -142,8 +142,8 @@ from dreamplace.ops.size_interpolated_pin.sizing_limit_utils import (
     compute_size_interpolated_pin_properties,
     warmup_size_interpolated_pin_native_cache,
 )
-from dreamplace.flows.joint_proximal import JointProximalObjective
-from dreamplace.flows.hold_objective import HoldObjective
+from dreamplace.flows.baselines.joint_runtime import JointProximalObjective
+from dreamplace.flows.gp.hold_timing import HoldObjective
 
 _AIMP_TRUE_VALUES = {"1", "true", "yes", "on"}
 _AIMP_FALSE_VALUES = {"0", "false", "no", "off"}
@@ -729,17 +729,21 @@ class PreconditionOp:
 
     def __init__(
         self, placedb, data_collections, op_collections, precond_pin_count_flag=False,
-        use_net_weights=False,
+        use_net_weights=False, star_runtime_getter=None,
     ):
         self.placedb = placedb
         self.data_collections = data_collections
         self.op_collections = op_collections
         self.precond_pin_count_flag = bool(precond_pin_count_flag)
         self.use_net_weights = bool(use_net_weights)
+        self.star_runtime_getter = star_runtime_getter
         self.iteration = 0
         self.alpha = 1.0
         self.best_overflow = None
         self.overflows = []
+        self._last_d_metric_base = None
+        self._last_d_metric_timing_x = None
+        self._last_d_metric_timing_y = None
         if len(placedb.regions) > 0:
             self.movablenode2fence_region_map_clamp = (
                 data_collections.node2fence_region_map[: placedb.num_movable_nodes]
@@ -822,12 +826,66 @@ class PreconditionOp:
 
         precond = density_precond
         if self.use_net_weights:
-            precond = precond + self.op_collections.pws_op(
+            pin_stiffness = self.op_collections.pws_op(
                 self.data_collections.net_weights
             )
-        elif self.precond_pin_count_flag:
-            # Original DreamPlace pin counts, including zero counts for fillers.
-            precond = precond + self.data_collections.num_pins_in_nodes
+            precond = precond + pin_stiffness
+        else:
+            pin_stiffness = self.data_collections.num_pins_in_nodes
+            if self.precond_pin_count_flag:
+                # Original DreamPlace pin counts, including zero counts for fillers.
+                precond = precond + pin_stiffness
+        star_rt = (
+            self.star_runtime_getter() if callable(self.star_runtime_getter) else None
+        )
+        if (
+            star_rt is not None
+            and star_rt.curvature_precondition_enabled
+            and (
+                star_rt.is_objective_active
+                or getattr(star_rt, "is_macro_field_active", False)
+            )
+        ):
+            curv_2n = star_rt.effective_curvature_2n(
+                fallback_pos=self.data_collections.pos[0],
+                fallback_alpha=1.0,
+            )
+            if curv_2n is not None:
+                timing_curv_2n = getattr(star_rt, "last_timing_curvature_2n", None)
+                if timing_curv_2n is None:
+                    timing_curv_2n = curv_2n
+                d_metric_base = (
+                    density_precond
+                    + pin_stiffness.to(
+                        device=density_precond.device, dtype=density_precond.dtype
+                    )
+                ).clamp(min=1.0)
+                self._last_d_metric_base = d_metric_base.detach()
+                self._last_d_metric_timing_x = (
+                    d_metric_base
+                    + timing_curv_2n[0].to(device=precond.device, dtype=precond.dtype)
+                ).clamp(min=1.0).detach()
+                self._last_d_metric_timing_y = (
+                    d_metric_base
+                    + timing_curv_2n[1].to(device=precond.device, dtype=precond.dtype)
+                ).clamp(min=1.0).detach()
+                precond_2n = (
+                    precond.unsqueeze(0)
+                    + curv_2n.to(device=precond.device, dtype=precond.dtype)
+                ).clamp(min=1.0)
+                try:
+                    star_rt.record_precondition_diagonal(
+                        precond_2n,
+                        base_1n=precond,
+                        curv_2n=curv_2n,
+                    )
+                except TypeError:
+                    star_rt.record_precondition_diagonal(precond_2n)
+                return precond_2n
+        if star_rt is not None and getattr(star_rt, "curvature_precondition_enabled", False):
+            record_base_fn = getattr(star_rt, "record_precondition_base_only", None)
+            if callable(record_base_fn):
+                record_base_fn(precond)
         return precond.clamp(min=1.0)
 
     def _apply_precondition_to_grad(
@@ -839,8 +897,12 @@ class PreconditionOp:
             + self.placedb.num_movable_nodes : self.placedb.num_nodes
             + self.placedb.num_physical_nodes
         ] = 0
-        grad[0 : self.placedb.num_nodes].div_(precond)
-        grad[self.placedb.num_nodes : self.placedb.num_nodes * 2].div_(precond)
+        if precond.dim() == 2:
+            grad[0 : self.placedb.num_nodes].div_(precond[0])
+            grad[self.placedb.num_nodes : self.placedb.num_nodes * 2].div_(precond[1])
+        else:
+            grad[0 : self.placedb.num_nodes].div_(precond)
+            grad[self.placedb.num_nodes : self.placedb.num_nodes * 2].div_(precond)
         # stop gradients for terminated electric field
         if update_mask is not None:
             grad2 = grad.view(2, -1)
@@ -1084,7 +1146,11 @@ class PlaceObj(nn.Module):
                 if callable(size_parameter_getter)
                 else getattr(self.data_collections, "size_logits", None)
             )
-            if size_parameter is not None:
+            surrogate_mode = str(
+                getattr(params, "timing_surrogate_mode", "auto") or "auto"
+            ).lower()
+            self._cell_modeling_enabled_for_sizing = size_parameter is not None
+            if size_parameter is not None and surrogate_mode != "lut_only":
                 self.op_collections.cell_modeling_op = CellModeling(self.data_collections)
             self.op_collections.timing_propagation_op = (
                 self.build_timing_propagation_op(params, placedb, self.data_collections)
@@ -1108,6 +1174,17 @@ class PlaceObj(nn.Module):
         self.op_collections.precondition_op = self.build_precondition(
             params, placedb, self.data_collections, self.op_collections
         )
+        self.star_tdp_runtime = None
+        if self._should_build_star_tdp_runtime(params, placedb):
+            from dreamplace.flows.gp.star_tdp_runtime import StarTdpRuntime
+
+            self.star_tdp_runtime = StarTdpRuntime(
+                model=self,
+                params=params,
+                placedb=placedb,
+                data_collections=self.data_collections,
+                op_collections=self.op_collections,
+            )
         self.op_collections.noise_op = self.build_noise(
             params, placedb, self.data_collections
         )
@@ -1236,7 +1313,7 @@ class PlaceObj(nn.Module):
             warmup_size_interpolated_pin_native_cache(self.data_collections)
 
     def _timing_objective_lane(self):
-        return getattr(self.params, "timing_objective_lane", "timing_slew_cap")
+        return getattr(self.params, "timing_objective_lane", "timing_only")
 
     def _timing_objective_lane_enabled_terms(self):
         lane = self._timing_objective_lane()
@@ -1519,6 +1596,17 @@ class PlaceObj(nn.Module):
             return full_wns, full_tns, metadata
         return selector(full_wns, full_tns)
 
+    def _timing_grad_balance_scales_term(self, term_name):
+        if term_name == "timing":
+            return True
+        summary = getattr(self, "timing_grad_balance_summary", None) or {}
+        enabled = summary.get("enabled_terms")
+        if enabled is not None:
+            return term_name in enabled
+        if getattr(self.params, "placement_sizing_mode", "place_only") != "size_only":
+            return term_name in self._timing_objective_lane_enabled_terms()
+        return False
+
     def _timing_objective_term_components(self, wns, tns):
         enabled_terms = self._timing_objective_lane_enabled_terms()
         effective_wns, effective_tns, pruning_metadata = (
@@ -1534,12 +1622,12 @@ class PlaceObj(nn.Module):
             "slew": self._timing_objective_term_tensor(
                 "last_total_slew_violation_tensor",
                 "last_total_slew_violation",
-                default_scale=1.0,
+                default_scale=1000.0,
             ),
             "cap": self._timing_objective_term_tensor(
                 "last_total_cap_violation_tensor",
                 "last_total_cap_violation",
-                default_scale=1.0,
+                default_scale=1000.0,
             ),
             "leakage": self._timing_objective_term_tensor(
                 "last_total_leakage_tensor",
@@ -1554,8 +1642,9 @@ class PlaceObj(nn.Module):
             "cap": None if timing_op is None else getattr(timing_op, "last_total_cap_violation", None),
             "leakage": None if timing_op is None else getattr(timing_op, "last_total_leakage", None),
         }
-        weights = {
-            "timing": float(getattr(self, "timing_grad_balance_weight", 1.0)),
+        balance_weight = float(getattr(self, "timing_grad_balance_weight", 1.0))
+        base_weights = {
+            "timing": 1.0,
             "slew": float(
                 getattr(
                     self,
@@ -1577,6 +1666,14 @@ class PlaceObj(nn.Module):
                     getattr(self.params, "timing_leakage_weight", 0.0),
                 )
             ),
+        }
+        weights = {
+            name: (
+                value * balance_weight
+                if self._timing_grad_balance_scales_term(name)
+                else value
+            )
+            for name, value in base_weights.items()
         }
         weighted_terms = {}
         total_loss = zero
@@ -1607,8 +1704,8 @@ class PlaceObj(nn.Module):
             "enabled_terms": list(enabled_terms),
             "units": {
                 "timing": "loss_proxy",
-                "slew": "ns",
-                "cap": "pF",
+                "slew": "ps",
+                "cap": "fF",
                 "leakage": "mW",
             },
             "weights": {name: float(value) for name, value in weights.items()},
@@ -1623,13 +1720,12 @@ class PlaceObj(nn.Module):
             "critical_endpoint_pruning": pruning_metadata,
             "detached_zero_terms": detached_zero_terms,
         }
+        raw_slew = self.last_timing_objective_terms["raw_terms"]["slew"]
+        raw_cap = self.last_timing_objective_terms["raw_terms"]["cap"]
         self.last_timing_objective_terms["report_aligned_terms"] = {
-            "slew_violation_ns": self.last_timing_objective_terms["raw_terms"]["slew"],
-            "cap_violation_fF": (
-                None
-                if self.last_timing_objective_terms["raw_terms"]["cap"] is None
-                else self.last_timing_objective_terms["raw_terms"]["cap"] * 1000.0
-            ),
+            "slew_violation_ns": None if raw_slew is None else raw_slew / 1000.0,
+            "cap_violation_pF": None if raw_cap is None else raw_cap / 1000.0,
+            "cap_violation_fF": raw_cap,
             "leakage_mW": self.last_timing_objective_terms["raw_terms"]["leakage"],
         }
         hold_term = zero
@@ -1768,6 +1864,7 @@ class PlaceObj(nn.Module):
                 target_ratio=target_ratio,
             )
         else:
+            self.timing_grad_balance_weight = 1.0
             wirelength = self.op_collections.wirelength_op(pos)
             wirelength_grad = torch.autograd.grad(
                 wirelength,
@@ -1807,6 +1904,8 @@ class PlaceObj(nn.Module):
         result.update(
             iteration=int(iteration),
             overflow=float(torch.as_tensor(overflow).detach().cpu().item()),
+            lane=self._timing_objective_lane(),
+            enabled_terms=list(self._timing_objective_lane_enabled_terms()),
             timing_wns_coeff=float(self.timing_wns_coeff),
             timing_tns_coeff=float(self.timing_tns_coeff),
         )
@@ -2145,6 +2244,22 @@ class PlaceObj(nn.Module):
     def _is_size_only_mode(self):
         return getattr(self.params, "placement_sizing_mode", "place_only") == "size_only"
 
+    @staticmethod
+    def _should_build_star_tdp_runtime(params, placedb):
+        from dreamplace.flows.gp.timing_carriers import (
+            diff_tdp_enabled,
+            diff_tdp_uses_star_pin_pair,
+        )
+
+        return (
+            diff_tdp_enabled(params)
+            and bool(getattr(params, "global_place_flag", 1))
+            and not bool(getattr(params, "build_model_only", False))
+            and str(getattr(params, "flow_kind", "placement") or "placement") != "sta"
+            and getattr(placedb, "gr_sizing", None) is None
+            and diff_tdp_uses_star_pin_pair(params)
+        )
+
     def _use_targeted_sizing_backward(self):
         flag = getattr(self.params, "targeted_sizing_backward", False)
         env_flag = os.environ.get("AIMP_TARGETED_SIZING_BACKWARD", "")
@@ -2467,6 +2582,25 @@ class PlaceObj(nn.Module):
             self._virtual_cell_density_view._density_ops.clear()
         if self._candidate_density_view is not None:
             self._candidate_density_view._density_ops.clear()
+        if getattr(self, "star_tdp_runtime", None) is not None:
+            self.star_tdp_runtime.invalidate_after_geometry_or_sizing_change()
+
+    def refresh_star_timing_snapshot(
+        self,
+        pos,
+        *,
+        iteration,
+        overflow=None,
+        topology_already_rebuilt=False,
+    ):
+        if getattr(self, "star_tdp_runtime", None) is None:
+            raise RuntimeError("StarTdpRuntime is not initialized on PlaceObj")
+        return self.star_tdp_runtime.refresh_snapshot(
+            pos,
+            iteration=iteration,
+            overflow=overflow,
+            topology_already_rebuilt=topology_already_rebuilt,
+        )
 
     @staticmethod
     def _telemetry_scalar(value):
@@ -2755,6 +2889,14 @@ class PlaceObj(nn.Module):
 
         if (
             (not self._is_size_only_mode())
+            and getattr(self, "star_tdp_runtime", None) is not None
+        ):
+            star_term = self.star_tdp_runtime.objective(objective_pos)
+            if star_term is not None:
+                result = torch.add(result, star_term)
+
+        if (
+            (not self._is_size_only_mode())
             and self.params.enable_net_weighting
             and self.params.net_weighting_scheme == "pin2pin"
         ):
@@ -2978,9 +3120,9 @@ class PlaceObj(nn.Module):
             groups = None
         pin_sizes = size_var[pin_nodes]
         pin_vts = vt_var[pin_nodes]
-        sized_pin_cap = torch.zeros_like(pin_sizes)
-        sized_pin_rcap = torch.zeros_like(pin_sizes)
-        sized_pin_fcap = torch.zeros_like(pin_sizes)
+        sized_pin_cap = torch.zeros_like(pin_sizes, dtype=pin_cap_base.dtype)
+        sized_pin_rcap = torch.zeros_like(pin_sizes, dtype=pin_rcap_base.dtype)
+        sized_pin_fcap = torch.zeros_like(pin_sizes, dtype=pin_fcap_base.dtype)
         size_temperature = 4.0
         debug_target_pins = (
             set() if self._production_fast_loop_enabled() else {"FE_DBTC149_n_2224:A"}
@@ -6074,6 +6216,7 @@ class PlaceObj(nn.Module):
                 sparse_runtime = getattr(timing_op, "_sparse_runtime", None)
                 if sparse_runtime is not None:
                     sparse_runtime.timing._active_discrete_action_context = None
+            self._active_timing_surrogate_mode = None
 
     def _timing_obj_impl(
         self,
@@ -6395,91 +6538,91 @@ class PlaceObj(nn.Module):
             if self._should_copy_pin_slack_after_timing(timing_artifact_enabled):
                 self.data_collections.pin_slack = timing_op.get_pin_slack()
             _profile_add("pin_slack_get_ms", profile_stage_start)
+            profile_stage_start = _profile_now()
+            if timing_artifact_enabled:
+                self._write_critical_endpoint_pruning_artifact(
+                    iteration=self.invoke_timing_count,
+                )
+            elif self._production_fast_loop_enabled():
+                profile_record["artifact_write_skipped_by_fast_loop"] = True
+            _profile_add("critical_endpoint_artifact_ms", profile_stage_start)
+            profile_stage_start = _profile_now()
+            if timing_artifact_enabled:
+                self._write_timing_propagation_profile_artifact()
+            _profile_add("timing_profile_artifact_ms", profile_stage_start)
+            profile_stage_start = _profile_now()
+            if timing_artifact_enabled:
+                self._write_timing_propagation_parity_artifact()
+            _profile_add("timing_parity_artifact_ms", profile_stage_start)
+            profile_stage_start = _profile_now()
+            aux_slew_pin_mask = None
+            aux_cap_pin_mask = None
+            if self._should_use_active_cone_aux_pin_masks():
+                aux_slew_pin_mask, aux_cap_pin_mask, aux_mask_metadata = (
+                    self._active_cone_aux_pin_masks(timing_op)
+                )
+                profile_record["active_cone_aux_pin_mask"].update(aux_mask_metadata)
+            aux_limit_pin_mask = None
+            if aux_slew_pin_mask is not None and aux_cap_pin_mask is not None:
+                aux_limit_pin_mask = aux_slew_pin_mask | aux_cap_pin_mask.to(
+                    device=aux_slew_pin_mask.device
+                )
+            reuse_zero_slew_aux = self._should_reuse_zero_slew_aux(timing_op)
+            profile_record["zero_slew_aux_reuse"]["applied"] = bool(reuse_zero_slew_aux)
+            if timing_profile_enabled:
+                self.data_collections._size_interpolated_pin_profile_enabled = True
+            if self._current_timing_surrogate_mode() == "lut_only":
+                # A legal master owns exact limits. Soft VT probabilities belong
+                # to the surrogate; beta supplies the action interpolation below.
+                slew_limit_table = self.data_collections.flat_lib_pin_slew_limit
+                cap_limit_table = self.data_collections.flat_lib_pin_cap_limit
+                slew_limits = (
+                    None
+                    if reuse_zero_slew_aux
+                    else slew_limit_table[
+                        self.pin2libpin_flat_ids.to(device=slew_limit_table.device)
+                    ]
+                )
+                cap_limits = cap_limit_table[
+                    self.pin2libpin_flat_ids.to(device=cap_limit_table.device)
+                ]
+            elif reuse_zero_slew_aux:
+                cap_limits = compute_size_interpolated_pin_properties(
+                    self.data_collections,
+                    [self.data_collections.flat_lib_pin_cap_limit],
+                    pin_mask=self._zero_slew_reuse_cap_limit_interpolation_pin_mask(
+                        aux_cap_pin_mask,
+                        self.output_pin_mask,
+                    ),
+                )[0]
+                slew_limits = None
+            else:
+                slew_limits, cap_limits = compute_size_interpolated_pin_properties(
+                    self.data_collections,
+                    [
+                        self.data_collections.flat_lib_pin_slew_limit,
+                        self.data_collections.flat_lib_pin_cap_limit,
+                    ],
+                    pin_mask=aux_limit_pin_mask,
+                )
+                if slew_limits is None:
+                    slew_limit_table = self.data_collections.flat_lib_pin_slew_limit
+                    slew_limits = slew_limit_table[
+                        self.pin2libpin_flat_ids.to(device=slew_limit_table.device)
+                    ]
+            if cap_limits is None:
+                cap_limit_table = self.data_collections.flat_lib_pin_cap_limit
+                cap_limits = cap_limit_table[
+                    self.pin2libpin_flat_ids.to(device=cap_limit_table.device)
+                ]
+            slew_limits, cap_limits = self._apply_discrete_action_limits(
+                slew_limits,
+                cap_limits,
+                self.data_collections,
+            )
+            _profile_add("slew_cap_limit_ms", profile_stage_start)
         finally:
             self._active_timing_surrogate_mode = None
-        profile_stage_start = _profile_now()
-        if timing_artifact_enabled:
-            self._write_critical_endpoint_pruning_artifact(
-                iteration=self.invoke_timing_count,
-            )
-        elif self._production_fast_loop_enabled():
-            profile_record["artifact_write_skipped_by_fast_loop"] = True
-        _profile_add("critical_endpoint_artifact_ms", profile_stage_start)
-        profile_stage_start = _profile_now()
-        if timing_artifact_enabled:
-            self._write_timing_propagation_profile_artifact()
-        _profile_add("timing_profile_artifact_ms", profile_stage_start)
-        profile_stage_start = _profile_now()
-        if timing_artifact_enabled:
-            self._write_timing_propagation_parity_artifact()
-        _profile_add("timing_parity_artifact_ms", profile_stage_start)
-        profile_stage_start = _profile_now()
-        aux_slew_pin_mask = None
-        aux_cap_pin_mask = None
-        if self._should_use_active_cone_aux_pin_masks():
-            aux_slew_pin_mask, aux_cap_pin_mask, aux_mask_metadata = (
-                self._active_cone_aux_pin_masks(timing_op)
-            )
-            profile_record["active_cone_aux_pin_mask"].update(aux_mask_metadata)
-        aux_limit_pin_mask = None
-        if aux_slew_pin_mask is not None and aux_cap_pin_mask is not None:
-            aux_limit_pin_mask = aux_slew_pin_mask | aux_cap_pin_mask.to(
-                device=aux_slew_pin_mask.device
-            )
-        reuse_zero_slew_aux = self._should_reuse_zero_slew_aux(timing_op)
-        profile_record["zero_slew_aux_reuse"]["applied"] = bool(reuse_zero_slew_aux)
-        if timing_profile_enabled:
-            self.data_collections._size_interpolated_pin_profile_enabled = True
-        if self._current_timing_surrogate_mode() == "lut_only":
-            # A legal master owns exact limits. Soft VT probabilities belong
-            # to the surrogate; beta supplies the action interpolation below.
-            slew_limit_table = self.data_collections.flat_lib_pin_slew_limit
-            cap_limit_table = self.data_collections.flat_lib_pin_cap_limit
-            slew_limits = (
-                None
-                if reuse_zero_slew_aux
-                else slew_limit_table[
-                    self.pin2libpin_flat_ids.to(device=slew_limit_table.device)
-                ]
-            )
-            cap_limits = cap_limit_table[
-                self.pin2libpin_flat_ids.to(device=cap_limit_table.device)
-            ]
-        elif reuse_zero_slew_aux:
-            cap_limits = compute_size_interpolated_pin_properties(
-                self.data_collections,
-                [self.data_collections.flat_lib_pin_cap_limit],
-                pin_mask=self._zero_slew_reuse_cap_limit_interpolation_pin_mask(
-                    aux_cap_pin_mask,
-                    self.output_pin_mask,
-                ),
-            )[0]
-            slew_limits = None
-        else:
-            slew_limits, cap_limits = compute_size_interpolated_pin_properties(
-                self.data_collections,
-                [
-                    self.data_collections.flat_lib_pin_slew_limit,
-                    self.data_collections.flat_lib_pin_cap_limit,
-                ],
-                pin_mask=aux_limit_pin_mask,
-            )
-            if slew_limits is None:
-                slew_limit_table = self.data_collections.flat_lib_pin_slew_limit
-                slew_limits = slew_limit_table[
-                    self.pin2libpin_flat_ids.to(device=slew_limit_table.device)
-                ]
-        if cap_limits is None:
-            cap_limit_table = self.data_collections.flat_lib_pin_cap_limit
-            cap_limits = cap_limit_table[
-                self.pin2libpin_flat_ids.to(device=cap_limit_table.device)
-            ]
-        slew_limits, cap_limits = self._apply_discrete_action_limits(
-            slew_limits,
-            cap_limits,
-            self.data_collections,
-        )
-        _profile_add("slew_cap_limit_ms", profile_stage_start)
         if timing_profile_enabled:
             profile_record["size_interpolated_pin_profile"] = dict(
                 getattr(
@@ -6500,8 +6643,9 @@ class PlaceObj(nn.Module):
                 aux_slew_pin_mask if aux_slew_pin_mask is not None else self.inst_pins_mask,
                 slew_limits,
             )
-            timing_op.last_total_slew_violation = float(
-                timing_op.last_total_slew_violation_tensor.detach().item()
+            timing_op.last_total_slew_violation = (
+                float(timing_op.last_total_slew_violation_tensor.detach().item())
+                / 1000.0
             )
         _profile_add("slew_violation_ms", profile_stage_start)
         profile_stage_start = _profile_now()
@@ -6509,8 +6653,9 @@ class PlaceObj(nn.Module):
             aux_cap_pin_mask if aux_cap_pin_mask is not None else self.output_pin_mask,
             cap_limits,
         )
-        timing_op.last_total_cap_violation = float(
-            timing_op.last_total_cap_violation_tensor.detach().item() * 1000.0
+        timing_op.last_total_cap_violation = (
+            float(timing_op.last_total_cap_violation_tensor.detach().item())
+            / 1000.0
         )
         _profile_add("cap_violation_ms", profile_stage_start)
         profile_stage_start = _profile_now()
@@ -10233,6 +10378,16 @@ class PlaceObj(nn.Module):
         )
         return rc_timing
 
+    def _ensure_cell_modeling_op(self):
+        existing = getattr(self.op_collections, "cell_modeling_op", None)
+        if existing is not None:
+            return existing
+        if not getattr(self, "_cell_modeling_enabled_for_sizing", False):
+            return None
+        cell_modeling_op = CellModeling(self.data_collections)
+        self.op_collections.cell_modeling_op = cell_modeling_op
+        return cell_modeling_op
+
     def build_timing_propagation_op(self, params, placedb, data_collections):
 
         write_crash_stage_marker(
@@ -10285,6 +10440,9 @@ class PlaceObj(nn.Module):
                 and len(placedb.backend_endpoint_fSlew) > 0 else None
             ),
             sparse_timing_view=getattr(data_collections, "sparse_timing_view", None),
+            recovery_rat_is_capture_deadline=bool(getattr(
+                getattr(placedb, "pydb", None), "recovery_rat_is_capture_deadline", False
+            )),
             pin_pair_arc_keys=data_collections.pin_pair_arc_keys,
             flat_pin_pair_arc_start=data_collections.flat_pin_pair_arc_start,
             flat_pin_pair_arc_indices=data_collections.flat_pin_pair_arc_indices,
@@ -10305,6 +10463,11 @@ class PlaceObj(nn.Module):
             inst_topo_start=getattr(data_collections, "inst_topo_start", None),
             inst_topo_ids=getattr(data_collections, "inst_topo_ids", None),
             cell_modeling_op=self.op_collections.cell_modeling_op,
+            cell_modeling_factory=(
+                self._ensure_cell_modeling_op
+                if getattr(self, "_cell_modeling_enabled_for_sizing", False)
+                else None
+            ),
             lib_arc_offsets=(
                 data_collections.flat_libarc_info[:, 3].long()
                 if getattr(data_collections, "flat_libarc_info", None) is not None
@@ -10366,7 +10529,7 @@ class PlaceObj(nn.Module):
             hold_timing_data=getattr(placedb, "hold_timing_data", None),
         )
         if getattr(placedb, "hold_timing_data", None) is not None:
-            from dreamplace.flows.hold_rc import HoldRC
+            from dreamplace.flows.gp.hold_timing import HoldRC
 
             timing_propagation_op.hold_rc = HoldRC(placedb.hold_timing_data)
         write_crash_stage_marker(
@@ -10928,7 +11091,7 @@ class PlaceObj(nn.Module):
         LOWER_PCOF = params.RePlAce_LOWER_PCOF
         UPPER_PCOF = params.RePlAce_UPPER_PCOF
         timing_coeff_growth_factor = float(
-            getattr(params, "timing_coeff_growth_factor", 1.01)
+            getattr(params, "timing_coeff_growth_factor", 1.0)
         )
         if not math.isfinite(timing_coeff_growth_factor) or timing_coeff_growth_factor <= 0:
             raise ValueError("timing_coeff_growth_factor must be a positive finite float")
@@ -11117,6 +11280,7 @@ class PlaceObj(nn.Module):
             placedb, data_collections, op_collections,
             precond_pin_count_flag=pin_count_flag,
             use_net_weights=not pin_count_flag,
+            star_runtime_getter=lambda: getattr(self, "star_tdp_runtime", None),
         )
 
     def build_route_utilization_map(self, params, placedb, data_collections):

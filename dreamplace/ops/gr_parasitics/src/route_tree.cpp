@@ -1,3 +1,5 @@
+#include "spef_tree.h"
+
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -325,4 +327,16 @@ py::dict prepareTree(const py::dict& route, const py::dict& pinNames, const py::
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     module.def("prepare_tree", &prepareTree, "Prepare GR RC trees with estimated pin access and recorded loop reduction");
+    module.def(
+        "prepare_spef_tree",
+        &gr_parasitics::prepareSpefTree,
+        py::arg("spef_path"),
+        py::arg("pin_names"),
+        py::arg("net_names"),
+        py::arg("py_pin_net"),
+        py::arg("driver_pins"),
+        py::arg("eligible_nets"),
+        py::arg("coupling_cap_scale") = 1.0,
+        py::arg("reconcile_lumped_cap") = false,
+        "Prepare SPEF RC trees with series-parallel ladder and shortest-resistance spanning tree reduction");
 }

@@ -55,14 +55,27 @@ from dreamplace.macroPlaceDB import MacroPlaceDB as PlaceDB
 import dreamplace.NonLinearPlace as NonLinearPlace
 from dreamplace.ops.openroad_handoff import launcher as handoff_launcher
 import dreamplace.placer_cli as placer_cli
-from dreamplace.flows.optimization_flow import run_optimization_flow
-from dreamplace.flows.flow_config import (
+from dreamplace.placer_cli import run_optimization_flow
+from dreamplace.flows.config.profiles import (
     FlowKind,
     STAGED_JOINT_SIZING_ITERATIONS,
     STAGED_JOINT_SIZING_STAGE_DEFAULTS,
     STAGED_JOINT_TDP_ITERATIONS,
     STAGED_JOINT_TDP_STAGE_DEFAULTS,
 )
+
+
+def create_session(engine):
+    """Create mid-placement continuation session without importing baseline repair unless enabled."""
+    from dreamplace.ops.placeio_ecc.export_options import resolve_flag
+
+    if not resolve_flag(engine.params, "repair_buffering_midplace_enable"):
+        from dreamplace.flows.discrete.buffer_commit import create_direct_commit_session
+
+        return create_direct_commit_session(engine)
+    from dreamplace.flows.baselines.midplace_repair import MidplaceRepairSession
+
+    return MidplaceRepairSession(engine)
 
 
 def _load_placeio_openroad():
@@ -209,9 +222,13 @@ class PlacementEngine:
         tt = time.time()
         self.placedb.init_db(self.params)
         if self.params.timing_rc_mode == "gr":
-            from dreamplace.flows.gr_sizing import prepare_gr_sizing
+            from dreamplace.flows.post_gp.rc_sizing import prepare_gr_sizing
 
             prepare_gr_sizing(self.params, self.placedb)
+        elif self.params.timing_rc_mode == "spef":
+            from dreamplace.flows.post_gp.rc_sizing import prepare_spef_sizing
+
+            prepare_spef_sizing(self.params, self.placedb)
         else:
             self.placedb.gr_sizing = None
         logging.info(
@@ -460,8 +477,13 @@ class PlacementEngine:
             )
         if not reuse_existing or self.placer is None:
             timer = None
-            self.placer = NonLinearPlace.NonLinearPlace(
-                self.params, self.placedb, timer)
+            midplace = getattr(self, "midplace_repair", None)
+            if midplace is None:
+                self.placer = NonLinearPlace.NonLinearPlace(self.params, self.placedb, timer)
+            else:
+                self.placer = midplace.build_placer(
+                    lambda: NonLinearPlace.NonLinearPlace(self.params, self.placedb, timer)
+                )
             logging.info(
                 "non-linear placement initialization takes %.2f seconds"
                 % (time.time() - tt)
@@ -976,7 +998,9 @@ class PlacementEngine:
                     output_dir=output_dir,
                 )
             elif getattr(request, "placement_node_x", None) is not None:
-                from dreamplace.flows.joint_physical_actions import commit_joint_physical_actions
+                from dreamplace.flows.baselines.joint_runtime import (
+                    commit_joint_physical_actions,
+                )
 
                 commit_summary = commit_joint_physical_actions(
                     self, request, mutation_backend=mutation_backend, output_dir=output_dir,
@@ -2293,7 +2317,7 @@ class PlacementEngine:
         if not bool(getattr(self.params, "joint_post_commit_continue", True)):
             logging.info("joint post-commit continuation disabled; keeping safe-stop result")
             return None
-        from dreamplace.flows.committed_topology import refresh_committed_topology
+        from dreamplace.flows.s5b1.committed_topology import refresh_committed_topology
 
         return refresh_committed_topology(self, control_result)
 
@@ -2977,6 +3001,12 @@ class PlacementEngine:
                 logging.info("Macro placement skipped: %s", result)
                 return result
         self.setup_placedb()
+        from dreamplace.flows.gp.continuation import (
+            MidplaceBoundedStop,
+            MidplaceRestart,
+        )
+
+        self.midplace_repair = create_session(self)
         if self._is_segment_direct_joint() and self._joint_buffer_outer_iterations() > 1:
             if int(
                 getattr(self.params, "joint_segment_virtual_window_steps", 0) or 0
@@ -2987,21 +3017,41 @@ class PlacementEngine:
         outer_window_index = 0
         post_commit_result = None
         while True:
-            if outer_window_index == 0:
-                self.place()
-            else:
-                self.place(reuse_existing=True)
+            try:
+                if outer_window_index == 0:
+                    self.place()
+                else:
+                    self.place(reuse_existing=True)
+            except MidplaceRestart:
+                self.placer = None
+                continue
+            except MidplaceBoundedStop:
+                self.last_run_result = dict(self.midplace_repair.record)
+                return self.last_run_result
+            except Exception as error:
+                if self.midplace_repair is not None:
+                    self.midplace_repair.fail(error)
+                raise
             placement_debug = dict(
                 getattr(self.placer, "last_placement_debug_summary", None) or {}
             )
             if placement_debug.get("status") == "failed":
+                if self.midplace_repair is not None:
+                    self.midplace_repair.fail(RuntimeError(placement_debug["stop_reason"]))
                 self.last_run_result = placement_debug
                 return self.last_run_result
 
+            if self.midplace_repair is not None:
+                midplace_result = self.midplace_repair.placement_finished()
+                if self.midplace_repair.config.bounded_steps:
+                    self.last_run_result = midplace_result
+                    return self.last_run_result
+
             alternating = self.placer.alternating_discrete
             if alternating is not None:
-                from dreamplace.flows.committed_topology import (
-                    MaterializationAreaPolicy, finalize_discrete_window,
+                from dreamplace.flows.s5b1.committed_topology import (
+                    MaterializationAreaPolicy,
+                    finalize_discrete_window,
                 )
 
                 result = finalize_discrete_window(
@@ -3013,8 +3063,10 @@ class PlacementEngine:
                 alternating._write_summary(status="completed")
                 return result
             if bool(getattr(self.params, "timing_opt_enabled", False)):
-                from dreamplace.flows.committed_topology import finalize_inflation_s5b1
+                from dreamplace.flows.s5b1.committed_topology import finalize_inflation_s5b1
 
+                if self.midplace_repair is not None:
+                    return self.midplace_repair.finish_terminal(lambda: finalize_inflation_s5b1(self))
                 return finalize_inflation_s5b1(self)
             control_result = self._post_commit_control_result()
             outer_commit_result = self._execute_pending_joint_buffer_commit(
@@ -3215,7 +3267,7 @@ class PlacementEngine:
             self.params.flow_kind == FlowKind.SIZING.value
             and not bool(getattr(self.params, "diff_sizing_terminal_gr_sta_enabled", 0))
         ):
-            from dreamplace.flows.gr_sizing import finalize_gr_sizing
+            from dreamplace.flows.post_gp.rc_sizing import finalize_gr_sizing
 
             final_ppa = finalize_gr_sizing(self, final_ppa)
         elif self.params.timing_rc_mode == "gr":
@@ -3233,13 +3285,13 @@ class PlacementEngine:
 
     def run_diff_opt(self):
         """Execute the standalone placement-parasitic timing flow."""
-        from dreamplace.flows.diff_opt import run_diff_opt
+        from dreamplace.flows.post_gp.diff_opt import run_diff_opt
 
         return run_diff_opt(self)
 
     def run_diff_sizing(self):
         """Execute standalone GR sizing with the opt-in action gradient."""
-        from dreamplace.flows.diff_sizing import run_diff_sizing
+        from dreamplace.flows.post_gp.diff_sizing import run_diff_sizing
 
         return run_diff_sizing(self)
 

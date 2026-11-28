@@ -1,8 +1,8 @@
 from types import SimpleNamespace
 
 import pytest
-from dreamplace.flows.diff_opt import DiffOptController
-from dreamplace.flows.diff_opt_spec import parse_diff_opt_flows
+from dreamplace.flows.post_gp.diff_opt import DiffOptController
+from dreamplace.flows.config.specs import parse_diff_opt_flows
 
 
 def test_diff_opt_default_modes_are_step_local():
@@ -76,8 +76,8 @@ def test_diff_opt_buffer_phase_rebuilds_full_domain_and_binds_timing_loss():
 
 def test_diff_opt_each_phase_uses_its_four_terms_and_restores_model_state(monkeypatch, tmp_path):
     import torch
-    from dreamplace.flows import diff_opt
-    from dreamplace.flows.discrete_timing_owner import DiscreteTimingOwner
+    from dreamplace.flows.post_gp import diff_opt
+    from dreamplace.flows.discrete.owner import DiscreteTimingOwner
     from dreamplace.PlaceObj import PlaceObj
 
     params = SimpleNamespace(
@@ -218,3 +218,240 @@ def test_diff_opt_each_phase_uses_its_four_terms_and_restores_model_state(monkey
             hashlib.sha256(Path(phase["trace_path"]).read_bytes()).hexdigest()
             == phase["trace_sha256"]
         )
+
+
+def test_diff_opt_direct_b1_commits_to_ecc_carrier_rebuilds_for_next_sz_and_aggregates(
+    ecc_schema3_carrier_harness, monkeypatch, tmp_path
+):
+    import torch
+    from dreamplace.flows.post_gp import diff_opt
+    from dreamplace.ops.buffer_insertion.buffering_lane import BufferingOptimizationLane
+    from dreamplace.ops.buffer_insertion.optimization_state import (
+        build_typed_discrete_candidate_state,
+    )
+    from dreamplace.ops.placeio_ecc.timing_carrier import CommittedTimingPyDB
+    from dreamplace.PlaceObj import PlaceObj
+
+    placedb = ecc_schema3_carrier_harness.placedb
+    rawdb = ecc_schema3_carrier_harness.rawdb
+    params = SimpleNamespace(
+        place_io_engine="ecc",
+        placement_sizing_mode="place_only",
+        timing_objective_lane="timing_only",
+        differentiable_timing_obj=0,
+        timing_opt_sizing_rounds=1,
+        buffering_continuous_steps=1,
+        diff_optimization_mode="joint",
+        enable_relaxed_buffer_timing=False,
+        cell_padding_x=0.0,
+        scale_factor=1.0,
+        shift_factor=(0.0, 0.0),
+        result_dir=str(tmp_path),
+    )
+
+    table = ecc_schema3_carrier_harness.make_drive_type_table(tmp_path)
+
+    def _make_runtime():
+        n_mov = placedb.num_movable_nodes
+        pydb = placedb.pydb
+        inst_cell_id = torch.tensor(
+            [
+                -1
+                if int(m) < 0
+                else int(pydb.main_id_2_cell_id_start[int(m)])
+                + int(pydb.inst_libcell_offset[i])
+                for i, m in enumerate(pydb.inst_main_id)
+            ],
+            dtype=torch.long,
+        )
+        data = SimpleNamespace(
+            sizing_parameterization="real_size",
+            flat_libcell_info=torch.tensor([[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 2.0, 0.0]]),
+            flat_libcell_leakage=torch.tensor([1.0, 2.0]),
+            flat_libcell_width=torch.tensor([1000.0, 2000.0]),
+            flat_libcell_height=torch.tensor([1000.0, 1000.0]),
+            inst_size_lower=torch.ones(n_mov),
+            inst_size_upper=torch.full((n_mov,), 2.0),
+            inst_vt_mask=torch.ones((n_mov, 1), dtype=torch.bool),
+            inst_is_sizeable=torch.ones(n_mov, dtype=torch.bool),
+            inst_cell_id=inst_cell_id,
+            real_size=torch.nn.Parameter(torch.ones(n_mov), requires_grad=False),
+            vt_logits=torch.nn.Parameter(torch.zeros(n_mov, 1), requires_grad=False),
+            node_size_x=torch.as_tensor(placedb.node_size_x, dtype=torch.float64),
+            node_size_y=torch.as_tensor(placedb.node_size_y, dtype=torch.float64),
+            original_node_size_x=torch.as_tensor(placedb.node_size_x, dtype=torch.float64),
+            original_node_size_y=torch.as_tensor(placedb.node_size_y, dtype=torch.float64),
+            node_areas=torch.as_tensor(
+                placedb.node_size_x * placedb.node_size_y, dtype=torch.float64
+            ),
+            target_density=torch.tensor([0.5], dtype=torch.float64),
+            sorted_node_map=torch.arange(n_mov, dtype=torch.int32),
+            pin_offset_x=torch.zeros(len(placedb.pydb.pin_names), dtype=torch.float64),
+            pin_offset_y=torch.zeros(len(placedb.pydb.pin_names), dtype=torch.float64),
+            original_pin_offset_x=torch.zeros(len(placedb.pydb.pin_names), dtype=torch.float64),
+            original_pin_offset_y=torch.zeros(len(placedb.pydb.pin_names), dtype=torch.float64),
+            flat_node2pin_map=torch.as_tensor(placedb.flat_node2pin_map, dtype=torch.long),
+            flat_node2pin_start_map=torch.as_tensor(
+                placedb.flat_node2pin_start_map, dtype=torch.long
+            ),
+        )
+        data.get_continuous_size_parameter = lambda: data.real_size
+        pos = torch.tensor(
+            list(placedb.node_x) + list(placedb.node_y), dtype=torch.float64
+        )
+        timing = SimpleNamespace(
+            last_total_slew_violation_tensor=torch.tensor(0.0),
+            last_total_cap_violation_tensor=torch.tensor(0.0),
+            last_total_slew_violation=0.0,
+            last_total_cap_violation=0.0,
+        )
+        ops = SimpleNamespace(
+            timing_propagation_op=timing,
+            steiner_topo_op=SimpleNamespace(topology_generation=1, frozen_nets=None),
+            virtual_cell_density_op=None,
+        )
+        model = PlaceObj.__new__(PlaceObj)
+        model.params = params
+        model.op_collections = ops
+        model.timing_wns_coeff, model.timing_tns_coeff = 100.0, 1.0
+        model.timing_slew_weight, model.timing_cap_weight = 1.0, 1.0
+        model.timing_grad_balance_weight, model.timing_leakage_weight = 1.0, 0.0
+        model._timing_geometry_cache = None
+        model._virtual_cell_density_view = None
+        model._candidate_density_view = None
+        model.refresh_after_geometry_change = lambda: None
+        model.timing_obj = lambda _pos: tuple(
+            torch.tensor(v) for v in (-10.0, -20.0, 0.0, 0.0)
+        )
+        from dreamplace.ops.buffer_insertion.buffering_config import (
+            build_buffering_config_from_params,
+        )
+
+        config = build_buffering_config_from_params(params, flow_kind="buffering")
+        lane = BufferingOptimizationLane(config, placedb=placedb)
+        lane.data_collections = data
+        return model, pos, data, ops, (lambda _pos: None), lane
+
+    sz_observations = []
+    virtual_prepare_calls = []
+
+    def _stub_prepare(self, model, pos, *, active_only=True, **_kwargs):
+        del model, pos
+        virtual_prepare_calls.append(active_only)
+        records = [
+            {
+                "candidate_id": 0,
+                "net_id": 0,
+                "candidate_node_id": 1,
+                "buffer_main_type_index": 0,
+                "parent_node_id": 0,
+                "child_node_ids": [1],
+                "segment_split_ratio": 0.5,
+                "x_dbu": 50000,
+                "y_dbu": 0,
+            }
+        ]
+        state = build_typed_discrete_candidate_state(
+            records,
+            buffer_main_type_index=0,
+            legal_buffer_count=4,
+            drive_type_table=table,
+        )
+        payload = {
+            "metadata": {"state_kind": "candidate"},
+            "buffer_legal_table": {
+                "legal_cell_ids": [0, 1, 0, 1],
+                "legal_master_names": ["BUF1", "BUF2", "BUF1", "BUF2"],
+                "legal_size_values": [1.0, 2.0, 1.0, 2.0],
+                "buffer_main_type_indices": [0, 0, 0, 0],
+            },
+        }
+        self.lane.buffer_optimization_state = state
+        self.lane.buffer_relaxed_timing_payload = payload
+        self.lane.attach_state(self.data)
+
+    def _stub_run_sizing(self, model, pos, geometry, capacity):
+        del model, pos, geometry, capacity
+        sz_observations.append(
+            {
+                "relaxed_timing": bool(self.params.enable_relaxed_buffer_timing),
+                "node_names": list(self.placedb.node_names),
+                "num_movable": int(self.placedb.num_movable_nodes),
+                "is_carrier": isinstance(self.placedb.rawdb.pydb, CommittedTimingPyDB),
+                "sparse_states": self.placedb.rawdb.sparse_timing_view.statistics()[
+                    "num_states"
+                ],
+            }
+        )
+        u_idx = self.placedb.node_names.index("u")
+        self.data.inst_cell_id[u_idx] = 1
+        return {"best_round": 1, "rounds": [{"accepted": 1}]}
+
+    def _stub_run_buffering(self, model, pos, capacity):
+        del model, pos, capacity
+        state = self.lane._current_state()
+        with torch.no_grad():
+            state.activation_param.zero_()
+            state.activation_param[0, 0] = 1.0
+        return {"status": "ok", "scheduled": 1, "accepted": 1}
+
+    rebuild_calls = []
+
+    def _rebuild():
+        rebuild_calls.append(len(placedb.node_names))
+        return _make_runtime()
+
+    monkeypatch.setattr(diff_opt.DiscreteTimingOwner, "prepare", _stub_prepare)
+    monkeypatch.setattr(diff_opt.DiscreteTimingOwner, "run_sizing", _stub_run_sizing)
+    monkeypatch.setattr(
+        diff_opt.DiscreteTimingOwner, "run_buffering", _stub_run_buffering
+    )
+
+    model, pos, data, ops, refresh_topo, lane = _make_runtime()
+    controller = diff_opt.DiffOptController(
+        params,
+        placedb,
+        data,
+        ops,
+        refresh_topo,
+        lane=lane,
+        rebuild_runtime_fn=_rebuild,
+    )
+    assert controller.direct_commit_enabled is True
+    summary = controller.run(
+        model,
+        pos,
+        flows=[
+            ["bf", 1, [100, 1, 1, 1]],
+            ["sz", 1, [100, 1, 1, 1]],
+            ["bf", 1, [100, 1, 1, 1]],
+        ],
+    )
+
+    assert ecc_schema3_carrier_harness.sta_calls == []
+    assert len(ecc_schema3_carrier_harness.commit_calls) == 2
+    assert len(ecc_schema3_carrier_harness.refresh_records) == 2
+    assert all(
+        rec["ecc_sta_run"] is False
+        for rec in ecc_schema3_carrier_harness.refresh_records
+    )
+    assert rebuild_calls == [4]
+    assert virtual_prepare_calls == [False, False]
+    assert sz_observations == [
+        {
+            "relaxed_timing": False,
+            "node_names": ["b", "u", "OUT", "IN"],
+            "num_movable": 2,
+            "is_carrier": True,
+            "sparse_states": 12,
+        }
+    ]
+    assert len(ecc_schema3_carrier_harness.sizing_calls) == 1
+    assert rawdb.sparse_timing_view is not None
+    assert rawdb.sparse_timing_view.statistics()["num_states"] == 16
+    assert params.enable_relaxed_buffer_timing is False
+    assert controller.owner.lane._current_state() is None
+    assert controller.owner.terminal_request.is_noop is True
+    assert summary["direct_committed_buffer_count"] == 2
+    assert summary["refresh_counts"]["full_rebuild_count"] == 2
+    assert summary["terminal_request"]["direct_committed_count"] == 2

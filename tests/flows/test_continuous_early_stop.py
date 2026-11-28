@@ -256,7 +256,7 @@ def test_best_master_restore_rebuilds_vt_and_leakage_state():
 @pytest.mark.parametrize("owner", ["segment_joint", "timing_opt", "alternating"])
 def test_best_restore_preserves_milestone_owned_cells_and_geometry(owner):
     placer = _placer()
-    from dreamplace.flows.alternating_discrete import PROFILE
+    from dreamplace.flows.baselines.alternating_discrete import PROFILE
 
     placer.params = SimpleNamespace(
         timing_opt_enabled=owner == "timing_opt",

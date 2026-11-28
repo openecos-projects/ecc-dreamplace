@@ -4,7 +4,7 @@ import torch
 from types import SimpleNamespace
 
 from dreamplace.ops.timing_net_weighting import net_weighting
-from dreamplace.flows import timing_net_weighting as timing_net_weighting_flow
+from dreamplace.flows.gp import timing_carriers as timing_net_weighting_flow
 from dreamplace.NonLinearPlace import NonLinearPlace
 
 

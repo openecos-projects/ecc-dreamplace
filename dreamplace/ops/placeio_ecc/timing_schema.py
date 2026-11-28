@@ -43,7 +43,11 @@ def validate_timing_schema(pydb):
         len(pydb.endpoints_constraint_arcs),
         len(pydb.endpoints_timing_check_arcs),
     )
-    for pair, count in zip(zip(QUALIFICATION_FIELDS[::2], QUALIFICATION_FIELDS[1::2]), counts):
+    for pair, count in zip(
+        zip(QUALIFICATION_FIELDS[::2], QUALIFICATION_FIELDS[1::2], strict=True),
+        counts,
+        strict=True,
+    ):
         valid_name, reason_name = pair
         for name in pair:
             if not hasattr(pydb, name):

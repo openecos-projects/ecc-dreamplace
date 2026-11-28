@@ -100,11 +100,13 @@ class _ActionCellAatContribution(torch.autograd.Function):
         )
         if ctx.context is not None:
             ctx.context.native_action_backward_used = True
-            if global_rows is not None:
-                rows = global_rows.to(device=finite.device).long()
-                ctx.context.valid_arcs[rows] &= finite
+            all_finite = bool(finite.all().item())
+            if global_rows is not None and getattr(ctx.context, "valid_arcs", None) is not None:
+                if not all_finite:
+                    rows = global_rows.to(device=finite.device).long()
+                    ctx.context.valid_arcs[rows] &= finite
             else:
-                ctx.context._action_backward_all_finite = bool(finite.all().item())
+                ctx.context._action_backward_all_finite = all_finite
         return (None, grad_beta) + (None,) * 19
 
 
@@ -207,6 +209,40 @@ def apply_action_cell_aat(
         return pins[0].new_zeros((0, 8))
     if context is not None:
         context.action_cell_aat_calls += 1
+    native = lut_entry_2d_op._select_module(pins[0])
+    if (
+        context is not None
+        and defer_target_queries
+        and not getattr(context, "evaluate_targets", False)
+        and global_rows is not None
+        and hasattr(native, "cell_aat_action_backward")
+    ):
+        if cap_delta_r is None:
+            cap_delta_r = torch.zeros(
+                (int(arcs.shape[0]), int(target_arc_ids.shape[1])),
+                device=arcs.device,
+                dtype=pins[0].dtype,
+            )
+        if cap_delta_f is None:
+            cap_delta_f = torch.zeros_like(cap_delta_r)
+        context.native_values_used = hasattr(native, "cell_aat_values")
+        context.native_action_values_used = False
+        return _deferred_action_values(
+            arcs,
+            pins,
+            tables,
+            smooth,
+            alpha,
+            target_arc_ids=target_arc_ids,
+            target_senses=target_senses,
+            valid_arcs=valid_arcs,
+            inst_ids=inst_ids,
+            beta=beta,
+            context=context,
+            global_rows=global_rows,
+            cap_delta_r=cap_delta_r,
+            cap_delta_f=cap_delta_f,
+        )
     non_unate = (arcs[:, 4] != 1) & (arcs[:, 4] != -1)
     non_unate &= ((target_senses == arcs[:, 4, None]) | ~valid_arcs).all(dim=1)
     if bool(non_unate.any()):
@@ -250,7 +286,6 @@ def apply_action_cell_aat(
             )
             result = result.index_copy(0, other, values)
         return result
-    native = lut_entry_2d_op._select_module(pins[0])
     if cap_delta_r is None:
         cap_delta_r = torch.zeros(
             (int(arcs.shape[0]), int(target_arc_ids.shape[1])),
@@ -259,31 +294,6 @@ def apply_action_cell_aat(
         )
     if cap_delta_f is None:
         cap_delta_f = torch.zeros_like(cap_delta_r)
-    if (
-        context is not None
-        and defer_target_queries
-        and not getattr(context, "evaluate_targets", False)
-        and global_rows is not None
-        and hasattr(native, "cell_aat_action_backward")
-    ):
-        context.native_values_used = hasattr(native, "cell_aat_values")
-        context.native_action_values_used = False
-        return _deferred_action_values(
-            arcs,
-            pins,
-            tables,
-            smooth,
-            alpha,
-            target_arc_ids=target_arc_ids,
-            target_senses=target_senses,
-            valid_arcs=valid_arcs,
-            inst_ids=inst_ids,
-            beta=beta,
-            context=context,
-            global_rows=global_rows,
-            cap_delta_r=cap_delta_r,
-            cap_delta_f=cap_delta_f,
-        )
     if context is not None:
         use_native_action = use_native_action and not getattr(context, "evaluate_targets", False)
         context.native_values_used = hasattr(native, "cell_aat_values")
@@ -357,8 +367,9 @@ def apply_action_cell_aat(
         delta = torch.nan_to_num(delta, nan=0.0, posinf=0.0, neginf=0.0)
         delta[..., 4:] = 0.0
     if context is not None and global_rows is not None:
-        rows = global_rows.to(effective_valid.device).long()
-        context.valid_arcs[rows] &= effective_valid
+        if not bool(effective_valid.all()):
+            rows = global_rows.to(effective_valid.device).long()
+            context.valid_arcs[rows] &= effective_valid
     inst_ids = inst_ids.long()
     safe_inst_ids = inst_ids.clamp(min=0)
     weights = (
@@ -373,6 +384,19 @@ def apply_action_cell_aat(
 def refresh_action_valid_instances(context):
     """Recompute the all-arcs mask after target-value finiteness is known."""
 
+    arc_version = (context.valid_arcs.data_ptr(), context.valid_arcs._version)
+    if getattr(context, "_refreshed_valid_arcs_version", None) == arc_version:
+        actions = context.mapping_summary.get("actions")
+        if isinstance(actions, dict):
+            for action_index, action in enumerate(context.action_names):
+                summary = actions.get(action)
+                if isinstance(summary, dict) and "timing_valid_instance_count" not in summary:
+                    summary["timing_invalid_instance_count"] = 0
+                    summary["timing_valid_instance_count"] = int(
+                        context.valid_instances[:, action_index].sum().item()
+                    )
+        return context.valid_instances
+
     num_instances = int(context.beta.shape[0])
     num_actions = int(context.beta.shape[1])
     previous_valid = context.valid_instances.clone()
@@ -380,6 +404,7 @@ def refresh_action_valid_instances(context):
     rows = context.inst_ids >= 0
     if not bool(rows.any()):
         context.valid_instances.zero_()
+        context._refreshed_valid_arcs_version = arc_version
         return context.valid_instances
     instance_ids = context.inst_ids[rows]
     counts = torch.zeros(
@@ -388,11 +413,12 @@ def refresh_action_valid_instances(context):
         device=context.valid_instances.device,
     )
     bad = torch.zeros_like(counts)
+    ones = torch.ones_like(instance_ids)
     for action in range(num_actions):
         counts[:, action].scatter_add_(
             0,
             instance_ids,
-            torch.ones_like(instance_ids),
+            ones,
         )
         bad[:, action].scatter_add_(
             0,
@@ -401,6 +427,7 @@ def refresh_action_valid_instances(context):
         )
     valid = (counts > 0) & (bad == 0)
     context.valid_instances.copy_(valid & context.valid_instances)
+    context._refreshed_valid_arcs_version = arc_version
     timing_invalid = previous_valid & ~context.valid_instances
     actions = context.mapping_summary.get("actions")
     if isinstance(actions, dict):

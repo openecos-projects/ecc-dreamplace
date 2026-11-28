@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from dreamplace.flows.joint_proximal import JointProximalObjective
+from dreamplace.flows.baselines.joint_runtime import JointProximalObjective
 from dreamplace.NonLinearPlace import NonLinearPlace
 from dreamplace.PlaceObj import PlaceObj
 

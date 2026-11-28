@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 import preflight
 import torch
-from dreamplace.flows.hold_objective import HoldObjective
+from dreamplace.flows.gp.hold_timing import HoldObjective
 from dreamplace.ops.timing_propagation import lut_entry_2d_op
 from dreamplace.ops.timing_propagation.early_propagation import EarlyPropagation
 from native_hold_case import NativeHoldCase

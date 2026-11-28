@@ -203,16 +203,20 @@ class FakeTimingPropagationOp:
     def get_pin_slack(self):
         return self.pin_slack
 
+    def request_critical_path_snapshot(self):
+        raise RuntimeError("snapshot unavailable in fake op")
+
     def get_total_slew_violation_tensor(self, inst_pins_mask, slew_limits):
-        return torch.tensor(0.25, dtype=torch.float32)
+        return torch.tensor(250.0, dtype=torch.float32)
 
     def get_total_cap_violation_tensor(self, output_pin_mask, cap_limits):
-        return torch.tensor(0.125, dtype=torch.float32)
+        return torch.tensor(125.0, dtype=torch.float32)
 
 
 class TimingObjViolationCacheTest(unittest.TestCase):
     def test_timing_obj_caches_violation_metrics_on_timing_op(self):
         shell = object.__new__(PlaceObj)
+        shell.placedb = SimpleNamespace(gr_sizing=None)
         shell.params = SimpleNamespace(
             timing_surrogate_mode="surrogate_only",
             critical_endpoint_pruning_mode="off",
@@ -222,7 +226,9 @@ class TimingObjViolationCacheTest(unittest.TestCase):
         shell.inst_pins_mask = torch.tensor([True], dtype=torch.bool)
         shell.output_pin_mask = torch.tensor([True], dtype=torch.bool)
         shell.pin2libpin_flat_ids = torch.tensor([0], dtype=torch.long)
-        shell._log_violation_details = lambda timing_op, slew_limits, cap_limits: None
+        shell._log_violation_details = (
+            lambda timing_op, slew_limits, cap_limits, **kwargs: None
+        )
         shell.get_total_leakage_tensor = lambda: torch.tensor(0.5, dtype=torch.float32)
 
         timing_op = FakeTimingPropagationOp()
@@ -261,7 +267,7 @@ class TimingObjViolationCacheTest(unittest.TestCase):
         self.assertAlmostEqual(float(wns.item()), -1.0)
         self.assertAlmostEqual(float(tns.item()), -2.0)
         self.assertAlmostEqual(float(timing_op.last_total_slew_violation), 0.25)
-        self.assertAlmostEqual(float(timing_op.last_total_cap_violation), 125.0)
+        self.assertAlmostEqual(float(timing_op.last_total_cap_violation), 0.125)
         self.assertAlmostEqual(float(timing_op.last_total_leakage), 0.5)
         self.assertGreaterEqual(timing_op.last_runtime_seconds, 0.0)
 

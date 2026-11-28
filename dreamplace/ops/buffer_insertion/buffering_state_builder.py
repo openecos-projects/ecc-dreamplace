@@ -14,9 +14,16 @@ from dreamplace.ops.net_subgraph_timing import build_relaxed_buffer_timing_paylo
 from .buffer_library import build_buffer_library_from_metadata
 from .buffer_selection import resolve_fixed_buffer_selection
 from .net_eligibility import clock_net_ids
+from .candidate_sites import downstream_loads
 from .candidates import sample_buffer_candidates
 from .contract import BufferFamilyContract
 from .drive_type_table import load_drive_type_table
+from .fast_buffer_types import (
+    FAST_BUFFERS_MODE,
+    fast_buffer_drive_type_table,
+    fast_buffer_load_limits,
+    fast_buffer_master_names,
+)
 from .optimization_state import (
     build_buffer_optimization_state,
     build_discrete_candidate_state,
@@ -982,6 +989,26 @@ def _contextual_candidate(
     return item
 
 
+def _fast_buffer_allowed_actions(state, nets, metadata):
+    """Admit a fast buffer at a position only within its target load."""
+
+    rc_tree_by_net = {int(net["net_id"]): net.get("rc_tree") or {} for net in nets}
+    loads = [0.0] * len(state.candidate_records)
+    rows_by_net = {}
+    for row, record in enumerate(state.candidate_records):
+        if _is_segment_candidate(record):
+            rows_by_net.setdefault(int(record["net_id"]), []).append(row)
+    for net_id, rows in rows_by_net.items():
+        records = [state.candidate_records[row] for row in rows]
+        for row, load in zip(rows, downstream_loads(records, rc_tree_by_net.get(net_id, {}))):
+            loads[row] = load
+    limits = fast_buffer_load_limits(metadata, state.drive_type_master_names)
+    device = state.activation_param.device
+    return torch.tensor(loads, device=device).view(-1, 1) <= torch.tensor(
+        limits, device=device
+    ).view(1, -1)
+
+
 def _generate_candidates_from_nets(
     nets,
     *,
@@ -1045,7 +1072,11 @@ def _generate_candidates_from_nets(
             )
             global_candidate_id += 1
     generation = {
-        "candidate_generation_mode": "equal_count",
+        "candidate_generation_mode": (
+            "rebuffer_sites"
+            if _candidate_generation_policy(params) == "rebuffer_sites"
+            else "equal_count"
+        ),
         "max_candidates_per_segment": int(max_candidates_per_segment),
         "supported_tree_net_count": int(supported_tree_net_count),
         "candidate_bearing_net_count": int(candidate_bearing_net_count),
@@ -1479,6 +1510,12 @@ def _build_candidate_buffering_state_for_model(
             buffer_library=buffer_library,
         )
         fixed_bsu_index, fixed_buffer_master, fixed_buffer_source = None, "", "typed_table"
+    elif candidate_drive_type_mode == FAST_BUFFERS_MODE:
+        drive_type_table = fast_buffer_drive_type_table(
+            fast_buffer_master_names(_metadata(data_collections, params)),
+            buffer_library=buffer_library,
+        )
+        fixed_bsu_index, fixed_buffer_master, fixed_buffer_source = None, "", "typed_table"
     else:
         fixed_bsu_index, fixed_buffer_master, fixed_buffer_source = (
             resolve_fixed_buffer_selection(params, config, buffer_library)
@@ -1487,7 +1524,7 @@ def _build_candidate_buffering_state_for_model(
     record_runtime_stage("candidate_size_and_policy_build_ms", runtime_stage_started_at)
     runtime_stage_started_at = time.perf_counter()
     if candidate_strategy == "discrete_net_gradient":
-        if candidate_drive_type_mode == "four_strength_table":
+        if drive_type_table is not None:
             state = build_typed_discrete_candidate_state(
                 selected_candidates,
                 buffer_main_type_index=buffer_main_type_index,
@@ -1496,6 +1533,12 @@ def _build_candidate_buffering_state_for_model(
                 dtype=dtype,
                 device=state_device,
             )
+            if candidate_drive_type_mode == FAST_BUFFERS_MODE:
+                state.drive_type_allowed = _fast_buffer_allowed_actions(
+                    state,
+                    selected_nets,
+                    _metadata(data_collections, params),
+                )
         else:
             if fixed_bsu_index is None:
                 raise ValueError(
@@ -1511,7 +1554,7 @@ def _build_candidate_buffering_state_for_model(
             )
     elif candidate_drive_type_mode != "single_fixed":
         raise ValueError(
-            "four_strength_table requires candidate discrete_net_gradient"
+            f"{candidate_drive_type_mode} requires candidate discrete_net_gradient"
         )
     elif candidate_strategy == "continuous":
         state = build_buffer_optimization_state(

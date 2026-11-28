@@ -7,7 +7,7 @@ from torch import nn
 
 from dreamplace.ops.rc_timing.rc_timing import evaluate_rc_tree
 
-from .route_snapshot import RouteSnapshot, prepare_snapshot
+from .route_snapshot import RouteSnapshot, prepare_snapshot, prepare_spef_snapshot
 
 
 class GRParasiticsOp(nn.Module):
@@ -22,6 +22,28 @@ class GRParasiticsOp(nn.Module):
     @classmethod
     def prepare(cls, route_pack, rc_parameters, pin_mapping, identity, *, dtype=torch.float32):
         return cls(prepare_snapshot(route_pack, rc_parameters, pin_mapping, identity, dtype=dtype))
+
+    @classmethod
+    def prepare_spef(
+        cls,
+        spef_path,
+        pin_mapping,
+        identity,
+        *,
+        coupling_cap_scale=1.0,
+        reconcile_lumped_cap=False,
+        dtype=torch.float32,
+    ):
+        return cls(
+            prepare_spef_snapshot(
+                spef_path,
+                pin_mapping,
+                identity,
+                coupling_cap_scale=coupling_cap_scale,
+                reconcile_lumped_cap=reconcile_lumped_cap,
+                dtype=dtype,
+            )
+        )
 
     def forward(self, pin_cap_base, pin_cap_rise, pin_cap_fall):
         """Return the six RC dictionaries described by ``evaluate_rc_tree``.

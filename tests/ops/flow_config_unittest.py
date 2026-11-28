@@ -12,7 +12,7 @@ sys.path.append(str(REPO_ROOT))
 
 class FlowConfigTest(unittest.TestCase):
     def test_infer_flow_kind_from_existing_params(self):
-        from dreamplace.flows.flow_config import FlowKind, infer_flow_kind
+        from dreamplace.flows.config.resolver import FlowKind, infer_flow_kind
 
         self.assertEqual(FlowKind.PLACEMENT, infer_flow_kind(types.SimpleNamespace()))
         self.assertEqual(
@@ -52,7 +52,7 @@ class FlowConfigTest(unittest.TestCase):
         )
 
     def test_explicit_flow_kind_overrides_inference(self):
-        from dreamplace.flows.flow_config import FlowKind, infer_flow_kind
+        from dreamplace.flows.config.resolver import FlowKind, infer_flow_kind
 
         self.assertEqual(
             FlowKind.BUFFERING,
@@ -65,7 +65,7 @@ class FlowConfigTest(unittest.TestCase):
         )
 
     def test_discrete_alternating_profile_resolves_joint_contract(self):
-        from dreamplace.flows.flow_config import FlowKind, resolve_flow_config
+        from dreamplace.flows.config.resolver import FlowKind, resolve_flow_config
 
         resolved = resolve_flow_config(
             {
@@ -88,7 +88,7 @@ class FlowConfigTest(unittest.TestCase):
         self.assertEqual("final_only", resolved["joint_alternating_buffer_commit_policy"])
 
     def test_discrete_alternating_profile_keeps_nesterov_for_placement(self):
-        from dreamplace.flows.flow_config import resolve_flow_config
+        from dreamplace.flows.config.resolver import resolve_flow_config
 
         resolved = resolve_flow_config(
             {
@@ -108,7 +108,7 @@ class FlowConfigTest(unittest.TestCase):
         assert resolved["global_place_stages"][0]["optimizer"] == "nesterov"
 
     def test_discrete_alternating_profile_clears_legacy_segment_strategy(self):
-        from dreamplace.flows.flow_config import resolve_flow_config
+        from dreamplace.flows.config.resolver import resolve_flow_config
 
         resolved = resolve_flow_config(
             {
@@ -130,7 +130,7 @@ class FlowConfigTest(unittest.TestCase):
         self.assertEqual("continuous", resolved["buffering_segment_strategy"])
 
     def test_discrete_alternating_coordinator_owns_only_placement_optimizer_group(self):
-        from dreamplace.flows.joint_coordinator import JointCoordinator
+        from dreamplace.flows.baselines.joint_coordinator import JointCoordinator
 
         params = types.SimpleNamespace(
             flow_kind="joint",
@@ -150,8 +150,8 @@ class FlowConfigTest(unittest.TestCase):
         self.assertEqual(["placement"], [group["group_name"] for group in groups])
 
     def test_timing_driven_placement_is_a_placement_profile(self):
-        from dreamplace.flows.flow_config import FlowKind, apply_flow_defaults
-        from dreamplace.flows.flow_profiles import TIMING_DRIVEN_PLACEMENT_DEFAULTS
+        from dreamplace.flows.config.resolver import FlowKind, apply_flow_defaults
+        from dreamplace.flows.config.profiles import TIMING_DRIVEN_PLACEMENT_DEFAULTS
 
         params = types.SimpleNamespace(
             flow_kind="placement",
@@ -175,7 +175,7 @@ class FlowConfigTest(unittest.TestCase):
         self.assertEqual(1, params.diff_timing_driven_placement)
 
     def test_resolve_flow_config_copies_input(self):
-        from dreamplace.flows.flow_config import resolve_flow_config
+        from dreamplace.flows.config.resolver import resolve_flow_config
 
         config = {
             "flow_kind": "placement",
@@ -192,7 +192,7 @@ class FlowConfigTest(unittest.TestCase):
         )
 
     def test_pin2pin_timing_placement_disables_differentiable_objective(self):
-        from dreamplace.flows.flow_config import FlowKind, apply_flow_defaults
+        from dreamplace.flows.config.resolver import FlowKind, apply_flow_defaults
 
         params = types.SimpleNamespace(
             flow_kind="placement",
@@ -211,7 +211,7 @@ class FlowConfigTest(unittest.TestCase):
         self.assertEqual(15, params.timing_topology_refresh_interval)
 
     def test_pin2pin_timing_placement_rejects_differentiable_objective(self):
-        from dreamplace.flows.flow_config import apply_flow_defaults
+        from dreamplace.flows.config.resolver import apply_flow_defaults
 
         params = types.SimpleNamespace(
             flow_kind="placement",
@@ -225,7 +225,7 @@ class FlowConfigTest(unittest.TestCase):
             apply_flow_defaults(params)
 
     def test_apply_sizing_flow_defaults_sets_recommended_entry_defaults(self):
-        from dreamplace.flows.flow_config import FlowKind, apply_flow_defaults
+        from dreamplace.flows.config.resolver import FlowKind, apply_flow_defaults
 
         params = types.SimpleNamespace(flow_kind="sizing")
 
@@ -253,7 +253,7 @@ class FlowConfigTest(unittest.TestCase):
         self.assertTrue(params.early_stop_restore_best)
 
     def test_openroad_vt_suffixes_have_configurable_default_and_normalization(self):
-        from dreamplace.flows.flow_config import apply_flow_defaults
+        from dreamplace.flows.config.resolver import apply_flow_defaults
 
         params = types.SimpleNamespace(
             flow_kind="sizing",
@@ -264,16 +264,16 @@ class FlowConfigTest(unittest.TestCase):
 
         self.assertEqual(("H7H", "H7R", "H7L"), params.openroad_vt_suffixes)
 
-    def test_openroad_vt_suffixes_default_is_ics55_configuration(self):
-        from dreamplace.flows.flow_config import apply_flow_defaults
+    def test_openroad_vt_suffixes_default_is_explicit_empty_configuration(self):
+        from dreamplace.flows.config.resolver import apply_flow_defaults
 
         params = types.SimpleNamespace(flow_kind="sizing")
         apply_flow_defaults(params)
 
-        self.assertEqual(("_9THVT", "_9TSVT", "_9TLVT"), params.openroad_vt_suffixes)
+        self.assertEqual((), params.openroad_vt_suffixes)
 
     def test_openroad_vt_suffixes_custom_value_survives_explicit_placement_flow(self):
-        from dreamplace.flows.flow_config import apply_flow_defaults
+        from dreamplace.flows.config.resolver import apply_flow_defaults
 
         params = types.SimpleNamespace(
             flow_kind="placement",
@@ -284,7 +284,7 @@ class FlowConfigTest(unittest.TestCase):
         self.assertEqual(("SVT", "LVT"), params.openroad_vt_suffixes)
 
     def test_apply_sizing_flow_defaults_preserves_user_overrides(self):
-        from dreamplace.flows.flow_config import apply_flow_defaults
+        from dreamplace.flows.config.resolver import apply_flow_defaults
 
         params = types.SimpleNamespace(
             placement_sizing_mode="size_only",
@@ -325,7 +325,7 @@ class FlowConfigTest(unittest.TestCase):
         self.assertEqual(2.5, params.discrete_gradient_topk_shared_budget_percent)
 
     def test_apply_sta_flow_defaults_enables_timing_without_optimization_loop(self):
-        from dreamplace.flows.flow_config import FlowKind, apply_flow_defaults
+        from dreamplace.flows.config.resolver import FlowKind, apply_flow_defaults
 
         params = types.SimpleNamespace(
             flow_kind="sta", global_place_stages=[{"iteration": 20}]
@@ -343,7 +343,7 @@ class FlowConfigTest(unittest.TestCase):
         self.assertEqual(0, params.global_place_stages[0]["iteration"])
 
     def test_apply_buffering_flow_defaults_sets_recommended_dry_run_profile(self):
-        from dreamplace.flows.flow_config import FlowKind, apply_flow_defaults
+        from dreamplace.flows.config.resolver import FlowKind, apply_flow_defaults
 
         params = types.SimpleNamespace(flow_kind="buffering")
 
@@ -369,7 +369,7 @@ class FlowConfigTest(unittest.TestCase):
         self.assertFalse(hasattr(params, "buffering_enable_real_coordinate_commit"))
 
     def test_apply_buffering_flow_defaults_honors_candidate_mode_profile(self):
-        from dreamplace.flows.flow_config import FlowKind, apply_flow_defaults
+        from dreamplace.flows.config.resolver import FlowKind, apply_flow_defaults
 
         params = types.SimpleNamespace(
             flow_kind="buffering", buffering_mode="candidate"
@@ -383,7 +383,7 @@ class FlowConfigTest(unittest.TestCase):
         self.assertEqual(0, params.buffering_segment_count_tns_gradient)
 
     def test_apply_physical_eco_flow_kind_is_explicitly_rejected(self):
-        from dreamplace.flows.flow_config import apply_flow_defaults
+        from dreamplace.flows.config.resolver import apply_flow_defaults
 
         params = types.SimpleNamespace(flow_kind="physical_eco")
 
@@ -391,7 +391,7 @@ class FlowConfigTest(unittest.TestCase):
             apply_flow_defaults(params)
 
     def test_apply_physical_eco_candidate_mode_is_explicitly_rejected(self):
-        from dreamplace.flows.flow_config import apply_flow_defaults
+        from dreamplace.flows.config.resolver import apply_flow_defaults
 
         params = types.SimpleNamespace(
             flow_kind="physical_eco",
@@ -402,7 +402,7 @@ class FlowConfigTest(unittest.TestCase):
             apply_flow_defaults(params)
 
     def test_apply_buffering_flow_defaults_preserves_explicit_user_controls(self):
-        from dreamplace.flows.flow_config import apply_flow_defaults
+        from dreamplace.flows.config.resolver import apply_flow_defaults
 
         params = types.SimpleNamespace(
             flow_kind="buffering",
@@ -427,7 +427,7 @@ class FlowConfigTest(unittest.TestCase):
         self.assertEqual(5, params.buffering_max_repeaters_per_segment)
 
     def test_explicit_sizing_flow_kind_overrides_stale_json_defaults(self):
-        from dreamplace.flows.flow_config import apply_flow_defaults
+        from dreamplace.flows.config.resolver import apply_flow_defaults
 
         params = types.SimpleNamespace(
             flow_kind="sizing",

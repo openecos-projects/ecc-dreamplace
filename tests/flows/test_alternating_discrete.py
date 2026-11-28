@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from dreamplace.flows import alternating_discrete
+from dreamplace.flows.baselines import alternating_discrete
 from dreamplace.ops.buffer_insertion.buffering_lane import BufferingOptimizationLane
 from dreamplace.ops.buffer_insertion.drive_type_table import write_case_drive_type_table
 from dreamplace.ops.buffer_insertion.optimization_state import (
@@ -362,3 +362,217 @@ def test_live_rc_rebuilds_candidate_payload_only_when_topology_changes(monkeypat
     assert calls == ["placement_geometry_iteration_25", "placement_geometry_iteration_30"]
     assert len(installs) == 3
     assert topo.frozen_nets.candidate_state is state
+
+
+def test_alternating_discrete_direct_b1_runs_sizing_cleanly_and_restores_after_restart(
+    ecc_schema3_carrier_harness, monkeypatch, tmp_path
+):
+    from contextlib import nullcontext
+
+    from dreamplace.flows.discrete.buffer_commit import DirectBufferCommitSession
+    from dreamplace.flows.gp.continuation import MidplaceRestart, PlacementCursor
+    from dreamplace.Placer import create_session
+
+    placedb = ecc_schema3_carrier_harness.placedb
+    rawdb = ecc_schema3_carrier_harness.rawdb
+    params = SimpleNamespace(
+        place_io_engine="ecc",
+        flow_kind="joint",
+        joint_quality_profile=alternating_discrete.PROFILE,
+        repair_buffering_midplace_enable=0,
+        timing_opt_overflow_milestones=(0.30, 0.20),
+        timing_opt_max_windows=2,
+        timing_opt_sizing_rounds=2,
+        discrete_gradient_topk_shared_budget_percent=1.0,
+        joint_alternating_outer_rounds=2,
+        joint_alternating_sizing_rounds=2,
+        joint_alternating_sizing_shared_budget_percent=1.0,
+        joint_alternating_buffering_rounds=1,
+        joint_alternating_buffering_selection_fraction=0.003,
+        placement_sizing_mode="place_only",
+        timing_objective_lane="timing_only",
+        differentiable_timing_obj=0,
+        sizing_parameterization="real_size",
+        enable_relaxed_buffer_timing=True,
+        enable_fillers=0,
+        cell_padding_x=0.0,
+        scale_factor=1.0,
+        shift_factor=(0.0, 0.0),
+        result_dir=str(tmp_path),
+        design_name=lambda: "fixture",
+    )
+    engine = SimpleNamespace(params=params, placedb=placedb)
+    session = create_session(engine)
+    assert isinstance(session, DirectBufferCommitSession)
+
+    table = ecc_schema3_carrier_harness.make_drive_type_table(tmp_path)
+
+    def _build_controller():
+        n_mov = placedb.num_movable_nodes
+        data = SimpleNamespace(
+            sizing_parameterization="real_size",
+            flat_libcell_info=torch.tensor([[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 2.0, 0.0]]),
+            flat_libcell_leakage=torch.tensor([1.0, 2.0]),
+            flat_libcell_width=torch.tensor([1000.0, 2000.0]),
+            flat_libcell_height=torch.tensor([1000.0, 1000.0]),
+            inst_cell_id=torch.zeros(n_mov, dtype=torch.long),
+            node_size_x=torch.as_tensor(placedb.node_size_x, dtype=torch.float64),
+            node_size_y=torch.as_tensor(placedb.node_size_y, dtype=torch.float64),
+            original_node_size_x=torch.as_tensor(placedb.node_size_x, dtype=torch.float64),
+            original_node_size_y=torch.as_tensor(placedb.node_size_y, dtype=torch.float64),
+            node_areas=torch.as_tensor(
+                placedb.node_size_x * placedb.node_size_y, dtype=torch.float64
+            ),
+            target_density=torch.tensor([0.5], dtype=torch.float64),
+            sorted_node_map=torch.arange(n_mov, dtype=torch.int32),
+            pin_offset_x=torch.zeros(len(placedb.pydb.pin_names), dtype=torch.float64),
+            pin_offset_y=torch.zeros(len(placedb.pydb.pin_names), dtype=torch.float64),
+            original_pin_offset_x=torch.zeros(len(placedb.pydb.pin_names), dtype=torch.float64),
+            original_pin_offset_y=torch.zeros(len(placedb.pydb.pin_names), dtype=torch.float64),
+            flat_node2pin_map=torch.as_tensor(placedb.flat_node2pin_map, dtype=torch.long),
+            flat_node2pin_start_map=torch.as_tensor(
+                placedb.flat_node2pin_start_map, dtype=torch.long
+            ),
+            node2fence_region_map=torch.as_tensor(
+                placedb.node2fence_region_map, dtype=torch.int32
+            ),
+        )
+        ops = SimpleNamespace(
+            timing_propagation_op=SimpleNamespace(
+                last_total_slew_violation=0.0, last_total_cap_violation=0.0
+            ),
+            steiner_topo_op=SimpleNamespace(topology_generation=1, frozen_nets=None),
+            virtual_cell_density_op=None,
+        )
+        controller = alternating_discrete.AlternatingDiscreteController(
+            params, placedb, data, ops, lambda _pos: None
+        )
+        controller.owner.electrical_window = nullcontext
+        controller.owner._electrical_window = nullcontext
+        controller.owner._sizing_coefficients = lambda _m: nullcontext({"wns": 1.0})
+        pos = torch.tensor(
+            list(placedb.node_x) + list(placedb.node_y), dtype=torch.float64
+        )
+        placer = SimpleNamespace(
+            placedb=placedb,
+            data_collections=data,
+            op_collections=ops,
+            pos=[pos],
+            inflation_s5b1=None,
+            alternating_discrete=controller,
+            _routability_controller=SimpleNamespace(_gp_steps=2, _last_inflation_step=None),
+        )
+        return controller, placer
+
+    phase_flags = []
+
+    def _stub_prepare(owner, _model, _pos, *, active_only=True, **_kwargs):
+        records = [
+            {
+                "candidate_id": 0,
+                "net_id": 0,
+                "candidate_node_id": 1,
+                "buffer_main_type_index": 0,
+                "parent_node_id": 0,
+                "child_node_ids": [1],
+                "segment_split_ratio": 0.5,
+                "x_dbu": 50000,
+                "y_dbu": 0,
+            }
+        ]
+        state = build_typed_discrete_candidate_state(
+            records,
+            buffer_main_type_index=0,
+            legal_buffer_count=4,
+            drive_type_table=table,
+        )
+        config = SimpleNamespace(
+            mode="candidate",
+            candidate_strategy="discrete_net_gradient",
+            active_strategy="discrete_net_gradient",
+            candidate_drive_type_mode="four_strength_table",
+            route_b_selection_fraction=0.001,
+            continuous_steps=1,
+            output_dir=str(tmp_path / "buffering"),
+            commit_enabled=True,
+            segment_capacity_enabled=False,
+            max_selected_actions=None,
+        )
+        owner.lane = BufferingOptimizationLane(
+            config,
+            buffer_optimization_state=state,
+            buffer_relaxed_timing_payload={"metadata": {"state_kind": "candidate"}},
+            placedb=placedb,
+        )
+        owner.lane.attach_state(owner.data)
+        phase_flags.append(("prepare", active_only))
+
+    def _stub_sizing(ctrl, _model, _pos):
+        phase_flags.append(("sizing", bool(ctrl.params.enable_relaxed_buffer_timing)))
+        return {"best_round": 1, "rounds": [{"accepted": 1}]}
+
+    def _stub_buffering(ctrl, _model, _pos):
+        phase_flags.append(("buffering", bool(ctrl.params.enable_relaxed_buffer_timing)))
+        state = ctrl.owner.lane._current_state()
+        with torch.no_grad():
+            state.activation_param.zero_()
+            state.activation_param[0, 0] = 1.0
+        return {"status": "ok", "scheduled": 1, "accepted": 1}
+
+    monkeypatch.setattr(
+        alternating_discrete.AlternatingSizingOwner, "prepare", _stub_prepare
+    )
+    monkeypatch.setattr(alternating_discrete, "run_sizing_phase", _stub_sizing)
+    monkeypatch.setattr(alternating_discrete, "run_buffering_phase", _stub_buffering)
+
+    controller, placer = _build_controller()
+    session.runtime_ready(placer, None, placer._routability_controller)
+    session.bind_alternating_controller(placer, controller)
+    assert controller.owner.direct_commit_enabled is True
+
+    model = SimpleNamespace(
+        Lgamma_iteration=10,
+        Llambda_density_weight_iteration=1,
+        Lsub_iteration=2,
+        gamma=torch.tensor(4.0),
+        overflow=torch.tensor([0.25]),
+        _timing_geometry_cache=None,
+        _virtual_cell_density_view=None,
+        _candidate_density_view="stale_should_be_cleared",
+        _timing_loss=lambda wns, tns, _ws, _ts: -(wns + tns),
+        refresh_routability_operators=lambda: None,
+        refresh_after_geometry_change=lambda: None,
+    )
+    optimizer = SimpleNamespace(rebase_objective_state=lambda **_k: {"rebased": True})
+    metric = SimpleNamespace(
+        overflow=torch.tensor([0.25]), evaluate=lambda *_a, **_k: None
+    )
+
+    controller.before_step(
+        model, placer.pos[0], optimizer, metric, None, iteration=4, stage=0
+    )
+    assert phase_flags == [
+        ("sizing", False),
+        ("prepare", False),
+        ("buffering", True),
+    ]
+    assert params.enable_relaxed_buffer_timing is False
+    assert model._candidate_density_view is None
+    assert controller.owner._pending_window_commit_request is not None
+
+    with pytest.raises(MidplaceRestart):
+        session.after_timing_window_step(
+            placer, model, controller, metric, PlacementCursor(0, 1, 0, 0, 4)
+        )
+
+    assert ecc_schema3_carrier_harness.sta_calls == []
+    assert len(ecc_schema3_carrier_harness.commit_calls) == 1
+    assert rawdb.sparse_timing_view.statistics()["num_states"] == 12
+
+    fresh_controller, fresh_placer = _build_controller()
+    session.runtime_ready(fresh_placer, None, fresh_placer._routability_controller)
+    session.bind_alternating_controller(fresh_placer, fresh_controller)
+    assert fresh_controller.completed_rounds == 1
+    assert fresh_controller.owner.committed_buffer_count == 1
+    assert len(fresh_controller.trace) == 1
+    assert "direct_buffer_commit" in fresh_controller.trace[-1]

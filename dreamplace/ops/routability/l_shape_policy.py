@@ -34,6 +34,7 @@ class LShapePolicy:
         model._l_shape_ratio_rise_streak = 0
         model._l_shape_ratio_guard_disabled = False
         model._l_shape_inflation_guard_disabled = False
+        model._l_shape_paused_for_inflation = False
 
     @staticmethod
     def reset_overflow_state(model):
@@ -94,6 +95,13 @@ class LShapePolicy:
                 )
         self.maybe_auto_disable(model, iteration, outer_update=True)
 
+    def _deactivate_l_shape(self, model):
+        model.use_l_shape_routability = False
+        model.enable_l_shape_routability = False
+        if hasattr(model, "reset_l_shape_weight_state"):
+            model.reset_l_shape_weight_state()
+        self.reset_auto_disable_state(model)
+
     def disable_for_recovery(
         self,
         model,
@@ -102,15 +110,17 @@ class LShapePolicy:
         update_threshold=False,
         inflation_round=None,
         ratio_info=None,
+        *,
+        force=False,
     ):
-        if not getattr(model, "use_l_shape_routability", False):
+        if not (
+            force
+            or getattr(model, "use_l_shape_routability", False)
+            or getattr(model, "enable_l_shape_routability", False)
+        ):
             return
 
-        model.use_l_shape_routability = False
-        model.enable_l_shape_routability = False
-        if hasattr(model, "reset_l_shape_weight_state"):
-            model.reset_l_shape_weight_state()
-        self.reset_auto_disable_state(model)
+        self._deactivate_l_shape(model)
 
         base_threshold = float(
             getattr(
@@ -138,6 +148,7 @@ class LShapePolicy:
         if reason == "inflation" and bool(getattr(self.params, "timing_opt_enabled", False)):
             model._l_shape_reenable_threshold = base_threshold
             model._l_shape_reenable_count = 0
+            model._l_shape_paused_for_inflation = True
             logging.info("L-shape paused for inflation round %d; resumes below %.4f",
                          inflation_round, base_threshold)
         elif reason == "inflation":
@@ -330,7 +341,36 @@ class LShapePolicy:
                 },
             )
 
+    def maybe_pause_for_overflow(self, model, current_overflow, iteration=None):
+        if bool(getattr(self.params, "l_shape_keep_during_inflation", False)):
+            return
+        if not (
+            getattr(model, "use_l_shape_routability", False)
+            or getattr(model, "enable_l_shape_routability", False)
+        ):
+            return
+        threshold = float(
+            getattr(
+                model,
+                "_l_shape_reenable_threshold",
+                getattr(self.params, "l_shape_overflow_threshold", 0.2),
+            )
+        )
+        if current_overflow >= threshold:
+            self._deactivate_l_shape(model)
+            self.reset_reenable_progress(model)
+            model._l_shape_paused_for_inflation = True
+            logging.info(
+                "L-shape paused due to high overflow %.4f >= %.4f at iteration %s",
+                current_overflow,
+                threshold,
+                iteration,
+            )
+
     def maybe_reenable(self, model, current_overflow):
+        if getattr(self.params, "_midplace_objectives_pending", False):
+            model.enable_l_shape_routability = False
+            return
         if model.enable_l_shape_routability:
             return
         if getattr(model, "_l_shape_auto_disabled", False):
@@ -348,7 +388,8 @@ class LShapePolicy:
             )
         )
         reenable_count = int(getattr(model, "_l_shape_reenable_count", 0))
-        if reenable_count <= 0:
+        paused_for_inflation = bool(getattr(model, "_l_shape_paused_for_inflation", False))
+        if reenable_count <= 0 and not paused_for_inflation:
             if current_overflow < threshold:
                 model.enable_l_shape_routability = True
             return
@@ -367,6 +408,7 @@ class LShapePolicy:
         model._l_shape_reenable_descend_streak = descend_streak
         if descend_streak >= 5 and current_overflow < threshold:
             model.enable_l_shape_routability = True
+            model._l_shape_paused_for_inflation = False
 
 
 __all__ = ["LShapePolicy"]

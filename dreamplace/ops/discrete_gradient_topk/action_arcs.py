@@ -44,12 +44,40 @@ def _decode_pin_name(value):
     return str(value)
 
 
-def _cell_pin_names(pin_names, pin_start, cell):
+def _cell_pin_names(pin_names, pin_start, cell, *, pin_start_list=None, cell_pin_cache=None):
     if pin_names is None:
         return None
-    begin = int(pin_start[cell].item())
-    end = int(pin_start[cell + 1].item())
-    return tuple(_decode_pin_name(value) for value in pin_names[begin:end])
+    if cell_pin_cache is not None:
+        cached = cell_pin_cache[cell]
+        if cached is not None:
+            return cached
+    if pin_start_list is not None:
+        begin = int(pin_start_list[cell])
+        end = int(pin_start_list[cell + 1])
+    else:
+        begin = int(pin_start[cell].item())
+        end = int(pin_start[cell + 1].item())
+    names = tuple(_decode_pin_name(value) for value in pin_names[begin:end])
+    if cell_pin_cache is not None:
+        cell_pin_cache[cell] = names
+    return names
+
+
+def _pin_names_identity_key(pin_names):
+    if pin_names is None:
+        return None
+    count = len(pin_names)
+    if count == 0:
+        return ()
+    if count <= 64:
+        return tuple(_decode_pin_name(value) for value in pin_names)
+    return (
+        id(pin_names),
+        count,
+        _decode_pin_name(pin_names[0]),
+        _decode_pin_name(pin_names[count // 2]),
+        _decode_pin_name(pin_names[-1]),
+    )
 
 
 def _pair_mapping(
@@ -60,30 +88,60 @@ def _pair_mapping(
     pin_start,
     pin_names=None,
     signatures=None,
+    *,
+    arc_start_list=None,
+    pin_start_list=None,
+    cell_pin_cache=None,
 ):
     """Return one target arc per source arc, or a structural failure."""
 
-    cell_count = int(arc_start.numel()) - 1
+    cell_count = (
+        len(arc_start_list) - 1
+        if arc_start_list is not None
+        else int(arc_start.numel()) - 1
+    )
     if not (0 <= source_cell < cell_count and 0 <= target_cell < cell_count):
         return None, "target_cell", {}
 
-    source_begin = int(arc_start[source_cell].item())
-    source_end = int(arc_start[source_cell + 1].item())
-    target_begin = int(arc_start[target_cell].item())
-    target_end = int(arc_start[target_cell + 1].item())
+    if arc_start_list is not None:
+        source_begin = int(arc_start_list[source_cell])
+        source_end = int(arc_start_list[source_cell + 1])
+        target_begin = int(arc_start_list[target_cell])
+        target_end = int(arc_start_list[target_cell + 1])
+    else:
+        source_begin = int(arc_start[source_cell].item())
+        source_end = int(arc_start[source_cell + 1].item())
+        target_begin = int(arc_start[target_cell].item())
+        target_end = int(arc_start[target_cell + 1].item())
     if source_begin == source_end:
         return torch.empty(0, dtype=torch.long), None, {}
 
-    source_pin_count = int(pin_start[source_cell + 1] - pin_start[source_cell])
-    target_pin_count = int(pin_start[target_cell + 1] - pin_start[target_cell])
+    if pin_start_list is not None:
+        source_pin_count = int(pin_start_list[source_cell + 1] - pin_start_list[source_cell])
+        target_pin_count = int(pin_start_list[target_cell + 1] - pin_start_list[target_cell])
+    else:
+        source_pin_count = int(pin_start[source_cell + 1] - pin_start[source_cell])
+        target_pin_count = int(pin_start[target_cell + 1] - pin_start[target_cell])
     if source_pin_count != target_pin_count:
         return None, "pin_count", {
             "source_pin_count": source_pin_count,
             "target_pin_count": target_pin_count,
         }
     if pin_names is not None:
-        source_names = _cell_pin_names(pin_names, pin_start, source_cell)
-        target_names = _cell_pin_names(pin_names, pin_start, target_cell)
+        source_names = _cell_pin_names(
+            pin_names,
+            pin_start,
+            source_cell,
+            pin_start_list=pin_start_list,
+            cell_pin_cache=cell_pin_cache,
+        )
+        target_names = _cell_pin_names(
+            pin_names,
+            pin_start,
+            target_cell,
+            pin_start_list=pin_start_list,
+            cell_pin_cache=cell_pin_cache,
+        )
         if source_names != target_names:
             return None, "pin_identity", {
                 "source_pin_count": source_pin_count,
@@ -152,6 +210,10 @@ def _cached_pair_mapping(
     cache_owner=None,
     library_key=None,
     signatures=None,
+    *,
+    arc_start_list=None,
+    pin_start_list=None,
+    cell_pin_cache=None,
 ):
     owner = flat_arc_info if cache_owner is None else cache_owner
     cache = getattr(owner, "_lut_action_pair_cache", None)
@@ -174,6 +236,9 @@ def _cached_pair_mapping(
         pin_start,
         pin_names,
         signatures,
+        arc_start_list=arc_start_list,
+        pin_start_list=pin_start_list,
+        cell_pin_cache=cell_pin_cache,
     )
     if cache is not None:
         cache[key] = result
@@ -270,23 +335,84 @@ def build_action_arc_table(
                 target_vts[allowed],
             ]
 
-    pin2node = data.pin2node_map.to(device=device, dtype=torch.long)
-    output_pins = arcs[:, 1].long()
-    safe_output_pins = output_pins.clamp(
-        min=0,
-        max=max(int(pin2node.numel()) - 1, 0),
+    runtime_key = (
+        int(arcs.data_ptr()),
+        tuple(int(value) for value in arcs.shape),
+        str(device),
     )
-    inst_ids = torch.full(
-        (num_arcs,),
-        -1,
-        dtype=torch.long,
-        device=device,
+    output_entry = None
+    if output_cache is not None:
+        output_entry = output_cache.get(runtime_key)
+    output_buffer_reused = False
+    if output_entry is None and output_cache is not None:
+        output_entry = {}
+        output_cache[runtime_key] = output_entry
+
+    pin2node = data.pin2node_map
+    output_pins = arcs[:, 1]
+    topo_key = (
+        int(pin2node.data_ptr()),
+        int(pin2node._version),
+        num_instances,
+        num_arcs,
     )
-    valid_output = (output_pins >= 0) & (output_pins < int(pin2node.numel()))
-    if bool(valid_output.any()):
-        mapped_nodes = pin2node[safe_output_pins]
-        valid_node = (mapped_nodes >= 0) & (mapped_nodes < num_instances)
-        inst_ids[valid_output & valid_node] = mapped_nodes[valid_output & valid_node]
+    if (
+        output_entry is not None
+        and output_entry.get("topo_key") == topo_key
+        and "output_pins" in output_entry
+        and torch.equal(output_pins, output_entry["output_pins"])
+    ):
+        inst_ids = output_entry["inst_ids"]
+        inst_ids_cpu = output_entry["inst_ids_cpu"]
+        valid_inst_rows = output_entry["valid_inst_rows"]
+        safe_inst_ids = output_entry["safe_inst_ids"]
+        valid_inst_rows_dev = output_entry["valid_inst_rows_dev"]
+        rows_dev = output_entry["rows_dev"]
+        has_arcs = output_entry["has_arcs"]
+        mapped_arc_count = output_entry["mapped_arc_count"]
+    else:
+        pin2node_dev = pin2node.to(device=device, dtype=torch.long)
+        output_pins_long = output_pins.long()
+        safe_output_pins = output_pins_long.clamp(
+            min=0,
+            max=max(int(pin2node_dev.numel()) - 1, 0),
+        )
+        inst_ids = torch.full(
+            (num_arcs,),
+            -1,
+            dtype=torch.long,
+            device=device,
+        )
+        valid_output = (output_pins_long >= 0) & (output_pins_long < int(pin2node_dev.numel()))
+        if bool(valid_output.any()):
+            mapped_nodes = pin2node_dev[safe_output_pins]
+            valid_node = (mapped_nodes >= 0) & (mapped_nodes < num_instances)
+            inst_ids[valid_output & valid_node] = mapped_nodes[valid_output & valid_node]
+        inst_ids_cpu = inst_ids.detach().to(device="cpu", dtype=torch.long)
+        valid_inst_rows = (inst_ids_cpu >= 0) & (inst_ids_cpu < num_instances)
+        safe_inst_ids = inst_ids_cpu.clamp(min=0, max=max(num_instances - 1, 0))
+        valid_inst_rows_dev = inst_ids >= 0
+        rows_dev = inst_ids[valid_inst_rows_dev] if bool(valid_inst_rows_dev.any()) else inst_ids[:0]
+        counts_1d = torch.zeros((num_instances,), dtype=torch.long, device=device)
+        if rows_dev.numel():
+            counts_1d.scatter_add_(0, rows_dev, torch.ones_like(rows_dev))
+        has_arcs = (counts_1d > 0).unsqueeze(1)
+        mapped_arc_count = int(rows_dev.numel())
+        if output_entry is not None:
+            output_entry.update(
+                {
+                    "topo_key": topo_key,
+                    "output_pins": output_pins.clone(),
+                    "inst_ids": inst_ids,
+                    "inst_ids_cpu": inst_ids_cpu,
+                    "valid_inst_rows": valid_inst_rows,
+                    "safe_inst_ids": safe_inst_ids,
+                    "valid_inst_rows_dev": valid_inst_rows_dev,
+                    "rows_dev": rows_dev,
+                    "has_arcs": has_arcs,
+                    "mapped_arc_count": mapped_arc_count,
+                }
+            )
     targets_ms = (time.perf_counter() - targets_started_at) * 1000.0
 
     arc_start = data.cell_id_2_arc_id_start.detach().to(device="cpu", dtype=torch.long)
@@ -294,7 +420,6 @@ def build_action_arc_table(
     pin_start = data.cell_id_2_libpin_id_start.detach().to(
         device="cpu", dtype=torch.long
     )
-    pin_names = tuple(pin_names) if pin_names is not None else None
     check_types = getattr(data, "flat_libarc_check_types", None)
     if check_types is not None and check_types.shape != (flat_arc_info.shape[0],):
         raise RuntimeError("lut_action library check classes do not align with library arcs")
@@ -305,13 +430,13 @@ def build_action_arc_table(
         int(data.flat_libarc_info._version),
         int(data.cell_id_2_libpin_id_start.data_ptr()),
         int(data.cell_id_2_libpin_id_start._version),
-        None if pin_names is None else hash(pin_names),
+        _pin_names_identity_key(pin_names),
         None if check_types is None else (int(check_types.data_ptr()), int(check_types._version)),
     )
     pin_identity_unavailable_reason = None
     if pin_names is not None:
         expected_pin_count = int(pin_start[-1].item()) if pin_start.numel() else 0
-        if not pin_names:
+        if len(pin_names) == 0:
             pin_names = None
             pin_identity_unavailable_reason = "missing_flat_lib_pin_names"
         elif len(pin_names) != expected_pin_count:
@@ -320,31 +445,20 @@ def build_action_arc_table(
                 f"names={len(pin_names)}:expected={expected_pin_count}"
             )
             pin_names = None
-    arc_signatures = None
     arc_cells = arcs[:, 2].detach().to(device="cpu", dtype=torch.long)
     arc_ids = arcs[:, 3].detach().to(device="cpu", dtype=torch.long)
 
-    runtime_key = (
-        int(arcs.data_ptr()),
-        int(arcs._version),
-        tuple(int(value) for value in arcs.shape),
-        str(device),
-    )
-    output_entry = None
-    if output_cache is not None:
-        output_entry = output_cache.get(runtime_key)
-    output_buffer_reused = False
-
-    def output_tensor(name, shape, *, dtype, fill_value=None):
+    def output_tensor(name, shape, *, dtype, fill_value=None, reset=True):
         nonlocal output_entry, output_buffer_reused
         if output_entry is not None:
             value = output_entry.get(name)
             if value is not None and tuple(value.shape) == tuple(shape):
                 output_buffer_reused = True
-                if fill_value is not None:
-                    value.fill_(fill_value)
-                else:
-                    value.zero_()
+                if reset:
+                    if fill_value is not None:
+                        value.fill_(fill_value)
+                    else:
+                        value.zero_()
                 return value
         if fill_value is None:
             value = torch.zeros(shape, dtype=dtype, device=device)
@@ -354,64 +468,17 @@ def build_action_arc_table(
             output_entry[name] = value
         return value
 
-    if output_entry is None and output_cache is not None:
-        output_entry = {}
-        output_cache[runtime_key] = output_entry
-    target_arc_ids = output_tensor(
-        "target_arc_ids", (num_arcs, num_actions), dtype=torch.long, fill_value=-1
-    )
-    target_senses = output_tensor(
-        "target_senses", (num_arcs, num_actions), dtype=torch.long
-    )
-    valid_arcs = output_tensor(
-        "valid_arcs", (num_arcs, num_actions), dtype=torch.bool
-    )
-    failure_counts = {
-        str(action): {
-            "target_cell_missing": 0,
-            "pin_count": 0,
-            "arc_schema": 0,
-            "stale_instance_master": 0,
-            "invalid_runtime_arc": 0,
-            "pin_identity": 0,
-        }
-        for action in action_names
-    }
     instance_master = current_cells.detach().to(device="cpu", dtype=torch.long)
-    target_cells_cpu = target_cells.detach().to(device="cpu", dtype=torch.long)
     candidate_targets_cpu = candidate_table.target_cell_ids.detach().to(
         device="cpu",
         dtype=torch.long,
     )
     target_valid_cpu = target_valid.detach().to(device="cpu", dtype=torch.bool)
-    inst_ids_cpu = inst_ids.detach().to(device="cpu", dtype=torch.long)
     pair_loop_started_at = time.perf_counter()
 
     cell_count = int(arc_start.numel()) - 1
     flat_arc_count = int(flat_arc_info.shape[0])
-    valid_inst_rows = (inst_ids_cpu >= 0) & (inst_ids_cpu < num_instances)
-    safe_inst_ids = inst_ids_cpu.clamp(min=0, max=max(num_instances - 1, 0))
-    valid_source_cells = (arc_cells >= 0) & (arc_cells < cell_count)
-    valid_runtime_arcs = (arc_ids >= 0) & (arc_ids < flat_arc_count)
-    stale_rows = (
-        valid_inst_rows
-        & valid_source_cells
-        & (instance_master[safe_inst_ids] != arc_cells)
-    )
-    invalid_runtime_rows = ~(valid_inst_rows & valid_source_cells & valid_runtime_arcs)
-    valid_runtime_rows = (
-        valid_inst_rows
-        & valid_source_cells
-        & valid_runtime_arcs
-        & ~stale_rows
-    )
-    target_valid_rows = target_valid_cpu[safe_inst_ids]
-    target_valid_rows &= valid_inst_rows.unsqueeze(1)
-    safe_arc_ids = arc_ids.clamp(min=0, max=max(flat_arc_count - 1, 0))
-    safe_source_cells = arc_cells.clamp(min=0, max=max(cell_count - 1, 0))
-    used_cells = torch.unique(
-        current_cells.detach().to(device="cpu", dtype=torch.long)
-    )
+    used_cells = torch.unique(instance_master)
     used_cells = used_cells[(used_cells >= 0) & (used_cells < cell_count)]
     arc_cache = getattr(data, "_lut_action_arc_table_cache", None)
     if (
@@ -426,6 +493,10 @@ def build_action_arc_table(
             "action_count": num_actions,
             "flat_arc_count": flat_arc_count,
             "cell_count": cell_count,
+            "arc_start_list": arc_start.tolist(),
+            "pin_start_list": pin_start.tolist(),
+            "cell_pin_cache": [None] * cell_count,
+            "arc_signatures": None,
             "mapped_arc_ids": [
                 torch.full((flat_arc_count,), -1, dtype=torch.long)
                 for _ in range(num_actions)
@@ -444,8 +515,12 @@ def build_action_arc_table(
             ],
         }
         data._lut_action_arc_table_cache = arc_cache
+    arc_start_list = arc_cache["arc_start_list"]
+    pin_start_list = arc_cache["pin_start_list"]
+    cell_pin_cache = arc_cache["cell_pin_cache"]
+    arc_signatures = arc_cache["arc_signatures"]
     cached_changed_cells = 0
-    for action_index, action in enumerate(action_names):
+    for action_index in range(num_actions):
         mapped_arc_ids = arc_cache["mapped_arc_ids"][action_index]
         mapping_target = arc_cache["mapping_target"][action_index]
         bad_reason_cells = arc_cache["bad_reason"][action_index]
@@ -475,9 +550,10 @@ def build_action_arc_table(
                     (*signature, int(check_type))
                     for signature, check_type in zip(arc_signatures, check_types.detach().cpu().tolist(), strict=True)
                 ]
+            arc_cache["arc_signatures"] = arc_signatures
         for source_cell in changed_cells.tolist():
-            source_begin = int(arc_start[source_cell].item())
-            source_end = int(arc_start[source_cell + 1].item())
+            source_begin = int(arc_start_list[source_cell])
+            source_end = int(arc_start_list[source_cell + 1])
             if source_end > source_begin:
                 mapped_arc_ids[source_begin:source_end] = -1
             for reason in bad_reason_cells:
@@ -496,6 +572,9 @@ def build_action_arc_table(
                 cache_owner=data,
                 library_key=library_key,
                 signatures=arc_signatures,
+                arc_start_list=arc_start_list,
+                pin_start_list=pin_start_list,
+                cell_pin_cache=cell_pin_cache,
             )
             if mapping is None:
                 if reason in bad_reason_cells:
@@ -504,90 +583,228 @@ def build_action_arc_table(
             if source_end > source_begin:
                 mapped_arc_ids[source_begin:source_end] = mapping
 
-        target_for_rows = mapped_arc_ids[safe_arc_ids]
-        valid = valid_runtime_rows & target_valid_rows[:, action_index]
-        valid &= target_for_rows >= 0
-        target_arc_ids[:, action_index] = torch.where(
-            valid,
-            target_for_rows,
-            torch.full_like(target_for_rows, -1),
-        ).to(device=device)
-        target_senses[:, action_index] = torch.where(
-            valid,
-            flat_arc_info[target_for_rows.clamp(min=0), 4],
-            torch.zeros_like(target_for_rows),
-        ).to(device=device)
-        valid_arcs[:, action_index] = valid.to(device=device)
-
-        target_valid_column = target_valid_rows[:, action_index]
-        failure_counts[action]["target_cell_missing"] = int(
-            (valid_inst_rows & ~target_valid_column).sum().item()
-        )
-        failure_counts[action]["stale_instance_master"] = int(
-            (stale_rows & target_valid_column).sum().item()
-        )
-        failure_counts[action]["invalid_runtime_arc"] = int(
-            (invalid_runtime_rows & target_valid_column).sum().item()
-        )
+    def evaluate_rows(
+        row_indices,
+        inst_master_vec,
+        arc_cells_vec,
+        arc_ids_vec,
+        target_valid_mat,
+        action_index,
+        mapped_arc_ids,
+        bad_reason_cells,
+    ):
+        r_valid_inst = valid_inst_rows[row_indices]
+        r_safe_inst = safe_inst_ids[row_indices]
+        r_arc_cells = arc_cells_vec[row_indices]
+        r_arc_ids = arc_ids_vec[row_indices]
+        r_valid_src = (r_arc_cells >= 0) & (r_arc_cells < cell_count)
+        r_valid_rt_arc = (r_arc_ids >= 0) & (r_arc_ids < flat_arc_count)
+        r_stale = r_valid_inst & r_valid_src & (inst_master_vec[r_safe_inst] != r_arc_cells)
+        r_invalid_rt = ~(r_valid_inst & r_valid_src & r_valid_rt_arc)
+        r_valid_rt = r_valid_inst & r_valid_src & r_valid_rt_arc & ~r_stale
+        r_tvc = target_valid_mat[r_safe_inst, action_index] & r_valid_inst
+        r_safe_arc_ids = r_arc_ids.clamp(min=0, max=max(flat_arc_count - 1, 0))
+        r_safe_src_cells = r_arc_cells.clamp(min=0, max=max(cell_count - 1, 0))
+        target_for_rows = mapped_arc_ids[r_safe_arc_ids]
+        valid = r_valid_rt & r_tvc & (target_for_rows >= 0)
+        failures = {
+            "target_cell_missing": int((r_valid_inst & ~r_tvc).sum().item()),
+            "pin_count": 0,
+            "arc_schema": 0,
+            "stale_instance_master": int((r_stale & r_tvc).sum().item()),
+            "invalid_runtime_arc": int((r_invalid_rt & r_tvc).sum().item()),
+            "pin_identity": 0,
+        }
         for reason, bad_cells in bad_reason_cells.items():
-            if not bool(bad_cells.any()):
-                continue
-            bad_source_rows = bad_cells[safe_source_cells]
-            failure_counts[action][reason] = int(
-                (
-                    valid_runtime_rows
-                    & target_valid_column
-                    & bad_source_rows
-                    & (target_for_rows < 0)
+            if bool(bad_cells.any()):
+                failures[reason] = int(
+                    (
+                        r_valid_rt
+                        & r_tvc
+                        & bad_cells[r_safe_src_cells]
+                        & (target_for_rows < 0)
+                    )
+                    .sum()
+                    .item()
                 )
-                .sum()
-                .item()
-            )
+        return target_for_rows, valid, failures
 
-    pair_loop_ms = (time.perf_counter() - pair_loop_started_at) * 1000.0
-    assembly_started_at = time.perf_counter()
-    counts = output_tensor(
-        "counts", (num_instances, num_actions), dtype=torch.long
+    inc_key = (
+        library_key,
+        topo_key,
+        int(candidate_table.target_cell_ids.data_ptr()),
+        int(candidate_table.target_cell_ids._version),
+        int(data.inst_is_sizeable._version),
+        int(data.inst_vt_mask._version),
     )
-    bad_counts = output_tensor(
-        "bad_counts", (num_instances, num_actions), dtype=torch.long
+    can_incremental = (
+        output_entry is not None
+        and output_entry.get("inc_key") == inc_key
+        and "prev_instance_master" in output_entry
     )
-    valid_inst_rows = inst_ids >= 0
-    if bool(valid_inst_rows.any()):
-        rows = inst_ids[valid_inst_rows]
-        for action_index in range(num_actions):
-            counts[:, action_index].scatter_add_(
-                0,
-                rows,
-                torch.ones_like(rows),
+    dirty_arcs = None
+    if can_incremental:
+        changed_inst_mask = instance_master != output_entry["prev_instance_master"]
+        changed_arc_mask = (
+            (arc_cells != output_entry["prev_arc_cells"])
+            | (arc_ids != output_entry["prev_arc_ids"])
+            | (valid_inst_rows & changed_inst_mask[safe_inst_ids])
+        )
+        if int(changed_arc_mask.sum().item()) * 4 < num_arcs:
+            dirty_arcs = torch.nonzero(changed_arc_mask, as_tuple=False).flatten()
+        else:
+            can_incremental = False
+
+    if can_incremental and dirty_arcs is not None:
+        target_arc_ids = output_tensor(
+            "target_arc_ids", (num_arcs, num_actions), dtype=torch.long, fill_value=-1, reset=False
+        )
+        target_senses = output_tensor(
+            "target_senses", (num_arcs, num_actions), dtype=torch.long, reset=False
+        )
+        valid_arcs = output_tensor(
+            "valid_arcs", (num_arcs, num_actions), dtype=torch.bool, reset=False
+        )
+        bad_counts = output_tensor(
+            "bad_counts", (num_instances, num_actions), dtype=torch.long, reset=False
+        )
+        failure_counts = {
+            str(action): dict(output_entry["failure_counts"][str(action)])
+            for action in action_names
+        }
+        if dirty_arcs.numel() > 0:
+            d_arcs_dev = dirty_arcs.to(device=device)
+            d_valid_inst_dev = valid_inst_rows[dirty_arcs].to(device=device)
+            d_rows_dev = inst_ids[d_arcs_dev][d_valid_inst_dev]
+            for action_index, action in enumerate(action_names):
+                mapped_arc_ids = arc_cache["mapped_arc_ids"][action_index]
+                bad_reason_cells = arc_cache["bad_reason"][action_index]
+                target_for_rows, valid, new_fail = evaluate_rows(
+                    dirty_arcs,
+                    instance_master,
+                    arc_cells,
+                    arc_ids,
+                    target_valid_cpu,
+                    action_index,
+                    mapped_arc_ids,
+                    bad_reason_cells,
+                )
+                _, _, old_fail = evaluate_rows(
+                    dirty_arcs,
+                    output_entry["prev_instance_master"],
+                    output_entry["prev_arc_cells"],
+                    output_entry["prev_arc_ids"],
+                    output_entry["prev_target_valid_cpu"],
+                    action_index,
+                    mapped_arc_ids,
+                    bad_reason_cells,
+                )
+                old_valid_dev = valid_arcs[d_arcs_dev, action_index].clone()
+                new_valid_dev = valid.to(device=device)
+                target_arc_ids[d_arcs_dev, action_index] = torch.where(
+                    valid, target_for_rows, torch.full_like(target_for_rows, -1)
+                ).to(device=device)
+                target_senses[d_arcs_dev, action_index] = torch.where(
+                    valid,
+                    flat_arc_info[target_for_rows.clamp(min=0), 4],
+                    torch.zeros_like(target_for_rows),
+                ).to(device=device)
+                valid_arcs[d_arcs_dev, action_index] = new_valid_dev
+                if d_rows_dev.numel():
+                    delta_bad = (
+                        (~new_valid_dev[d_valid_inst_dev]).long()
+                        - (~old_valid_dev[d_valid_inst_dev]).long()
+                    )
+                    bad_counts[:, action_index].scatter_add_(0, d_rows_dev, delta_bad)
+                for k in failure_counts[action]:
+                    failure_counts[action][k] += new_fail[k] - old_fail[k]
+            output_entry["prev_instance_master"].copy_(instance_master)
+            output_entry["prev_arc_cells"].copy_(arc_cells)
+            output_entry["prev_arc_ids"].copy_(arc_ids)
+            output_entry["prev_target_valid_cpu"].copy_(target_valid_cpu)
+            output_entry["failure_counts"] = {
+                str(a): dict(failure_counts[str(a)]) for a in action_names
+            }
+        pair_loop_ms = (time.perf_counter() - pair_loop_started_at) * 1000.0
+        assembly_started_at = time.perf_counter()
+    else:
+        target_arc_ids = output_tensor(
+            "target_arc_ids", (num_arcs, num_actions), dtype=torch.long, fill_value=-1
+        )
+        target_senses = output_tensor(
+            "target_senses", (num_arcs, num_actions), dtype=torch.long
+        )
+        valid_arcs = output_tensor(
+            "valid_arcs", (num_arcs, num_actions), dtype=torch.bool
+        )
+        failure_counts = {}
+        all_rows = slice(None)
+        for action_index, action in enumerate(action_names):
+            mapped_arc_ids = arc_cache["mapped_arc_ids"][action_index]
+            bad_reason_cells = arc_cache["bad_reason"][action_index]
+            target_for_rows, valid, failure_counts[str(action)] = evaluate_rows(
+                all_rows,
+                instance_master,
+                arc_cells,
+                arc_ids,
+                target_valid_cpu,
+                action_index,
+                mapped_arc_ids,
+                bad_reason_cells,
             )
-            bad_counts[:, action_index].scatter_add_(
-                0,
-                rows,
-                (~valid_arcs[valid_inst_rows, action_index]).long(),
-            )
-    valid_instances = target_valid & (counts > 0) & (bad_counts == 0)
+            target_arc_ids[:, action_index] = torch.where(
+                valid, target_for_rows, torch.full_like(target_for_rows, -1)
+            ).to(device=device)
+            target_senses[:, action_index] = torch.where(
+                valid,
+                flat_arc_info[target_for_rows.clamp(min=0), 4],
+                torch.zeros_like(target_for_rows),
+            ).to(device=device)
+            valid_arcs[:, action_index] = valid.to(device=device)
+
+        pair_loop_ms = (time.perf_counter() - pair_loop_started_at) * 1000.0
+        assembly_started_at = time.perf_counter()
+        bad_counts = output_tensor(
+            "bad_counts", (num_instances, num_actions), dtype=torch.long
+        )
+        if rows_dev.numel():
+            for action_index in range(num_actions):
+                bad_counts[:, action_index].scatter_add_(
+                    0,
+                    rows_dev,
+                    (~valid_arcs[valid_inst_rows_dev, action_index]).long(),
+                )
+        if output_entry is not None:
+            output_entry["inc_key"] = inc_key
+            output_entry["prev_instance_master"] = instance_master.clone()
+            output_entry["prev_arc_cells"] = arc_cells.clone()
+            output_entry["prev_arc_ids"] = arc_ids.clone()
+            output_entry["prev_target_valid_cpu"] = target_valid_cpu.clone()
+            output_entry["failure_counts"] = {
+                str(a): dict(failure_counts[str(a)]) for a in action_names
+            }
+    valid_instances = target_valid & has_arcs & (bad_counts == 0)
 
     action_summary = {}
     sizeable_count = int(sizeable.sum().item())
+    valid_arc_counts = [int(x) for x in valid_arcs.sum(dim=0).tolist()]
+    valid_inst_counts = [int(x) for x in valid_instances.sum(dim=0).tolist()]
     for action_index, action in enumerate(action_names):
+        valid_arc_cnt = valid_arc_counts[action_index]
+        valid_inst_cnt = valid_inst_counts[action_index]
         action_summary[action] = {
-            "valid_arc_count": int(valid_arcs[:, action_index].sum().item()),
+            "valid_arc_count": valid_arc_cnt,
             "active_arc_count": num_arcs,
-            "valid_instance_count": int(
-                valid_instances[:, action_index].sum().item()
-            ),
-            "mapped_arc_count": int(
-                (inst_ids >= 0).sum().item()
-            ),
+            "valid_instance_count": valid_inst_cnt,
+            "mapped_arc_count": mapped_arc_count,
             "sizeable_instance_count": sizeable_count,
             "arc_valid_rate": (
-                float(valid_arcs[:, action_index].sum().item()) / num_arcs
+                float(valid_arc_cnt) / num_arcs
                 if num_arcs
                 else 0.0
             ),
             "instance_valid_rate": (
-                float(valid_instances[:, action_index].sum().item())
+                float(valid_inst_cnt)
                 / sizeable_count
                 if sizeable_count
                 else 0.0

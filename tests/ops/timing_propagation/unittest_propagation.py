@@ -1502,8 +1502,8 @@ class TestTimingPropagationFastLoopState(unittest.TestCase):
             torch.tensor([True, True], device=device),
             torch.tensor([0.05, 0.05], device=device, dtype=dtype),
         )
-        self.assertAlmostEqual(float(slew_vio.detach().cpu().item()), 0.020, places=6)
-        self.assertAlmostEqual(float(cap_vio.detach().cpu().item()), 0.040, places=6)
+        self.assertAlmostEqual(float(slew_vio.detach().cpu().item()), 20.0, places=5)
+        self.assertAlmostEqual(float(cap_vio.detach().cpu().item()), 40.0, places=5)
 
     def test_production_fast_loop_critical_paths_use_live_snapshots(self):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

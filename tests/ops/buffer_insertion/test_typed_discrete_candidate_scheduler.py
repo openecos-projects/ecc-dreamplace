@@ -149,3 +149,18 @@ def test_typed_candidate_slice_moves_active_view_indices_to_cuda():
     assert view.candidate_bu_tensor.device == device
     assert view.bsu_index_tensor.device == device
     assert view.candidate_bu_tensor.tolist() == [1.0, 0.0]
+
+
+def test_typed_scheduler_skips_disallowed_position_types():
+    allowed = torch.tensor([[False, True, True, True], [True, True, True, True]])
+    transition = schedule_typed_candidate_gradient_actions(
+        candidate_net_index=torch.tensor([0, 0], dtype=torch.long),
+        net_ids=torch.tensor([10], dtype=torch.long),
+        candidate_ids=torch.tensor([100, 101], dtype=torch.long),
+        activations=torch.zeros((2, 4)),
+        raw_grad=torch.tensor([[-9.0, -1.0, -1.0, -1.0], [-2.0, -1.0, -1.0, -1.0]]),
+        allowed_actions=allowed,
+    )
+
+    assert transition.selected_candidate_ids.tolist() == [101]
+    assert transition.selected_drive_type_ids.tolist() == [0]

@@ -1,37 +1,18 @@
-# AutoDMP Flow Entry Boundary
+# `dreamplace/flows` Layered Architecture
 
-`dreamplace/Placer.py` remains the executable entry point for AutoDMP runs.
-`dreamplace/placer_cli.py` owns the canonical CLI argument surface and effective
-parameter construction for placement, diff-sizing, buffering, joint, and
-physical-ECO flows.
+`dreamplace/Placer.py` (`PlacementEngine`) is the programmatic and executable entry point; `dreamplace/placer_cli.py` owns standalone CLI argument parsing and `run_optimization_flow`.
 
-Flow-level inference and recommended defaults live in `flow_config.py`. For
-example, the canonical diff-sizing entry is `--flow-kind sizing`; its defaults
-are intentionally defined here instead of in external experiment wrappers.
+## Subpackage Layers & Dependency Rules
 
-The canonical buffering entries are:
+`dreamplace/flows/` is organized into 6 domain subpackages with a strict unidirectional dependency DAG (enforced by `tests/flows/test_flow_layer_boundaries.py`):
 
 ```text
---flow-kind buffering
---flow-kind physical_eco
---buffering-mode {segment,candidate}
+config  <-  gp  <-  discrete  <-  {s5b1, post_gp}  <-  baselines
 ```
 
-`buffering` runs the current relaxed buffering analysis without enabling real
-OpenROAD coordinate commit by default. `physical_eco` inherits the same
-buffering profile and enables the legal-state real-commit loop.
-
-The public buffering algorithm choice is `--buffering-mode`. `segment` is the
-default production-oriented profile: optimize segment repeater counts and
-project them to equal-spaced buffer insertions. `candidate` keeps the explicit
-candidate-level relaxed/projection path available for comparison and debug.
-
-Historical research-specific buffering switches are no longer registered in
-the public CLI. Existing internal `buffering_*` fields can remain in flow
-defaults and the config adapter while lower-level runner code is migrated. New
-flow code should read the canonical buffering config rather than adding more
-direct `buffering_*` accesses.
-
-The top-level `baseline/run_workspace_flow1.py` script is a legacy experiment
-wrapper. It may still be useful for historical comparisons, but new canonical
-flow defaults and new public entry behavior should not be added there.
+1. **`config/`** (`profiles.py`, `specs.py`, `resolver.py`): Flow parameter schemas, default profiles, and `apply_flow_defaults` / `resolve_flow_config`. Leaf package within `flows/`.
+2. **`gp/`** (`l_shape_iteration.py`, `topology_refresh.py`, `timing_carriers.py`, `hold_timing.py`, `metrics.py`, `timing_artifacts.py`, `continuation.py`): Global placement iteration hooks, timing carriers, metric/artifact writers, and warm-restart continuation state.
+3. **`discrete/`** (`common.py`, `owner.py`, `sizing_filter.py`, `buffering_filter.py`, `buffer_commit.py`): Shared discrete Sizing/Buffering optimization engine (`DiscreteTimingOwner`), incremental timing acceptance gates, and direct ECC buffer commit.
+4. **`s5b1/`** (`inflation_s5b1.py`, `committed_topology.py`): Default production milestone co-optimization (`InflationS5B1`: S5 discrete sizing + B1 3-round 2n-subnet `candidate` buffering) and terminal materialization (`finalize_inflation_s5b1`).
+5. **`post_gp/`** (`rc_sizing.py`, `diff_sizing.py`, `diff_opt.py`): Post-placement standalone electrical flows (`DIFF_SIZING` with GR/Placement/SPEF parasitics, and optional `DIFF_OPT`).
+6. **`baselines/`** (`joint_coordinator.py`, `joint_runtime.py`, `segment_joint.py`, `segment_buffering.py`, `sizing_dynamics.py`, `real_size_transition.py`, `gate_projection.py`, `alternating_discrete.py`, `midplace_repair.py`, `repair_buffering.py`): Retained comparison and historical co-optimization flows. Production subpackages (`config`, `gp`, `discrete`, `s5b1`, `post_gp`) must never import `baselines`, and `dreamplace/ops/` must never import `dreamplace/flows/`.

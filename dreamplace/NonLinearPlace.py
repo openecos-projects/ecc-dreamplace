@@ -20,17 +20,40 @@ import matplotlib.pyplot as plt
 import inspect
 import hashlib
 from dataclasses import replace
-from dreamplace.flows import sizing_dynamics_policy, continuous_early_stop
-from dreamplace.flows import l_shape_iteration
-from dreamplace.flows import projected_pin_refresh
-from dreamplace.flows import placement_step_profile
+from dreamplace.flows.baselines import (
+    sizing_dynamics as sizing_dynamics_policy,
+    sizing_dynamics as continuous_early_stop,
+)
+from dreamplace.flows.gp import l_shape_iteration
+from dreamplace.flows.baselines import gate_projection as projected_pin_refresh
+from dreamplace.flows.gp import metrics as placement_step_profile
 from dreamplace.ops.routability import l_shape_telemetry
-from dreamplace.flows import sizing_debug, placement_metrics, metric_state, timing_artifacts, projection_context
-from dreamplace.flows import timing_iteration, joint_iteration, placement_topology_iteration
-from dreamplace.flows import segment_buffer_gradient, segment_joint_terminal, joint_commit_control
-from dreamplace.flows import sizing_dynamics, discrete_sizing_step, segment_sizing_frame
-from dreamplace.flows.inflation_s5b1 import InflationS5B1
-from dreamplace.flows.alternating_discrete import (
+from dreamplace.flows.baselines import (
+    sizing_dynamics as sizing_debug,
+    gate_projection as projection_context,
+)
+from dreamplace.flows.gp import (
+    timing_artifacts as placement_metrics,
+    metrics as metric_state,
+    timing_artifacts,
+)
+from dreamplace.flows.gp import (
+    topology_refresh as timing_iteration,
+    topology_refresh as placement_topology_iteration,
+)
+from dreamplace.flows.baselines import joint_runtime as joint_iteration
+from dreamplace.flows.baselines import (
+    segment_buffering as segment_buffer_gradient,
+    segment_joint as segment_joint_terminal,
+    joint_runtime as joint_commit_control,
+)
+from dreamplace.flows.baselines import (
+    sizing_dynamics,
+    real_size_transition as discrete_sizing_step,
+    segment_buffering as segment_sizing_frame,
+)
+from dreamplace.flows.s5b1.inflation_s5b1 import InflationS5B1
+from dreamplace.flows.baselines.alternating_discrete import (
     AlternatingDiscreteController,
     PROFILE as DISCRETE_ALTERNATING_PROFILE,
 )
@@ -117,7 +140,7 @@ from dreamplace.ops.steiner_topo.ggr_l_shape_topology import (
 from dreamplace.ops.routability.routability_controller import RoutabilityController
 from dreamplace.ops.irt_egr.egr_padding import apply_egr_padding, restore_egr_padding
 from dreamplace.ops.routability import inflation_legalization
-from dreamplace.flows.handoff_state import (
+from dreamplace.flows.gp.continuation import (
     build_continuation_seed,
     call_restart_after_topology_sync,
     apply_warm_schedule_state,
@@ -128,13 +151,13 @@ from dreamplace.flows.handoff_state import (
     restart_probe_payload,
     restart_scalar,
 )
-from dreamplace.flows.handoff_transaction import (
+from dreamplace.flows.baselines.repair_buffering import (
     HandoffTransactionContext,
     build_handoff_command_failure_payload,
     build_session_mutation_result,
     execute_openroad_handoff_transaction,
 )
-from dreamplace.flows.metric_state import (
+from dreamplace.flows.gp.metrics import (
     apply_metric_snapshot,
     combined_timing_loss,
     finite_timing_scalar,
@@ -148,7 +171,7 @@ from dreamplace.flows.metric_state import (
     update_metric_timing,
     value_has_nonfinite,
 )
-from dreamplace.flows.real_size_transition import (
+from dreamplace.flows.baselines.real_size_transition import (
     RealSizeTransitionContext,
     TransitionProjection,
     capture_transaction,
@@ -157,7 +180,7 @@ from dreamplace.flows.real_size_transition import (
     sync_projected_real_size,
     transition_to_discrete,
 )
-from dreamplace.flows.real_size_transition_profile import (
+from dreamplace.flows.baselines.real_size_transition import (
     finalize_transition_accounting,
     process_peak_rss_bytes,
     record_transition_artifacts,
@@ -168,12 +191,13 @@ from dreamplace.flows.real_size_transition_profile import (
     transition_profile_device,
     write_transition_profile,
 )
-from dreamplace.flows.timing_objective_policy import (
+from dreamplace.flows.gp.timing_carriers import (
     diff_tdp_controls_direct_timing_objective,
     diff_tdp_enabled,
     diff_tdp_gate_status,
     diff_tdp_uses_direct_loss,
     diff_tdp_uses_gradient_net_weight,
+    diff_tdp_uses_star_pin_pair,
     freeze_diff_tdp_step_status,
     legacy_net_weight_gate_status,
     net_weighting_nendpoints,
@@ -186,22 +210,24 @@ from dreamplace.flows.timing_objective_policy import (
     should_use_live_timing_loss,
     timing_placement_carrier,
 )
-from dreamplace.flows.timing_net_weighting import (
-    TimingNetWeightingContext, LegacyWeightContext, update_legacy_weights,
+from dreamplace.flows.gp.timing_carriers import (
+    TimingNetWeightingContext,
+    LegacyWeightContext,
+    update_legacy_weights,
     rebuild_pin2pin_pair_weights,
 )
-from dreamplace.flows.timing_gradient_projection import (
+from dreamplace.flows.gp.timing_carriers import (
     TimingGradientProjectionContext,
     project_timing_gradient_to_net_weights,
 )
-from dreamplace.flows.timing_topology import (
+from dreamplace.flows.gp.topology_refresh import (
     TimingTopologyContext,
     freeze_live_timing_topology,
     prepare_legacy_net_weight_timing_topology,
     publish_live_timing_topology,
     refresh_live_timing_topology,
 )
-from dreamplace.flows.segment_joint import (
+from dreamplace.flows.baselines.segment_joint import (
     SegmentJointContext,
     apply_segment_overflow_milestone_transaction,
     apply_segment_rebootstrap_milestone_transaction,
@@ -210,7 +236,7 @@ from dreamplace.flows.segment_joint import (
     rebuild_and_install_segment_pin2pin,
     run_segment_milestone_sizing_micro_loop,
 )
-from dreamplace.flows.segment_joint_terminal import (
+from dreamplace.flows.baselines.segment_joint import (
     TerminalLaneContext,
     TerminalRouteBContext,
     rebuild_terminal_segment_route_b_state,
@@ -219,7 +245,7 @@ from dreamplace.flows.segment_joint_terminal import (
     terminal_route_b_round_budget,
     terminal_static_timing_snapshot,
 )
-from dreamplace.flows.timing_artifacts import (
+from dreamplace.flows.gp.timing_artifacts import (
     StageCompareWriterContext,
     artifact_bool,
     artifact_float,
@@ -233,7 +259,7 @@ from dreamplace.flows.timing_artifacts import (
     write_timing_stage_summary,
     write_post_projection_timing_summary,
 )
-from dreamplace.flows.projection_context import (
+from dreamplace.flows.baselines.gate_projection import (
     ProjectionScoringContext,
     aggregate_violation_per_instance,
     build_projection_context,
@@ -244,7 +270,7 @@ from dreamplace.flows.projection_context import (
     projection_objective_profile,
     projection_profile_term_weights,
 )
-from dreamplace.flows.projection_artifacts import (
+from dreamplace.flows.baselines.gate_projection import (
     ProjectionFrameContext,
     build_projection_frame,
     projected_vt_distribution,
@@ -252,7 +278,7 @@ from dreamplace.flows.projection_artifacts import (
     projection_changed_inst_mask,
     write_projection_summary_artifact,
 )
-from dreamplace.flows.projection_runtime_refresh import (
+from dreamplace.flows.baselines.gate_projection import (
     ProjectionTimingSnapshotContext,
     compute_post_projection_timing_snapshot,
 )
@@ -411,7 +437,172 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         )
         self._egr_padding_state = None
 
+    @staticmethod
+    def _decode_node_name(raw_name) -> str:
+        if isinstance(raw_name, (bytes, np.bytes_)):
+            return raw_name.decode("utf-8", errors="ignore")
+        return str(raw_name)
+
+    def export_d_metric_movable_map(self, params, placedb):
+        if not bool(getattr(params, "d_metric_legalize_flag", 0)):
+            return None
+        model = getattr(self, "_routability_model", None)
+        precond = getattr(
+            getattr(model, "op_collections", None), "precondition_op", None
+        )
+        d_base = getattr(precond, "_last_d_metric_base", None)
+        d_tx = getattr(precond, "_last_d_metric_timing_x", None)
+        d_ty = getattr(precond, "_last_d_metric_timing_y", None)
+        if d_base is None or d_tx is None or d_ty is None:
+            return None
+        raw_names = getattr(placedb, "node_names", None)
+        m_cnt = int(placedb.num_movable_nodes)
+        if raw_names is None or len(raw_names) < m_cnt or m_cnt <= 0:
+            return None
+        with torch.no_grad():
+            max_w = float(getattr(params, "d_metric_legalize_max_weight", 64.0))
+            n_use = min(m_cnt, int(d_base.numel()), int(d_tx.numel()), int(d_ty.numel()))
+            if n_use <= 0:
+                return None
+            denom = d_base[:n_use].detach().float().clamp(min=1.0)
+            ex = (d_tx[:n_use].detach().float() / denom).clamp(1.0, max_w)
+            ey = (d_ty[:n_use].detach().float() / denom).clamp(1.0, max_w)
+            e_iso = torch.maximum(ex, ey).cpu()
+            names = [self._decode_node_name(raw_names[i]) for i in range(n_use)]
+            known_names = set(names)
+            nz = torch.nonzero(e_iso > (1.0 + 1e-6), as_tuple=False).reshape(-1).tolist()
+            node_map = {names[idx]: float(e_iso[idx].item()) for idx in nz}
+            return {
+                "node_map": node_map,
+                "known_names": known_names,
+                "max_weight": max_w,
+                "anchor_boost": float(
+                    getattr(params, "d_metric_legalize_anchor_boost", 0.5)
+                ),
+                "source_movable_count": int(n_use),
+            }
+
+    def _prepare_d_metric_legalize_weights(self, params, placedb) -> None:
+        self.data_collections.d_metric_legalize_weights = None
+        carried = getattr(placedb, "_carried_d_metric_movable_map", None)
+        if carried is not None:
+            placedb._carried_d_metric_movable_map = None
+        if not bool(getattr(params, "d_metric_legalize_flag", 0)):
+            return
+
+        m_cnt = int(placedb.num_movable_nodes)
+        n_total = int(placedb.num_nodes)
+        max_w = float(getattr(params, "d_metric_legalize_max_weight", 64.0))
+        anchor_boost = float(getattr(params, "d_metric_legalize_anchor_boost", 0.5))
+
+        model = getattr(self, "_routability_model", None)
+        precond = getattr(
+            getattr(model, "op_collections", None), "precondition_op", None
+        )
+        d_base = getattr(precond, "_last_d_metric_base", None)
+        d_tx = getattr(precond, "_last_d_metric_timing_x", None)
+        d_ty = getattr(precond, "_last_d_metric_timing_y", None)
+
+        if d_base is not None and d_tx is not None and d_ty is not None:
+            with torch.no_grad():
+                denom = d_base.detach().float().clamp(min=1.0)
+                ex = (d_tx.detach().float() / denom).clamp(1.0, max_w)
+                ey = (d_ty.detach().float() / denom).clamp(1.0, max_w)
+                if int(ex.numel()) < n_total:
+                    pad = torch.ones(
+                        (n_total - int(ex.numel()),),
+                        dtype=torch.float32,
+                        device=ex.device,
+                    )
+                    ex = torch.cat([ex, pad], dim=0)
+                    ey = torch.cat([ey, pad], dim=0)
+                else:
+                    ex = ex[:n_total].clone()
+                    ey = ey[:n_total].clone()
+                ex[m_cnt:] = 1.0
+                ey[m_cnt:] = 1.0
+                e_iso = torch.maximum(ex, ey).cpu()
+                self.data_collections.d_metric_legalize_weights = (e_iso, e_iso)
+                emax_m = e_iso[:m_cnt]
+                tier_cnt = int((emax_m >= 1.41421356).sum().item())
+                logging.info(
+                    "D-metric legalization active: tier>=1 movable=%d/%d, max_ex=%.2f, max_ey=%.2f, anchor_boost=%.2f",
+                    tier_cnt,
+                    m_cnt,
+                    float(ex[:m_cnt].max().item()) if m_cnt > 0 else 1.0,
+                    float(ey[:m_cnt].max().item()) if m_cnt > 0 else 1.0,
+                    anchor_boost,
+                )
+            return
+
+        if isinstance(carried, dict) and m_cnt > 0:
+            raw_names = getattr(placedb, "node_names", None)
+            if raw_names is None or len(raw_names) < m_cnt:
+                return
+            node_map = carried.get("node_map") or {}
+            known_names = carried.get("known_names") or set()
+            with torch.no_grad():
+                e_full = torch.ones((n_total,), dtype=torch.float32)
+                new_movable_mask = torch.zeros((m_cnt,), dtype=torch.bool)
+                for idx in range(m_cnt):
+                    name = self._decode_node_name(raw_names[idx])
+                    if name in node_map:
+                        e_full[idx] = float(node_map[name])
+                    elif known_names and name not in known_names:
+                        new_movable_mask[idx] = True
+                new_cnt = int(new_movable_mask.sum().item())
+                if new_cnt > 0:
+                    p2node = getattr(self.data_collections, "pin2node_map", None)
+                    p2net = getattr(self.data_collections, "pin2net_map", None)
+                    if torch.is_tensor(p2node) and torch.is_tensor(p2net):
+                        p2node_c = p2node.detach().cpu().long().reshape(-1)
+                        p2net_c = p2net.detach().cpu().long().reshape(-1)
+                        n_p = min(int(p2node_c.numel()), int(p2net_c.numel()))
+                        p2node_c, p2net_c = p2node_c[:n_p], p2net_c[:n_p]
+                        valid_p = (p2node_c >= 0) & (p2node_c < m_cnt) & (p2net_c >= 0)
+                        if bool(valid_p.any()):
+                            vp_nodes = p2node_c[valid_p]
+                            vp_nets = p2net_c[valid_p]
+                            num_nets = int(vp_nets.max().item()) + 1
+                            e_mov = e_full[:m_cnt]
+                            cur_known = ~new_movable_mask
+                            for _ in range(2):
+                                km = cur_known[vp_nodes]
+                                np_m = new_movable_mask[vp_nodes]
+                                if not (bool(km.any()) and bool(np_m.any())):
+                                    break
+                                net_max_e = torch.ones((num_nets,), dtype=torch.float32)
+                                net_max_e.scatter_reduce_(
+                                    0,
+                                    vp_nets[km],
+                                    e_mov[vp_nodes[km]],
+                                    reduce="amax",
+                                    include_self=True,
+                                )
+                                e_mov.scatter_reduce_(
+                                    0,
+                                    vp_nodes[np_m],
+                                    net_max_e[vp_nets[np_m]],
+                                    reduce="amax",
+                                    include_self=True,
+                                )
+                                cur_known = cur_known | (e_mov > (1.0 + 1e-6))
+                e_full.clamp_(1.0, max_w)
+                e_full[m_cnt:] = 1.0
+                self.data_collections.d_metric_legalize_weights = (e_full, e_full)
+                emax_m = e_full[:m_cnt]
+                tier_cnt = int((emax_m >= 1.41421356).sum().item())
+                logging.info(
+                    "D-metric legalization active (carried): tier>=1 movable=%d/%d (new_buf=%d), max_e=%.2f, anchor_boost=%.2f",
+                    tier_cnt,
+                    m_cnt,
+                    new_cnt,
+                    float(emax_m.max().item()) if m_cnt > 0 else 1.0,
+                    anchor_boost,
+                )
+
     def _run_standard_legalization(self, params, placedb, iteration, all_metrics):
+        self._prepare_d_metric_legalize_weights(params, placedb)
         controller = self._routability_controller
         if controller is not None:
             controller.before_legalization(model=self._routability_model, position=self.pos[0])
@@ -1027,15 +1218,15 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         model_params = getattr(model, "params", params)
         payload.setdefault(
             "lane",
-            getattr(model_params, "timing_objective_lane", "timing_slew_cap"),
+            getattr(model_params, "timing_objective_lane", "timing_only"),
         )
         payload.setdefault("enabled_terms", ["timing"])
         payload.setdefault(
             "units",
             {
                 "timing": "loss_proxy",
-                "slew": "ns",
-                "cap": "pF",
+                "slew": "ps",
+                "cap": "fF",
                 "leakage": "mW",
             },
         )
@@ -1405,6 +1596,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
     def _diff_tdp_uses_direct_loss(self, params):
         return diff_tdp_uses_direct_loss(params)
 
+    def _diff_tdp_uses_star_pin_pair(self, params):
+        return diff_tdp_uses_star_pin_pair(params)
+
     def _diff_tdp_uses_gradient_net_weight(self, params):
         return diff_tdp_uses_gradient_net_weight(params)
 
@@ -1470,14 +1664,37 @@ class NonLinearPlace(BasicPlace.BasicPlace):
     def _diff_tdp_gate_status(self, params, iteration, overflow):
         return diff_tdp_gate_status(params, iteration, overflow)
 
-    def _freeze_diff_tdp_step_status(self, params, iteration, overflow):
+    def _freeze_diff_tdp_step_status(
+        self, params, iteration, overflow, *, model=None
+    ):
         previous_status = getattr(self, "_diff_tdp_step_status", None) or {}
+        summary = getattr(self, "_diff_tdp_gate_summary", None)
+        already_activated = bool(
+            isinstance(summary, dict)
+            and summary.get("first_timing_active_iteration") is not None
+        )
+        active_model = (
+            model
+            if model is not None
+            else getattr(self, "last_global_place_model", None)
+        )
+        star_rt = (
+            getattr(active_model, "star_tdp_runtime", None)
+            if active_model is not None
+            else None
+        )
+        topology_initialized = (
+            bool(star_rt is not None and star_rt.snapshot_generation > 0)
+            if self._diff_tdp_uses_star_pin_pair(params)
+            else getattr(self, "_live_timing_topology_initialized", False)
+        )
         status = freeze_diff_tdp_step_status(
             params,
             iteration,
             overflow,
             previous_status,
-            getattr(self, "_live_timing_topology_initialized", False),
+            topology_initialized,
+            already_activated=already_activated,
         )
         self._diff_tdp_step_status = dict(status)
         self._record_diff_tdp_gate_status(params, status)
@@ -1522,6 +1739,13 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         return copy.deepcopy(state)
 
     def _reset_timing_grad_balance_for_restart(self, model, params, *, iteration):
+        star_rt = getattr(model, "star_tdp_runtime", None)
+        if star_rt is not None:
+            star_rt.reset_for_restart(
+                recalibrate_kappa=bool(
+                    getattr(params, "star_kappa_recalibrate_on_restart", 0)
+                )
+            )
         if not bool(
             getattr(params, "timing_grad_balance_reset_on_restart", True)
         ):
@@ -2118,7 +2342,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         return result
 
     def _final_joint_physical_context(self, pos, *, iteration):
-        from dreamplace.flows.joint_physical_actions import final_physical_context
+        from dreamplace.flows.baselines.joint_runtime import final_physical_context
 
         return final_physical_context(self, pos, iteration=iteration)
 
@@ -2145,6 +2369,45 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             self.joint_buffer_commit_trace = trace
         trace.append(dict(result))
 
+    def _refresh_star_tdp_snapshot(
+        self,
+        params,
+        placedb,
+        model,
+        pos,
+        *,
+        iteration,
+        gate_status,
+        topology_prepared=False,
+    ):
+        runtime = getattr(model, "star_tdp_runtime", None)
+        if runtime is None and callable(getattr(model, "_ensure_star_tdp_runtime", None)):
+            runtime = model._ensure_star_tdp_runtime()
+        if (
+            not topology_prepared
+            and runtime is not None
+            and runtime.needs_live_topology_refresh(
+                pos.detach(), overflow=gate_status.get("overflow")
+            )
+        ):
+            with torch.no_grad():
+                self._refresh_live_timing_topology(pos.detach())
+            topology_prepared = True
+        summary = model.refresh_star_timing_snapshot(
+            pos,
+            iteration=iteration,
+            overflow=gate_status.get("overflow"),
+            topology_already_rebuilt=bool(topology_prepared),
+        )
+        if getattr(model, "wns", None) is not None and getattr(model, "tns", None) is not None:
+            self._record_timing_metrics(
+                model.wns,
+                model.tns,
+                getattr(model, "ws", None),
+                getattr(model, "ts", None),
+            )
+        return summary
+
     def _timing_iteration_context(self):
         return timing_iteration.TimingIterationContext(
             enabled=self._diff_tdp_enabled,
@@ -2153,6 +2416,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
             refresh_topology=self._refresh_live_timing_topology,
             carrier=self._timing_placement_carrier,
             reset_weights=self._reset_diff_tdp_net_weights_if_needed,
+            uses_star_pin_pair=self._diff_tdp_uses_star_pin_pair,
+            refresh_star_snapshot=self._refresh_star_tdp_snapshot,
         )
 
     def _prepare_segment_direct_joint_iteration(
@@ -2540,7 +2805,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         return compact
 
     def _maybe_run_buffering_inner_loop(self, params, model):
-        from dreamplace.flows.buffering_coordinator import run_buffering_inner_loop
+        from dreamplace.flows.baselines.segment_buffering import run_buffering_inner_loop
 
         return run_buffering_inner_loop(self, params, model)
 
@@ -3415,9 +3680,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         )
 
     def _apply_projected_runtime_refresh(self, params, placedb):
-        from dreamplace.flows.projection_runtime_refresh import (
-            apply_projected_runtime_refresh,
-        )
+        from dreamplace.flows.baselines.gate_projection import apply_projected_runtime_refresh
 
         return apply_projected_runtime_refresh(self, params, placedb)
 
@@ -3912,7 +4175,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         # List with the available optimizers. ATTENTION: Do not add "nesterov" in this list.
         optimizers_list = ["sgd", "sgd_momentum", "sgd_nesterov", "adam", "adamax", "nadam", "adamw", "adadelta", "rmsprop", "aggmo", "qhadam", "yogi", "radam", "adabelief", "adabound", "adafactor", "diffgrad", "novograd", "cg_fr", "cg_prp", "cg_hs", "cg_cd", "cg_ls", "cg_dy", "cg_hz", "cg_hs-dy"]
 
-        iteration = 0
+        midplace = getattr(self, "midplace_repair", None)
+        if midplace is not None:
+            from dreamplace.flows.gp.continuation import PlacementCursor
+
+        resume_cursor = midplace.resume_cursor if midplace is not None else None
+        iteration = resume_cursor.raw_iteration if resume_cursor is not None else 0
         all_metrics = []
         original_stop_overflow = params.stop_overflow
         if getattr(params, "macro_only", False) and getattr(
@@ -3949,6 +4217,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     self._refresh_live_timing_topology,
                 )
                 self.inflation_s5b1 = cooptimization
+        if midplace is not None:
+            midplace.runtime_ready(self, cooptimization, routability_controller)
         inflation_legalization.validate_params(params)
         validate_ggr_l_shape_topology_params(params)
 
@@ -3983,6 +4253,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
 
             # global placement may run in multiple stages according to user specification
             for cur_stage, global_place_params in enumerate(global_place_stages):
+                if resume_cursor is not None and cur_stage < resume_cursor.stage:
+                    continue
 
                 # we formulate each stage as a 3-nested optimization problem
                 # f_gamma(g_density(h(x) ; density weight) ; gamma)
@@ -4098,7 +4370,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     model.inflation_state = None
                 handoff_controller = placedb.create_openroad_handoff_controller(params)
                 if self._joint_flow_enabled(params):
-                    from dreamplace.flows.joint_coordinator import JointCoordinator
+                    from dreamplace.flows.baselines.joint_coordinator import JointCoordinator
 
                     previous_lane = getattr(self, "last_buffering_lane", None)
                     reuse_buffering_lane = (
@@ -4145,6 +4417,12 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 self._refresh_live_timing_topology,
                                 lane=buffering_lane,
                             )
+                            if midplace is not None and callable(
+                                getattr(midplace, "bind_alternating_controller", None)
+                            ):
+                                midplace.bind_alternating_controller(
+                                    self, self.alternating_discrete
+                                )
                         cooptimization = self.alternating_discrete
                         self.last_alternating_discrete_summary = (
                             self.alternating_discrete.summarize()
@@ -4500,7 +4778,15 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         use_live_timing_loss=use_live_timing_loss,
                     )
 
-                if iteration == 0 or (params.macro_place_flag and cur_stage == 1):
+                is_midplace_restart_stage = bool(
+                    midplace is not None
+                    and midplace.restarted
+                    and resume_cursor is not None
+                    and cur_stage == resume_cursor.stage
+                )
+                if (
+                    iteration == 0 or (params.macro_place_flag and cur_stage == 1)
+                ) and not is_midplace_restart_stage:
                     write_crash_stage_marker(
                         "nonlinearplace_learning_rate_initialization",
                         "start",
@@ -4772,7 +5058,16 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     # handle multiple density weights for multi-electric field
                     _profile_t = profile_now()
                     if torch.eq(model.density_weight.mean(), 0.0):
-                        model.initialize_density_weight(params, placedb)
+                        if (
+                            midplace is not None
+                            and midplace.restarted
+                            and resume_cursor is not None
+                            and cur_stage == resume_cursor.stage
+                            and getattr(midplace.schedule, "use_restart_density_weight", False)
+                        ):
+                            model.initialize_restart_density_weight(params, placedb)
+                        else:
+                            model.initialize_density_weight(params, placedb)
                         if model.density_weight.size(0) == 1:
                             logging.info("density_weight = %.6E" %
                                          (model.density_weight.data))
@@ -4797,6 +5092,13 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     _profile_t = profile_now()
                     cur_metric.evaluate(placedb, eval_ops,
                                         pos, model.data_collections)
+                    if midplace is not None:
+                        midplace.observe_initial(
+                            cur_metric, PlacementCursor(
+                                cur_stage, Lgamma_step, Llambda_density_weight_step,
+                                Lsub_step, iteration,
+                            ),
+                        )
                     model.overflow = cur_metric.overflow.data.clone()
                     coordinator = getattr(self, "joint_coordinator", None)
                     if coordinator is not None:
@@ -4825,6 +5127,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         params,
                         iteration,
                         model.overflow,
+                        model=model,
                     )
                     if self._diff_tdp_controls_direct_timing_objective(params):
                         model.use_timing_obj = bool(
@@ -4855,6 +5158,55 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         cooptimization.before_step(
                             model, pos, optimizer, cur_metric, eval_ops,
                             iteration=iteration, stage=cur_stage,
+                        )
+                        star_rt = getattr(model, "star_tdp_runtime", None)
+                        if (
+                            star_rt is not None
+                            and self._diff_tdp_uses_star_pin_pair(params)
+                            and bool(diff_tdp_gate_status.get("timing_objective_active", False))
+                            and star_rt.geometry_dirty
+                        ):
+                            self._refresh_star_tdp_snapshot(
+                                params,
+                                placedb,
+                                model,
+                                pos,
+                                iteration=iteration,
+                                gate_status={
+                                    **diff_tdp_gate_status,
+                                    "overflow": model.overflow,
+                                },
+                                topology_prepared=False,
+                            )
+                        if midplace is not None and callable(
+                            getattr(midplace, "after_timing_window_step", None)
+                        ):
+                            midplace.after_timing_window_step(
+                                self,
+                                model,
+                                cooptimization,
+                                cur_metric,
+                                PlacementCursor(
+                                    cur_stage,
+                                    Lgamma_step,
+                                    Llambda_density_weight_step,
+                                    Lsub_step,
+                                    iteration,
+                                ),
+                            )
+
+                    star_rt = getattr(model, "star_tdp_runtime", None)
+                    if (
+                        star_rt is not None
+                        and star_rt.refresh_count > 0
+                        and getattr(model, "wns", None) is not None
+                        and getattr(model, "tns", None) is not None
+                    ):
+                        self._update_metric_timing(
+                            cur_metric,
+                            model.wns,
+                            model.tns,
+                            getattr(model, "ws", None),
                         )
 
                     self._initialize_timing_grad_balance_if_needed(
@@ -5388,10 +5740,13 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         or params.adjust_rudy_area_flag
                     )
                     adjust_pin_area_flag = params.adjust_pin_area_flag
-                    num_area_adjust = 0
+                    num_area_adjust = (
+                        midplace.schedule.inflation_rounds.get(cur_stage, 0)
+                        if midplace is not None else 0
+                    )
                     max_area_adjust_rounds = routability_controller.inflation.get_inflation_round_limit(params)
                     if getattr(model, "inflation_state", None) is not None:
-                        model.inflation_state.num_area_adjust = 0
+                        model.inflation_state.num_area_adjust = num_area_adjust
                     if inflation_legalization.is_enabled(params):
                         logging.info(
                             "Ordinary inflation will trigger at stop_overflow=%.6g "
@@ -5405,6 +5760,141 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                 model.enable_l_shape_routability = False
                 l_shape_policy.reset_auto_disable_state(model)
                 l_shape_policy.reset_reenable_state(model)
+                if is_midplace_restart_stage:
+                    pos = model.data_collections.pos[0]
+                    restart_metric = EvalMetrics.EvalMetrics(iteration)
+                    restart_metric.evaluate(
+                        placedb,
+                        eval_ops,
+                        pos,
+                        model.data_collections,
+                    )
+                    model.overflow = restart_metric.overflow.data.clone()
+                    midplace.schedule.restore_model_state(self, model, params)
+                    if params.routability_opt_flag and getattr(params, "l_shape_routability_flag", 0):
+                        pause_on_inflation_restart = (
+                            bool(midplace.schedule.use_restart_density_weight)
+                            and not bool(getattr(params, "l_shape_keep_during_inflation", False))
+                        )
+                        if midplace.schedule.use_l_shape_routability and not pause_on_inflation_restart:
+                            model.enable_l_shape_routability = True
+                            model.use_l_shape_routability = False
+                            route_updated = l_shape_iteration.update_iteration(
+                                l_shape_iteration.LShapeIterationContext(
+                                    self.data_collections,
+                                    self.op_collections,
+                                ),
+                                params,
+                                placedb,
+                                model,
+                                pos,
+                                iteration,
+                                restart_metric,
+                                l_shape_policy,
+                            )
+                            if route_updated:
+                                topo = self.op_collections.steiner_topo_op
+                                self._publish_live_timing_topology(
+                                    topo.newx,
+                                    topo.newy,
+                                    update_kind="routing_feedback",
+                                )
+                        midplace.schedule.restore_l_shape_state(model, params)
+                        if midplace.schedule.use_l_shape_routability and pause_on_inflation_restart:
+                            l_shape_policy.disable_for_recovery(
+                                model,
+                                iteration,
+                                reason="inflation",
+                                update_threshold=True,
+                                inflation_round=num_area_adjust,
+                                force=True,
+                            )
+                    model.refresh_after_geometry_change()
+                    if midplace.schedule.use_restart_density_weight:
+                        model.initialize_restart_density_weight(params, placedb)
+                        if model.density_weight.numel() == 1:
+                            density_weight_repr = "%.6E" % (
+                                model.density_weight.detach().cpu().item()
+                            )
+                        else:
+                            density_weight_repr = "[%s]" % ", ".join(
+                                "%.6E" % value
+                                for value in model.density_weight.detach()
+                                .cpu()
+                                .tolist()
+                            )
+                        restart_scale = getattr(
+                            model,
+                            "_inflation_density_weight_restart_scale",
+                            float("nan"),
+                        )
+                        logging.info(
+                            "density restart mode=xplace_normalized "
+                            "scale=%.6E norm_ratio=%.6E w_restart=%s",
+                            restart_scale,
+                            getattr(
+                                model,
+                                "_density_weight_grad_norm_ratio",
+                                float("nan"),
+                            ),
+                            density_weight_repr,
+                        )
+                    self._reset_timing_grad_balance_for_restart(
+                        model,
+                        params,
+                        iteration=iteration,
+                    )
+                    model.reset_l_shape_weight_state()
+                    optimizer.load_state_dict(initial_state)
+                    initialize_learning_rate(pos)
+                    frozen_generation = self._activate_size_only_frozen_topology(
+                        params,
+                        pos,
+                    )
+                    if frozen_generation is not None:
+                        logging.info(
+                            "froze size-only timing topology generation=%d",
+                            frozen_generation,
+                        )
+                    initial_state = copy.deepcopy(optimizer.state_dict())
+                    if midplace.resume_sub_iteration is not None:
+                        model.Lsub_iteration = midplace.resume_sub_iteration
+                    routability_controller.after_geometry_change(
+                        model=model,
+                        position=pos,
+                    )
+                    keep_during_inflation = getattr(params, "l_shape_keep_during_inflation", False)
+                    if getattr(model, "use_l_shape_routability", False) and not keep_during_inflation:
+                        l_shape_policy.disable_for_recovery(
+                            model,
+                            iteration,
+                            reason="inflation",
+                            update_threshold=True,
+                            inflation_round=num_area_adjust if params.routability_opt_flag else 1,
+                        )
+                    trigger_lgamma = midplace.schedule.trigger_lgamma_step
+                    trigger_ov = midplace.schedule.trigger_overflow
+                    trigger_gov = midplace.schedule.trigger_goverflow
+                    if trigger_lgamma is not None and trigger_ov is not None:
+                        if len(placedb.regions) > 0 and trigger_gov is not None:
+                            model.op_collections.update_gamma_op(
+                                trigger_lgamma,
+                                trigger_gov,
+                            )
+                        elif len(placedb.regions) == 0:
+                            model.op_collections.update_gamma_op(
+                                trigger_lgamma,
+                                trigger_ov,
+                            )
+                        else:
+                            model.op_collections.precondition_op.set_overflow(
+                                trigger_ov,
+                            )
+                    if optimizer_name.lower() in ["sgd", "adam", "sgd_momentum", "sgd_nesterov", "cg"]:
+                        if "learning_rate_decay" in global_place_params:
+                            for param_group in optimizer.param_groups:
+                                param_group["lr"] *= global_place_params["learning_rate_decay"]
+                    Llambda_flat_iteration = int(midplace.schedule.llambda_flat_iteration)
 
                 # preparation for self-adaptive divergence check
                 overflow_list = [1]
@@ -5430,14 +5920,28 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                         "full placement budget: disable convergence early stops"
                     )
 
-                for Lgamma_step in range(model.Lgamma_iteration):
+                full_placement_budget = full_placement_budget or (
+                    midplace is not None and midplace.needs_bounded_steps
+                )
+                for Lgamma_step in range(
+                    resume_cursor.start(cur_stage) if resume_cursor is not None else 0,
+                    model.Lgamma_iteration,
+                ):
                     Lgamma_metrics.append([])
                     Llambda_metrics = Lgamma_metrics[-1]
                     inflation_applied_this_gamma = False
-                    for Llambda_density_weight_step in range(model.Llambda_density_weight_iteration):
+                    for Llambda_density_weight_step in range(
+                        resume_cursor.start(cur_stage, Lgamma_step)
+                        if resume_cursor is not None else 0,
+                        model.Llambda_density_weight_iteration,
+                    ):
                         Llambda_metrics.append([])
                         Lsub_metrics = Llambda_metrics[-1]
-                        for Lsub_step in range(model.Lsub_iteration):
+                        for Lsub_step in range(
+                            resume_cursor.start(cur_stage, Lgamma_step, Llambda_density_weight_step)
+                            if resume_cursor is not None else 0,
+                            model.Lsub_iteration,
+                        ):
                             # divergence threshold should decrease as overflow decreases
                             # only detect divergence when overflow is relatively low but not too low
                             div_flag = check_divergence(
@@ -5459,6 +5963,9 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     "possible DIVERGENCE detected, roll back to the best position recorded"
                                 )
 
+                            midplace_step_started = (
+                                time.perf_counter() if midplace is not None else None
+                            )
                             try:
                                 cur_metric = one_descent_step(
                                     Lgamma_step,
@@ -5467,6 +5974,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     iteration,
                                     Lsub_metrics,
                                 )
+                                self._last_eval_metric = cur_metric
+                                self._llambda_flat_iteration = Llambda_flat_iteration
                             except AssertionError as exc:
                                 if not self._is_gradient_nan_assertion(exc):
                                     raise
@@ -5490,6 +5999,22 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     iteration,
                                 )
                                 break
+
+                            if midplace is not None:
+                                midplace.after_step(
+                                    self, model, cur_metric, eval_ops,
+                                    PlacementCursor(
+                                        cur_stage, Lgamma_step, Llambda_density_weight_step,
+                                        Lsub_step, iteration,
+                                    ),
+                                    (time.perf_counter() - midplace_step_started) * 1000.0,
+                                    pending_transaction=(
+                                        pending_joint_topology_commit_result is not None
+                                    ),
+                                )
+                                full_placement_budget = (
+                                    full_placement_budget or midplace.needs_bounded_steps
+                                )
 
                             if handoff_controller is not None:
                                 run_event = {
@@ -5539,11 +6064,14 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     Llambda_metrics[-1][-1],
                                 )
                             )
-                            if self._update_continuous_early_stop_state(
-                                continuous_early_stop_state,
-                                early_stop_loss,
-                                iteration,
-                                loss_source=early_stop_loss_source,
+                            if (
+                                not (midplace is not None and midplace.needs_bounded_steps)
+                                and self._update_continuous_early_stop_state(
+                                    continuous_early_stop_state,
+                                    early_stop_loss,
+                                    iteration,
+                                    loss_source=early_stop_loss_source,
+                                )
                             ):
                                 stop_placement = 1
                                 logging.info(
@@ -5621,16 +6149,27 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 stop_placement_reason,
                             )
                         Llambda_flat_iteration += 1
+                        self._llambda_flat_iteration = Llambda_flat_iteration
 
                         # update density weight
                         if Llambda_flat_iteration > 1:
-                            model.op_collections.update_density_weight_op(
-                                Llambda_metrics[-1][-1],
+                            prev_llambda_metric = (
                                 Llambda_metrics[-2][-1]
                                 if len(Llambda_metrics) > 1
-                                else Lgamma_metrics[-2][-1][-1],
-                                Llambda_flat_iteration,
+                                else (
+                                    Lgamma_metrics[-2][-1][-1]
+                                    if len(Lgamma_metrics) > 1
+                                    else getattr(midplace.schedule, "last_llambda_metric", None)
+                                    if midplace is not None
+                                    else None
+                                )
                             )
+                            if prev_llambda_metric is not None:
+                                model.op_collections.update_density_weight_op(
+                                    Llambda_metrics[-1][-1],
+                                    prev_llambda_metric,
+                                    Llambda_flat_iteration,
+                                )
                         # logging.debug("update density weight %.3f ms" % ((time.time()-t2)*1000))
                         llambda_should_stop = Llambda_stop_criterion(
                             Lgamma_step,
@@ -5667,6 +6206,57 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                 Llambda_metrics[-1][-1].overflow,
                             )
                             if trigger_enhanced_inflation or trigger_legacy_inflation:
+                                if (
+                                    midplace is not None
+                                    and not midplace.active
+                                    and int(num_area_adjust) == 0
+                                    and midplace.defers_to_first_inflation_window(self)
+                                ):
+                                    midplace.before_first_inflation(
+                                        self,
+                                        model,
+                                        Llambda_metrics[-1][-1],
+                                        eval_ops,
+                                        PlacementCursor(
+                                            cur_stage,
+                                            Lgamma_step,
+                                            model.Llambda_density_weight_iteration - 1,
+                                            model.Lsub_iteration - 1,
+                                            iteration - 1,
+                                        ),
+                                    )
+                                    routability_controller.record_inflation()
+                                    inflation_applied_this_gamma = True
+                                    num_area_adjust += 1
+                                    if getattr(model, "inflation_state", None) is not None:
+                                        model.inflation_state.num_area_adjust = num_area_adjust
+                                    model.refresh_after_geometry_change()
+                                    model.initialize_restart_density_weight(params, placedb)
+                                    self._reset_timing_grad_balance_for_restart(
+                                        model,
+                                        params,
+                                        iteration=iteration,
+                                    )
+                                    model.reset_l_shape_weight_state()
+                                    optimizer.load_state_dict(initial_state)
+                                    initialize_learning_rate(model.data_collections.pos[0])
+                                    model.Lsub_iteration = model.routability_Lsub_iteration
+                                    routability_controller.after_geometry_change(
+                                        model=model,
+                                        position=model.data_collections.pos[0],
+                                    )
+                                    best_metric[0] = None
+                                    best_pos[0] = None
+                                    keep_during_inflation = getattr(params, "l_shape_keep_during_inflation", False)
+                                    if getattr(model, "use_l_shape_routability", False) and not keep_during_inflation:
+                                        l_shape_policy.disable_for_recovery(
+                                            model,
+                                            iteration,
+                                            reason="inflation",
+                                            update_threshold=True,
+                                            inflation_round=num_area_adjust,
+                                        )
+                                    break
                                 if cooptimization is not None:
                                     cooptimization.before_inflation(
                                         model, model.data_collections.pos[0],
@@ -5999,6 +6589,40 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                     num_area_adjust += 1
                                     if getattr(model, "inflation_state", None) is not None:
                                         model.inflation_state.num_area_adjust = num_area_adjust
+                                    if midplace is not None and callable(
+                                        getattr(midplace, "after_inflation_window", None)
+                                    ):
+                                        midplace.after_inflation_window(
+                                            self,
+                                            model,
+                                            Llambda_metrics[-1][-1],
+                                            eval_ops,
+                                            PlacementCursor(
+                                                cur_stage,
+                                                Lgamma_step,
+                                                model.Llambda_density_weight_iteration - 1,
+                                                model.Lsub_iteration - 1,
+                                                iteration - 1,
+                                            ),
+                                            window_index=num_area_adjust,
+                                        )
+                                    if midplace is not None and callable(
+                                        getattr(midplace, "after_inflation_round", None)
+                                    ):
+                                        midplace.after_inflation_round(
+                                            self,
+                                            model,
+                                            cooptimization,
+                                            Llambda_metrics[-1][-1],
+                                            PlacementCursor(
+                                                cur_stage,
+                                                Lgamma_step,
+                                                model.Llambda_density_weight_iteration - 1,
+                                                model.Lsub_iteration - 1,
+                                                iteration - 1,
+                                            ),
+                                            adjust_area_flag=True,
+                                        )
                                     # restart Llambda
                                     model.refresh_after_geometry_change()
                                     model.initialize_restart_density_weight(
@@ -6075,6 +6699,23 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                                         if current_inflation_round is not None
                                         else num_area_adjust,
                                     )
+                                    if midplace is not None and callable(
+                                        getattr(midplace, "after_inflation_round", None)
+                                    ):
+                                        midplace.after_inflation_round(
+                                            self,
+                                            model,
+                                            cooptimization,
+                                            Llambda_metrics[-1][-1],
+                                            PlacementCursor(
+                                                cur_stage,
+                                                Lgamma_step,
+                                                Llambda_density_weight_step,
+                                                model.Lsub_iteration - 1,
+                                                iteration - 1,
+                                            ),
+                                            adjust_area_flag=False,
+                                        )
 
                     if pending_joint_topology_commit_result is not None or (
                         stop_placement == 1
@@ -6366,6 +7007,16 @@ class NonLinearPlace(BasicPlace.BasicPlace):
                     pos_device=str(self.pos[0].device),
                     steiner_input_device=str(final_global_topology["node_x"].device),
                 )
+
+            if (
+                getattr(params, "repair_buffering_enable", False)
+                and pending_joint_topology_commit_result is None
+            ):
+                from dreamplace.flows.baselines.repair_buffering import (
+                    reenter_after_repair_buffering,
+                )
+
+                return reenter_after_repair_buffering(self, params, placedb)
 
             if pending_joint_topology_commit_result is not None:
                 return self._safe_stop_after_joint_buffer_request(
@@ -6931,6 +7582,8 @@ class NonLinearPlace(BasicPlace.BasicPlace):
         if params.dump_legalize_solution_flag:
             self.dump(params, placedb, self.pos[0].cpu(
             ), "%s.dp.pklz" % (params.design_name()))
+        if os.environ.get("STAR_DUMP_STAGE_DEFS") == "1":
+            self._post_lg_pos_tensor = self.pos[0].detach().clone()
 
         # detailed placement
         if params.detailed_place_flag:

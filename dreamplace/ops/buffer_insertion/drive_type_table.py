@@ -13,9 +13,71 @@ import math
 from pathlib import Path
 
 
-from dreamplace.flows.buffer_drive_table import (
-    DRIVE_TYPE_TABLE_SCHEMA,
+DRIVE_TYPE_TABLE_SCHEMA = "ecc.discrete_buffer_drive_strength.v1"
+
+
+EXPECTED_DRIVE_TYPE_MASTERS = ("BUFX8H7L", "BUFX12H7L", "BUFX16H7L", "BUFX20H7L")
+ASAP7_DRIVE_TYPE_MASTERS = (
+    "BUFx4_ASAP7_75t_L",
+    "BUFx8_ASAP7_75t_L",
+    "BUFx12_ASAP7_75t_L",
+    "BUFx24_ASAP7_75t_L",
 )
+PDK_DRIVE_TYPE_SPECS = {
+    "ics55": tuple(zip(EXPECTED_DRIVE_TYPE_MASTERS, (8.0, 12.0, 16.0, 20.0), strict=True)),
+    "asap7": tuple(zip(ASAP7_DRIVE_TYPE_MASTERS, (4.0, 8.0, 12.0, 24.0), strict=True)),
+}
+
+
+def resolve_drive_type_masters_for_library(libcell_names):
+    names = {str(name) for name in (libcell_names or ())}
+    if all(name in names for name in ASAP7_DRIVE_TYPE_MASTERS):
+        return ASAP7_DRIVE_TYPE_MASTERS
+    return EXPECTED_DRIVE_TYPE_MASTERS
+
+
+def _spec_for_pdk(pdk_name):
+    normalized = str(pdk_name or "ics55").strip().lower()
+    spec = PDK_DRIVE_TYPE_SPECS.get(normalized)
+    if spec is None:
+        raise ValueError(f"unsupported drive-strength table library: {pdk_name!r}")
+    return spec
+
+
+def build_drive_strength_table(pdk_name, buffer_masters, source_pdk, *, drive_strengths=None):
+    if drive_strengths is None:
+        spec = _spec_for_pdk(pdk_name)
+        missing = [name for name, _strength in spec if name not in buffer_masters]
+        if missing:
+            raise ValueError(f"case PDK is missing approved buffers: {missing}")
+        rows = [
+            {"drive_type_id": index, "master_name": name, "drive_strength": strength}
+            for index, (name, strength) in enumerate(spec)
+        ]
+    else:
+        rows = []
+        seen = set()
+        for entry in drive_strengths:
+            name = str(entry["master"])
+            strength = float(entry["strength"])
+            if name not in buffer_masters:
+                raise ValueError(f"configured buffer is not in the legal buffer list: {name}")
+            if name in seen or not math.isfinite(strength) or strength <= 0:
+                raise ValueError(f"invalid or duplicate buffer strength: {name}")
+            seen.add(name)
+            rows.append(
+                {"drive_type_id": len(rows), "master_name": name, "drive_strength": strength}
+            )
+        if not rows:
+            raise ValueError("explicit drive_strengths are required for candidate buffering")
+    return {
+        "schema": DRIVE_TYPE_TABLE_SCHEMA,
+        "source": "case-pdk-buffer-list",
+        "library": str(pdk_name),
+        "units": {"drive_strength": "relative"},
+        "source_pdk": str(source_pdk),
+        "buffers": rows,
+    }
 
 
 @dataclass(frozen=True)

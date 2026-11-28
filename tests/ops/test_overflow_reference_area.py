@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import torch
 from dreamplace.EvalMetrics import EvalMetrics
-from dreamplace.flows.handoff_state import build_continuation_seed
+from dreamplace.flows.gp.continuation import build_continuation_seed
 from dreamplace.ops.adjust_node_area.adjust_node_area import AdjustNodeArea
 from dreamplace.ops.electric_potential.electric_overflow import ElectricOverflow
 from dreamplace.ops.routability.cooptimization_area import (

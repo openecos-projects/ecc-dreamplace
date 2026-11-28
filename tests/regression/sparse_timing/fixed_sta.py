@@ -25,7 +25,7 @@ def production_timing(view, base, device, *, backend=None):
     Legacy scalar seed/RAT fields are intentionally empty: schema v3 supplies
     those via the validated sparse view. RC remains frozen and zero-wire here.
     """
-    from dreamplace.flows.timing_factory import build_timing_propagation_op
+    from .timing_factory import build_timing_propagation_op
     from dreamplace.ops.placeio_ecc.timing_generation import timing_generation_lease
     from dreamplace.ops.timing_propagation.timing_propagation import (
         ARCS_INFO,

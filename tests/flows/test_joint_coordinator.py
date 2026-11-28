@@ -4,13 +4,13 @@ import numpy as np
 import pytest
 import torch
 
-from dreamplace.flows.joint_coordinator import (
+from dreamplace.flows.baselines.joint_coordinator import (
     JointCoordinator,
     Pin2PinPairGenerationState,
     SegmentJointMilestoneState,
 )
-from dreamplace.flows.joint_proximal import JointProximalObjective
-from dreamplace.flows.segment_joint import (
+from dreamplace.flows.baselines.joint_runtime import JointProximalObjective
+from dreamplace.flows.baselines.segment_joint import (
     SegmentJointContext,
     apply_segment_overflow_milestone_transaction,
     apply_segment_rebootstrap_milestone_transaction,
@@ -136,7 +136,7 @@ def test_no_sizing_segment_joint_keeps_placement_optimizer():
     params.placement_sizing_mode = "place_only"
     params.global_place_stages = [{"optimizer": "nesterov"}]
 
-    from dreamplace.flows.flow_config import apply_flow_defaults
+    from dreamplace.flows.config.resolver import apply_flow_defaults
 
     apply_flow_defaults(params)
 

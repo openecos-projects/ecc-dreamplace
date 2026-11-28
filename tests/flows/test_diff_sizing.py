@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 from dreamplace.Placer import PlacementEngine
 
@@ -21,7 +22,7 @@ def test_sizing_lut_action_dispatches_to_diff_sizing():
 
 
 def test_diff_sizing_controller_uses_one_action_phase(monkeypatch):
-    from dreamplace.flows import diff_sizing
+    from dreamplace.flows.post_gp import diff_sizing
 
     calls = []
 
@@ -101,8 +102,8 @@ def test_diff_sizing_controller_uses_one_action_phase(monkeypatch):
 
 
 def test_diff_sizing_controller_runs_ordered_action_phases(monkeypatch):
-    from dreamplace.flows import diff_sizing
-    from dreamplace.flows.diff_sizing_spec import parse_diff_sizing_flows
+    from dreamplace.flows.post_gp import diff_sizing
+    from dreamplace.flows.config.specs import parse_diff_sizing_flows
 
     calls = []
 
@@ -217,12 +218,13 @@ def test_diff_sizing_controller_runs_ordered_action_phases(monkeypatch):
     [
         ("gr", 0, "diff_sizing_terminal_gr_sta_disabled"),
         ("placement", 1, "diff_sizing_timing_rc_mode_placement"),
+        ("spef", 0, "diff_sizing_timing_rc_mode_spef"),
     ],
 )
 def test_run_diff_sizing_commits_refreshes_and_writes_summary(
     monkeypatch, tmp_path, timing_rc_mode, terminal_gr_sta_enabled, expected_reason
 ):
-    from dreamplace.flows import diff_sizing
+    from dreamplace.flows.post_gp import diff_sizing
 
     calls = []
     gr_session = object()
@@ -249,10 +251,22 @@ def test_run_diff_sizing_commits_refreshes_and_writes_summary(
                 global_place_stages=[{"iteration": 2}],
                 timing_opt_sizing_rounds=10,
                 diff_sizing_terminal_gr_sta_enabled=terminal_gr_sta_enabled,
+                scale_factor=2.0,
                 result_dir=str(tmp_path),
             )
             self.placedb = SimpleNamespace(
-                gr_sizing=gr_session if timing_rc_mode == "gr" else None
+                gr_sizing=(
+                    gr_session if timing_rc_mode in {"gr", "spef"} else None
+                ),
+                pin_offset_x=np.array([0.0, 0.0], dtype=np.float32),
+                pin_offset_y=np.array([0.0, 0.0], dtype=np.float32),
+                rawdb=SimpleNamespace(
+                    pydb=SimpleNamespace(
+                        pin_offset_x=[1.5, 2.5],
+                        pin_offset_y=[3.5, 4.5],
+                        native_state_dirty=True,
+                    )
+                ),
             )
             self.placer = SimpleNamespace(
                 data_collections=SimpleNamespace(pos=[object()]),
@@ -298,12 +312,20 @@ def test_run_diff_sizing_commits_refreshes_and_writes_summary(
     assert len(phases) == 1
     assert phases[0].action == "quad"
     assert phases[0].rounds == 2
-    assert calls[3] == (
-        "refresh",
-        {"refresh_mode": "full_rebuild", "rebuild_mode": "full_rebuild"},
-    )
+    assert len(calls) == 3
+    assert result["diff_sizing"]["refresh"] == {
+        "status": "skipped",
+        "reason": "inplace_sizing_sync",
+        "refresh_mode": "inplace",
+        "rebuild_mode": "none",
+        "accepted_count": 1,
+        "pin_offsets_synced": True,
+    }
+    np.testing.assert_allclose(engine.placedb.pin_offset_x, [3.0, 5.0])
+    np.testing.assert_allclose(engine.placedb.pin_offset_y, [7.0, 9.0])
+    assert engine.placedb.rawdb.pydb.native_state_dirty is False
     assert engine.placedb.gr_sizing is (
-        gr_session if timing_rc_mode == "gr" else None
+        gr_session if timing_rc_mode in {"gr", "spef"} else None
     )
     assert engine.params.timing_action_gradient_mode == "lut_action"
     assert engine.params.timing_opt_sizing_rounds == 10
@@ -322,3 +344,110 @@ def test_run_diff_sizing_commits_refreshes_and_writes_summary(
     assert summary["status"] == "ok"
     assert summary["final_timing"] == {"wns": -1.0, "tns": -2.0}
     assert engine.last_run_result is result
+
+
+@pytest.mark.parametrize(
+    ("timing_rc_mode", "initially_legal", "expect_legalizer_call"),
+    [
+        ("spef", True, False),
+        ("spef", False, True),
+        ("gr", True, True),
+    ],
+)
+def test_legalize_and_measure_preserves_legal_postroute_placement_in_spef_mode(
+    monkeypatch, tmp_path, timing_rc_mode, initially_legal, expect_legalizer_call
+):
+    import dreamplace.NonLinearPlace as nlp_mod
+    import torch
+    from dreamplace.flows.post_gp import diff_sizing
+
+    calls = []
+
+    class FakePlacer:
+        def __init__(self, terminal_params, placedb, _):
+            self.pos = [torch.tensor([1.0, 2.0])]
+            self._legal = initially_legal
+            self.op_collections = SimpleNamespace(
+                legality_check_op=lambda _pos: self._legal,
+                hpwl_op=lambda _pos: torch.tensor(123.5),
+            )
+
+        def __call__(self, terminal_params, placedb):
+            calls.append("legalize")
+            self._legal = True
+            return 10.0, 20.0, {"timing_stage_summary": {}}
+
+        def run_sta_only(self, terminal_params, placedb):
+            calls.append("sta")
+            return float("inf"), float("inf"), {
+                "timing_stage_summary": {"sta": {"wns": -0.25, "tns": -1.5}}
+            }
+
+    monkeypatch.setattr(nlp_mod, "NonLinearPlace", FakePlacer)
+    params = SimpleNamespace(timing_rc_mode=timing_rc_mode, result_dir=str(tmp_path))
+    engine = SimpleNamespace(placedb=SimpleNamespace(cooptimization_geometry="old"))
+
+    timing = diff_sizing._legalize_and_measure(engine, params)
+
+    assert timing == {"wns": -0.25, "tns": -1.5}
+    assert calls == (["legalize", "sta"] if expect_legalizer_call else ["sta"])
+    assert engine.hpwl == (20.0 if expect_legalizer_call else 123.5)
+
+
+def test_build_timing_model_forces_lut_only_and_restores_params():
+    from dreamplace.flows.post_gp import diff_sizing
+
+    seen_modes = []
+
+    class FakeEngine:
+        def __init__(self):
+            self.params = SimpleNamespace(
+                flow_kind="sizing",
+                global_place_flag=1,
+                legalize_flag=1,
+                detailed_place_flag=1,
+                global_place_stages=[{"iteration": 50}],
+                timing_surrogate_mode="surrogate_only",
+                build_model_only=False,
+            )
+            self.placedb = SimpleNamespace(gr_sizing=object())
+            self.placer = None
+
+        def place(self):
+            seen_modes.append(self.params.timing_surrogate_mode)
+            self.placer = SimpleNamespace(last_global_place_model="fake_model")
+
+    engine = FakeEngine()
+    assert diff_sizing._build_timing_model(engine) == "fake_model"
+    assert seen_modes == ["lut_only"]
+    assert engine.params.timing_surrogate_mode == "surrogate_only"
+
+
+@pytest.mark.parametrize(
+    ("action_mode", "expected_surrogate_mode"),
+    [("lut_action", "lut_only"), ("off", "surrogate_only")],
+)
+def test_configure_gr_sizing_sets_surrogate_mode_by_action_mode(
+    action_mode, expected_surrogate_mode
+):
+    from dreamplace.flows.config.specs import configure_gr_sizing
+
+    params = SimpleNamespace(
+        flow_kind="sizing",
+        timing_rc_mode="gr",
+        place_io_engine="ecc",
+        gpu=0,
+        gpugr_backend="cpu_pr_mt",
+        routability_opt_flag=0,
+        l_shape_routability_flag=0,
+        adjust_gpugr_area_flag=0,
+        gpugr_final_eval_flag=0,
+        enable_net_weighting=0,
+        pin2pin_net_weighting=0,
+        timing_opt_enabled=0,
+        timing_action_gradient_mode=action_mode,
+        diff_sizing_continuous_steps=0,
+        global_place_stages=[{"iteration": 100}],
+    )
+    configure_gr_sizing(params)
+    assert params.timing_surrogate_mode == expected_surrogate_mode

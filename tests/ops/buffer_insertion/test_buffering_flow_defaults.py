@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from dreamplace.flows.flow_config import apply_flow_defaults
+from dreamplace.flows.config.resolver import apply_flow_defaults
 
 
 def test_buffering_flow_defaults_to_segment_native_projection_recipe():

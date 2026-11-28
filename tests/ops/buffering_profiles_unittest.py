@@ -1,4 +1,4 @@
-from dreamplace.flows.buffering_profiles import (
+from dreamplace.flows.config.profiles import (
     BUFFERING_DEFAULTS,
     CANDIDATE_BUFFERING_DEFAULTS,
     CANDIDATE_PHYSICAL_ECO_DEFAULTS,

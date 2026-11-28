@@ -1,7 +1,7 @@
 {
     "timing_placement_carrier": {
-        "description": "coordinate timing method; explicit direct_loss or pin2pin selects mutually exclusive GP controls; gradient_net_weight retains gradient projection",
-        "default": "direct_loss"
+        "description": "coordinate timing method; explicit direct_loss, star_pin_pair, or pin2pin selects mutually exclusive GP controls; gradient_net_weight retains gradient projection",
+        "default": "star_pin_pair"
     },
     "timing_topology_refresh_interval": {
         "description": "GP steps between full timing topology refreshes",
@@ -13,7 +13,7 @@
     },
     "timing_objective_lane": {
         "description": "timing objective terms, timing_only | timing_slew_cap",
-        "default": "timing_slew_cap"
+        "default": "timing_only"
     },
     "timing_aggregation_mode": {
         "description": "AAT/RAT aggregation: hard max/min or smooth LSE; endpoint WNS/TNS retain hard reductions",
@@ -56,7 +56,7 @@
         "default": null
     },
     "buffering_candidate_drive_type_mode": {
-        "description": "candidate discrete buffer type selection, single_fixed | four_strength_table",
+        "description": "candidate discrete buffer type selection, single_fixed | four_strength_table | fast_buffers",
         "default": "single_fixed"
     },
     "buffering_candidate_drive_strength_table": {
@@ -227,6 +227,18 @@
         "description": "action family for placement sizing windows and diff_opt sizing: up | down | quad; explicit diff_sizing phase masks take precedence",
         "default": "quad"
     },
+    "timing_sizing_incremental_commit": {
+        "description": "evaluate gradient-ranked sizing candidates one-by-one via C++ incremental STA and commit only capacity-legal loss improvements",
+        "default": 1
+    },
+    "timing_buffering_incremental_commit": {
+        "description": "evaluate gradient-ranked buffering candidates sequentially via C++ incremental STA and commit only capacity-legal loss improvements",
+        "default": 1
+    },
+    "timing_buffering_direct_commit": {
+        "description": "commit accepted buffering window insertions directly into the ECC native DB carrier and warm-resume placement without a separate post-buffering STA rebuild",
+        "default": 1
+    },
     "timing_action_score_objective": {
         "description": "objective differentiated for the local LUT action score; loss uses diff_sizing_coefficients, tns/wns select a single timing metric",
         "default": "loss"
@@ -366,7 +378,7 @@
     },
     "timing_coeff_growth_factor": {
         "description": "positive finite multiplier applied to WNS/TNS coefficients at each GP density-weight update; 1 disables growth; size_only skips this schedule",
-        "default": 1.01
+        "default": 1.0
     },
     "sizing_parameterization": {
         "description": "continuous sizing coordinate, logits | real_size",
@@ -579,6 +591,10 @@
         "description": "maximum discrete size/VT rounds in each timing-optimization window, up to ten",
         "default": 10
     },
+    "timing_opt_buffering_rounds": {
+        "description": "maximum incremental buffering rounds in each timing-optimization window",
+        "default": 3
+    },
     "timing_opt_coefficients": {
         "description": "GP sizing-window coefficient policy: mode=inherit uses live placement values; mode=fixed requires wns, tns, slew and cap during S rounds only, with outer timing weight 1; placement weights are restored on exit",
         "default": {
@@ -588,6 +604,78 @@
             "cap": 1.0,
             "slew": 1.0
         }
+    },
+    "repair_buffering_enable": {
+        "description": "run native repair_design/repair_timing buffering after global placement and before legalization",
+        "default": 0
+    },
+    "repair_buffering_mode": {
+        "description": "repair buffering stage: repair_design, repair_timing, or repair_design_then_timing",
+        "default": "repair_design_then_timing"
+    },
+    "repair_buffering_max_passes": {
+        "description": "maximum repair-timing candidate attempts (one net plan plus overlay evaluation each), not endpoint passes; OpenROAD BM64 used 2869 endpoint passes, roughly 70000 net attempts, so this budget only covers the worst few endpoints",
+        "default": 3000
+    },
+    "repair_buffering_config": {
+        "description": "native repair planner configuration; acceptance defaults to endpoint_journal and timing_driver_resize defaults to true",
+        "default": {}
+    },
+    "repair_buffering_midplace_enable": {
+        "description": "opt-in native repair at an overflow crossing, followed by fresh global placement",
+        "default": false
+    },
+    "repair_buffering_midplace_overflow": {
+        "description": "post-step placement overflow threshold for the session's single repair request",
+        "default": 0.4
+    },
+    "repair_buffering_midplace_mode": {
+        "description": "mid-placement repair_design or repair_design_then_timing",
+        "default": "repair_design"
+    },
+    "repair_buffering_midplace_once": {
+        "description": "require a single repair request per placement session, including restarts",
+        "default": true
+    },
+    "repair_buffering_midplace_resume_policy": {
+        "description": "cold optimizer restart with cold or warm_schedule density weights",
+        "default": "cold"
+    },
+    "repair_buffering_midplace_continue": {
+        "description": "continue global placement after the mid-placement repair",
+        "default": true
+    },
+    "repair_buffering_midplace_objectives_after_repair": {
+        "description": "defer timing, routability, electrical windows and inflation until the mid-placement repair completes",
+        "default": false
+    },
+    "repair_buffering_midplace_timing_enable": {
+        "description": "explicitly authorize the native timing-repair lane after design handoff qualification",
+        "default": false
+    },
+    "repair_buffering_midplace_max_passes": {
+        "description": "maximum native timing-repair candidate attempts in the mid-placement lane",
+        "default": 20
+    },
+    "repair_buffering_midplace_max_buffer_fraction": {
+        "description": "per-window movable-node fraction cap for native timing-repair buffer insertions in the mid-placement lane",
+        "default": 0.001
+    },
+    "repair_buffering_midplace_initial_policy": {
+        "description": "initial overflow below threshold triggers at the first stable optimizer step",
+        "default": "first_stable_step"
+    },
+    "repair_buffering_midplace_pending_policy": {
+        "description": "latch the crossing and defer repair until placement transactions complete",
+        "default": "defer"
+    },
+    "repair_buffering_midplace_bounded_steps": {
+        "description": "stop the experimental lane after this many post-repair steps; zero continues the remaining full budget",
+        "default": 0
+    },
+    "repair_buffering_midplace_artifact": {
+        "description": "handoff artifact filename under the design's placement result directory",
+        "default": "midplace_handoff.json"
     },
     "two_stage_density_scaler": {
         "description": "scale density weight after the macro placement stage",
@@ -922,15 +1010,27 @@
     },
     "timing_rc_mode": {
         "default": "placement",
-        "description": "timing parasitics, placement | gr; gr requires native ECC CPU sizing or STA"
+        "description": "timing parasitics, placement | gr | spef; gr and spef require native ECC CPU sizing or STA"
     },
     "diff_sizing_timing_rc_mode": {
         "default": "gr",
-        "description": "standalone diff_sizing timing RC source; placement uses the placement parasitics and gr uses the frozen GR snapshot"
+        "description": "standalone diff_sizing timing RC source; placement uses placement parasitics, gr uses the frozen GR snapshot, and spef uses extracted post-route SPEF"
+    },
+    "spef_input": {
+        "default": "",
+        "description": "post-route SPEF or SPEF.gz path consumed when timing_rc_mode=spef"
+    },
+    "spef_coupling_cap_scale": {
+        "default": 1.0,
+        "description": "nonnegative Miller-like multiplier applied to cross-net coupling capacitors in SPEF mode"
+    },
+    "spef_reconcile_lumped_cap": {
+        "default": 0,
+        "description": "when 1, distribute positive (*D_NET total cap - unscaled *CAP sum) equally across each net's pin nodes to recover omitted pin-node wire capacitance (e.g. OpenROAD SpefWriter)"
     },
     "diff_sizing_optimization_flows": {
         "default": null,
-        "description": "ordered standalone diff_sizing phases: [action, rounds, [wns, tns, slew, cap], selection_percent]; action is quad, up, or down and percent is in (0, 100]; null selects a quad phase; ECC defaults to 50 rounds with diff_sizing_coefficients and a shared 1% budget per round"
+        "description": "ordered standalone diff_sizing phases: [action, rounds, [wns, tns, slew, cap], selection_percent]; action is quad, up, down, vt, vt_fast, or vt_slow and percent is in (0, 100]; null selects a quad phase; ECC defaults to 50 rounds with diff_sizing_coefficients and a shared 1% budget per round"
     },
     "cell_model_schema": {
         "default": "main_id_arc_offset_piecewise_linear",
@@ -1140,6 +1240,10 @@
         "description": "keep L-shape routability enabled during inflation (normally disabled); enables filler pseudo wire force to work with inflation",
         "default": false
     },
+    "timing_keep_during_inflation": {
+        "description": "keep differentiable timing objective latched on during post-inflation overflow rebound once timing has been activated",
+        "default": false
+    },
     "l_shape_weight_momentum": {
         "description": "EMA momentum used by the adaptive per-iteration L-shape weight controller",
         "default": 0.1
@@ -1239,5 +1343,305 @@
     "l_shape_auto_disable_ov_ema_plateau_eps": {
         "description": "maximum L-shape overflow EMA improvement treated as a plateau for auto-disable",
         "default": 0.001
+    },
+    "star_kappa": {
+        "description": "target movable raw-L1 timing/WL gradient ratio at first active Star TDP publication",
+        "default": 0.04752809509417255
+    },
+    "star_max_kappa": {
+        "description": "optional live movable-L1 timing/WL gradient ratio ceiling enforced across Star TDP refreshes (<= 0 disables, pure AutoDMP default)",
+        "default": 0.0
+    },
+    "star_post_restart_max_kappa": {
+        "description": "live movable-L1 timing/WL gradient ratio ceiling enforced only after a sizing/buffering/routability restart (<= 0 disables)",
+        "default": 0.20
+    },
+    "star_fixed_lambda": {
+        "description": "optional explicit positive Star TDP multiplier overriding star_kappa calibration when > 0",
+        "default": null
+    },
+    "star_distance_model": {
+        "description": "Star TDP pair distance surrogate: lse | wa | l1",
+        "default": "lse"
+    },
+    "star_timing_loss_mode": {
+        "description": "timing scalar differentiated at Star TDP snapshot refresh: tns_only | combined",
+        "default": "tns_only"
+    },
+    "star_smooth_extremum": {
+        "description": "whether Star TDP snapshot refresh uses smooth LSE timing merges and softplus(-slack/tau) endpoint TNS",
+        "default": 1
+    },
+    "star_extremum_tau_ps": {
+        "description": "base LSE/softplus temperature in picoseconds for Star TDP snapshot refresh",
+        "default": 1.0
+    },
+    "star_at_merge_vjp_tau": {
+        "description": "AT fan-in merge VJP temperature policy during Star TDP snapshot refresh: drift | fixed",
+        "default": "drift"
+    },
+    "star_load_sign": {
+        "description": "driver-load wire-cap pullback B sign policy: clamp (B+) | signed | zero",
+        "default": "clamp"
+    },
+    "star_load_geometry": {
+        "description": "driver-load wire-cap geometry channel: wa_net (net-level smooth WA with unit Hanan boundary slope, default for gate-dominated PDKs) | star (pair-sum L_0k, optional for wire-dominated PDKs)",
+        "default": "wa_net"
+    },
+    "star_input_history_mode": {
+        "description": "timing input gradient history mode before Star pair projection: accumulate | ema | replace | off",
+        "default": "accumulate"
+    },
+    "star_input_history_gain": {
+        "description": "gain applied to fresh delay/cap input gradients in Star InputAccumulator",
+        "default": 0.2
+    },
+    "star_input_history_half_life": {
+        "description": "iteration half-life for Star InputAccumulator (0 disables decay in accumulate mode)",
+        "default": 0.0
+    },
+    "star_input_history_max_carry_ratio": {
+        "description": "maximum carried-history to fresh-update L1 ratio per channel in Star InputAccumulator (<= 0 disables)",
+        "default": 0.0
+    },
+    "star_rc_calibration_enabled": {
+        "description": "whether to calibrate Star RC delays/loads/impulses against FLUTE Steiner Elmore teacher",
+        "default": 1
+    },
+    "star_rc_resample_every_refresh": {
+        "description": "whether to resample FLUTE Steiner teacher RC calibration on every Star TDP snapshot refresh (0 uses xplace_overflow milestones + cap-digest changes)",
+        "default": 0
+    },
+    "star_rc_calibration_overflow_step": {
+        "description": "overflow milestone step for resampling FLUTE Steiner teacher RC calibration",
+        "default": 0.05
+    },
+    "star_slope_calibration_enabled": {
+        "description": "whether to rescale per-net Star delay weights K by FLUTE homothety slope ratio s_n",
+        "default": 1
+    },
+    "star_lcb_ff_clock_enabled": {
+        "description": "whether to model movable leaf LCB/ICG -> FF clock nets via clock StarPinPair and launch-capture VJP",
+        "default": 1
+    },
+    "star_clock_weight_scale": {
+        "description": "multiplier on launch-capture leaf clock pair weights relative to data Star weights",
+        "default": 1.0
+    },
+    "star_curvature_precondition_enabled": {
+        "description": "whether to add 2N MM row-sum Hessian curvature of Star TDP to PreconditionOp",
+        "default": 1
+    },
+    "star_elmore_rowsum_axes": {
+        "description": "number of axes summed in quadratic Elmore row-sum curvature bound (1 or 2)",
+        "default": 2
+    },
+    "star_rowsum_full_linear_slope": {
+        "description": "whether WA row-sum curvature includes 2*c_unit*L alongside sink pin capacitance",
+        "default": 1
+    },
+    "star_momentum_transport_envelope": {
+        "description": "legacy Nesterov velocity damping envelope when 2N precondition diagonal grows (> 1 enables, 0 disables in favor of star_momentum_transport_timing)",
+        "default": 0.0
+    },
+    "star_momentum_transport_timing": {
+        "description": "whether to apply parameter-free kinetic-energy-preserving Nesterov momentum scaling on Star + macro curvature growth",
+        "default": 1
+    },
+    "star_refresh_nesterov_state": {
+        "description": "whether Nesterov refreshes cached driver gradient g_k at v_k when Star snapshot generation advances",
+        "default": 1
+    },
+    "star_kappa_recalibrate_on_restart": {
+        "description": "whether to recalibrate lambda_star on the first active violated publication after GP/inflation/midplace/sizing restart",
+        "default": 1
+    },
+    "star_restart_history_mode": {
+        "description": "InputAccumulator retention policy across sizing/buffering/routability restarts: selective_sigmoid | delay_sigmoid | slack_beta | reset",
+        "default": "selective_sigmoid"
+    },
+    "star_recal_m_eff_scale_fix": {
+        "description": "whether post-restart m_eff normalizes against single-refresh gain*fresh pair force (1) vs legacy unscaled delay L1 (0)",
+        "default": 1
+    },
+    "star_restart_beta_tau_mode": {
+        "description": "temperature policy for slack_beta softplus severity phi_tau(s): drift | fixed",
+        "default": "drift"
+    },
+    "star_restart_beta_tau_scale": {
+        "description": "scale multiplier applied to online-estimated drift_tau in slack_beta mode",
+        "default": 1.0
+    },
+    "star_restart_beta_min_tau_ps": {
+        "description": "minimum temperature floor in picoseconds for slack_beta severity",
+        "default": 1.0
+    },
+    "star_restart_beta_fixed_tau_ps": {
+        "description": "fixed temperature in picoseconds when star_restart_beta_tau_mode == fixed",
+        "default": 40.0
+    },
+    "star_endpoint_slack_tau_mode": {
+        "description": "endpoint zero-point softplus(-slack/tau) temperature policy: fixed | drift | post_restart_drift",
+        "default": "post_restart_drift"
+    },
+    "star_endpoint_slack_tau_scale": {
+        "description": "scale multiplier applied to online-estimated drift_tau when star_endpoint_slack_tau_mode in {drift, post_restart_drift}",
+        "default": 1.0
+    },
+    "macro_exclusion_field_flag": {
+        "description": "whether to enable seamless torsion-dome + distance MacroExclusionField and Secant MM curvature in Star TDP",
+        "default": 1
+    },
+    "macro_exclusion_ov_start": {
+        "description": "overflow threshold where MacroExclusionField begins ramping on",
+        "default": 0.2
+    },
+    "macro_exclusion_ov_full": {
+        "description": "overflow threshold where MacroExclusionField reaches full strength",
+        "default": 0.085
+    },
+    "macro_exclusion_beta_max": {
+        "description": "maximum analytical pull multiplier for MacroExclusionField",
+        "default": 1.1
+    },
+    "macro_exclusion_bg_wl_scale": {
+        "description": "background non-critical wirelength pull fraction for MacroExclusionField",
+        "default": 0.0
+    },
+    "macro_exclusion_wl_gate_scale": {
+        "description": "wirelength slope fraction added for active slack-gated cells in MacroExclusionField",
+        "default": 0.35
+    },
+    "macro_exclusion_warmup_iters": {
+        "description": "post-TDP-onset warmup iterations before MacroExclusionField activates",
+        "default": 110
+    },
+    "macro_exclusion_ramp_iters": {
+        "description": "iteration ramp width after warmup for MacroExclusionField",
+        "default": 40
+    },
+    "macro_exclusion_collar_rows": {
+        "description": "exterior evacuation collar width in site rows around multi-row macros and row gaps",
+        "default": 1.0
+    },
+    "macro_exclusion_distance_blend": {
+        "description": "signed-distance blend ratio added to torsion-dome potential in MacroExclusionField",
+        "default": 0.15
+    },
+    "macro_exclusion_profile_mode": {
+        "description": "obstacle interior profile mode for MacroExclusionField: tent_rim | dome | tent | tent_bell",
+        "default": "tent_rim"
+    },
+    "macro_exclusion_ridge_smooth_rows": {
+        "description": "smoothing width in site rows for tent_rim ridge in MacroExclusionField",
+        "default": 3.0
+    },
+    "macro_exclusion_slack_gate_mode": {
+        "description": "slack reserve gating mode for MacroExclusionField: kappa_evac | uniform | slack_reserve | ratchet",
+        "default": "kappa_evac"
+    },
+    "macro_exclusion_slack_margin_ps": {
+        "description": "slack reserve margin in picoseconds for slack_reserve/ratchet modes",
+        "default": 300.0
+    },
+    "macro_exclusion_slack_tau_ps": {
+        "description": "sigmoid transition width in picoseconds for slack gating in MacroExclusionField",
+        "default": 100.0
+    },
+    "macro_exclusion_depth_ps_per_um": {
+        "description": "evacuation delay budget per micron of obstacle depth in picoseconds/um",
+        "default": 2.5
+    },
+    "macro_exclusion_crit_wl_scale": {
+        "description": "critical wirelength pull fraction in slack_reserve/ratchet modes",
+        "default": 0.65
+    },
+    "macro_exclusion_ratchet_decay": {
+        "description": "monotonic per-refresh decay factor for ratchet slack gate",
+        "default": 1.0
+    },
+    "macro_exclusion_kappa_slack": {
+        "description": "self-calibrated physical evacuation delay slack reserve multiplier for kappa_evac mode",
+        "default": 1.0
+    },
+    "macro_exclusion_row_margin": {
+        "description": "baseline row-height evacuation margin in rows for kappa_evac slack reserve",
+        "default": 5.0
+    },
+    "macro_exclusion_force_mode": {
+        "description": "force matching mode for MacroExclusionField: taylor_kkt | scalar | normal_proj",
+        "default": "taylor_kkt"
+    },
+    "macro_exclusion_escape_slope_mode": {
+        "description": "evacuation delay slope model for MacroExclusionField: global | liberty_cell",
+        "default": "global"
+    },
+    "macro_exclusion_gate_release_mode": {
+        "description": "temporal risk gate memory mode for MacroExclusionField: ratchet | hysteresis",
+        "default": "ratchet"
+    },
+    "macro_exclusion_hyst_kappa_band": {
+        "description": "Schmitt-trigger hysteresis slack release band multiplier (in units of dtau_evac)",
+        "default": 0.75
+    },
+    "macro_exclusion_interior_evac_boost": {
+        "description": "smooth deep-interior evacuation boost factor for normal_proj mode",
+        "default": 0.50
+    },
+    "macro_exclusion_bell_sigma_rows": {
+        "description": "Gaussian/Bell smoothing kernel sigma in placement rows for macro-neighborhood base potential in profile_mode=tent_bell",
+        "default": 16.0
+    },
+    "macro_exclusion_bell_bias": {
+        "description": "asymmetric ridge-bias strength eta_bell on P_bell in profile_mode=tent_bell",
+        "default": 0.80
+    },
+    "star_input_history_reference_interval": {
+        "description": "reference outer GP interval for step-invariant ZOH InputAccumulator scaling (0 disables)",
+        "default": 0.0
+    },
+    "star_satisfied_release_mode": {
+        "description": "positive-slack KKT multiplier release mode in Star InputAccumulator: off | hard | smooth",
+        "default": "off"
+    },
+    "star_satisfied_release_threshold_ps": {
+        "description": "minimum positive slack threshold (ps) before satisfied KKT multiplier release starts",
+        "default": 60.0
+    },
+    "star_satisfied_release_band_ps": {
+        "description": "smoothstep slack release band width (ps) above s_start",
+        "default": 140.0
+    },
+    "star_satisfied_release_tau_mult": {
+        "description": "guard band multiplier on AT merge VJP temperature tau_ps for satisfied release",
+        "default": 2.0
+    },
+    "star_satisfied_release_half_life": {
+        "description": "step-invariant GP iteration half-life for smooth satisfied KKT multiplier release",
+        "default": 45.0
+    },
+    "timing_at_merge_vjp_tau_step_norm": {
+        "description": "normalize AT merge gap drift sigma by elapsed GP steps and scale by predicted next interval",
+        "default": 0
+    },
+    "timing_at_merge_vjp_tau_min_horizon_steps": {
+        "description": "minimum effective step horizon H_min for step-normalized AT merge VJP temperature",
+        "default": 0.0
+    },
+    "timing_at_merge_vjp_tau_leg_floor_rows": {
+        "description": "physical legalization displacement floor (in row heights) for AT merge VJP temperature",
+        "default": 0.0
+    },
+    "d_metric_legalize_flag": {
+        "description": "whether to enable Star TDP D-metric curvature-weighted Greedy + Abacus legalization",
+        "default": 1
+    },
+    "d_metric_legalize_anchor_boost": {
+        "description": "pass-2 GreedyLegalize critical-cell x-anchoring boost strength",
+        "default": 0.5
+    },
+    "d_metric_legalize_max_weight": {
+        "description": "maximum clamped D-metric node stiffness weight for legalization",
+        "default": 64.0
     }
 }

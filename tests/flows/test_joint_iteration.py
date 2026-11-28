@@ -4,8 +4,8 @@ from types import SimpleNamespace
 import torch
 
 from dreamplace.NonLinearPlace import NonLinearPlace
-from dreamplace.flows.joint_iteration import JointStepState, prepare_step, after_step
-from dreamplace.flows.joint_coordinator import JointCoordinator
+from dreamplace.flows.baselines.joint_runtime import JointStepState, prepare_step, after_step
+from dreamplace.flows.baselines.joint_coordinator import JointCoordinator
 from dreamplace.NesterovAcceleratedGradientOptimizer import NesterovAcceleratedGradientOptimizer
 
 

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
-from dreamplace.flows import gr_sizing
+from dreamplace.flows.post_gp import rc_sizing as gr_sizing
 
 
 @pytest.mark.parametrize("net_ids, filtered", [([0], 0), ([], 1)])

@@ -5,7 +5,7 @@ adds the min corner, input loads and early timing model used by hold tests.
 """
 
 import torch
-from dreamplace.flows.hold_rc import HoldRC
+from dreamplace.flows.gp.hold_timing import HoldRC
 from dreamplace.ops.placeio_ecc.hold_schema import read_hold_timing_schema
 from dreamplace.ops.timing_propagation.early_propagation import EarlyPropagation
 from native_action_case import NativeActionCase

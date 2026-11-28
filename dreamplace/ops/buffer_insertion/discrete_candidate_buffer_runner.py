@@ -5,18 +5,23 @@ import time
 from pathlib import Path
 
 import torch
-from dreamplace.ops.timing_propagation.buffer_timing_fast_path import buffer_timing_fast_path
+
+from dreamplace.ops.timing_propagation.buffer_timing_fast_path import (
+    buffer_timing_fast_path,
+)
 
 from .buffering_inner_loop import BufferingInnerLoopSummary
-from .typed_candidate_gradient import typed_candidate_objective_gradient as _typed_candidate_objective_gradient
 from .buffering_lane import _tensor_digest
+from .candidate_objective import objective_snapshot as _objective_snapshot
 from .discrete_candidate_scheduler import (
     schedule_candidate_gradient_actions,
     schedule_typed_candidate_gradient_actions,
 )
 from .discrete_virtual_buffer_runner import _compact_round_record
-from .candidate_objective import objective_snapshot as _objective_snapshot
-
+from .fast_buffer_types import TYPED_DRIVE_TYPE_MODES
+from .typed_candidate_gradient import (
+    typed_candidate_objective_gradient as _typed_candidate_objective_gradient,
+)
 
 
 def _assert_candidate_state(lane, *, require_zero):
@@ -41,8 +46,8 @@ def _assert_candidate_state(lane, *, require_zero):
         raise ValueError("candidate discrete_net_gradient cannot use max_selected_actions")
     state.validate_binary_()
     if getattr(state, "is_typed_candidate", False):
-        if str(getattr(config, "candidate_drive_type_mode", "")) != "four_strength_table":
-            raise ValueError("typed candidate state requires four_strength_table mode")
+        if str(getattr(config, "candidate_drive_type_mode", "")) not in TYPED_DRIVE_TYPE_MODES:
+            raise ValueError("typed candidate state requires a typed drive type mode")
         if require_zero and not bool(
             (state.activation_param.detach().sum(dim=1) == 0.0).all()
         ):
@@ -376,8 +381,305 @@ def update_discrete_candidate_scheduler_trace_commit(trace_path, commit):
 
 
 
+def _concat_transitions(first, extra_list):
+    if not extra_list:
+        return first
+    items = [first, *extra_list]
+    if hasattr(first, "selected_drive_type_ids"):
+        from dreamplace.ops.buffer_insertion.discrete_candidate_scheduler import (
+            TypedDiscreteCandidateTransition,
+        )
+
+        return TypedDiscreteCandidateTransition(
+            next_activations=items[-1].next_activations,
+            selected_candidate_indices=torch.cat([t.selected_candidate_indices for t in items]),
+            selected_drive_type_ids=torch.cat([t.selected_drive_type_ids for t in items]),
+            selected_net_indices=torch.cat([t.selected_net_indices for t in items]),
+            selected_candidate_ids=torch.cat([t.selected_candidate_ids for t in items]),
+            selected_raw_grads=torch.cat([t.selected_raw_grads for t in items]),
+            selected_predicted_improvements=torch.cat(
+                [t.selected_predicted_improvements for t in items]
+            ),
+            affected_net_count=first.affected_net_count,
+            eligible_net_count=first.eligible_net_count,
+            prefix_size=first.prefix_size,
+            positive_prefix_count=first.positive_prefix_count,
+        )
+    from dreamplace.ops.buffer_insertion.discrete_candidate_scheduler import (
+        DiscreteCandidateTransition,
+    )
+
+    return DiscreteCandidateTransition(
+        next_activations=items[-1].next_activations,
+        selected_candidate_indices=torch.cat(
+            [t.selected_candidate_indices for t in items]
+        ),
+        selected_net_indices=torch.cat([t.selected_net_indices for t in items]),
+        selected_candidate_ids=torch.cat([t.selected_candidate_ids for t in items]),
+        selected_raw_grads=torch.cat([t.selected_raw_grads for t in items]),
+        selected_predicted_improvements=torch.cat(
+            [t.selected_predicted_improvements for t in items]
+        ),
+        affected_net_count=first.affected_net_count,
+        eligible_net_count=first.eligible_net_count,
+        prefix_size=first.prefix_size,
+        positive_prefix_count=first.positive_prefix_count,
+    )
+
+
+def _record_round_area_rejections(
+    cur_state,
+    proposed_transition,
+    report,
+    round_area_blocked,
+):
+    rej_indices = [int(i) for i in (report.get("rejected_area_indices") or ())]
+    if not rej_indices:
+        return round_area_blocked
+    device = cur_state.activation_param.device
+    if round_area_blocked is None:
+        round_area_blocked = torch.zeros(
+            cur_state.activation_param.shape,
+            dtype=torch.bool,
+            device=device,
+        )
+    rows = proposed_transition.selected_candidate_indices.detach().cpu().tolist()
+    if getattr(cur_state, "is_typed_candidate", False):
+        dtypes = proposed_transition.selected_drive_type_ids.detach().cpu().tolist()
+        for spec_i in rej_indices:
+            if 0 <= spec_i < len(rows):
+                round_area_blocked[int(rows[spec_i]), int(dtypes[spec_i])] = True
+    else:
+        for spec_i in rej_indices:
+            if 0 <= spec_i < len(rows):
+                round_area_blocked[int(rows[spec_i])] = True
+    return round_area_blocked
+
+
+_INITIAL_REPORT_KEYS = (
+    "initial_loss",
+    "initial_wns_ps",
+    "initial_tns_ps",
+    "initial_slew_violation_ps",
+    "initial_cap_violation_pf",
+    "initial_area",
+    "cache_hit",
+)
+_SUM_INT_REPORT_KEYS = (
+    "input_count",
+    "evaluated_count",
+    "rejected_area_count",
+    "rejected_loss_count",
+    "skipped_invalid_count",
+)
+_SUM_FLOAT_REPORT_KEYS = (
+    "elapsed_ms",
+    "engine_build_ms",
+    "total_filter_ms",
+)
+
+
+def _offset_spec_indices(tier_reports, key):
+    out = []
+    offset = 0
+    for rep in tier_reports:
+        out.extend(offset + int(i) for i in (rep.get(key) or ()))
+        offset += int(rep.get("input_count", 0))
+    return out
+
+
+def _merge_tier_incremental_reports(
+    tier_reports,
+    *,
+    total_accepted_in_round,
+    round_action_infos,
+    round_dirty_nets,
+):
+    merged = {**tier_reports[0], **tier_reports[-1]}
+    for key in _INITIAL_REPORT_KEYS:
+        if key in tier_reports[0]:
+            merged[key] = tier_reports[0][key]
+    for key in _SUM_INT_REPORT_KEYS:
+        if any(key in rep for rep in tier_reports):
+            merged[key] = sum(int(rep.get(key, 0)) for rep in tier_reports)
+    for key in _SUM_FLOAT_REPORT_KEYS:
+        if any(key in rep for rep in tier_reports):
+            merged[key] = sum(float(rep.get(key, 0.0)) for rep in tier_reports)
+    merged["tier_attempts"] = len(tier_reports)
+    merged["accepted_count"] = int(total_accepted_in_round)
+    if any("accepted_action_infos" in rep for rep in tier_reports):
+        merged["accepted_action_infos"] = list(round_action_infos)
+    if any("dirty_nets" in rep for rep in tier_reports):
+        merged["dirty_nets"] = sorted(round_dirty_nets)
+    for key in ("accepted_indices", "rejected_area_indices"):
+        if any(key in rep for rep in tier_reports):
+            merged[key] = _offset_spec_indices(tier_reports, key)
+    if any("accepted_actions" in rep for rep in tier_reports):
+        acc_actions = []
+        offset = 0
+        for rep in tier_reports:
+            for act in rep.get("accepted_actions") or ():
+                item = dict(act)
+                if "spec_index" in item:
+                    item["spec_index"] = offset + int(item["spec_index"])
+                acc_actions.append(item)
+            offset += int(rep.get("input_count", 0))
+        merged["accepted_actions"] = acc_actions
+    return merged
+
+
+def _record_tier_outcome(
+    state,
+    *,
+    proposed_transition,
+    filtered_transition,
+    report,
+    tier_reports,
+    accepted_transitions,
+    round_area_blocked,
+    round_action_infos,
+    round_accepted_orig_nets,
+    round_dirty_nets,
+):
+    tier_reports.append(report)
+    round_area_blocked = _record_round_area_rejections(
+        state,
+        proposed_transition,
+        report,
+        round_area_blocked,
+    )
+    if filtered_transition.accepted_count > 0:
+        accepted_transitions.append(filtered_transition)
+        with torch.no_grad():
+            state.activation_param.copy_(filtered_transition.next_activations)
+        for info in report.get("accepted_action_infos") or ():
+            round_action_infos.append(info)
+            if info.get("orig_net_id") is not None:
+                round_accepted_orig_nets.add(int(info["orig_net_id"]))
+        round_dirty_nets.update(int(n) for n in (report.get("dirty_nets") or ()))
+    return round_area_blocked
+
+
+def _allowed_mask_for_round_tier(
+    cur_state,
+    *,
+    incremental_gate,
+    gate_active,
+    round_accepted_orig_nets,
+    round_area_blocked=None,
+):
+    device = cur_state.activation_param.device
+    if getattr(cur_state, "is_typed_candidate", False):
+        base_allowed = (
+            incremental_gate.allowed_typed_actions(cur_state)
+            if gate_active
+            else cur_state.drive_type_allowed
+        )
+    else:
+        base_allowed = (
+            incremental_gate.allowed_untyped_candidates(cur_state)
+            if gate_active
+            else None
+        )
+    if round_area_blocked is not None:
+        area_ok = ~round_area_blocked.to(device=device, dtype=torch.bool)
+        base_allowed = (
+            area_ok
+            if base_allowed is None
+            else base_allowed.to(device=device, dtype=torch.bool) & area_ok
+        )
+    if not round_accepted_orig_nets:
+        return base_allowed
+    net_mask = torch.tensor(
+        [
+            int(nid) not in round_accepted_orig_nets
+            for nid in cur_state.candidate_net_id.detach().cpu().tolist()
+        ],
+        dtype=torch.bool,
+        device=device,
+    )
+    if base_allowed is None:
+        return net_mask
+    if base_allowed.ndim == 2:
+        return base_allowed.to(net_mask.device) & net_mask.view(-1, 1)
+    return base_allowed.to(net_mask.device) & net_mask
+
+
+def _schedule_round_tier_once(
+    cur_state,
+    *,
+    raw_grad,
+    selection_fraction,
+    incremental_gate,
+    gate_active,
+    round_accepted_orig_nets,
+    round_area_blocked=None,
+):
+    allowed = _allowed_mask_for_round_tier(
+        cur_state,
+        incremental_gate=incremental_gate,
+        gate_active=gate_active,
+        round_accepted_orig_nets=round_accepted_orig_nets,
+        round_area_blocked=round_area_blocked,
+    )
+    if getattr(cur_state, "is_typed_candidate", False):
+        return schedule_typed_candidate_gradient_actions(
+            candidate_net_index=cur_state.candidate_net_index,
+            net_ids=cur_state.net_ids,
+            candidate_ids=cur_state.candidate_ids,
+            activations=cur_state.activation_param.detach(),
+            raw_grad=raw_grad,
+            selection_fraction=selection_fraction,
+            allowed_actions=allowed,
+        )
+    return schedule_candidate_gradient_actions(
+        candidate_net_index=cur_state.candidate_net_index,
+        net_ids=cur_state.net_ids,
+        candidate_ids=cur_state.candidate_ids,
+        activations=cur_state.activation_param.detach(),
+        raw_grad=raw_grad,
+        selection_fraction=selection_fraction,
+        allowed_candidates=allowed,
+    )
+
+
+def _can_retry_round_tier(
+    *,
+    tier_attempts,
+    max_tier_attempts,
+    last_proposed,
+    last_accepted,
+    last_rep,
+    round_cap,
+    incremental_gate,
+    min_buf_area,
+):
+    if tier_attempts >= int(max_tier_attempts) or last_proposed <= 0:
+        return False
+    rejected_any = (last_accepted < last_proposed) or (
+        int(last_rep.get("rejected_loss_count", 0)) > 0
+    )
+    if not rejected_any:
+        return False
+    if round_cap is not None and incremental_gate.last_area is not None:
+        return (
+            float(incremental_gate.last_area) + min_buf_area
+            <= float(round_cap) + 1e-6
+        )
+    return True
+
+
 def _run_discrete_candidate_buffer_scheduler_impl(
-    *, lane, model, rounds, allow_existing_activation=False
+    *,
+    lane,
+    model,
+    rounds,
+    allow_existing_activation=False,
+    incremental_gate=None,
+    selection_fraction=None,
+    round_budget_fn=None,
+    on_round_accepted=None,
+    max_tier_attempts=4,
 ):
     """Run Candidate Route-B on one frozen full-design candidate topology."""
     rounds = int(rounds)
@@ -387,8 +689,20 @@ def _run_discrete_candidate_buffer_scheduler_impl(
         lane,
         require_zero=not bool(allow_existing_activation),
     )
-    selection_fraction = float(
-        getattr(lane.config, "route_b_selection_fraction", 0.001)
+    preexisting_virtual_count = int(
+        state.activation_param.detach().sum().cpu().item()
+    )
+    gate_active = (
+        incremental_gate is not None
+        and incremental_gate.check_available(
+            preexisting_virtual_count=preexisting_virtual_count
+        )
+        is None
+    )
+    selection_fraction = (
+        float(selection_fraction)
+        if selection_fraction is not None
+        else float(getattr(lane.config, "route_b_selection_fraction", 0.001))
     )
     trace_rounds = []
     pending_record = None
@@ -399,9 +713,27 @@ def _run_discrete_candidate_buffer_scheduler_impl(
     best_key = (float("inf"), float("inf"), float("inf"), float("inf"))
     best_round = 0
     best_snapshot = None
+    topology_refreshed = False
 
     for round_index in range(rounds):
-        _assert_candidate_state(lane, require_zero=False)
+        state = _assert_candidate_state(lane, require_zero=False)
+        round_sel_fraction = selection_fraction
+        round_cap = None
+        min_buf_area = 0.0
+        if round_budget_fn is not None:
+            cur_area = incremental_gate.current_area() if gate_active else None
+            budget_info = round_budget_fn(
+                round_idx=round_index,
+                total_rounds=rounds,
+                current_area=cur_area,
+                gate=incremental_gate,
+            )
+            if budget_info is None or budget_info.get("exhausted", False):
+                terminal_reason = "area_budget_exhausted"
+                break
+            round_sel_fraction = float(budget_info.get("selection_fraction", selection_fraction))
+            round_cap = budget_info.get("round_capacity")
+            min_buf_area = float(budget_info.get("min_buffer_area", 0.0) or 0.0)
         activation_before = state.activation_param.detach()
         snapshot_id = _typed_candidate_snapshot_identity(lane, state)
         drive_type_order = list(range(int(getattr(state, "drive_type_count", 1))))
@@ -447,7 +779,7 @@ def _run_discrete_candidate_buffer_scheduler_impl(
             -float(snapshot.get("wns") or 0.0),
             int(round_index),
         )
-        if snapshot_key < best_key:
+        if gate_active or snapshot_key < best_key or best_snapshot is None:
             best_key = snapshot_key
             best_score = float(snapshot["restore_score"])
             best_round = int(round_index)
@@ -472,24 +804,115 @@ def _run_discrete_candidate_buffer_scheduler_impl(
             )
             objective_grad_ms = (time.perf_counter() - gradient_started_at) * 1000.0
         scheduler_started_at = time.perf_counter()
-        if getattr(state, "is_typed_candidate", False):
-            transition = schedule_typed_candidate_gradient_actions(
-                candidate_net_index=state.candidate_net_index,
-                net_ids=state.net_ids,
-                candidate_ids=state.candidate_ids,
-                activations=state.activation_param.detach(),
-                raw_grad=raw_grad,
-                selection_fraction=selection_fraction,
+
+        round_accepted_orig_nets = set()
+        round_area_blocked = None
+        first_trial = _schedule_round_tier_once(
+            state,
+            raw_grad=raw_grad,
+            selection_fraction=round_sel_fraction,
+            incremental_gate=incremental_gate,
+            gate_active=gate_active,
+            round_accepted_orig_nets=round_accepted_orig_nets,
+            round_area_blocked=round_area_blocked,
+        )
+        transition = first_trial
+        proposed_count = int(transition.accepted_count)
+        incremental_report = None
+        round_action_infos = []
+        round_dirty_nets = set()
+        if incremental_gate is not None:
+            transition, incremental_report = (
+                incremental_gate.filter_candidate_transition(
+                    state,
+                    first_trial,
+                    capacity_override=round_cap,
+                )
             )
-        else:
-            transition = schedule_candidate_gradient_actions(
-                candidate_net_index=state.candidate_net_index,
-                net_ids=state.net_ids,
-                candidate_ids=state.candidate_ids,
-                activations=state.activation_param.detach(),
-                raw_grad=raw_grad,
-                selection_fraction=selection_fraction,
-            )
+            if (
+                gate_active
+                and isinstance(incremental_report, dict)
+                and incremental_report.get("status") == "ok"
+            ):
+                tier_reports = []
+                accepted_transitions = []
+                round_area_blocked = _record_tier_outcome(
+                    state,
+                    proposed_transition=first_trial,
+                    filtered_transition=transition,
+                    report=incremental_report,
+                    tier_reports=tier_reports,
+                    accepted_transitions=accepted_transitions,
+                    round_area_blocked=round_area_blocked,
+                    round_action_infos=round_action_infos,
+                    round_accepted_orig_nets=round_accepted_orig_nets,
+                    round_dirty_nets=round_dirty_nets,
+                )
+                last_proposed = proposed_count
+                last_accepted = int(transition.accepted_count)
+                last_rep = incremental_report
+                while _can_retry_round_tier(
+                    tier_attempts=len(tier_reports),
+                    max_tier_attempts=max_tier_attempts,
+                    last_proposed=last_proposed,
+                    last_accepted=last_accepted,
+                    last_rep=last_rep,
+                    round_cap=round_cap,
+                    incremental_gate=incremental_gate,
+                    min_buf_area=min_buf_area,
+                ):
+                    next_trial = _schedule_round_tier_once(
+                        state,
+                        raw_grad=raw_grad,
+                        selection_fraction=round_sel_fraction,
+                        incremental_gate=incremental_gate,
+                        gate_active=gate_active,
+                        round_accepted_orig_nets=round_accepted_orig_nets,
+                        round_area_blocked=round_area_blocked,
+                    )
+                    last_proposed = int(next_trial.accepted_count)
+                    if last_proposed == 0:
+                        break
+                    next_filtered, next_rep = (
+                        incremental_gate.filter_candidate_transition(
+                            state,
+                            next_trial,
+                            capacity_override=round_cap,
+                        )
+                    )
+                    if not (
+                        isinstance(next_rep, dict) and next_rep.get("status") == "ok"
+                    ):
+                        break
+                    round_area_blocked = _record_tier_outcome(
+                        state,
+                        proposed_transition=next_trial,
+                        filtered_transition=next_filtered,
+                        report=next_rep,
+                        tier_reports=tier_reports,
+                        accepted_transitions=accepted_transitions,
+                        round_area_blocked=round_area_blocked,
+                        round_action_infos=round_action_infos,
+                        round_accepted_orig_nets=round_accepted_orig_nets,
+                        round_dirty_nets=round_dirty_nets,
+                    )
+                    last_rep = next_rep
+                    last_accepted = int(next_filtered.accepted_count)
+                if len(tier_reports) > 1:
+                    incremental_report = _merge_tier_incremental_reports(
+                        tier_reports,
+                        total_accepted_in_round=sum(
+                            int(t.accepted_count) for t in accepted_transitions
+                        ),
+                        round_action_infos=round_action_infos,
+                        round_dirty_nets=round_dirty_nets,
+                    )
+                if accepted_transitions:
+                    transition = _concat_transitions(
+                        accepted_transitions[0], accepted_transitions[1:]
+                    )
+            else:
+                gate_active = False
         scheduler_wall_ms = (time.perf_counter() - scheduler_started_at) * 1000.0
         next_activation = transition.next_activations.detach()
         active_count_after = int(
@@ -554,19 +977,43 @@ def _run_discrete_candidate_buffer_scheduler_impl(
                 transition.selected_predicted_improvements.sum().detach().cpu().item()
             ),
             "selected_rows": _selected_rows(state, transition),
+            **(
+                {}
+                if incremental_report is None
+                else {"incremental_commit": incremental_report}
+            ),
         }
         trace_rounds.append(record)
         iterations += 1
         if transition.accepted_count == 0:
-            terminal_reason = (
-                "all_candidates_active"
-                if transition.eligible_net_count == 0
-                else "no_positive_action"
-            )
+            if gate_active and proposed_count > 0:
+                terminal_reason = "incremental_gate_no_improving_action"
+            else:
+                terminal_reason = (
+                    "all_candidates_active"
+                    if transition.eligible_net_count == 0
+                    else "no_positive_action"
+                )
             break
-        with torch.no_grad():
-            state.activation_param.copy_(transition.next_activations)
+        if transition.accepted_count > 0:
+            with torch.no_grad():
+                state.activation_param.copy_(transition.next_activations)
         state.validate_binary_()
+        if gate_active and on_round_accepted is not None and round_dirty_nets:
+            refresh_report = on_round_accepted(
+                round_action_infos,
+                sorted(round_dirty_nets),
+            )
+            record["incremental_refresh"] = refresh_report
+            state = lane._current_state()
+            topology_refreshed = True
+            best_activation = state.activation_param.detach().clone()
+            best_key = snapshot_key
+            best_score = float(snapshot["restore_score"])
+            best_round = int(iterations)
+            best_snapshot = dict(snapshot)
+        elif gate_active:
+            best_activation = state.activation_param.detach().clone()
         pending_record = record
 
     _assert_candidate_state(lane, require_zero=False)
@@ -587,7 +1034,14 @@ def _run_discrete_candidate_buffer_scheduler_impl(
         -float(terminal_snapshot.get("wns") or 0.0),
         int(iterations),
     )
-    if terminal_key < best_key:
+    if (
+        gate_active
+        or terminal_key < best_key
+        or (
+            topology_refreshed
+            and best_activation.shape != state.activation_param.shape
+        )
+    ):
         best_key = terminal_key
         best_score = float(terminal_snapshot["restore_score"])
         best_round = int(iterations)
@@ -656,7 +1110,7 @@ def _run_discrete_candidate_buffer_scheduler_impl(
             else int(state.fixed_bsu_index)
         ),
         "candidate_drive_type_mode": (
-            "four_strength_table"
+            str(getattr(lane.config, "candidate_drive_type_mode", "four_strength_table"))
             if getattr(state, "is_typed_candidate", False)
             else "single_fixed"
         ),
@@ -680,7 +1134,7 @@ def _run_discrete_candidate_buffer_scheduler_impl(
         "best_restore": {
             "status": "restored",
             "initial_snapshot": {
-                key: trace_rounds[0][key]
+                key: (trace_rounds[0] if trace_rounds else terminal_snapshot)[key]
                 for key in (
                     "loss",
                     "restore_score",
@@ -787,7 +1241,16 @@ def _release_candidate_python_state(lane):
 
 
 def run_discrete_candidate_buffer_scheduler(
-    *, lane, model, rounds, allow_existing_activation=False
+    *,
+    lane,
+    model,
+    rounds,
+    allow_existing_activation=False,
+    incremental_gate=None,
+    selection_fraction=None,
+    round_budget_fn=None,
+    on_round_accepted=None,
+    max_tier_attempts=4,
 ):
     try:
         with buffer_timing_fast_path(model):
@@ -796,6 +1259,11 @@ def run_discrete_candidate_buffer_scheduler(
                 model=model,
                 rounds=rounds,
                 allow_existing_activation=allow_existing_activation,
+                incremental_gate=incremental_gate,
+                selection_fraction=selection_fraction,
+                round_budget_fn=round_budget_fn,
+                on_round_accepted=on_round_accepted,
+                max_tier_attempts=max_tier_attempts,
             )
     finally:
         _release_candidate_python_state(lane)

@@ -1,5 +1,9 @@
 import math
 
+from .candidate_sites import rebuffer_site_ratios
+
+CANDIDATE_GENERATION_POLICIES = ("segment_only", "rebuffer_sites")
+
 
 def _distance_dbu(a, b):
     return math.hypot(float(a[0]) - float(b[0]), float(a[1]) - float(b[1]))
@@ -16,8 +20,8 @@ def _is_endpoint_coordinate(point, start, end):
     return tuple(point) == tuple(start) or tuple(point) == tuple(end)
 
 
-def _merge_candidate(candidate_by_xy, candidate):
-    key = (candidate["x_dbu"], candidate["y_dbu"])
+def _merge_candidate(candidate_by_xy, candidate, key=None):
+    key = (candidate["x_dbu"], candidate["y_dbu"]) if key is None else key
     existing = candidate_by_xy.get(key)
     if existing is None:
         candidate["source_flags"] = sorted(set(candidate["source_flags"]))
@@ -131,8 +135,9 @@ def sample_buffer_candidates(
 ):
     if tree_view.get("status") != "ok":
         return []
-    if candidate_generation_policy != "segment_only":
+    if candidate_generation_policy not in CANDIDATE_GENERATION_POLICIES:
         raise ValueError(f"unknown candidate_generation_policy: {candidate_generation_policy}")
+    rebuffer_sites = candidate_generation_policy == "rebuffer_sites"
     max_candidates_per_segment = int(max_candidates_per_segment)
     if max_candidates_per_segment <= 0:
         raise ValueError("max_candidates_per_segment must be positive")
@@ -148,6 +153,8 @@ def sample_buffer_candidates(
     rounded_endpoint_skip_count = 0
     coordinate_dedup_count = 0
     net_id = int(tree_view["net_id"])
+    sink_pin_ids = {int(pin_id) for pin_id in tree_view.get("sink_pin_ids", ()) or ()}
+    generation_mode = "rebuffer_sites" if rebuffer_sites else "equal_count"
     if include_tree_node_candidates:
         for node_id in tree_view.get("node_ids", []):
             if node_id not in coordinates:
@@ -165,7 +172,7 @@ def sample_buffer_candidates(
                     "y_dbu": int(y_dbu),
                     "x_um": float(x_dbu) / float(dbu),
                     "y_um": float(y_dbu) / float(dbu),
-                    "candidate_generation_mode": "equal_count",
+                    "candidate_generation_mode": generation_mode,
                     "max_candidates_per_segment": max_candidates_per_segment,
                     "segment_length_dbu": 0,
                     "segment_split_index": None,
@@ -188,11 +195,19 @@ def sample_buffer_candidates(
             continue
         nonzero_tree_edge_count += 1
         edge_has_candidate = False
-        for split_index in range(1, max_candidates_per_segment + 1):
+        if rebuffer_sites:
+            ratios = rebuffer_site_ratios(length_dbu, child_is_pin=int(child) in sink_pin_ids)
+        else:
+            ratios = [
+                split_index / float(max_candidates_per_segment + 1)
+                for split_index in range(1, max_candidates_per_segment + 1)
+            ]
+        for split_index, split_ratio in enumerate(ratios, start=1):
             candidate_attempt_count += 1
-            split_ratio = split_index / float(max_candidates_per_segment + 1)
             x_dbu, y_dbu = _interpolate(start, end, split_ratio)
-            if _is_endpoint_coordinate((x_dbu, y_dbu), start, end):
+            # Parent-end sites deliberately round onto the parent vertex; they
+            # stay distinct per child edge through their segment identity.
+            if not rebuffer_sites and _is_endpoint_coordinate((x_dbu, y_dbu), start, end):
                 rounded_endpoint_skip_count += 1
                 continue
             edge_has_candidate = True
@@ -208,15 +223,18 @@ def sample_buffer_candidates(
                     "y_dbu": y_dbu,
                     "x_um": float(x_dbu) / float(dbu),
                     "y_um": float(y_dbu) / float(dbu),
-                    "candidate_generation_mode": "equal_count",
+                    "candidate_generation_mode": generation_mode,
                     "max_candidates_per_segment": max_candidates_per_segment,
                     "segment_length_dbu": int(round(length_dbu)),
                     "segment_split_index": split_index,
-                    "segment_split_count_on_edge": max_candidates_per_segment,
+                    "segment_split_count_on_edge": len(ratios),
                     "segment_split_ratio": float(split_ratio),
                     "source_flags": ["segment_sample"],
                     "buffer_main_type_index": int(buffer_main_type_index),
                 },
+                key=(x_dbu, y_dbu, int(parent), int(child), float(split_ratio))
+                if rebuffer_sites
+                else None,
             )
             if not inserted:
                 coordinate_dedup_count += 1

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from dreamplace.flows.timing_topology import (
+from dreamplace.flows.gp.topology_refresh import (
     TimingTopologyContext,
     refresh_live_timing_topology,
 )

@@ -161,7 +161,7 @@ class BufferFamilyContract:
             ),
         )
 
-    def _typed_legal_table(self):
+    def _typed_legal_table(self, typed_masters):
         """Build a configured master table even when OpenSTA exposes separate families.
 
         The legacy contract intentionally requires one equivalent-cell family.
@@ -171,14 +171,6 @@ class BufferFamilyContract:
         the first family id as the compatibility value used by candidate
         geometry records.
         """
-        import json
-        from pathlib import Path
-
-        if not self.drive_strength_table:
-            return None, ["missing_configured_drive_strength_table"]
-        payload = json.loads(Path(self.drive_strength_table).read_text())
-        configured_masters = [row["master_name"] for row in payload["buffers"]]
-
         names = _as_list(getattr(self.metadata, "flat_libcell_names", []))
         rows = _as_rows(getattr(self.metadata, "flat_libcell_info", []))
         candidate_main_ids = {
@@ -197,7 +189,7 @@ class BufferFamilyContract:
         size_values = []
         main_ids = []
         missing = []
-        for master_name in configured_masters:
+        for master_name in typed_masters:
             match = by_name.get(master_name)
             if match is None:
                 missing.append(master_name)
@@ -294,9 +286,28 @@ class BufferFamilyContract:
         return sorted(set(reasons))
 
     def build_artifact(self):
-        typed_table = self.candidate_drive_type_mode == "four_strength_table"
-        if typed_table:
-            legal_table, typed_reasons = self._typed_legal_table()
+        from .fast_buffer_types import (
+            FAST_BUFFERS_MODE,
+            TYPED_DRIVE_TYPE_MODES,
+            fast_buffer_master_names,
+        )
+
+        if self.candidate_drive_type_mode in TYPED_DRIVE_TYPE_MODES:
+            if self.candidate_drive_type_mode == FAST_BUFFERS_MODE:
+                master_names = fast_buffer_master_names(self.metadata)
+            elif self.drive_strength_table:
+                import json
+                from pathlib import Path
+
+                payload = json.loads(Path(self.drive_strength_table).read_text())
+                master_names = [row["master_name"] for row in payload["buffers"]]
+            else:
+                from .drive_type_table import resolve_drive_type_masters_for_library
+
+                master_names = resolve_drive_type_masters_for_library(
+                    _as_list(getattr(self.metadata, "flat_libcell_names", []))
+                )
+            legal_table, typed_reasons = self._typed_legal_table(master_names)
             unsupported_reasons = list(typed_reasons)
             if legal_table is not None:
                 unsupported_reasons.extend(self._basic_reasons(legal_table))

@@ -386,6 +386,10 @@ class EarlyPropagation:
     ):
         self._prepare_checks(timing, reference, sparse=context_arrival is not None)
         if surrogate and self._check_model is None:
+            if getattr(timing, "cell_modeling_op", None) is None:
+                ensure = getattr(timing, "_ensure_cell_modeling_op", None)
+                if callable(ensure):
+                    ensure()
             from .hold_check_model import HoldCheckModel
 
             self._check_model = HoldCheckModel(timing, self.data.lib_arc_check_types)

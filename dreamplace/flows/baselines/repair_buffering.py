@@ -285,6 +285,22 @@ def _run_repair_timing(placedb, *, max_passes, config, profile=None):
     resolved_max_buffers = resolve_max_buffers(config, pydb=pydb, placedb=placedb)
     if resolved_max_buffers > 0:
         config = {**config, "max_buffers": resolved_max_buffers}
+    has_sparse_view = (
+        int(getattr(pydb, "timing_schema_version", 2)) == 3
+        or getattr(pydb, "sparse_timing_view", None) is not None
+        or getattr(raw_db, "sparse_timing_view", None) is not None
+    )
+    if has_sparse_view:
+        # Native C++ propagation only models scalar schema-v2 endpoints; use the
+        # Python TimingPropagation consumer when schema-v3 sparse checks are active.
+        config = {
+            **config,
+            "use_native_timing_graph": False,
+            "use_native_timing_queue": False,
+            "use_native_timing_evaluation": False,
+            "use_native_timing_planning": False,
+            "use_native_timing_path_context": False,
+        }
     with measure_phase(profile, "python_timing_model_build_ms"):
         timing_model = RebufferTimingModel(
             pydb,

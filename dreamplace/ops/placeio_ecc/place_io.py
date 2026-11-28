@@ -142,11 +142,13 @@ class PlaceIOFunction:
             pydb = CommittedTimingPyDB(
                 pydb,
                 pydb,
-                recovery_rat_is_capture_deadline=True,
-                preserve_sparse=False,
+                recovery_rat_is_capture_deadline=timing_metadata_only,
+                preserve_sparse=not timing_metadata_only,
             )
             attach_repair_library_source(pydb, params, timing_inputs)
-            sparse_timing_view = None
+            sparse_timing_view = (
+                None if timing_metadata_only else getattr(pydb, "sparse_timing_view", None)
+            )
         raw_db = ECCPlaceIOBackend(
             module=module,
             workspace=workspace,

@@ -434,3 +434,87 @@ def test_repair_timing_resolves_max_buffer_fraction_from_movable_nodes(monkeypat
 
     assert result["status"] == "ok"
     assert planner_configs[0]["max_buffers"] == 3
+
+
+def test_repair_timing_disables_native_scalar_graph_for_schema3_sparse_carrier(monkeypatch):
+    model_kwargs = []
+    monkeypatch.setattr(
+        "dreamplace.ops.rebuffer.timing_model.RebufferTimingModel",
+        lambda pydb, **kwargs: model_kwargs.append(kwargs)
+        or SimpleNamespace(baseline=SimpleNamespace(as_dict=lambda: {})),
+    )
+    monkeypatch.setattr(
+        PlaceIOFunction,
+        "backend_caps",
+        staticmethod(lambda raw_db: {"backend": "ecc", "supports_buffer_commit": True}),
+    )
+    planner_configs, _ = _install_timing_plan(monkeypatch, [])
+    placedb = _Placedb()
+    placedb.rawdb.pydb = SimpleNamespace(timing_schema_version=3, sparse_timing_view="sparse_v3")
+    placedb.pydb = placedb.rawdb.pydb
+
+    result = repair_buffering.run_repair_buffering_stage(
+        placedb, mode="repair_timing", max_passes=4
+    )
+
+    assert result["status"] == "ok"
+    assert model_kwargs[0]["use_native_timing_graph"] is False
+    assert model_kwargs[0]["use_native_timing_evaluation"] is False
+    assert {
+        key: planner_configs[0][key]
+        for key in (
+            "use_native_timing_graph",
+            "use_native_timing_queue",
+            "use_native_timing_evaluation",
+            "use_native_timing_planning",
+            "use_native_timing_path_context",
+        )
+    } == {
+        "use_native_timing_graph": False,
+        "use_native_timing_queue": False,
+        "use_native_timing_evaluation": False,
+        "use_native_timing_planning": False,
+        "use_native_timing_path_context": False,
+    }
+
+
+def test_place_io_read_preserves_schema3_sparse_carrier_when_metadata_falls_back(monkeypatch):
+    carrier_calls = []
+
+    def fake_carrier(base, phys, **kwargs):
+        carrier_calls.append(kwargs)
+        return SimpleNamespace(
+            timing_schema_version=3 if kwargs.get("preserve_sparse") else 2,
+            sparse_timing_view="rebuilt_sparse_v3" if kwargs.get("preserve_sparse") else None,
+        )
+
+    module = SimpleNamespace(
+        prepare_placement_metadata=lambda _inputs: {
+            "status": "ok",
+            "placement_metadata_supported": False,
+            "parasitics_initialization": "python_placement_rc_pending",
+        },
+        get_dmInst_ptr=lambda: "dm",
+        pydb=lambda *args, **kwargs: SimpleNamespace(timing_schema_version=3, kwargs=kwargs),
+        write_placement_back=lambda *_args: True,
+        def_save=lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        "dreamplace.ops.placeio_ecc.place_io.validate_timing_schema",
+        lambda _pydb: "validated_sparse_v3",
+    )
+    monkeypatch.setattr(
+        "dreamplace.ops.placeio_ecc.timing_carrier.CommittedTimingPyDB", fake_carrier
+    )
+    monkeypatch.setattr(
+        "dreamplace.ops.placeio_ecc.library_metadata.attach_repair_library_source",
+        lambda *_args: None,
+    )
+    params = SimpleNamespace(with_sta=1, repair_buffering_midplace_enable=True, design_inputs={})
+    raw_db = PlaceIOFunction.read(params, SimpleNamespace(ecc_module=module, dir_workspace="ws"))
+
+    assert carrier_calls == [
+        {"recovery_rat_is_capture_deadline": False, "preserve_sparse": True}
+    ]
+    assert raw_db.sparse_timing_view == "rebuilt_sparse_v3"
+    assert raw_db.pydb.timing_schema_version == 3
